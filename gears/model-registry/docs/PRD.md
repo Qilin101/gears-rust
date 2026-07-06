@@ -27,11 +27,14 @@
   - [Performance](#performance)
   - [Availability](#availability)
   - [Scale](#scale)
+  - [Discovery Plugin Isolation](#discovery-plugin-isolation)
+  - [Discovery Plugin Extensibility](#discovery-plugin-extensibility)
   - [Rate Limiting](#rate-limiting)
 - [9. Error Codes](#9-error-codes)
 - [10. Security Considerations](#10-security-considerations)
 - [11. Consumers](#11-consumers)
 - [12. Public Library Interfaces](#12-public-library-interfaces)
+  - [External Integration Contracts](#external-integration-contracts)
 - [13. Use Cases](#13-use-cases)
   - [UC-001: Get Tenant Model](#uc-001-get-tenant-model)
   - [UC-002: List Tenant Models](#uc-002-list-tenant-models)
@@ -50,6 +53,8 @@
   - [UC-015: Handle Tenant Re-parenting](#uc-015-handle-tenant-re-parenting)
   - [UC-016: Bulk Approve Models](#uc-016-bulk-approve-models)
   - [UC-017: Trigger Discovery](#uc-017-trigger-discovery)
+  - [UC-025: Add a New Provider Discovery Plugin](#uc-025-add-a-new-provider-discovery-plugin)
+  - [UC-026: Auto-Discover Models via Plugin](#uc-026-auto-discover-models-via-plugin)
   - [UC-018: Approve Model for User Group](#uc-018-approve-model-for-user-group)
   - [UC-019: Override User Access](#uc-019-override-user-access)
   - [UC-020: Manually Manage Model Catalog](#uc-020-manually-manage-model-catalog)
@@ -142,6 +147,8 @@ LLM Gateway requires a centralized source of truth for model availability, capab
 | Canonical ID | Unique model identifier in format `{provider_slug}::{provider_model_id}` |
 | Provider Slug | Human-readable unique identifier for a provider instance (e.g., `azure-corp-global`) |
 | Provider Plugin | Module responsible for communication with specific LLM provider |
+| Discovery Plugin | A per-provider-type plugin implementing the discovery plugin contract (`cpt-cf-model-registry-contract-discovery-plugin`); it accepts a GTS-typed discovery-settings payload, queries the provider for available models via OAGW, and returns model definitions to the registry. A specialization of the general Provider Plugin concept, scoped to model-catalog discovery. |
+| Model Definition | The structured record produced by a discovery plugin for a single discovered model; contains at minimum the provider-assigned model identifier, display name, and capability flags required for catalog ingestion (see `cpt-cf-model-registry-fr-discovery-model-output`). |
 | Tag | Free-form label associated with a model (e.g., `best for reasoning`, `lightweight`); managed independently of models and used for discovery/filtering |
 
 ## 2. Actors
@@ -569,13 +576,12 @@ Model Registry provides discovery API endpoint; scheduling is NOT built into Mod
 
 **Concurrency**: Fixed concurrency limit + staggered intervals when multiple discoveries run.
 
-Per (tenant, provider) pair where discovery is enabled:
-- Fetch models from provider's models endpoint (plugin responsibility)
-- New models → create with `pending` status
-- Existing models → update metadata (capabilities, limits, provider cost)
-- Missing models → soft-delete (mark as `deprecated`)
+Per (tenant, provider) pair where discovery is enabled, a discovery plugin is selected and executed for that provider's GTS type, producing model definitions that are reconciled with the catalog (newly appearing models added as `pending`, existing models updated, absent models deprecated). The per-provider plugin boundary, GTS-typed discovery settings, and catalog reconciliation outcome are fully specified in the following sub-requirements:
+- `cpt-cf-model-registry-fr-discovery-plugins` — plugin selection and extensibility
+- `cpt-cf-model-registry-fr-discovery-settings` — GTS-typed discovery-settings contract
+- `cpt-cf-model-registry-fr-discovery-model-output` — plugin output and catalog reconciliation
 
-**Dependencies**: OAGW (executes provider API calls), Provider API (returns models list)
+**Dependencies**: OAGW (executes provider API calls), Provider API (returns raw model list consumed by discovery plugin)
 
 #### Model Approval Integration
 
@@ -610,6 +616,45 @@ The system must support batch approval operations: `approve_models(model_ids[])`
 - [ ] `p2` - **ID**: `cpt-cf-model-registry-fr-manual-trigger`
 
 The system must allow platform and tenant admins to manually trigger discovery for a configured provider. (Health probe triggers arrive in P3 alongside provider health monitoring.)
+
+#### Discovery Plugin Architecture
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-fr-discovery-plugins`
+
+The system must support an extensible, per-provider model-discovery plugin capability so that new AI providers can be added to the discovery mechanism without modifying the core registry.
+
+Each provider type MUST be served by exactly one discovery plugin. The registry MUST select and execute the discovery capability corresponding to the provider's GTS type for each (tenant, provider) pair. A missing or failed plugin for one provider MUST NOT prevent discovery from running for other providers.
+
+A discovery request targeting a provider whose GTS type has no available discovery plugin MUST be rejected with a validation error and MUST NOT invoke any plugin or make any provider network call.
+
+The registry MUST be extensible to new provider types without modifying existing components; adding a new provider type MUST NOT require changes to any other provider's discovery capability.
+
+- **Rationale**: A closed, monolithic discovery implementation cannot scale to the growing number of AI providers. A per-provider plugin boundary isolates provider-specific protocol details, limits the blast radius of provider-side changes, and allows the platform to onboard new providers independently of the registry release cycle.
+- **Actors**: `cpt-cf-model-registry-actor-platform-admin`
+
+#### GTS-Typed Discovery Settings per Plugin
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-fr-discovery-settings`
+
+Each discovery plugin MUST accept a discovery-settings payload whose schema is declared by that plugin and identified by a GTS type specific to that plugin.
+
+The registry MUST validate that the discovery-settings payload presented for a provider conforms to the GTS type declared by the corresponding discovery plugin; a payload whose GTS type does not match MUST be rejected with a validation error.
+
+Discovery-settings payloads for different provider plugins MUST be schema-independent — a change to one plugin's settings schema MUST NOT require changes to any other plugin's settings or to the registry's core discovery path.
+
+- **Rationale**: Provider discovery parameters differ structurally across providers (endpoint URL shape, pagination style, authentication hints visible to the plugin, filter criteria, etc.). Typed, per-plugin settings — identified by GTS type — ensure that each plugin receives only well-formed, provider-appropriate input, and that the registry can detect schema mismatches before network calls are made. This follows the same GTS-typed settings pattern already established for provider settings in this registry.
+- **Actors**: `cpt-cf-model-registry-actor-platform-admin`
+
+#### Plugin Model-Definition Output and Catalog Ingestion
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-fr-discovery-model-output`
+
+Each discovery plugin MUST produce a set of **model definitions** as its output — one definition per model discovered from the provider. The registry MUST reconcile the definitions produced by the plugin with the current catalog so that: newly appearing models are added with `pending` approval status; existing models have their mutable metadata updated (approval status is not changed by discovery); and models no longer reported by the plugin are soft-deleted (marked `deprecated`). The reconciliation MUST be idempotent: running discovery for the same (tenant, provider) pair multiple times without intervening provider changes MUST produce the same catalog state. See DESIGN.md §3.5 for the reconciliation mechanism.
+
+Each model definition MUST contain at minimum: (1) the provider-assigned model identifier, which is the field required to construct the canonical model ID (combined with provider context per Domain Model §5); (2) a display name and the capability flags required to produce a complete catalog entry (see Domain Model §5 for model field definitions).
+
+- **Rationale**: Decoupling the plugin's output contract from the registry's storage model allows plugins to evolve independently while ensuring the registry always ingests consistent, well-defined model information. The `pending → approved → deprecated` lifecycle ensures that newly discovered models do not become available to tenants without an explicit approval step, preserving the approval workflow established in `cpt-cf-model-registry-fr-model-approval`. Plugin invocation outcomes feed provider discovery health; see `cpt-cf-model-registry-fr-health-monitoring` (P3).
+- **Actors**: `cpt-cf-model-registry-actor-platform-admin`
 
 ### P3 — Enhanced Features
 
@@ -667,6 +712,8 @@ Manual health probe trigger is added in this phase (extends `fr-manual-trigger`)
 - Per-tenant-API-key availability
 
 **Dependencies**: OAGW (executes provider API calls), Provider API (returns response for health derivation)
+
+- **Covers**: `cpt-cf-model-registry-upreq-provider-health`
 
 #### Alias Management
 
@@ -789,6 +836,8 @@ The following operations MUST be logged for audit compliance:
 | Tag deleted (P3) | tag_name, tenant_id, actor_id, timestamp |
 | Tag assigned to model (P3) | tag_name, model_id, tenant_id, actor_id, timestamp |
 | Tag removed from model (P3) | tag_name, model_id, tenant_id, actor_id, timestamp |
+| Discovery plugin invoked (P2) | provider_id, plugin_gts_type, tenant_id, actor_id, timestamp, outcome (success/failure) |
+| Discovery settings validation failed (P2) | provider_id, plugin_gts_type, tenant_id, actor_id, timestamp, reason |
 
 Read operations are not audited (high volume, low value).
 
@@ -832,6 +881,23 @@ Cache unavailable: Fallback to direct DB queries (higher latency).
 | Tenants | 10,000 |
 | Total models (worst case) | ~2,000,000 |
 | Read:Write ratio | 1000:1 |
+
+### Discovery Plugin Isolation
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-nfr-discovery-plugin-isolation`
+
+A runtime failure (panic, timeout, or unrecoverable error) in one discovery plugin MUST NOT terminate or corrupt the discovery run for any other provider. The registry MUST record the failure for the affected provider (updating provider discovery health accordingly) and continue processing remaining providers.
+
+- **Rationale**: Providers are independently operated; a defect or outage at one provider's endpoint must not cascade to halt discovery for all other providers in the same scheduler tick. This property is measurable: when discovery is triggered for N providers and one plugin fails, exactly N−1 other providers' catalog entries MUST be updated (or confirmed unchanged) in the same run.
+
+### Discovery Plugin Extensibility
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-nfr-discovery-plugin-extensibility`
+
+The registry MUST support adding a new provider's discovery capability without modifying core discovery behavior or any other provider's configuration. Adding a new provider type MUST be achievable solely by providing a new discovery plugin; no changes to any existing plugin or to the registry's core discovery path are permitted.
+
+- **Rationale**: The AI provider landscape changes frequently. Operators must be able to onboard new providers at their own pace without gating on a core registry release.
+- **Verification method — inspection at P2 completion**: demonstrate that a new provider's discovery capability was added by providing only a new discovery plugin, with no changes to existing plugins or the core discovery path; the inspection is performed during the P2 release review and recorded there.
 
 ### Rate Limiting
 
@@ -891,7 +957,21 @@ Key interfaces:
 - `ModelRegistryClient` — SDK for LLM Gateway integration
 - `AdminClient` — SDK for Tenant Admin UI
 
+### External Integration Contracts
+
+#### Discovery Plugin Contract
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-contract-discovery-plugin`
+
+- **Direction**: Required from each discovery plugin; provided to the registry by each plugin.
+- **Protocol/Format**: The contract defines: (1) the GTS type identifier for the plugin's discovery-settings schema, (2) the input — a GTS-typed discovery-settings payload plus provider context (tenant, provider slug, OAGW routing alias), and (3) the output — a list of model definitions whose structure satisfies `cpt-cf-model-registry-fr-discovery-model-output`.
+- **Stability**: unstable — the contract may evolve as the plugin mechanism matures; breaking changes increment the contract version.
+- **Compatibility**: Each plugin MUST declare the exact GTS type it accepts for discovery settings. The registry treats a settings-GTS-type mismatch as a validation error rather than a contract breach, so existing plugins are unaffected when new plugins are added.
+- **Rationale**: A published, versioned plugin contract is the mechanism that makes the plugin architecture (`cpt-cf-model-registry-fr-discovery-plugins`) implementable by independent teams. Without an explicit contract boundary, each plugin would implicitly depend on registry internals.
+
 ## 13. Use Cases
+
+> **Note on use-case numbering**: UC-025 and UC-026 are P2 use cases appended after the existing P2 use case UC-017. They appear in the table of contents ahead of the P3/P4 use cases UC-018–UC-024. This ordering is intentional to preserve stable, existing UC IDs; UC-018–UC-024 are not renumbered.
 
 ### UC-001: Get Tenant Model
 
@@ -952,8 +1032,8 @@ Key interfaces:
 **Flow**:
 1. Discovery triggered for (tenant, provider) pair
 2. Registry sends GET to provider's models endpoint via OAGW
-3. Provider returns models list
-4. Registry compares with current catalog:
+3. Provider returns a raw model list; the discovery plugin translates this into model definitions
+4. Registry compares model definitions with current catalog:
    - New model → register with Approval Service as `pending`
    - Existing model → update metadata
    - Missing model → mark as `deprecated` (soft-delete)
@@ -1251,6 +1331,60 @@ Key interfaces:
 - Rate limited to prevent abuse
 - Tenant admin can trigger discovery for own providers; Platform admin can trigger for any provider
 
+### UC-025: Add a New Provider Discovery Plugin
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-usecase-add-discovery-plugin`
+
+**Actor**: `cpt-cf-model-registry-actor-platform-admin`
+
+**Preconditions**: A new AI provider type is to be onboarded. A discovery plugin capability exists for the new provider type.
+
+**Flow**:
+1. Platform admin registers the new provider in the registry (UC-006), specifying the provider's GTS type and discovery-settings payload conforming to the plugin's expected discovery-settings type.
+2. Registry validates that a discovery plugin capability exists for the given provider GTS type.
+3. Registry validates the discovery-settings payload against the plugin's expected discovery-settings type.
+4. Admin triggers discovery for the new provider (UC-017).
+5. Registry selects and executes the new provider's discovery plugin, passing the validated discovery-settings payload.
+6. Plugin returns model definitions; registry ingests them per `cpt-cf-model-registry-fr-discovery-model-output`.
+
+**Postconditions**: Newly discovered models appear in the catalog with `pending` approval status; no other provider's catalog is affected.
+
+**Acceptance criteria**:
+- Discovery for an unrecognized provider GTS type (no plugin registered) returns a `validation_error` (400) and does not invoke any plugin.
+- A discovery-settings payload whose GTS type does not match the plugin's declared schema returns a `validation_error` (400) before any network call.
+- Successfully completing the flow for the new provider does not alter catalog entries belonging to any other provider.
+- Discovery run for the new provider is idempotent: triggering it twice with no intervening provider changes produces the same catalog state.
+
+### UC-026: Auto-Discover Models via Plugin
+
+- [ ] `p2` - **ID**: `cpt-cf-model-registry-usecase-auto-discover-via-plugin`
+
+**Actor**: `cpt-cf-model-registry-actor-platform-admin` (manual trigger) or External Scheduler (automated)
+
+**Preconditions**: Provider configured with `discovery.enabled = true`. A discovery plugin exists for the provider's GTS type. Discovery-settings payload is valid.
+
+**Flow**:
+1. Discovery is triggered for a (tenant, provider) pair — manually (UC-017) or via external scheduler.
+2. Registry selects the discovery plugin matching the provider's GTS type.
+3. Registry passes the provider's GTS-typed discovery-settings payload and OAGW routing context to the plugin.
+4. Plugin calls the provider's model-list endpoint via OAGW and returns model definitions.
+5. Registry reconciles definitions against the current catalog:
+   - New model → create with `pending` approval status.
+   - Existing model → update mutable metadata.
+   - Missing model → mark as `deprecated`.
+6. The plugin invocation outcome (success/failure, latency) is recorded. When provider health monitoring is available (P3, `cpt-cf-model-registry-fr-health-monitoring`), this outcome updates provider discovery health storage.
+
+**Postconditions**: Catalog reflects the provider's current model set. Provider discovery health is updated if health monitoring (P3) is active.
+
+**Note**: P2 discovery does not persist health metrics. Health storage is a P3 capability (`cpt-cf-model-registry-fr-health-monitoring`).
+
+**Acceptance criteria**:
+- Each model definition produced by the plugin results in exactly one catalog create, update, or deprecation.
+- Approval status is not changed by discovery for models already in the catalog.
+- A plugin failure (timeout, provider error) leaves the catalog unchanged for the affected provider.
+- A plugin failure for one provider does not prevent discovery for other providers in the same scheduler tick (per `cpt-cf-model-registry-nfr-discovery-plugin-isolation`).
+- Discovery run is idempotent: consecutive runs with identical plugin output produce no catalog mutations.
+
 ### UC-018: Approve Model for User Group
 
 - [ ] `p4` - **ID**: `cpt-cf-model-registry-usecase-user-group-approval`
@@ -1406,6 +1540,10 @@ Key interfaces:
 | Security | Authorization checks pass for all protected endpoints | P1 |
 | Integration | LLM Gateway can resolve models and check availability | P1 |
 | Integration | Tenant Admin UI can manage approvals | P1 |
+| Discovery | Discovery for an unrecognized provider GTS type (no plugin capability available) returns a `validation_error` (400) and invokes no plugin | P2 |
+| Discovery | A plugin failure for one provider does not prevent discovery from completing for any other provider in the same run | P2 |
+| Discovery | A discovery run for the same (tenant, provider) pair is idempotent: consecutive runs with identical plugin output produce no catalog mutations | P2 |
+| Discovery | Adding a new provider type requires only a new discovery plugin; no existing plugin or core discovery component requires modification | P2 |
 
 ## 15. Dependencies
 
@@ -1426,6 +1564,9 @@ Key interfaces:
 6. Platform authenticates requests and provides verified tenant context
 7. Platform provides audit logging for all operations
 8. Platform provides distributed tracing, structured logging, metrics, and health endpoints
+9. Each discovery plugin correctly implements the discovery plugin contract (`cpt-cf-model-registry-contract-discovery-plugin`): it accepts a GTS-typed discovery-settings payload and returns a well-formed list of model definitions. The registry is not responsible for correcting malformed plugin output beyond schema validation at the plugin boundary.
+10. The GTS type system provides the tooling (`make dylint`, `make gts-docs`) to validate discovery-settings GTS schema ids at build time, consistent with the validation already enforced for provider-settings GTS ids.
+11. When a provider is removed or disabled, the lifecycle of its previously discovered catalog entries (deprecation or purge) is governed by `cpt-cf-model-registry-fr-provider-management`; detailed handling is deferred to DESIGN.md.
 
 ## 17. Risks
 
@@ -1434,6 +1575,8 @@ Key interfaces:
 | Cache invalidation delay | Stale model data served (up to TTL) | TTL-based expiry (own data 30 min, inherited 5 min) |
 | Tenant hierarchy changes | Inherited approvals may become invalid | Invalidate tenant cache on re-parenting event |
 | Provider removes model without notice | Requests fail until catalog synced | Periodic sync detection |
+| Discovery plugin produces malformed or oversized output | Catalog bloat or resource exhaustion from ingesting unbounded model-definition sets | Validate and bound the model-definition count per plugin invocation; reject plugin output that exceeds the configured threshold before any catalog writes |
+| Discovery-plugin contract instability | A breaking contract change forces simultaneous updates to all plugins, blocking onboarding of new providers | Maintain backward compatibility for at least one prior contract version; document the breaking-change policy and require explicit version increments in the plugin contract |
 
 ## 18. Open Questions
 
@@ -1443,6 +1586,8 @@ Key interfaces:
 | 2 | Specific QPS targets per endpoint | Deferred | DESIGN.md |
 | 3 | Provider plugin retry policies | Deferred | DESIGN.md |
 | 4 | Tag access rights — who may create/delete tags (tenant admin only, platform admin only, or both)? Working default for P3 FRs: tenant admin manages own-tenant tags, platform admin manages root/global tags. Owner: Model Registry Tech Lead. Target resolution: 2026-07-15 | Open | Pending |
+| 5 | Discovery-settings GTS namespace: what is the root GTS schema-id chain for per-plugin discovery-settings types? The settings shape for each provider's plugin is structurally different from the model-info envelope (`gts.cf.genai.model.info.v1~`); should discovery-settings use a sibling chain (e.g. `gts.cf.genai.model.discovery-settings.v1~<vendor>.<provider>.v1~`) or a separate root namespace? The exact chain is a DESIGN/ADR concern; the PRD requires only that each plugin's settings be identified by a GTS type. Owner: Model Registry Tech Lead. Target resolution: before P2 DESIGN finalization. | Open | Pending |
+| 6 | Per-plugin failure isolation policy: when a discovery plugin exceeds its timeout or returns an unrecoverable error, should the registry automatically retry on the next scheduler tick, require manual re-trigger, or apply a backoff policy? The PRD requires that one plugin's failure not block others (`cpt-cf-model-registry-nfr-discovery-plugin-isolation`); the retry/backoff strategy is a DESIGN concern. Owner: Model Registry Tech Lead. Target resolution: before P2 DESIGN finalization. | Open | Pending |
 
 ## 19. Migration & Rollback
 
@@ -1460,10 +1605,19 @@ Key interfaces:
 
 | Artifact | Link |
 |----------|------|
-| LLM Gateway PRD | `gears/llm_gateway/docs/PRD.md` |
-| ADR: Stateless Gateway | `gears/llm_gateway/docs/ADR/0001-fdd-llmgw-adr-stateless.md` |
-| ADR: Pass-through Content | `gears/llm_gateway/docs/ADR/0002-fdd-llmgw-adr-pass-through.md` |
-| ADR: Circuit Breaking | `gears/llm_gateway/docs/ADR/0004-fdd-llmgw-adr-circuit-breaking.md` |
+| LLM Gateway PRD | `gears/llm-gateway/docs/PRD.md` |
+| ADR: Stateless Gateway | `gears/llm-gateway/docs/ADR/0001-fdd-llmgw-adr-stateless.md` |
+| ADR: Pass-through Content | `gears/llm-gateway/docs/ADR/0002-fdd-llmgw-adr-pass-through.md` |
+| ADR: Circuit Breaking | `gears/llm-gateway/docs/ADR/0004-fdd-llmgw-adr-circuit-breaking.md` |
 | OData Pagination Standard | `docs/toolkit_unified_system/07_odata_pagination_select_filter.md` |
 | Error Handling Standard | `docs/toolkit_unified_system/05_errors_rfc9457.md` |
 | GTS Contracts | `gts/` (to be defined) |
+| ADR: GTS-Typed Provider Settings | `gears/model-registry/docs/ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md` |
+| FR: Discovery Plugin Architecture | `cpt-cf-model-registry-fr-discovery-plugins` (P2, §6) |
+| FR: GTS-Typed Discovery Settings | `cpt-cf-model-registry-fr-discovery-settings` (P2, §6) |
+| FR: Plugin Model-Definition Output | `cpt-cf-model-registry-fr-discovery-model-output` (P2, §6) |
+| NFR: Discovery Plugin Isolation | `cpt-cf-model-registry-nfr-discovery-plugin-isolation` (P2, §8) |
+| NFR: Discovery Plugin Extensibility | `cpt-cf-model-registry-nfr-discovery-plugin-extensibility` (P2, §8) |
+| Contract: Discovery Plugin Contract | `cpt-cf-model-registry-contract-discovery-plugin` (P2, §12) |
+| UC-025: Add a New Provider Discovery Plugin | `cpt-cf-model-registry-usecase-add-discovery-plugin` (P2, §13) |
+| UC-026: Auto-Discover Models via Plugin | `cpt-cf-model-registry-usecase-auto-discover-via-plugin` (P2, §13) |
