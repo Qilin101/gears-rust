@@ -1,0 +1,23 @@
+[package]
+name = "cf-gears-llm-gateway-sdk"
+description = "SDK for the LLM Gateway: Open Responses domain models"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+metadata.docs.rs.all-features = true
+
+[lib]
+name = "llm_gateway_sdk"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true, features = ["chrono04"] }

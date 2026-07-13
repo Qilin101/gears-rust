@@ -1834,6 +1834,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-llm-gateway-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cf-gears-mini-chat"
 version = "0.1.32"
 dependencies = [
