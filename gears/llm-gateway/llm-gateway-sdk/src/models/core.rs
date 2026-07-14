@@ -656,4 +656,52 @@ mod tests {
         assert_eq!(resource.status, ResponseStatus::Completed);
         assert_eq!(serde_json::to_value(&resource).unwrap(), wire);
     }
+
+    // A response carrying provider-extension output items and tools the core
+    // does not own must round-trip verbatim — extensibility must reach the
+    // payload families, not just the top-level event.
+    #[test]
+    fn response_resource_preserves_extension_item_and_tool() {
+        let wire = serde_json::json!({
+            "id": "resp_2",
+            "object": "response",
+            "created_at": 1_700_000_000_i64,
+            "completed_at": null,
+            "status": "completed",
+            "incomplete_details": null,
+            "model": "gpt",
+            "previous_response_id": null,
+            "instructions": null,
+            "output": [
+                { "type": "openai:web_search_call", "id": "ws_1", "status": "completed", "query": "rust" }
+            ],
+            "error": null,
+            "tools": [
+                { "type": "openai:web_search", "search_context_size": "high" }
+            ],
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": true,
+            "text": { "format": { "type": "text" } },
+            "top_p": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "top_logprobs": 0,
+            "temperature": 1.0,
+            "reasoning": {},
+            "usage": null,
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "store": false,
+            "background": false,
+            "service_tier": "auto",
+            "metadata": null,
+            "safety_identifier": null,
+            "prompt_cache_key": null
+        });
+        let resource: ResponseResource = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(resource.output[0], items::OutputItem::Other(_)));
+        assert!(matches!(resource.tools[0], tools::Tool::Other(_)));
+        assert_eq!(serde_json::to_value(&resource).unwrap(), wire);
+    }
 }

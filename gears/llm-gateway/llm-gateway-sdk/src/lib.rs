@@ -21,8 +21,9 @@ pub use errors::LlmGatewayError;
 pub use models::async_ops::{AsyncError, Batch, BatchRequest, BatchStatus, Job, JobStatus};
 pub use models::content::{
     Annotation, AudioFormat, ImageDetail, InputAudio, InputContentPart, InputFile, InputImage,
-    InputText, InputVideo, LogProb, OutputContentPart, OutputText, Refusal, TopLogProb,
+    InputText, InputVideo, LogProb, OutputContentPart, OutputText, Refusal, TopLogProb, UrlCitation,
 };
+pub use models::extension::Extension;
 pub use models::core::{
     CreateResponseBody, EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse,
     EmbeddingVector, EncodingFormat, FallbackConfig, FallbackStrategy, IncludeField,

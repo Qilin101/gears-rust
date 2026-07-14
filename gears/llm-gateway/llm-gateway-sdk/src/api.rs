@@ -21,12 +21,13 @@ use crate::models::streaming::StreamingEvent;
 
 /// Server-sent event stream produced by [`LlmGatewayClientV1::create_response_stream`].
 ///
-/// Each item is a decoded [`StreamingEvent`]; a per-item `Err` carries a
-/// mid-stream provider or transport failure without terminating the stream
-/// type. The `[DONE]` sentinel that closes an Open Responses SSE stream is not
-/// surfaced as an item — it ends the stream.
-pub type ResponseEventStream =
-    Pin<Box<dyn Stream<Item = Result<StreamingEvent, LlmGatewayError>> + Send>>;
+/// Each item is a decoded [`StreamingEvent`]. Failures are in-band: the gateway,
+/// as the stream producer, synthesizes a [`StreamingEvent::Failed`] /
+/// [`StreamingEvent::Error`] event for any provider or transport error and then
+/// closes the stream. Pre-stream setup failures surface as the outer `Result`
+/// on the method instead. The `[DONE]` sentinel that closes an Open Responses
+/// SSE stream is not surfaced as an item — it ends the stream.
+pub type ResponseEventStream = Pin<Box<dyn Stream<Item = StreamingEvent> + Send>>;
 
 /// Public API trait for the LLM Gateway (Version 1).
 ///

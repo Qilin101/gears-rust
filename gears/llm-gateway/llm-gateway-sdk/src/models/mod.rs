@@ -15,6 +15,7 @@
 pub mod async_ops;
 pub mod content;
 pub mod core;
+pub mod extension;
 pub mod items;
 pub mod streaming;
 pub mod tools;

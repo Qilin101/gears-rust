@@ -11,6 +11,7 @@
 
 use crate::models::content::{Annotation, LogProb, OutputContentPart};
 use crate::models::core::{ResponseError, ResponseResource};
+use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of};
 use crate::models::items::{DataOutput, OutputItem, ReasoningSummaryPart};
 
 // ---------------------------------------------------------------------------
@@ -18,8 +19,17 @@ use crate::models::items::{DataOutput, OutputItem, ReasoningSummaryPart};
 // ---------------------------------------------------------------------------
 
 /// A streaming response event, discriminated by `type` (the SSE event name).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+///
+/// Any `type` the core does not own — a provider extension
+/// (`{provider_slug}:{event_type}`) or third-party plugin event — is preserved
+/// verbatim in [`StreamingEvent::Other`] and forwarded without interpretation.
+// The core-owned variants carry a full response snapshot; the size gap versus
+// `Other` is inherent to the protocol and not worth an allocation on the hot
+// path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum StreamingEvent {
     /// The response was created.
     #[serde(rename = "response.created")]
@@ -108,6 +118,140 @@ pub enum StreamingEvent {
     /// A binary data output completed (Gears extension).
     #[serde(rename = "cf_gears:response.data.done")]
     DataDone(DataEvent),
+
+    /// An event `type` the core does not own, preserved verbatim.
+    #[serde(skip)]
+    Other(Extension),
+}
+
+impl serde::Serialize for StreamingEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Created(v) => serialize_tagged(serializer, "response.created", v),
+            Self::InProgress(v) => serialize_tagged(serializer, "response.in_progress", v),
+            Self::Queued(v) => serialize_tagged(serializer, "response.queued", v),
+            Self::Completed(v) => serialize_tagged(serializer, "response.completed", v),
+            Self::Incomplete(v) => serialize_tagged(serializer, "response.incomplete", v),
+            Self::Failed(v) => serialize_tagged(serializer, "response.failed", v),
+            Self::OutputItemAdded(v) => {
+                serialize_tagged(serializer, "response.output_item.added", v)
+            }
+            Self::OutputItemDone(v) => {
+                serialize_tagged(serializer, "response.output_item.done", v)
+            }
+            Self::ContentPartAdded(v) => {
+                serialize_tagged(serializer, "response.content_part.added", v)
+            }
+            Self::ContentPartDone(v) => {
+                serialize_tagged(serializer, "response.content_part.done", v)
+            }
+            Self::OutputTextDelta(v) => {
+                serialize_tagged(serializer, "response.output_text.delta", v)
+            }
+            Self::OutputTextDone(v) => {
+                serialize_tagged(serializer, "response.output_text.done", v)
+            }
+            Self::OutputTextAnnotationAdded(v) => {
+                serialize_tagged(serializer, "response.output_text.annotation.added", v)
+            }
+            Self::RefusalDelta(v) => serialize_tagged(serializer, "response.refusal.delta", v),
+            Self::RefusalDone(v) => serialize_tagged(serializer, "response.refusal.done", v),
+            Self::FunctionCallArgumentsDelta(v) => {
+                serialize_tagged(serializer, "response.function_call_arguments.delta", v)
+            }
+            Self::FunctionCallArgumentsDone(v) => {
+                serialize_tagged(serializer, "response.function_call_arguments.done", v)
+            }
+            Self::ReasoningDelta(v) => serialize_tagged(serializer, "response.reasoning.delta", v),
+            Self::ReasoningDone(v) => serialize_tagged(serializer, "response.reasoning.done", v),
+            Self::ReasoningSummaryPartAdded(v) => {
+                serialize_tagged(serializer, "response.reasoning_summary_part.added", v)
+            }
+            Self::ReasoningSummaryPartDone(v) => {
+                serialize_tagged(serializer, "response.reasoning_summary_part.done", v)
+            }
+            Self::ReasoningSummaryTextDelta(v) => {
+                serialize_tagged(serializer, "response.reasoning_summary_text.delta", v)
+            }
+            Self::ReasoningSummaryTextDone(v) => {
+                serialize_tagged(serializer, "response.reasoning_summary_text.done", v)
+            }
+            Self::Error(v) => serialize_tagged(serializer, "error", v),
+            Self::DataInProgress(v) => {
+                serialize_tagged(serializer, "cf_gears:response.data.in_progress", v)
+            }
+            Self::DataDone(v) => serialize_tagged(serializer, "cf_gears:response.data.done", v),
+            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StreamingEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(tag) = tag_of(&value) {
+            match tag {
+                "response.created" => return from_tagged(&value).map(Self::Created),
+                "response.in_progress" => return from_tagged(&value).map(Self::InProgress),
+                "response.queued" => return from_tagged(&value).map(Self::Queued),
+                "response.completed" => return from_tagged(&value).map(Self::Completed),
+                "response.incomplete" => return from_tagged(&value).map(Self::Incomplete),
+                "response.failed" => return from_tagged(&value).map(Self::Failed),
+                "response.output_item.added" => {
+                    return from_tagged(&value).map(Self::OutputItemAdded);
+                }
+                "response.output_item.done" => {
+                    return from_tagged(&value).map(Self::OutputItemDone);
+                }
+                "response.content_part.added" => {
+                    return from_tagged(&value).map(Self::ContentPartAdded);
+                }
+                "response.content_part.done" => {
+                    return from_tagged(&value).map(Self::ContentPartDone);
+                }
+                "response.output_text.delta" => {
+                    return from_tagged(&value).map(Self::OutputTextDelta);
+                }
+                "response.output_text.done" => {
+                    return from_tagged(&value).map(Self::OutputTextDone);
+                }
+                "response.output_text.annotation.added" => {
+                    return from_tagged(&value).map(Self::OutputTextAnnotationAdded);
+                }
+                "response.refusal.delta" => return from_tagged(&value).map(Self::RefusalDelta),
+                "response.refusal.done" => return from_tagged(&value).map(Self::RefusalDone),
+                "response.function_call_arguments.delta" => {
+                    return from_tagged(&value).map(Self::FunctionCallArgumentsDelta);
+                }
+                "response.function_call_arguments.done" => {
+                    return from_tagged(&value).map(Self::FunctionCallArgumentsDone);
+                }
+                "response.reasoning.delta" => {
+                    return from_tagged(&value).map(Self::ReasoningDelta);
+                }
+                "response.reasoning.done" => return from_tagged(&value).map(Self::ReasoningDone),
+                "response.reasoning_summary_part.added" => {
+                    return from_tagged(&value).map(Self::ReasoningSummaryPartAdded);
+                }
+                "response.reasoning_summary_part.done" => {
+                    return from_tagged(&value).map(Self::ReasoningSummaryPartDone);
+                }
+                "response.reasoning_summary_text.delta" => {
+                    return from_tagged(&value).map(Self::ReasoningSummaryTextDelta);
+                }
+                "response.reasoning_summary_text.done" => {
+                    return from_tagged(&value).map(Self::ReasoningSummaryTextDone);
+                }
+                "error" => return from_tagged(&value).map(Self::Error),
+                "cf_gears:response.data.in_progress" => {
+                    return from_tagged(&value).map(Self::DataInProgress);
+                }
+                "cf_gears:response.data.done" => return from_tagged(&value).map(Self::DataDone),
+                _ => {}
+            }
+        }
+        Ok(Self::Other(Extension(value)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,5 +591,32 @@ mod tests {
             panic!("expected output_text.delta");
         };
         assert_eq!(delta.logprobs.as_ref().unwrap()[0].bytes, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn derived_schema_keeps_type_discriminator_and_skips_other() {
+        // The schema is still derived even though serde is hand-written: it must
+        // document the known `type` tags and omit the `Other` catch-all.
+        let schema = serde_json::to_value(schemars::schema_for!(StreamingEvent)).unwrap();
+        let text = schema.to_string();
+        assert!(text.contains("response.created"), "known tag missing: {text}");
+        assert!(
+            text.contains("cf_gears:response.data.done"),
+            "gears tag missing"
+        );
+        assert!(!text.contains("\"Other\""), "Other must be skipped: {text}");
+    }
+
+    #[test]
+    fn unknown_event_type_preserved_as_other() {
+        let wire = serde_json::json!({
+            "type": "openai:web_search_call.searching",
+            "sequence_number": 9,
+            "output_index": 0,
+            "extra": { "query": "rust" }
+        });
+        let event: StreamingEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(event, StreamingEvent::Other(_)));
+        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
     }
 }
