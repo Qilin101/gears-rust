@@ -12,8 +12,12 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
+pub mod api;
+pub mod errors;
 pub mod models;
 
+pub use api::{LlmGatewayClientV1, ResponseEventStream};
+pub use errors::LlmGatewayError;
 pub use models::async_ops::{AsyncError, Batch, BatchRequest, BatchStatus, Job, JobStatus};
 pub use models::content::{
     Annotation, AudioFormat, ImageDetail, InputAudio, InputContentPart, InputFile, InputImage,

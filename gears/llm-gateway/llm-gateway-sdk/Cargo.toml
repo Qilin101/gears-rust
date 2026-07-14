@@ -21,3 +21,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+futures-core = { workspace = true }
+toolkit-security = { workspace = true }
