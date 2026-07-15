@@ -9,10 +9,12 @@
 //! - [`content`] — input/output content parts.
 //! - [`tools`] — tool definitions.
 //! - [`streaming`] — server-sent streaming events.
+//! - [`plugin`] — provider-plugin call context and capabilities.
 
 pub mod content;
 pub mod core;
 pub mod extension;
 pub mod items;
+pub mod plugin;
 pub mod streaming;
 pub mod tools;

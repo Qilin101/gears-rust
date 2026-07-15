@@ -14,10 +14,15 @@
 
 pub mod api;
 pub mod errors;
+pub mod gts;
 pub mod models;
+pub mod plugin_api;
 
 pub use api::{LlmGatewayClientV1, ResponseEventStream};
 pub use errors::LlmGatewayError;
+pub use gts::LlmGatewayProviderPluginSpecV1;
+pub use plugin_api::LlmGatewayProviderPluginClient;
+pub use models::plugin::{MediaInputMode, ProviderCallCtx, ProviderPluginCapabilities};
 pub use models::content::{
     Annotation, AudioFormat, ImageDetail, InputAudio, InputContentPart, InputFile, InputImage,
     InputText, InputVideo, LogProb, OutputContentPart, OutputText, Refusal, TopLogProb, UrlCitation,

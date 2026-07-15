@@ -1838,8 +1838,11 @@ name = "cf-gears-llm-gateway-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-gts",
  "cf-gears-toolkit-security",
  "futures-core",
+ "gts",
  "schemars 1.2.1",
  "serde",
  "serde_json",

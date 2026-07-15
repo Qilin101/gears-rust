@@ -24,3 +24,8 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 futures-core = { workspace = true }
 toolkit-security = { workspace = true }
+
+# GTS types for provider-plugin discovery
+gts = { workspace = true }
+toolkit-gts = { workspace = true }
+toolkit = { workspace = true }
