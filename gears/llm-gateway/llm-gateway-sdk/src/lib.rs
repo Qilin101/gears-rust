@@ -3,8 +3,8 @@
 //!
 //! Rust models for the LLM Gateway's Open Responses–aligned domain, translated
 //! from the JSON Schemas under `llm-gateway-sdk/schemas/`. Covers the core
-//! request/response, item, content, tool, async (job/batch), and streaming
-//! (server-sent event) families.
+//! request/response, item, content, tool, and streaming (server-sent event)
+//! families.
 //!
 //! Schema polymorphism (an `allOf` chain with a `const` `type` discriminator)
 //! maps to plain serde enums (`#[serde(tag = "type")]`).
@@ -18,7 +18,6 @@ pub mod models;
 
 pub use api::{LlmGatewayClientV1, ResponseEventStream};
 pub use errors::LlmGatewayError;
-pub use models::async_ops::{AsyncError, Batch, BatchRequest, BatchStatus, Job, JobStatus};
 pub use models::content::{
     Annotation, AudioFormat, ImageDetail, InputAudio, InputContentPart, InputFile, InputImage,
     InputText, InputVideo, LogProb, OutputContentPart, OutputText, Refusal, TopLogProb, UrlCitation,

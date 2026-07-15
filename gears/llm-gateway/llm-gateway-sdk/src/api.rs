@@ -44,9 +44,8 @@ pub type ResponseEventStream = Pin<Box<dyn Stream<Item = StreamingEvent> + Send>
 pub trait LlmGatewayClientV1: Send + Sync {
     /// Create a response (`POST /responses`), non-streaming.
     ///
-    /// Returns the fully assembled [`ResponseResource`]. With
-    /// `body.background == Some(true)` the response returns immediately with
-    /// `status: queued`; otherwise it returns the completed response.
+    /// Returns the fully assembled [`ResponseResource`]. Background (async) jobs
+    /// are handled by a separate API and are out of scope for this trait.
     ///
     /// See `cpt-cf-llm-gateway-seq-create-response-sync-v1`.
     async fn create_response(

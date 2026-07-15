@@ -16,26 +16,20 @@ use crate::models::{items, tools};
 
 /// Open Responses request body.
 ///
-/// Every field is optional; an absent field defers to the gateway/provider
-/// default. `store` and `previous_response_id` are accepted for protocol
-/// compatibility but the gateway operates statelessly.
-#[allow(clippy::struct_excessive_bools)]
+/// Aside from `model`, every field is optional; an absent field defers to the
+/// gateway/provider default.
 #[derive(
     Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 pub struct CreateResponseBody {
     /// Model identifier from the Model Registry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: String,
     /// Input items, a single text string, or null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<ResponseInput>,
     /// System-level instructions for the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// Identifier of a previous response for context chaining.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_response_id: Option<String>,
     /// Additional data to include in the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<IncludeField>>,
@@ -78,18 +72,9 @@ pub struct CreateResponseBody {
     /// Context-truncation strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<TruncationStrategy>,
-    /// Stream the response as server-sent events.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
     /// Streaming options.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
-    /// Run as a background (async) job.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background: Option<bool>,
-    /// Whether to store the response for later retrieval.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store: Option<bool>,
     /// Service-tier hint for processing priority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
@@ -152,7 +137,6 @@ pub struct StreamOptions {
 ///
 /// Every field is present on the wire; semantically optional fields are
 /// nullable and modeled as `Option`.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResponseResource {
     /// Unique response identifier.
@@ -169,8 +153,6 @@ pub struct ResponseResource {
     pub incomplete_details: Option<IncompleteDetails>,
     /// Model used for generation.
     pub model: String,
-    /// Identifier of the previous response in a chain.
-    pub previous_response_id: Option<String>,
     /// System-level instructions echoed back.
     pub instructions: Option<String>,
     /// Output items produced by the model.
@@ -205,10 +187,6 @@ pub struct ResponseResource {
     pub max_output_tokens: Option<u32>,
     /// Maximum number of tool calls.
     pub max_tool_calls: Option<u32>,
-    /// Whether the response is stored.
-    pub store: bool,
-    /// Whether the response ran as a background job.
-    pub background: bool,
     /// Service tier used.
     pub service_tier: String,
     /// Request metadata echoed back.
@@ -617,7 +595,6 @@ mod tests {
             "status": "completed",
             "incomplete_details": null,
             "model": "gpt",
-            "previous_response_id": null,
             "instructions": null,
             "output": [
                 {
@@ -645,8 +622,6 @@ mod tests {
             "usage": null,
             "max_output_tokens": null,
             "max_tool_calls": null,
-            "store": false,
-            "background": false,
             "service_tier": "auto",
             "metadata": null,
             "safety_identifier": null,
@@ -670,7 +645,6 @@ mod tests {
             "status": "completed",
             "incomplete_details": null,
             "model": "gpt",
-            "previous_response_id": null,
             "instructions": null,
             "output": [
                 { "type": "openai:web_search_call", "id": "ws_1", "status": "completed", "query": "rust" }
@@ -692,8 +666,6 @@ mod tests {
             "usage": null,
             "max_output_tokens": null,
             "max_tool_calls": null,
-            "store": false,
-            "background": false,
             "service_tier": "auto",
             "metadata": null,
             "safety_identifier": null,

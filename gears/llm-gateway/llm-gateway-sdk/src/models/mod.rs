@@ -8,11 +8,8 @@
 //! - [`items`] — input/output item families.
 //! - [`content`] — input/output content parts.
 //! - [`tools`] — tool definitions.
-//! - [`async_ops`] — async job and batch state (schemas under `schemas/async/`,
-//!   renamed to avoid the `async` keyword).
 //! - [`streaming`] — server-sent streaming events.
 
-pub mod async_ops;
 pub mod content;
 pub mod core;
 pub mod extension;

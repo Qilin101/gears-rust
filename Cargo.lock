@@ -1839,7 +1839,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-security",
- "chrono",
  "futures-core",
  "schemars 1.2.1",
  "serde",
