@@ -103,6 +103,7 @@ members = [
     "gears/chat-engine/chat-engine",
     "gears/model-registry/model-registry-sdk",
     "gears/llm-gateway/llm-gateway-sdk",
+    "gears/llm-gateway/llm-gateway-demo",
     "gears/bss/ledger/ledger",
     "gears/bss/ledger/ledger-sdk",
     "gears/bss/libs/coord",
