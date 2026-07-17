@@ -136,9 +136,7 @@ impl serde::Serialize for StreamingEvent {
             Self::OutputItemAdded(v) => {
                 serialize_tagged(serializer, "response.output_item.added", v)
             }
-            Self::OutputItemDone(v) => {
-                serialize_tagged(serializer, "response.output_item.done", v)
-            }
+            Self::OutputItemDone(v) => serialize_tagged(serializer, "response.output_item.done", v),
             Self::ContentPartAdded(v) => {
                 serialize_tagged(serializer, "response.content_part.added", v)
             }
@@ -148,9 +146,7 @@ impl serde::Serialize for StreamingEvent {
             Self::OutputTextDelta(v) => {
                 serialize_tagged(serializer, "response.output_text.delta", v)
             }
-            Self::OutputTextDone(v) => {
-                serialize_tagged(serializer, "response.output_text.done", v)
-            }
+            Self::OutputTextDone(v) => serialize_tagged(serializer, "response.output_text.done", v),
             Self::OutputTextAnnotationAdded(v) => {
                 serialize_tagged(serializer, "response.output_text.annotation.added", v)
             }
@@ -599,7 +595,10 @@ mod tests {
         // document the known `type` tags and omit the `Other` catch-all.
         let schema = serde_json::to_value(schemars::schema_for!(StreamingEvent)).unwrap();
         let text = schema.to_string();
-        assert!(text.contains("response.created"), "known tag missing: {text}");
+        assert!(
+            text.contains("response.created"),
+            "known tag missing: {text}"
+        );
         assert!(
             text.contains("cf_gears:response.data.done"),
             "gears tag missing"

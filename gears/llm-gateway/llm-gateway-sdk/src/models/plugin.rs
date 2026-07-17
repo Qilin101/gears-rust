@@ -8,37 +8,27 @@
 //! (`ModelCapabilities`) and validated by the core before dispatch — they are
 //! deliberately not duplicated here.
 
-use gts::GtsTypeId;
+use model_registry_sdk::ModelInfoV1;
 use serde::{Deserialize, Serialize};
 
 /// Per-call context the core Gateway passes to every provider-plugin method.
 ///
 /// Carries what translation and transport need without the plugin reaching into
-/// Model Registry itself. The core builds it from the resolved model
-/// (`ModelInfoV1`) and the request being served.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// Model Registry itself. The core builds it from the resolved model and the
+/// request being served.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderCallCtx {
-    /// Provider's own model identifier, sent on the wire
-    /// (`ModelInfoV1.provider_model_id`).
-    pub provider_model_id: String,
-
-    /// Provider identity — the Model Registry model-info `gts_type`
-    /// (e.g. `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`), the
-    /// authoritative provider routing key. Equals the resolving plugin's
-    /// declared `provider_type`; a plugin may use it to confirm it serves this
-    /// provider.
-    pub provider_type: GtsTypeId,
-
-    /// Provider-specific settings payload (`ModelInfoV1.provider_settings`),
-    /// carried as an opaque GTS value discriminated by `provider_type` — the
-    /// same type-erased carrier Model Registry uses (`serde_json::Value`
-    /// implements `gts::GtsSchema`). The plugin narrows it to its typed settings
-    /// (e.g. `OpenAiSettingsV1`) via [`ProviderCallCtx::typed_settings`] and
-    /// reads its own connection routing from there — including the `OAGW` alias
-    /// when the provider uses one (some, e.g. local models, do not). `OAGW`
-    /// injects credentials and applies circuit breaking; the plugin never reads
-    /// or stores provider credentials.
-    pub provider_settings: serde_json::Value,
+    /// The resolved model info the core fetched from Model Registry, carried as
+    /// the GTS-typed [`ModelInfoV1`] envelope (default `serde_json::Value`
+    /// provider settings). Its `gts_type` is the authoritative provider routing
+    /// key and equals the resolving plugin's declared `provider_type`. The
+    /// plugin narrows it to its typed view (e.g. `ModelInfoV1<OpenAiSettingsV1>`)
+    /// via [`ProviderCallCtx::typed_info`] and reads `provider_model_id`,
+    /// `provider_settings`, and its connection routing (e.g. the `OAGW` alias,
+    /// when the provider uses one) from there. `OAGW` injects credentials and
+    /// applies circuit breaking; the plugin never reads or stores provider
+    /// credentials.
+    pub model_info: ModelInfoV1,
 
     /// Gateway request correlation id (the response `id`), propagated for
     /// tracing across usage, error, and audit events.
@@ -46,22 +36,22 @@ pub struct ProviderCallCtx {
 }
 
 impl ProviderCallCtx {
-    /// Narrow [`Self::provider_settings`] to a concrete provider-settings type
-    /// `Q`, validating it against `provider_type`. Mirrors Model Registry's
-    /// `ModelV1::try_into_typed`.
+    /// Narrow [`Self::model_info`] to a concrete provider view `Q`, validating
+    /// its `gts_type` against `Q`'s GTS type id. Delegates to Model Registry's
+    /// `ModelInfoV1::try_into_typed`.
     ///
     /// # Errors
     ///
-    /// - [`gts::NarrowError::SchemaId`] when `provider_type` does not match
+    /// - [`gts::NarrowError::SchemaId`] when `model_info.gts_type` does not match
     ///   `Q`'s GTS type id (the plugin was handed a payload for another provider).
     /// - [`gts::NarrowError::Deserialize`] when the payload can't be
     ///   deserialized into `Q`.
-    pub fn typed_settings<Q>(&self) -> Result<Q, gts::NarrowError>
+    pub fn typed_info<Q>(&self) -> Result<ModelInfoV1<Q>, gts::NarrowError>
     where
         Q: gts::GtsSchema,
         for<'de> Q: gts::GtsDeserialize<'de>,
     {
-        gts::try_narrow::<Q>(self.provider_type.as_ref(), self.provider_settings.clone())
+        self.model_info.clone().try_into_typed::<Q>()
     }
 }
 

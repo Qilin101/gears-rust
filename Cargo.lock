@@ -1838,6 +1838,7 @@ name = "cf-gears-llm-gateway-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cf-gears-model-registry-sdk",
  "cf-gears-toolkit",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-security",

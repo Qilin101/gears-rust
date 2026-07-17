@@ -49,17 +49,12 @@ impl Extension {
 ///
 /// Used by the families' `Serialize` impls for their core-owned variants; the
 /// payload structs carry no `type` field of their own.
-pub(crate) fn serialize_tagged<S, T>(
-    serializer: S,
-    tag: &str,
-    value: &T,
-) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_tagged<S, T>(serializer: S, tag: &str, value: &T) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
     T: serde::Serialize,
 {
-    let mut v =
-        serde_json::to_value(value).map_err(<S::Error as serde::ser::Error>::custom)?;
+    let mut v = serde_json::to_value(value).map_err(<S::Error as serde::ser::Error>::custom)?;
     match v.as_object_mut() {
         Some(map) => {
             map.insert(

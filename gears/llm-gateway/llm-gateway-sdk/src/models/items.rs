@@ -44,9 +44,7 @@ impl serde::Serialize for InputItem {
         match self {
             Self::Message(v) => serialize_tagged(serializer, "message", v),
             Self::FunctionCall(v) => serialize_tagged(serializer, "function_call", v),
-            Self::FunctionCallOutput(v) => {
-                serialize_tagged(serializer, "function_call_output", v)
-            }
+            Self::FunctionCallOutput(v) => serialize_tagged(serializer, "function_call_output", v),
             Self::ItemReference(v) => serialize_tagged(serializer, "item_reference", v),
             Self::Reasoning(v) => serialize_tagged(serializer, "reasoning", v),
             Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),

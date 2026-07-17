@@ -28,9 +28,10 @@ use crate::models::plugin::{ProviderCallCtx, ProviderPluginCapabilities};
 ///
 /// Covers the P1 surfaces the core delegates per request: create-response
 /// (sync and streaming) and embeddings. Every call receives a
-/// [`ProviderCallCtx`] carrying the resolved `provider_model_id`, provider
-/// identity, and opaque `provider_settings` (from which the plugin reads its own
-/// connection routing), so the plugin needs no Model Registry access of its own.
+/// [`ProviderCallCtx`] carrying the resolved model info as the GTS-typed
+/// `ModelInfoV1` envelope (which the plugin narrows to its typed view for
+/// `provider_model_id`, `provider_settings`, and connection routing), so the
+/// plugin needs no Model Registry access of its own.
 /// Requests and responses are the
 /// same Open Responses–aligned SDK types the core uses; errors are
 /// [`LlmGatewayError`], which the core maps to the Open Responses error
