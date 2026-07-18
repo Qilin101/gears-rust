@@ -93,10 +93,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/config.rs`
 
-- [ ] define `ModelRegistryConfig` (serde `Deserialize` + `Default`) with cache TTLs (`own_ttl_seconds` default 1800, `inherited_ttl_seconds` default 300) and any P1 tunables (e.g. `max_page_size`)
-- [ ] provide `#[serde(default = ...)]` defaults so `ctx.config_or_default()` works with no YAML
-- [ ] write tests for defaults and partial-YAML deserialization
-- [ ] run tests — must pass before next task
+- [x] define `ModelRegistryConfig` (serde `Deserialize` + `Default`) with cache TTLs (`own_ttl_seconds` default 1800, `inherited_ttl_seconds` default 300) and any P1 tunables (e.g. `max_page_size`)
+- [x] provide `#[serde(default = ...)]` defaults so `ctx.config_or_default()` works with no YAML
+- [x] write tests for defaults and partial-YAML deserialization
+- [x] run tests — must pass before next task
 
 ### Task 3: Domain errors and repository traits
 
