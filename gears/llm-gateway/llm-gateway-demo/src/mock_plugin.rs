@@ -1,4 +1,4 @@
-//! Mock [`LlmGatewayProviderPluginClient`] standing in for an `OpenAI` provider
+//! Mock [`LlmGatewayProviderPluginClientV1`] standing in for an `OpenAI` provider
 //! integration. It does not call any network -- it narrows the settings from
 //! [`ProviderCallCtx`] and echoes a canned response so the wiring is visible.
 
@@ -15,7 +15,7 @@ use llm_gateway_sdk::models::plugin::{
 };
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
-    LlmGatewayProviderPluginClient, ResponseEventStream,
+    LlmGatewayProviderPluginClientV1, ResponseEventStream,
 };
 use model_registry_sdk::OpenAiSettingsV1;
 
@@ -23,7 +23,7 @@ use model_registry_sdk::OpenAiSettingsV1;
 pub struct MockOpenAiPlugin;
 
 #[async_trait]
-impl LlmGatewayProviderPluginClient for MockOpenAiPlugin {
+impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
     fn capabilities(&self) -> ProviderPluginCapabilities {
         ProviderPluginCapabilities {
             streaming_transport: true,

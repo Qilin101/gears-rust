@@ -5,7 +5,7 @@
 //! ```text
 //! main → LlmGatewayClientV1::create_response  (openai::gpt-4o)
 //!          → ModelRegistryClientV1::get_tenant_model
-//!          → LlmGatewayProviderPluginClient::create_response
+//!          → LlmGatewayProviderPluginClientV1::create_response
 //!          → ResponseResource (success)
 //!
 //! main → LlmGatewayClientV1::create_response  (anthropic::claude-sonnet-4)
@@ -33,7 +33,7 @@ use gts::{GtsSchema, GtsTypeId};
 use llm_gateway_sdk::models::content::OutputContentPart;
 use llm_gateway_sdk::models::core::ResponseInput;
 use llm_gateway_sdk::models::items::OutputItem;
-use llm_gateway_sdk::{CreateResponseBody, LlmGatewayClientV1, LlmGatewayProviderPluginClient};
+use llm_gateway_sdk::{CreateResponseBody, LlmGatewayClientV1, LlmGatewayProviderPluginClientV1};
 use model_registry_sdk::{ModelInfoV1, ModelRegistryClientV1, OpenAiSettingsV1};
 use toolkit_security::SecurityContext;
 
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Wire the mock dependencies as SDK trait objects. ---
     let registry: Arc<dyn ModelRegistryClientV1> = Arc::new(MockModelRegistry::new()?);
 
-    let plugin: Arc<dyn LlmGatewayProviderPluginClient> = Arc::new(MockOpenAiPlugin);
+    let plugin: Arc<dyn LlmGatewayProviderPluginClientV1> = Arc::new(MockOpenAiPlugin);
     println!(
         "→ registered plugin for {} (streaming={item}, media={md:?})",
         OPENAI_PROVIDER_TYPE,
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         md = plugin.capabilities().media_input,
     );
 
-    let mut plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClient>> = HashMap::new();
+    let mut plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClientV1>> = HashMap::new();
     plugins.insert(GtsTypeId::new(OPENAI_PROVIDER_TYPE), plugin);
 
     let gateway = DemoGateway::new(registry, plugins);

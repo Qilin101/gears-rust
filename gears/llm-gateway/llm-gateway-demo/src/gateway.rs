@@ -13,7 +13,7 @@ use gts::GtsTypeId;
 use llm_gateway_sdk::models::plugin::ProviderCallCtx;
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayClientV1, LlmGatewayError,
-    LlmGatewayProviderPluginClient, ResponseEventStream, ResponseResource,
+    LlmGatewayProviderPluginClientV1, ResponseEventStream, ResponseResource,
 };
 use model_registry_sdk::{ModelRegistryClientV1, ModelRegistryError};
 use toolkit_security::SecurityContext;
@@ -24,13 +24,13 @@ pub struct DemoGateway {
     registry: Arc<dyn ModelRegistryClientV1>,
     /// Provider plugins keyed by the Model Registry provider `gts_type` each
     /// one declares it serves.
-    plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClient>>,
+    plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClientV1>>,
 }
 
 impl DemoGateway {
     pub fn new(
         registry: Arc<dyn ModelRegistryClientV1>,
-        plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClient>>,
+        plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClientV1>>,
     ) -> Self {
         Self { registry, plugins }
     }
