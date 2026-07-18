@@ -159,10 +159,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
 
-- [ ] implement `ProviderRepository` for `SeaOrmRepository` using `SecureConn`/`AccessScope` (no raw `all/one/exec` — respect clippy disallowed-methods): get by id, list with OData, create (unique-slug conflict → `ProviderConflict`), update (PATCH; slug immutable), delete
-- [ ] enforce tenant scoping on every query via `AccessScope`
-- [ ] write integration tests (SQLite) for provider create/get/list(OData)/update/delete + slug-conflict + tenant-isolation (cross-tenant not visible)
-- [ ] run tests — must pass before next task
+- [x] implement `ProviderRepository` for `SeaOrmRepository` using `SecureConn`/`AccessScope` (no raw `all/one/exec` — respect clippy disallowed-methods): get by id, list with OData, create (unique-slug conflict → `ProviderConflict`), update (PATCH; slug immutable), delete
+- [x] enforce tenant scoping on every query via `AccessScope`
+- [x] write integration tests (SQLite) for provider create/get/list(OData)/update/delete + slug-conflict + tenant-isolation (cross-tenant not visible)
+- [x] run tests — must pass before next task
 
 ### Task 8: SeaORM repository — models CRUD, OData list, approvals
 
