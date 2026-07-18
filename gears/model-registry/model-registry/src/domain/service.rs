@@ -222,10 +222,20 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         for ancestor in &inheritance.ancestors {
             let ancestor_id = ancestor.id.0;
             let ancestor_scope = AccessScope::for_tenant(ancestor_id);
-            let default_query = ODataQuery::default();
+            // Apply the caller's filter to each ancestor query so filtering
+            // semantics are consistent across the full visible set. Pagination
+            // (limit/cursor) is only applied to the own-tenant query; ancestor
+            // items are fetched unfiltered-by-pagination and shadowed below.
+            let ancestor_query = ODataQuery {
+                filter: query.filter.clone(),
+                filter_hash: query.filter_hash.clone(),
+                order: query.order.clone(),
+                select: query.select.clone(),
+                ..ODataQuery::default() // no limit/cursor for ancestors
+            };
             if let Ok(ancestor_page) = self
                 .provider_repo
-                .list(&conn, &ancestor_scope, &default_query)
+                .list(&conn, &ancestor_scope, &ancestor_query)
                 .await
             {
                 ancestor_providers.extend(ancestor_page.items);
@@ -407,8 +417,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         for tenant_id in inheritance.chain_ids() {
             let key = cache_key(tenant_id, "model", canonical_id);
             if let Some(model) = self.cache.get::<crate::ModelV1>(&key).await {
-                // Return ModelDeprecated if the cached model is deprecated
-                if model.lifecycle_status == crate::LifecycleStatus::Deprecated {
+                // Return ModelDeprecated if the cached model is deprecated or sunset
+                if matches!(
+                    model.lifecycle_status,
+                    crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+                ) {
                     return Err(DomainError::model_deprecated(canonical_id));
                 }
                 return Ok(model);
@@ -428,8 +441,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await
         {
             Ok(model) => {
-                // If deprecated, return ModelDeprecated before caching
-                if model.lifecycle_status == crate::LifecycleStatus::Deprecated {
+                // If deprecated or sunset, return ModelDeprecated before caching
+                if matches!(
+                    model.lifecycle_status,
+                    crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+                ) {
                     return Err(DomainError::model_deprecated(canonical_id));
                 }
                 let key = cache_key(&own_tenant_id, "model", canonical_id);
@@ -499,10 +515,18 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         for ancestor in &inheritance.ancestors {
             let ancestor_id = ancestor.id.0;
             let ancestor_scope = AccessScope::for_tenant(ancestor_id);
-            let default_query = ODataQuery::default();
+            // Apply the caller's filter to each ancestor query for consistent
+            // filtering across the full visible set (see list_providers).
+            let ancestor_query = ODataQuery {
+                filter: query.filter.clone(),
+                filter_hash: query.filter_hash.clone(),
+                order: query.order.clone(),
+                select: query.select.clone(),
+                ..ODataQuery::default()
+            };
             if let Ok(ancestor_page) = self
                 .model_repo
-                .list(&conn, &ancestor_scope, &default_query)
+                .list(&conn, &ancestor_scope, &ancestor_query)
                 .await
             {
                 ancestor_models.extend(ancestor_page.items);

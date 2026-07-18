@@ -68,9 +68,14 @@ impl From<DomainError> for CanonicalError {
                     .with_resource(id.to_string())
                     .create()
             }
+            DomainError::ProviderHasModels { id, .. } => {
+                ModelRegistryResourceError::already_exists("Provider has existing models")
+                    .with_resource(id.to_string())
+                    .create()
+            }
             DomainError::InvalidTransition { detail } => {
-                ModelRegistryResourceError::already_exists("Invalid state transition")
-                    .with_resource(detail)
+                ModelRegistryResourceError::invalid_argument()
+                    .with_format(format!("Invalid state transition: {detail}"))
                     .create()
             }
 

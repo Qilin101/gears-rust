@@ -221,6 +221,19 @@ impl ProviderRepository for SeaOrmRepository {
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<(), DomainError> {
+        // Pre-check: refuse deletion if models still reference this provider.
+        let models = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(Condition::all().add(model::Column::ProviderId.eq(id)))
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        if !models.is_empty() {
+            return Err(DomainError::provider_has_models(id, models.len() as u64));
+        }
+
         let result = provider::Entity::delete_many()
             .secure()
             .scope_with(scope)
@@ -456,20 +469,12 @@ impl ModelRepository for SeaOrmRepository {
             .map_err(map_scope_error)?
             .ok_or(DomainError::model_not_found(model_id.to_string()))?;
 
-        // Update denormalized models.approval_status using secure_update_with_scope.
-        let mut model_am: entity::model::ActiveModel = entity.clone().into();
-        model_am.approval_status = Set(status_str.clone());
-        model_am.updated_at = Set(now);
-        let _updated = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
-            .await
-            .map_err(map_scope_error)?;
-
-        // Upsert model_approvals via secure insert with on_conflict.
-        let status_str2 = status_str.clone();
+        // Upsert model_approvals FIRST (the P1 seam of record). If this fails,
+        // the denormalized column is unchanged — no desync.
         let approval_am = entity::model_approval::ActiveModel {
             tenant_id: Set(entity.tenant_id),
             model_id: Set(model_id),
-            approval_status: Set(status_str2),
+            approval_status: Set(status_str.clone()),
             created_at: Set(now),
             updated_at: Set(now),
         };
@@ -493,6 +498,14 @@ impl ModelRepository for SeaOrmRepository {
             .await
             .map_err(map_scope_error)?;
 
+        // Update denormalized models.approval_status using secure_update_with_scope.
+        let mut model_am: entity::model::ActiveModel = entity.into();
+        model_am.approval_status = Set(status_str);
+        model_am.updated_at = Set(now);
+        let _updated = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
+            .await
+            .map_err(map_scope_error)?;
+
         Ok(())
     }
 
@@ -512,7 +525,7 @@ impl ModelRepository for SeaOrmRepository {
             .map_err(map_scope_error)?
             .ok_or(DomainError::model_not_found(model_id.to_string()))?;
 
-        // Delete the model_approval record via secure delete.
+        // Delete the model_approval record FIRST (the authoritative record).
         let _ = entity::model_approval::Entity::delete_many()
             .secure()
             .scope_with(scope)
@@ -525,7 +538,7 @@ impl ModelRepository for SeaOrmRepository {
             .await
             .map_err(map_scope_error)?;
 
-        // Reset the denormalized column to default (Pending) via secure update.
+        // Then reset the denormalized column to default (Pending).
         let mut model_am: entity::model::ActiveModel = entity.into();
         model_am.approval_status = Set("pending".to_owned());
         model_am.updated_at = Set(chrono::Utc::now());

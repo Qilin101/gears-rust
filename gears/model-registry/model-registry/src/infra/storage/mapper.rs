@@ -468,13 +468,15 @@ fn supported_api_denorm_to_json_array(s: Option<&str>) -> Vec<String> {
 
 /// Build a minimal `ModelInfoV1` from the denormalized columns when the `info`
 /// JSONB is missing or corrupt.
-#[allow(clippy::expect_used)]
 fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
     // Since ModelInfoV1 and its inner types are #[non_exhaustive], construct via
     // JSON roundtrip.
+    let gts_type_str = e.gts_type.as_deref().unwrap_or("gts.cf.genai.model.info.v1~");
+    let display_name = format!("model-{}", e.canonical_id);
+
     let value = json!({
-        "gts_type": e.gts_type.as_deref().unwrap_or("gts.cf.genai.model.info.v1~"),
-        "display_name": format!("model-{}", e.canonical_id),
+        "gts_type": gts_type_str,
+        "display_name": display_name,
         "description": null,
         "family": e.family,
         "vendor": e.vendor,
@@ -549,8 +551,44 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
         "provider_settings": null
     });
     // SAFETY: the JSON template above is constructed from entity fields with
-    // known types. A panic here is a programming error.
-    serde_json::from_value(value).expect("ModelInfoV1 roundtrip from denormalized columns")
+    // known types. A failure here indicates a programming error or a corrupt
+    // denormalized column (e.g. a new SupportedApi variant was added but the
+    // column wasn't updated). Degrade gracefully rather than panicking.
+    serde_json::from_value(value).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            "ModelInfoV1 roundtrip from denormalized columns failed, using fallback"
+        );
+        // Minimal fallback: only identity fields. The inner fallback is a
+        // hardcoded static JSON that should always deserialize — if it
+        // somehow doesn't, the all-null static JSON is the last resort.
+        serde_json::from_value(json!({
+            "gts_type": gts_type_str,
+            "display_name": display_name,
+        }))
+        .unwrap_or_else(|_| {
+            serde_json::from_value(json!({
+                "gts_type": "gts.cf.genai.model.info.v1~",
+                "display_name": "model-(unknown)",
+            }))
+            .unwrap_or_else(|_| {
+                // Unreachable: the hardcoded JSON contains only primitive
+                // types that always deserialize into the required fields.
+                tracing::error!("all ModelInfoV1 fallback attempts failed - this is a programming bug");
+                // Last resort: all-null value will produce a struct with
+                // gts_type="" and display_name="" via serde defaults.
+                serde_json::from_value(serde_json::Value::Object(serde_json::Map::default()))
+                    .unwrap_or_else(|_| {
+                        // If even serde defaults fail, ModelInfoV1's schema
+                        // has changed incompatibly — but serde should always
+                        // produce a valid value from an empty object since
+                        // the struct uses Option<T> for non-required fields.
+                        // This panic is a last resort for a programming error.
+                        panic!("ModelInfoV1 is no longer constructible from an empty JSON object")
+                    })
+            })
+        })
+    })
 }
 
 #[cfg(test)]

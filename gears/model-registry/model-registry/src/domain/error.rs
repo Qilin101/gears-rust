@@ -42,6 +42,10 @@ pub enum DomainError {
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
 
+    /// Provider has existing models that must be removed first.
+    #[error("provider has existing models: cannot delete provider with {model_count} model(s)")]
+    ProviderHasModels { id: Uuid, model_count: u64 },
+
     /// Invalid state transition.
     #[error("invalid state transition: {detail}")]
     InvalidTransition { detail: String },
@@ -111,6 +115,11 @@ impl DomainError {
     }
 
     #[must_use]
+    pub fn provider_has_models(id: Uuid, model_count: u64) -> Self {
+        Self::ProviderHasModels { id, model_count }
+    }
+
+    #[must_use]
     pub fn invalid_transition(detail: impl Into<String>) -> Self {
         Self::InvalidTransition {
             detail: detail.into(),
@@ -163,6 +172,7 @@ impl From<DomainError> for crate::ModelRegistryError {
             DomainError::Forbidden(msg) => Self::forbidden(msg),
             DomainError::ProviderDisabled { id } => Self::provider_disabled(id),
             DomainError::ProviderConflict { slug } => Self::provider_conflict(slug),
+            DomainError::ProviderHasModels { id, .. } => Self::internal(format!("provider {id} has existing models")),
             DomainError::InvalidTransition { detail } => Self::invalid_transition(detail),
             DomainError::Validation { message } => Self::validation(message),
             DomainError::Internal { detail, source } => Self::Internal { detail, source },

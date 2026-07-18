@@ -147,12 +147,12 @@ fn provider_disabled_maps_to_409() {
 }
 
 #[test]
-fn invalid_transition_maps_to_409() {
+fn invalid_transition_maps_to_400() {
     assert_mapping_with_detail(
         DomainError::invalid_transition("cannot deprecate from preview"),
-        409,
-        "gts.cf.core.errors.err.v1~cf.core.err.already_exists",
-        "transition",
+        400,
+        "gts.cf.core.errors.err.v1~cf.core.err.invalid_argument",
+        "Invalid state transition",
     );
 }
 
@@ -215,7 +215,7 @@ fn all_error_variants_have_valid_status() {
         (DomainError::forbidden("x"), 403),
         (DomainError::provider_conflict("s"), 409),
         (DomainError::provider_disabled(Uuid::nil()), 409),
-        (DomainError::invalid_transition("t"), 409),
+        (DomainError::invalid_transition("t"), 400),
         (DomainError::validation("v"), 400),
         (DomainError::internal("e"), 500),
     ];
