@@ -123,11 +123,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/infra/storage/migrations/mod.rs`
 - Create: `gears/model-registry/model-registry/src/infra/storage/migrations/initial_001.rs`
 
-- [ ] define SeaORM `Entity`/`Model`/`ActiveModel` for `providers`, `models` (with `info` + `provider_settings` JSONB columns **plus the denormalized filterable columns**: `gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, `approval_status`, and boolean capability flags `cap_vision`/`cap_function_calling`/`cap_streaming`/`cap_reasoning_effort`), `model_approvals` (mirror chat-engine JSONB entities)
-- [ ] write `initial_001` migration creating the three tables with columns/indexes per DESIGN §3.6 as adjusted (unique `(tenant_id, slug)`, unique `(tenant_id, canonical_id)`, FK `models.provider_id`→providers, FK+cascade `model_approvals.model_id`→models, `lifecycle_status` index, B-tree indexes on the denormalized filterable columns); use portable column types (JSONB on Postgres / JSON on SQLite via toolkit-db conventions); **no Postgres GIN indexes** (they break the SQLite dev/test path and are unnecessary now that filterable fields are real columns)
-- [ ] wire `Migrator` (`MigratorTrait`) listing `initial_001` in `migrations/mod.rs`
-- [ ] write a migration up/down test that applies against an in-memory SQLite DB
-- [ ] run tests — must pass before next task
+- [x] define SeaORM `Entity`/`Model`/`ActiveModel` for `providers`, `models` (with `info` + `provider_settings` JSONB columns **plus the denormalized filterable columns**: `gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, `approval_status`, and boolean capability flags `cap_vision`/`cap_function_calling`/`cap_streaming`/`cap_reasoning_effort`), `model_approvals` (mirror chat-engine JSONB entities)
+- [x] write `initial_001` migration creating the three tables with columns/indexes per DESIGN §3.6 as adjusted (unique `(tenant_id, slug)`, unique `(tenant_id, canonical_id)`, FK `models.provider_id`→providers, FK+cascade `model_approvals.model_id`→models, `lifecycle_status` index, B-tree indexes on the denormalized filterable columns); use portable column types (JSONB on Postgres / JSON on SQLite via toolkit-db conventions); **no Postgres GIN indexes** (they break the SQLite dev/test path and are unnecessary now that filterable fields are real columns)
+- [x] wire `Migrator` (`MigratorTrait`) listing `initial_001` in `migrations/mod.rs`
+- [x] write a migration up/down test that applies against an in-memory SQLite DB
+- [x] run tests — must pass before next task
 
 ### Task 5: Entity ↔ domain/SDK mappers (JSONB round-trip)
 
