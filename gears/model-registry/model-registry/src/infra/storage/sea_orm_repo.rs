@@ -6,13 +6,13 @@
 //! rows they are authorized for.
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
+use sea_orm::{ColumnTrait, Condition, DbErr, EntityTrait, Set};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
     secure_update_with_scope,
 };
-use toolkit_odata::{ODataQuery, Page, SortDir};
+use toolkit_odata::{normalize_filter_for_hash, ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -32,6 +32,27 @@ use super::odata_mapper::{
 // =============================================================================
 // ScopeError → DomainError
 // =============================================================================
+
+/// Check whether a [`sea_orm::DbErr`] represents a foreign-key constraint violation.
+///
+/// Uses `SeaORM`'s built-in `sql_err()` detection first, then falls back to
+/// string matching on the error message for backends that strip the SQLSTATE.
+#[must_use]
+fn is_fk_violation(err: &DbErr) -> bool {
+    // Discard unique-constraint violations early.
+    if matches!(
+        err.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    ) {
+        return false;
+    }
+
+    // Fallback: string-based detection for FK violations.
+    let msg = err.to_string().to_lowercase();
+    msg.contains("foreign key")
+        || msg.contains("constraint failed")
+        || msg.contains("is still referenced")
+}
 
 /// Map a [`ScopeError`] to a [`DomainError`].
 ///
@@ -240,7 +261,14 @@ impl ProviderRepository for SeaOrmRepository {
             .filter(Condition::all().add(provider::Column::Id.eq(id)))
             .exec(conn)
             .await
-            .map_err(map_scope_error)?;
+            .map_err(|e| match &e {
+                // TOCTOU guard: a concurrent model creation between the
+                // pre-check and the DELETE can fire the FK constraint.
+                ScopeError::Db(db_err) if is_fk_violation(db_err) => {
+                    DomainError::provider_has_models(id, 0)
+                }
+                _ => map_scope_error(e),
+            })?;
 
         if result.rows_affected == 0 {
             return Err(DomainError::provider_not_found(id));
@@ -253,6 +281,22 @@ impl ProviderRepository for SeaOrmRepository {
 // =============================================================================
 // ModelRepository implementation
 // =============================================================================
+
+/// Check whether an `OData` filter expression references `lifecycle_status`.
+///
+/// When the caller explicitly filters on `lifecycle_status` (e.g.
+/// `lifecycle_status eq 'deprecated'`), the base exclusion of deprecated
+/// / sunset models is omitted so their filter works as intended.
+#[must_use]
+fn filter_references_lifecycle_status(query: &ODataQuery) -> bool {
+    query
+        .filter
+        .as_ref()
+        .is_some_and(|expr| {
+            let normalized = normalize_filter_for_hash(expr);
+            normalized.contains("id(lifecycle_status)")
+        })
+}
 
 #[async_trait]
 impl ModelRepository for SeaOrmRepository {
@@ -283,12 +327,15 @@ impl ModelRepository for SeaOrmRepository {
         // Exclude deprecated / sunset models by default so the default list
         // shows only active, non-deprecated models. If the caller explicitly
         // wants deprecated models, they must add `lifecycle_status eq 'deprecated'`
-        // to the OData filter.
-        let base = model::Entity::find().secure().scope_with(scope).filter(
-            Condition::all()
-                .add(model::Column::LifecycleStatus.ne("deprecated"))
-                .add(model::Column::LifecycleStatus.ne("sunset")),
-        );
+        // to the OData filter — detected below to avoid a contradictory AND.
+        let mut base = model::Entity::find().secure().scope_with(scope);
+        if !filter_references_lifecycle_status(query) {
+            base = base.filter(
+                Condition::all()
+                    .add(model::Column::LifecycleStatus.ne("deprecated"))
+                    .add(model::Column::LifecycleStatus.ne("sunset")),
+            );
+        }
 
         let page =
             paginate_odata::<ModelFilterField, ModelODataMapper, model::Entity, ModelV1, _, C>(

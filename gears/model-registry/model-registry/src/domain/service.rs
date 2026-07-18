@@ -29,6 +29,8 @@ use super::cache::{CacheService, cache_key};
 use super::error::DomainError;
 use super::inheritance::{Ownership, cache_ttl_seconds, resolve_ancestors};
 use super::repo::{ModelRepository, ProviderRepository};
+use tracing;
+
 use crate::config::ModelRegistryConfig;
 use crate::{CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1};
 
@@ -84,6 +86,20 @@ pub struct Service<R, M, C> {
 }
 
 impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C> {
+    /// Validate that `discovery_interval_seconds` fits within `i32` range.
+    ///
+    /// The DB column is `i32`, so values exceeding `i32::MAX` must be rejected
+    /// at the application layer rather than silently truncated.
+    fn validate_discovery_interval(interval: Option<u32>) -> Result<(), DomainError> {
+        if let Some(v) = interval && v > i32::MAX as u32 {
+            return Err(DomainError::validation(format!(
+                "discovery_interval_seconds must not exceed {} (i32::MAX), got {v}",
+                i32::MAX,
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a new service instance.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -229,12 +245,21 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 select: query.select.clone(),
                 ..ODataQuery::default() // no limit/cursor for ancestors
             };
-            if let Ok(ancestor_page) = self
+            match self
                 .provider_repo
                 .list(&conn, &ancestor_scope, &ancestor_query)
                 .await
             {
-                ancestor_providers.extend(ancestor_page.items);
+                Ok(ancestor_page) => {
+                    ancestor_providers.extend(ancestor_page.items);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ancestor_tenant_id = %ancestor_id,
+                        "ancestor provider list query failed, continuing with partial results"
+                    );
+                }
             }
         }
 
@@ -268,8 +293,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         req: &CreateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Validate slug format
+        // 1. Validate slug format and discovery interval
         Self::validate_slug(req.slug())?;
+        Self::validate_discovery_interval(req.discovery_interval_seconds())?;
 
         // 2. Derive access scope (authorization check + DB scope)
         let scope = self
@@ -300,12 +326,15 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         id: Uuid,
         req: &UpdateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Derive access scope (authorization check + DB scope)
+        // 1. Validate discovery interval (if being updated)
+        Self::validate_discovery_interval(req.discovery_interval_seconds.flatten())?;
+
+        // 2. Derive access scope (authorization check + DB scope)
         let scope = self
             .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
             .await?;
 
-        // 2. Update via repo
+        // 3. Update via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
         let provider = self.provider_repo.update(&conn, &scope, id, req).await?;
 
@@ -523,12 +552,21 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 select: query.select.clone(),
                 ..ODataQuery::default()
             };
-            if let Ok(ancestor_page) = self
+            match self
                 .model_repo
                 .list(&conn, &ancestor_scope, &ancestor_query)
                 .await
             {
-                ancestor_models.extend(ancestor_page.items);
+                Ok(ancestor_page) => {
+                    ancestor_models.extend(ancestor_page.items);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        ancestor_tenant_id = %ancestor_id,
+                        "ancestor model list query failed, continuing with partial results"
+                    );
+                }
             }
         }
 

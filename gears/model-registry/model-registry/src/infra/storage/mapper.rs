@@ -126,7 +126,16 @@ pub fn provider_update_active_model(
             Set(interval.map(|v| i32::try_from(v).unwrap_or(i32::MAX)));
     }
 
-    active.updated_at = Set(chrono::Utc::now());
+    // Only bump `updated_at` when at least one field was actually set.
+    let changed = req.name.is_some()
+        || req.status.is_some()
+        || req.managed.is_some()
+        || req.metadata.is_some()
+        || req.discovery_enabled.is_some()
+        || req.discovery_interval_seconds.is_some();
+    if changed {
+        active.updated_at = Set(chrono::Utc::now());
+    }
     active
 }
 
@@ -296,7 +305,11 @@ pub fn model_update_active_model(
         });
     }
 
-    active.updated_at = Set(chrono::Utc::now());
+    // Only bump `updated_at` when at least one field was actually set.
+    let changed = req.lifecycle_status.is_some() || info_changed;
+    if changed {
+        active.updated_at = Set(chrono::Utc::now());
+    }
     active
 }
 
