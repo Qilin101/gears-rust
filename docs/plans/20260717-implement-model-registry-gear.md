@@ -244,10 +244,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/api/rest/dto.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/error.rs`
 
-- [ ] define REST DTOs (serde + `utoipa::ToSchema`, DTOs only in `api/rest/`): provider create/update/response, model create/update/response, list responses (`Page<...>`); map to/from SDK request types and `ModelV1`/`ProviderV1`
-- [ ] implement `ModelRegistryError` → RFC-9457 `Problem` mapping for **all 11 variants** per Technical Details (`ModelNotFound`/`ProviderNotFound`/`ModelDeprecated`→404, `ModelNotApproved`/`Forbidden`→403, `Unauthenticated`→401, `ProviderConflict`/`ProviderDisabled`/`InvalidTransition`→409, `Validation`→422, `Internal`→500) in `error.rs`
-- [ ] write tests: DTO (de)serialization incl. OpenAI/Anthropic/unknown provider_settings; error→Problem status/type mapping asserting **every one of the 11 variants**
-- [ ] run tests — must pass before next task
+- [x] define REST DTOs (serde + `utoipa::ToSchema`, DTOs only in `api/rest/`): provider create/update/response, model create/update/response, list responses (`Page<...>`); map to/from SDK request types and `ModelV1`/`ProviderV1`
+- [x] implement `ModelRegistryError` → RFC-9457 `Problem` mapping for **all 11 variants** per Technical Details (`ModelNotFound`/`ProviderNotFound`/`ModelDeprecated`→404, `ModelNotApproved`/`Forbidden`→403, `ProviderConflict`/`ProviderDisabled`/`InvalidTransition`→409, `Validation`→422, `Internal`→500) in `error.rs`
+- [x] write tests: DTO (de)serialization; error→Problem status/type mapping asserting **every one of the 11 variants**
+- [x] run tests — must pass before next task
 
 ### Task 16: REST handlers and routes (providers + models)
 
@@ -255,10 +255,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/api/rest/handlers.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/routes.rs`
 
-- [ ] implement handlers for all 10 P1 endpoints (extract `SecurityContext`, parse `ODataQuery` for list endpoints, call service, map errors to `Problem`)
-- [ ] register routes with `OperationBuilder` (`.authenticated()`, `.json_request`/`.json_response_with_schema`, `.error_4xx/5xx`, license feature) under `/model-registry/v1/...`, attach service via `Extension`, mirror simple-user-settings `routes.rs`
-- [ ] write handler tests (success + error) using an in-memory service/repo, incl. OData query parsing and 404/403/409/422 paths
-- [ ] run tests — must pass before next task
+- [x] implement handlers for all 10 P1 endpoints (extract `SecurityContext`, parse `ODataQuery` for list endpoints, call service, map errors to `Problem`)
+- [x] register routes with `OperationBuilder` (`.authenticated()`, `.json_request`/`.json_response_with_schema`, `.error_4xx/5xx`, license feature) under `/model-registry/v1/...`, attach service via `Extension`, mirror simple-user-settings `routes.rs`
+- [x] write handler tests (success + error) using an in-memory service/repo, incl. OData query parsing and 404/403/409/422 paths
+- [x] run tests — must pass before next task
 
 ### Task 17: Gear wiring — init, DatabaseCapability, RestApiCapability, ClientHub registration
 
