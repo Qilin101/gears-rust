@@ -81,12 +81,12 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Modify: `apps/cf-gears-example-server/Cargo.toml`
 - Modify: `apps/cf-gears-example-server/src/registered_gears.rs`
 
-- [ ] create `Cargo.toml` for `cf-gears-model-registry` (lib name `model_registry`), depending on `model-registry-sdk` and the two system SDKs by their renamed packages/paths (`tenant-resolver-sdk` → `package = "cf-gears-tenant-resolver-sdk", path = "../../system/tenant-resolver/tenant-resolver-sdk"`; `authz-resolver-sdk` → `package = "cf-gears-authz-resolver-sdk", path = "../../system/authz-resolver/authz-resolver-sdk"`), plus the toolkit crates used by simple-user-settings/chat-engine (`toolkit`, `toolkit-db` [sqlite], `toolkit-db-macros`, `toolkit-security`, `toolkit-odata`, `toolkit-canonical-errors` [axum], `toolkit-macros`), and `sea-orm`, `sea-orm-migration`, `axum`, `serde`, `serde_json`, `uuid`, `chrono`, `gts`, `async-trait`, `anyhow`, `thiserror`, `tracing`, `inventory`, `utoipa`
-- [ ] create `src/lib.rs` re-exporting the SDK trait/types and declaring `gear`, `config`, `domain`, `infra`, `api` modules (mirror simple-user-settings `lib.rs`)
-- [ ] create a minimal `src/gear.rs` with an empty `#[toolkit::gear(name = "model-registry", deps = ["tenant-resolver", "authz-resolver"], capabilities = [rest, db])]` struct that compiles (impls filled in later tasks)
-- [ ] add the crate to root `Cargo.toml` workspace members; wire into `apps/cf-gears-example-server` **feature-gated** like `chat-engine` — add `model-registry = ["dep:model_registry"]` feature + optional dep in its `Cargo.toml`, and `#[cfg(feature = "model-registry")] use model_registry as _;` in `registered_gears.rs`
-- [ ] write a unit test asserting `Gear::MODULE_NAME`/default construction (mirror simple-user-settings `gear.rs` tests)
-- [ ] run `cargo build -p cf-gears-model-registry` and workspace `cargo build` — must compile before next task
+- [x] create `Cargo.toml` for `cf-gears-model-registry` (lib name `model_registry`), depending on `model-registry-sdk` and the two system SDKs by their renamed packages/paths (`tenant-resolver-sdk` → `package = "cf-gears-tenant-resolver-sdk", path = "../../system/tenant-resolver/tenant-resolver-sdk"`; `authz-resolver-sdk` → `package = "cf-gears-authz-resolver-sdk", path = "../../system/authz-resolver/authz-resolver-sdk"`), plus the toolkit crates used by simple-user-settings/chat-engine (`toolkit`, `toolkit-db` [sqlite], `toolkit-db-macros`, `toolkit-security`, `toolkit-odata`, `toolkit-canonical-errors` [axum], `toolkit-macros`), and `sea-orm`, `sea-orm-migration`, `axum`, `serde`, `serde_json`, `uuid`, `chrono`, `gts`, `async-trait`, `anyhow`, `thiserror`, `tracing`, `inventory`, `utoipa`
+- [x] create `src/lib.rs` re-exporting the SDK trait/types and declaring `gear`, `config`, `domain`, `infra`, `api` modules (mirror simple-user-settings `lib.rs`)
+- [x] create a minimal `src/gear.rs` with an empty `#[toolkit::gear(name = "model-registry", deps = ["tenant-resolver", "authz-resolver"], capabilities = [rest, db])]` struct that compiles (impls filled in later tasks)
+- [x] add the crate to root `Cargo.toml` workspace members; wire into `apps/cf-gears-example-server` **feature-gated** like `chat-engine` — add `model-registry = ["dep:model_registry"]` feature + optional dep in its `Cargo.toml`, and `#[cfg(feature = "model-registry")] use model_registry as _;` in `registered_gears.rs`
+- [x] write a unit test asserting `Gear::MODULE_NAME`/default construction (mirror simple-user-settings `gear.rs` tests)
+- [x] run `cargo build -p cf-gears-model-registry` and workspace `cargo build` — must compile before next task
 
 ### Task 2: Config module
 
