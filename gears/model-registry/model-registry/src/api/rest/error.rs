@@ -33,6 +33,11 @@ impl From<DomainError> for CanonicalError {
                     .with_resource(id.to_string())
                     .create()
             }
+            DomainError::ProviderNotFoundBySlug { slug } => {
+                ModelRegistryResourceError::not_found("Provider not found")
+                    .with_resource(slug)
+                    .create()
+            }
             DomainError::ModelDeprecated { canonical_id } => {
                 ModelRegistryResourceError::not_found("Model is deprecated")
                     .with_resource(canonical_id)

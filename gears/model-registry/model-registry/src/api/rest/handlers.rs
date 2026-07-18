@@ -326,19 +326,46 @@ pub async fn update_model(
         sort_order: dto.sort_order,
         icon: dto.icon,
         multiplier_display: dto.multiplier_display,
-        performance: dto.performance.and_then(|v| serde_json::from_value(v).ok()),
+        performance: dto
+            .performance
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    CanonicalError::internal(format!("invalid performance: {e}")).create()
+                })
+            })
+            .transpose()?,
         capabilities: dto
             .capabilities
-            .and_then(|v| serde_json::from_value(v).ok()),
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    CanonicalError::internal(format!("invalid capabilities: {e}")).create()
+                })
+            })
+            .transpose()?,
         disabled_capabilities: dto
             .disabled_capabilities
-            .and_then(|v| serde_json::from_value(v).ok()),
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    CanonicalError::internal(format!("invalid disabled_capabilities: {e}")).create()
+                })
+            })
+            .transpose()?,
         context_window: dto
             .context_window
-            .and_then(|v| serde_json::from_value(v).ok()),
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    CanonicalError::internal(format!("invalid context_window: {e}")).create()
+                })
+            })
+            .transpose()?,
         default_parameters: dto
             .default_parameters
-            .and_then(|v| serde_json::from_value(v).ok()),
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    CanonicalError::internal(format!("invalid default_parameters: {e}")).create()
+                })
+            })
+            .transpose()?,
         allow_parameter_override: dto.allow_parameter_override,
         allow_extra_params: dto.allow_extra_params,
         provider_settings: dto.provider_settings,

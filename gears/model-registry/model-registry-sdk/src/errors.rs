@@ -23,6 +23,9 @@ pub enum ModelRegistryError {
     #[error("provider not found: {id}")]
     ProviderNotFound { id: Uuid },
 
+    #[error("provider with slug `{slug}` not found")]
+    ProviderNotFoundBySlug { slug: String },
+
     #[error("provider disabled: {id}")]
     ProviderDisabled { id: Uuid },
 
@@ -77,6 +80,13 @@ impl ModelRegistryError {
     #[must_use]
     pub fn provider_not_found(id: Uuid) -> Self {
         Self::ProviderNotFound { id }
+    }
+
+    #[must_use]
+    pub fn provider_not_found_by_slug(slug: impl Into<String>) -> Self {
+        Self::ProviderNotFoundBySlug {
+            slug: slug.into(),
+        }
     }
 
     #[must_use]

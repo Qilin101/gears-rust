@@ -1,8 +1,7 @@
 //! Cache service trait and in-memory backend.
 //!
 //! Defines the [`CacheService`] trait for cache-first model/provider reads
-//! (DESIGN §2.1). Ships the [`InMemoryCache`] backend; a future [`RedisCache`]
-//! is feature-gated behind `cfg(feature = "redis")`.
+//! (DESIGN §2.1). Ships the [`InMemoryCache`] backend.
 
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
@@ -126,36 +125,6 @@ impl CacheService for InMemoryCache {
         let prefix = tenant_prefix(&tenant_id);
         let mut map = self.data.write().await;
         map.retain(|k, _| !k.starts_with(&prefix));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RedisCache stub (feature-gated)
-// ---------------------------------------------------------------------------
-
-/// Placeholder for the Redis-backed cache.
-///
-/// Not yet implemented — tracked as a P1 follow-up (Redis cache backend).
-#[cfg(feature = "redis")]
-pub struct RedisCache; // TODO: implement with redis-rs or fred.
-
-#[cfg(feature = "redis")]
-#[async_trait]
-impl CacheService for RedisCache {
-    async fn get<T: DeserializeOwned + Send>(&self, _key: &str) -> Option<T> {
-        unimplemented!("RedisCache not yet implemented")
-    }
-
-    async fn set<T: Serialize + Send + Sync>(&self, _key: &str, _value: &T, _ttl_seconds: u64) {
-        unimplemented!("RedisCache not yet implemented")
-    }
-
-    async fn delete(&self, _key: &str) {
-        unimplemented!("RedisCache not yet implemented")
-    }
-
-    async fn invalidate_tenant(&self, _tenant_id: Uuid) {
-        unimplemented!("RedisCache not yet implemented")
     }
 }
 

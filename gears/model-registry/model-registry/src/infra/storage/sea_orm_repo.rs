@@ -105,9 +105,7 @@ impl ProviderRepository for SeaOrmRepository {
             .one(conn)
             .await
             .map_err(map_scope_error)?
-            .ok_or(DomainError::validation(format!(
-                "provider with slug `{slug}` not found"
-            )))?;
+            .ok_or(DomainError::provider_not_found_by_slug(slug))?;
 
         Ok(mapper::provider_entity_to_v1(&entity))
     }
@@ -545,13 +543,12 @@ impl ModelRepository for SeaOrmRepository {
 
 /// Convert an [`ApprovalStatus`] to its lowercase storage string.
 #[must_use]
-#[allow(clippy::match_same_arms)]
 fn approval_status_to_string(status: ApprovalStatus) -> String {
     match status {
         ApprovalStatus::Approved => "approved".to_owned(),
         ApprovalStatus::Rejected => "rejected".to_owned(),
         ApprovalStatus::Revoked => "revoked".to_owned(),
-        ApprovalStatus::Pending | _ => "pending".to_owned(),
+        _ => "pending".to_owned(),
     }
 }
 

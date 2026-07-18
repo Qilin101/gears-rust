@@ -18,6 +18,10 @@ pub enum DomainError {
     #[error("provider not found: {id}")]
     ProviderNotFound { id: Uuid },
 
+    /// Provider not found by slug.
+    #[error("provider with slug `{slug}` not found")]
+    ProviderNotFoundBySlug { slug: String },
+
     /// Model is deprecated (only when fetched directly by `canonical_id`).
     #[error("model deprecated: {canonical_id}")]
     ModelDeprecated { canonical_id: String },
@@ -70,6 +74,11 @@ impl DomainError {
     #[must_use]
     pub fn provider_not_found(id: Uuid) -> Self {
         Self::ProviderNotFound { id }
+    }
+
+    #[must_use]
+    pub fn provider_not_found_by_slug(slug: impl Into<String>) -> Self {
+        Self::ProviderNotFoundBySlug { slug: slug.into() }
     }
 
     #[must_use]
@@ -146,6 +155,7 @@ impl From<DomainError> for crate::ModelRegistryError {
         match e {
             DomainError::ModelNotFound { canonical_id } => Self::model_not_found(canonical_id),
             DomainError::ProviderNotFound { id } => Self::provider_not_found(id),
+            DomainError::ProviderNotFoundBySlug { slug } => Self::provider_not_found_by_slug(slug),
             DomainError::ModelDeprecated { canonical_id } => Self::model_deprecated(canonical_id),
             DomainError::ModelNotApproved { canonical_id } => {
                 Self::model_not_approved(canonical_id)
@@ -207,6 +217,13 @@ mod tests {
         let id = Uuid::new_v4();
         let domain = DomainError::provider_not_found(id);
         let sdk = ModelRegistryError::provider_not_found(id);
+        assert_conversion(domain, &sdk);
+    }
+
+    #[test]
+    fn provider_not_found_by_slug_converts() {
+        let domain = DomainError::provider_not_found_by_slug("openai");
+        let sdk = ModelRegistryError::provider_not_found_by_slug("openai");
         assert_conversion(domain, &sdk);
     }
 
@@ -311,6 +328,15 @@ mod tests {
         let id = Uuid::nil();
         let err = DomainError::provider_not_found(id);
         assert_eq!(err.to_string(), format!("provider not found: {id}"));
+    }
+
+    #[test]
+    fn provider_not_found_by_slug_display() {
+        let err = DomainError::provider_not_found_by_slug("openai");
+        assert_eq!(
+            err.to_string(),
+            "provider with slug `openai` not found"
+        );
     }
 
     #[test]

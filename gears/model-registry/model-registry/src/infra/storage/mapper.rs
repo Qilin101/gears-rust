@@ -175,10 +175,17 @@ pub fn model_create_active_model(
     initial_approval_status: ApprovalStatus,
 ) -> entity::model::ActiveModel {
     let canonical_id = format!("{}::{}", req.provider_slug, req.info.provider_model_id);
-    let info_json = serde_json::to_value(&req.info).unwrap_or(serde_json::Value::Null);
+    // SAFETY: req.info was just deserialized from valid JSON; re-serialization
+    // cannot fail for well-formed domain types (no non-string map keys, no
+    // I/O). Use expect to fail-fast rather than silently storing null.
+    #[allow(clippy::expect_used)]
+    let info_json = serde_json::to_value(&req.info)
+        .expect("CreateModelRequestV1.info re-serialization cannot fail");
 
-    let provider_settings_json =
-        serde_json::to_value(&req.info.provider_settings).unwrap_or(serde_json::Value::Null);
+    // SAFETY: same reasoning — provider_settings is a JSON-compatible type.
+    #[allow(clippy::expect_used)]
+    let provider_settings_json = serde_json::to_value(&req.info.provider_settings)
+        .expect("CreateModelRequestV1.info.provider_settings re-serialization cannot fail");
 
     entity::model::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -252,7 +259,12 @@ pub fn model_update_active_model(
         // SAFETY: info was just deserialized from JSON and is re-serializable.
         #[allow(clippy::expect_used)]
         let fresh = info.expect("info is Some after apply_info_patches");
-        let info_json = serde_json::to_value(&fresh).unwrap_or(serde_json::Value::Null);
+        // SAFETY: info was just deserialized from stored JSON; re-serialization
+        // cannot fail for well-formed domain types. Fail-fast rather than
+        // silently storing null.
+        #[allow(clippy::expect_used)]
+        let info_json = serde_json::to_value(&fresh)
+            .expect("ModelInfoV1 re-serialization cannot fail");
         active.info = Set(Some(info_json));
 
         // Re-project denormalized columns
@@ -270,8 +282,11 @@ pub fn model_update_active_model(
         active.cap_reasoning_effort = Set(fresh.capabilities.reasoning.effort);
 
         // Re-extract provider_settings
-        let ps_json =
-            serde_json::to_value(&fresh.provider_settings).unwrap_or(serde_json::Value::Null);
+        // SAFETY: provider_settings was just deserialized from stored JSON;
+        // re-serialization cannot fail for JSON-compatible types.
+        #[allow(clippy::expect_used)]
+        let ps_json = serde_json::to_value(&fresh.provider_settings)
+            .expect("provider_settings re-serialization cannot fail");
         active.provider_settings = Set(if ps_json.is_null() {
             None
         } else {

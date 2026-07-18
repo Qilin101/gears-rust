@@ -82,6 +82,15 @@ fn provider_not_found_maps_to_404() {
 }
 
 #[test]
+fn provider_not_found_by_slug_maps_to_404() {
+    assert_mapping(
+        DomainError::provider_not_found_by_slug("openai"),
+        404,
+        "gts.cf.core.errors.err.v1~cf.core.err.not_found",
+    );
+}
+
+#[test]
 fn model_deprecated_maps_to_404() {
     assert_mapping_with_detail(
         DomainError::model_deprecated("openai::gpt-4o"),
