@@ -232,9 +232,9 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/local_client.rs`
 
-- [ ] implement `LocalClient` wrapping `Arc<Service>` and implementing all 10 `ModelRegistryClientV1` methods, mapping `DomainError` → `ModelRegistryError`
-- [ ] write unit tests (mocked service) verifying each trait method delegates and maps errors correctly
-- [ ] run tests — must pass before next task
+- [x] implement `LocalClient` wrapping `Arc<Service>` and implementing all 10 `ModelRegistryClientV1` methods, mapping `DomainError` → `ModelRegistryError`
+- [x] write unit tests (mocked service) verifying each trait method delegates and maps errors correctly
+- [x] run tests — must pass before next task
 
 ### Task 15: REST DTOs and error mapping
 
