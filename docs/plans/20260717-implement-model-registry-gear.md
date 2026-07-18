@@ -212,10 +212,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 
-- [ ] implement `get_tenant_model` (cache-first with DB fallback, `approval_status` **populated on the returned model — NOT fail-closed on pending/rejected/revoked**, TTL by ownership) and `list_tenant_models` (OData + inheritance union + pagination). Return `ModelDeprecated` only when a soft-deleted model is fetched directly; `ModelNotFound` when absent
-- [ ] populate cache on miss; select TTL from ownership (own vs inherited) via the Task 10 helper
-- [ ] write unit tests: cache hit path, miss→DB→populate, not-found→`ModelNotFound`, deprecated-on-direct-get→`ModelDeprecated`, **pending/rejected model returned with populated `approval_status` (no error)**, inherited model visible with shorter TTL, list filtering + pagination
-- [ ] run tests — must pass before next task
+- [x] implement `get_tenant_model` (cache-first with DB fallback, `approval_status` **populated on the returned model — NOT fail-closed on pending/rejected/revoked**, TTL by ownership) and `list_tenant_models` (OData + inheritance union + pagination). Return `ModelDeprecated` only when a soft-deleted model is fetched directly; `ModelNotFound` when absent
+- [x] populate cache on miss; select TTL from ownership (own vs inherited) via the Task 10 helper
+- [x] write unit tests: cache hit path, miss→DB→populate, not-found→`ModelNotFound`, deprecated-on-direct-get→`ModelDeprecated`, **pending/rejected model returned with populated `approval_status` (no error)**, inherited model visible with shorter TTL, list filtering + pagination
+- [x] run tests — 157 pass, clippy clean
 
 ### Task 13: ModelRegistryService — models CRUD and approval writes
 
