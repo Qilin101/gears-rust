@@ -292,19 +292,8 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 
 - [x] update `README.md` with the implemented P1 REST surface and build/run notes
 - [x] check off the implemented `p1` functional drivers in DESIGN §1.2; note the two P1 implementation deviations from the DESIGN
-- [ ] update `CLAUDE.local.md`/CLAUDE.md only if a new reusable pattern emerged
+- [x] update `CLAUDE.local.md`/CLAUDE.md only if a new reusable pattern emerged — patterns (OData real-columns, SQLite integration tests) already added in CLAUDE.md; no further changes needed
 - [x] move this plan to `docs/plans/completed/`
-
-### Task 20: Update documentation and finalize
-
-**Files:**
-- Modify: `gears/model-registry/README.md`
-- Modify: `gears/model-registry/docs/DESIGN.md` (check off implemented P1 drivers in §1.2)
-
-- [ ] update `README.md` with the implemented P1 REST surface and build/run notes
-- [ ] check off the implemented `p1` functional drivers in DESIGN §1.2; note the two P1 implementation deviations from the DESIGN: (a) approval stored in local `model_approvals` table + denormalized `models.approval_status`; (b) OData-filterable `info.*` fields denormalized to real columns with B-tree indexes instead of JSONB + GIN (toolkit OData layer maps to real columns only)
-- [ ] update `CLAUDE.local.md`/CLAUDE.md only if a new reusable pattern emerged
-- [ ] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*
