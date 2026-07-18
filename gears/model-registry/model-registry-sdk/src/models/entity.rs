@@ -75,7 +75,7 @@ impl ModelV1<serde_json::Value> {
 // ---------------------------------------------------------------------------
 
 /// A configured AI provider instance for a tenant.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ProviderV1 {
     pub id: Uuid,

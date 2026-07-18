@@ -135,13 +135,13 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/infra/storage/mapper.rs`
 - Create: `gears/model-registry/model-registry/src/infra/storage/mapper_test.rs`
 
-- [ ] implement mapping `provider::Model` ↔ `ProviderV1` (incl. `gts_type` string↔`GtsTypeId`, `status` enum, optional `metadata` JSONB)
-- [ ] implement mapping `model::Model` (+ resolved `ApprovalStatus`) ↔ `ModelV1<serde_json::Value>` — deserialize `info` JSONB into `ModelInfoV1`, attach `provider_settings` raw JSON, derive `canonical_id`
-- [ ] implement request → `ActiveModel` builders for create/update (PATCH semantics: only set provided fields; enforce immutability of `canonical_id`/`provider_slug`/`info.provider_model_id`/`info.gts_type`) **and project the denormalized filterable columns from `info`** (gts_type, vendor, family, managed, architecture, format, provider_model_id, supported_api, capability flags) so they stay in sync with the JSONB source of truth
-- [ ] write a test asserting the denormalized columns match the `info` JSONB after a create and after a PATCH that changes a promoted field
-- [ ] write round-trip tests (domain→entity→domain) for provider and model incl. OpenAI + Anthropic provider_settings and unknown-provider raw JSON
-- [ ] write tests for immutability rejection and malformed-JSONB error paths
-- [ ] run tests — must pass before next task
+- [x] implement mapping `provider::Model` ↔ `ProviderV1` (incl. `gts_type` string↔`GtsTypeId`, `status` enum, optional `metadata` JSONB)
+- [x] implement mapping `model::Model` (+ resolved `ApprovalStatus`) ↔ `ModelV1<serde_json::Value>` — deserialize `info` JSONB into `ModelInfoV1`, attach `provider_settings` raw JSON, derive `canonical_id`
+- [x] implement request → `ActiveModel` builders for create/update (PATCH semantics: only set provided fields; enforce immutability of `canonical_id`/`provider_slug`/`info.provider_model_id`/`info.gts_type`) **and project the denormalized filterable columns from `info`** (gts_type, vendor, family, managed, architecture, format, provider_model_id, supported_api, capability flags) so they stay in sync with the JSONB source of truth
+- [x] write a test asserting the denormalized columns match the `info` JSONB after a create and after a PATCH that changes a promoted field
+- [x] write round-trip tests (domain→entity→domain) for provider and model incl. OpenAI + Anthropic provider_settings and unknown-provider raw JSON
+- [x] write tests for immutability rejection and malformed-JSONB error paths
+- [x] run tests — must pass before next task
 
 ### Task 6: OData field mapping for models and providers
 
