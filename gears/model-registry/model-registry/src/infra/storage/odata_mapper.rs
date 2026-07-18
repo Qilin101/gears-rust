@@ -29,6 +29,7 @@ use super::entity::{model, provider};
 /// parser level — [`FilterField::from_name`] returns `None` for them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ModelFilterField {
+    CanonicalId,
     LifecycleStatus,
     ApprovalStatus,
     GtsType,
@@ -47,6 +48,7 @@ pub enum ModelFilterField {
 
 impl FilterField for ModelFilterField {
     const FIELDS: &'static [Self] = &[
+        Self::CanonicalId,
         Self::LifecycleStatus,
         Self::ApprovalStatus,
         Self::GtsType,
@@ -65,6 +67,7 @@ impl FilterField for ModelFilterField {
 
     fn name(&self) -> &'static str {
         match self {
+            Self::CanonicalId => "canonical_id",
             Self::LifecycleStatus => "lifecycle_status",
             Self::ApprovalStatus => "approval_status",
             Self::GtsType => "gts_type",
@@ -84,7 +87,8 @@ impl FilterField for ModelFilterField {
 
     fn kind(&self) -> FieldKind {
         match self {
-            Self::LifecycleStatus
+            Self::CanonicalId
+            | Self::LifecycleStatus
             | Self::ApprovalStatus
             | Self::GtsType
             | Self::SupportedApi
@@ -110,6 +114,7 @@ impl FieldToColumn<ModelFilterField> for ModelODataMapper {
 
     fn map_field(field: ModelFilterField) -> model::Column {
         match field {
+            ModelFilterField::CanonicalId => model::Column::CanonicalId,
             ModelFilterField::LifecycleStatus => model::Column::LifecycleStatus,
             ModelFilterField::ApprovalStatus => model::Column::ApprovalStatus,
             ModelFilterField::GtsType => model::Column::GtsType,
@@ -136,6 +141,9 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
         field: ModelFilterField,
     ) -> sea_orm::Value {
         match field {
+            ModelFilterField::CanonicalId => {
+                sea_orm::Value::String(Some(Box::new(m.canonical_id.clone())))
+            }
             ModelFilterField::LifecycleStatus => {
                 sea_orm::Value::String(Some(Box::new(m.lifecycle_status.clone())))
             }
@@ -279,6 +287,7 @@ mod tests {
     /// Returns all filterable field names as expected by `OData` API consumers.
     fn expected_model_field_names() -> Vec<&'static str> {
         vec![
+            "canonical_id",
             "lifecycle_status",
             "approval_status",
             "gts_type",
@@ -330,6 +339,7 @@ mod tests {
             assert_eq!(actual.to_string(), expected, "field {f:?} should map to column {expected}");
         }
 
+        assert_col(ModelFilterField::CanonicalId, "canonical_id");
         assert_col(ModelFilterField::LifecycleStatus, "lifecycle_status");
         assert_col(ModelFilterField::ApprovalStatus, "approval_status");
         assert_col(ModelFilterField::GtsType, "gts_type");
@@ -351,6 +361,10 @@ mod tests {
         assert_eq!(
             ModelFilterField::from_name("lifecycle_status"),
             Some(ModelFilterField::LifecycleStatus)
+        );
+        assert_eq!(
+            ModelFilterField::from_name("canonical_id"),
+            Some(ModelFilterField::CanonicalId)
         );
         assert_eq!(
             ModelFilterField::from_name("approval_status"),

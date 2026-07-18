@@ -169,11 +169,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
 
-- [ ] implement `ModelRepository` for `SeaOrmRepository`: get_by_canonical, list with OData (filtering entirely on `models` columns — no join), create (derive canonical_id; unique conflict), update (PATCH; immutable identity fields), soft-delete (set `lifecycle_status=deprecated`, `deprecated_at`)
-- [ ] implement approval read/write (`get_approval`, `set_approval`, `delete_approval`) against `model_approvals` **and keep the denormalized `models.approval_status` column in sync** on every approval write (single transaction)
-- [ ] resolve `approval_status` on model reads from the `models` column (default `Pending`); exclude deprecated from default list
-- [ ] write integration tests (SQLite): model CRUD, OData `$filter` on `lifecycle_status`/`info.*`/`approval_status`, `$top`/`$skip`, soft-delete hiding, approval read/write/default, tenant isolation
-- [ ] run tests — must pass before next task
+- [x] implement `ModelRepository` for `SeaOrmRepository`: get_by_canonical, list with OData (filtering entirely on `models` columns — no join), create (derive canonical_id; unique conflict), update (PATCH; immutable identity fields), soft-delete (set `lifecycle_status=deprecated`, `deprecated_at`)
+- [x] implement approval read/write (`get_approval`, `set_approval`, `delete_approval`) against `model_approvals` **and keep the denormalized `models.approval_status` column in sync** on every approval write (single transaction)
+- [x] resolve `approval_status` on model reads from the `models` column (default `Pending`); exclude deprecated from default list
+- [x] write integration tests (SQLite): model CRUD, OData `$filter` on `lifecycle_status`/`info.*`/`approval_status`, `$top`/`$skip`, soft-delete hiding, approval read/write/default, tenant isolation
+- [x] run tests — must pass before next task
 
 ### Task 9: CacheService trait and InMemoryCache backend
 

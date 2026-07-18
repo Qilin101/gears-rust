@@ -6,25 +6,26 @@
 //! rows they are authorized for.
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, Condition, EntityTrait};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
 use toolkit_db::odata::sea_orm_filter::{paginate_odata, LimitCfg};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt,
-    secure_update_with_scope,
+    SecureOnConflict, secure_update_with_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repo::ProviderRepository;
+use crate::domain::repo::{ModelRepository, ProviderRepository};
 use crate::{
-    CreateProviderRequestV1, ProviderV1, UpdateProviderRequestV1,
+    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, ModelV1, ProviderV1,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
-use super::entity::provider;
+use super::entity::{self, model, provider};
 use super::mapper;
-use super::odata_mapper::{ProviderFilterField, ProviderODataMapper};
+use super::odata_mapper::{ModelFilterField, ModelODataMapper, ProviderFilterField, ProviderODataMapper};
 
 // =============================================================================
 // ScopeError → DomainError
@@ -223,6 +224,368 @@ impl ProviderRepository for SeaOrmRepository {
 }
 
 // =============================================================================
+// ModelRepository implementation
+// =============================================================================
+
+#[async_trait]
+impl ModelRepository for SeaOrmRepository {
+    async fn find_by_canonical<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        canonical_id: &str,
+    ) -> Result<ModelV1, DomainError> {
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::CanonicalId.eq(canonical_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(canonical_id))?;
+
+        Ok(mapper::model_entity_to_v1(&entity))
+    }
+
+    async fn list<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        query: &ODataQuery,
+    ) -> Result<Page<ModelV1>, DomainError> {
+        // Exclude deprecated / sunset models by default so the default list
+        // shows only active, non-deprecated models. If the caller explicitly
+        // wants deprecated models, they must add `lifecycle_status eq 'deprecated'`
+        // to the OData filter.
+        let base = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::LifecycleStatus.ne("deprecated"))
+                    .add(model::Column::LifecycleStatus.ne("sunset")),
+            );
+
+        let page = paginate_odata::<
+            ModelFilterField,
+            ModelODataMapper,
+            model::Entity,
+            ModelV1,
+            _,
+            C,
+        >(
+            base,
+            conn,
+            query,
+            ("canonical_id", SortDir::Asc),
+            LimitCfg {
+                default: 20,
+                max: 100,
+            },
+            |m| mapper::model_entity_to_v1(&m),
+        )
+        .await
+        .map_err(|e| DomainError::internal(format!("OData pagination failed: {e}")))?;
+
+        Ok(page)
+    }
+
+    async fn create<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        req: &CreateModelRequestV1,
+    ) -> Result<ModelV1, DomainError> {
+        let canonical_id = format!("{}::{}", req.provider_slug, req.info.provider_model_id);
+
+        // Check for duplicate canonical_id within the tenant scope.
+        let existing = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::CanonicalId.eq(&canonical_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        if existing.is_some() {
+            return Err(DomainError::validation(format!(
+                "model with canonical_id `{canonical_id}` already exists \
+                 (duplicate provider_slug + provider_model_id)"
+            )));
+        }
+
+        // Verify provider exists within scope.
+        let provider_entity = provider::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(provider::Column::Slug.eq(&req.provider_slug)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::validation(format!(
+                "provider with slug `{}` not found",
+                req.provider_slug,
+            )))?;
+
+        let initial_approval = req.approval_status.unwrap_or(ApprovalStatus::Pending);
+        let am = mapper::model_create_active_model(tenant_id, provider_entity.id, req, initial_approval);
+
+        let _ = model::Entity::insert(am.clone())
+            .secure()
+            .scope_with_model(scope, &am)
+            .map_err(map_scope_error)?
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        // Re-fetch to get the DB-persisted state via canonical_id.
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::CanonicalId.eq(&canonical_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or_else(|| DomainError::internal("created model not found after insert"))?;
+
+        Ok(mapper::model_entity_to_v1(&entity))
+    }
+
+    async fn update<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        canonical_id: &str,
+        req: &UpdateModelRequestV1,
+    ) -> Result<ModelV1, DomainError> {
+        // Fetch existing entity (scope-checked).
+        let existing = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::CanonicalId.eq(canonical_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(canonical_id))?;
+
+        // Build the patched ActiveModel via the mapper (PATCH semantics).
+        let am = mapper::model_update_active_model(&existing, req);
+
+        let model_id = existing.id;
+
+        // Execute update using secure_update_with_scope.
+        let updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(mapper::model_entity_to_v1(&updated))
+    }
+
+    async fn soft_delete<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        canonical_id: &str,
+    ) -> Result<(), DomainError> {
+        // Fetch existing entity (scope-checked).
+        let existing = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::CanonicalId.eq(canonical_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(canonical_id))?;
+
+        let model_id = existing.id;
+        let mut am: entity::model::ActiveModel = existing.into();
+        am.lifecycle_status = Set("deprecated".to_owned());
+        am.deprecated_at = Set(Some(chrono::Utc::now()));
+        am.updated_at = Set(chrono::Utc::now());
+
+        let _updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(())
+    }
+
+    async fn get_approval<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        model_id: Uuid,
+    ) -> Result<ApprovalStatus, DomainError> {
+        // Read approval status from the denormalized models column.
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::Id.eq(model_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
+
+        Ok(approval_status_from_string(&entity.approval_status))
+    }
+
+    async fn set_approval<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        model_id: Uuid,
+        status: ApprovalStatus,
+    ) -> Result<(), DomainError> {
+        let status_str = approval_status_to_string(status);
+        let now = chrono::Utc::now();
+
+        // Fetch model within scope (validates caller can access this model).
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::Id.eq(model_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
+
+        // Update denormalized models.approval_status using secure_update_with_scope.
+        let mut model_am: entity::model::ActiveModel = entity.clone().into();
+        model_am.approval_status = Set(status_str.clone());
+        model_am.updated_at = Set(now);
+        let _updated = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        // Upsert model_approvals via secure insert with on_conflict.
+        let status_str2 = status_str.clone();
+        let approval_am = entity::model_approval::ActiveModel {
+            tenant_id: Set(entity.tenant_id),
+            model_id: Set(model_id),
+            approval_status: Set(status_str2),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        let on_conflict = SecureOnConflict::columns([
+            entity::model_approval::Column::TenantId,
+            entity::model_approval::Column::ModelId,
+        ])
+        .update_columns([
+            entity::model_approval::Column::ApprovalStatus,
+            entity::model_approval::Column::UpdatedAt,
+        ])
+        .map_err(|e| DomainError::internal(format!("upsert conflict config: {e}")))?;
+
+        let _ = entity::model_approval::Entity::insert(approval_am.clone())
+            .secure()
+            .scope_with_model(scope, &approval_am)
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(())
+    }
+
+    async fn delete_approval<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        model_id: Uuid,
+    ) -> Result<(), DomainError> {
+        // Fetch model within scope.
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(model::Column::Id.eq(model_id)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
+
+        // Delete the model_approval record via secure delete.
+        let _ = entity::model_approval::Entity::delete_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(entity::model_approval::Column::ModelId.eq(model_id))
+                    .add(entity::model_approval::Column::TenantId.eq(entity.tenant_id)),
+            )
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        // Reset the denormalized column to default (Pending) via secure update.
+        let mut model_am: entity::model::ActiveModel = entity.into();
+        model_am.approval_status = Set("pending".to_owned());
+        model_am.updated_at = Set(chrono::Utc::now());
+        let _ = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Internal helpers — ApprovalStatus ↔ string
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Convert an [`ApprovalStatus`] to its lowercase storage string.
+#[must_use]
+#[allow(clippy::match_same_arms)]
+fn approval_status_to_string(status: ApprovalStatus) -> String {
+    match status {
+        ApprovalStatus::Approved => "approved".to_owned(),
+        ApprovalStatus::Rejected => "rejected".to_owned(),
+        ApprovalStatus::Revoked => "revoked".to_owned(),
+        ApprovalStatus::Pending | _ => "pending".to_owned(),
+    }
+}
+
+/// Parse a lowercase string back to [`ApprovalStatus`].
+#[must_use]
+fn approval_status_from_string(s: &str) -> ApprovalStatus {
+    match s {
+        "approved" => ApprovalStatus::Approved,
+        "rejected" => ApprovalStatus::Rejected,
+        "revoked" => ApprovalStatus::Revoked,
+        _ => ApprovalStatus::Pending,
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -299,13 +662,13 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let created = repo
-            .create(&conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"))
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
-        let found = repo
-            .find_by_id(&conn, &scope, created.id)
+        let found = ProviderRepository::find_by_id(&repo, &conn, &scope, created.id)
             .await
             .expect("find_by_id should succeed");
 
@@ -322,8 +685,7 @@ mod tests {
         let repo = SeaOrmRepository;
         let scope = scope_for(test_tenant());
 
-        let err = repo
-            .find_by_id(&conn, &scope, Uuid::nil())
+        let err = ProviderRepository::find_by_id(&repo, &conn, &scope, Uuid::nil())
             .await
             .expect_err("should return provider not found");
 
@@ -342,19 +704,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let created = repo
-            .create(
-                &conn,
-                &scope_for(tenant_a),
-                tenant_a,
-                &make_create_req("openai", "OpenAI"),
-            )
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
         // Other tenant should not see this provider.
-        let err = repo
-            .find_by_id(&conn, &scope_for(tenant_b), created.id)
+        let err = ProviderRepository::find_by_id(&repo, &conn, &scope_for(tenant_b), created.id)
             .await
             .expect_err("should be not found for other tenant");
 
@@ -377,10 +734,11 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let provider = repo
-            .create(&conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"))
-            .await
-            .expect("create should succeed");
+        let provider = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
         assert_eq!(provider.slug, "openai");
         assert_eq!(provider.name, "OpenAI");
@@ -400,15 +758,11 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let provider = repo
-            .create(
-                &conn,
-                &scope,
-                tenant_id,
-                &make_full_create_req("anthropic", "Anthropic"),
-            )
-            .await
-            .expect("create should succeed");
+        let provider = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_full_create_req("anthropic", "Anthropic"),
+        )
+        .await
+        .expect("create should succeed");
 
         assert_eq!(provider.slug, "anthropic");
         assert_eq!(provider.name, "Anthropic");
@@ -430,24 +784,17 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        repo.create(
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_req("openai", "OpenAI"),
+        ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("first create should succeed");
 
-        let err = repo
-            .create(
-                &conn,
-                &scope,
-                tenant_id,
-                &make_create_req("openai", "OpenAI Duplicate"),
-            )
-            .await
-            .expect_err("duplicate slug should be rejected");
+        let err = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI Duplicate"),
+        )
+        .await
+        .expect_err("duplicate slug should be rejected");
 
         assert!(
             matches!(&err, DomainError::ProviderConflict { slug } if slug == "openai"),
@@ -464,24 +811,17 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        repo.create(
-            &conn,
-            &scope_for(tenant_a),
-            tenant_a,
-            &make_create_req("openai", "OpenAI"),
+        ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("tenant A create should succeed");
 
-        let provider_b = repo
-            .create(
-                &conn,
-                &scope_for(tenant_b),
-                tenant_b,
-                &make_create_req("openai", "OpenAI B"),
-            )
-            .await
-            .expect("tenant B create with same slug should succeed");
+        let provider_b = ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_b), tenant_b, &make_create_req("openai", "OpenAI B"),
+        )
+        .await
+        .expect("tenant B create with same slug should succeed");
 
         assert_eq!(provider_b.slug, "openai");
         assert_eq!(provider_b.name, "OpenAI B");
@@ -500,29 +840,22 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let created = repo
-            .create(
-                &conn,
-                &scope,
-                tenant_id,
-                &make_create_req("openai", "OpenAI"),
-            )
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
-        let updated = repo
-            .update(
-                &conn,
-                &scope,
-                created.id,
-                &UpdateProviderRequestV1 {
-                    name: Some("OpenAI Updated".into()),
-                    managed: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("update should succeed");
+        let updated = ProviderRepository::update(
+            &repo, &conn, &scope, created.id,
+            &UpdateProviderRequestV1 {
+                name: Some("OpenAI Updated".into()),
+                managed: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update should succeed");
 
         assert_eq!(updated.name, "OpenAI Updated");
         assert!(updated.managed);
@@ -538,18 +871,15 @@ mod tests {
         let repo = SeaOrmRepository;
         let scope = scope_for(test_tenant());
 
-        let err = repo
-            .update(
-                &conn,
-                &scope,
-                Uuid::nil(),
-                &UpdateProviderRequestV1 {
-                    name: Some("N/A".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("should return not found");
+        let err = ProviderRepository::update(
+            &repo, &conn, &scope, Uuid::nil(),
+            &UpdateProviderRequestV1 {
+                name: Some("N/A".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("should return not found");
 
         assert!(
             matches!(&err, DomainError::ProviderNotFound { .. }),
@@ -566,29 +896,22 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let created = repo
-            .create(
-                &conn,
-                &scope_for(tenant_a),
-                tenant_a,
-                &make_create_req("openai", "OpenAI"),
-            )
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
         // Other tenant should not be able to update.
-        let err = repo
-            .update(
-                &conn,
-                &scope_for(tenant_b),
-                created.id,
-                &UpdateProviderRequestV1 {
-                    name: Some("Hacked".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("should be not found for other tenant");
+        let err = ProviderRepository::update(
+            &repo, &conn, &scope_for(tenant_b), created.id,
+            &UpdateProviderRequestV1 {
+                name: Some("Hacked".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("should be not found for other tenant");
 
         assert!(
             matches!(&err, DomainError::ProviderNotFound { .. }),
@@ -609,23 +932,18 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let created = repo
-            .create(
-                &conn,
-                &scope,
-                tenant_id,
-                &make_create_req("openai", "OpenAI"),
-            )
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
-        repo.delete(&conn, &scope, created.id)
+        ProviderRepository::delete(&repo, &conn, &scope, created.id)
             .await
             .expect("delete should succeed");
 
         // Verify it's gone.
-        let err = repo
-            .find_by_id(&conn, &scope, created.id)
+        let err = ProviderRepository::find_by_id(&repo, &conn, &scope, created.id)
             .await
             .expect_err("should be gone after delete");
 
@@ -643,8 +961,7 @@ mod tests {
         let repo = SeaOrmRepository;
         let scope = scope_for(test_tenant());
 
-        let err = repo
-            .delete(&conn, &scope, Uuid::nil())
+        let err = ProviderRepository::delete(&repo, &conn, &scope, Uuid::nil())
             .await
             .expect_err("should return not found");
 
@@ -663,19 +980,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let created = repo
-            .create(
-                &conn,
-                &scope_for(tenant_a),
-                tenant_a,
-                &make_create_req("openai", "OpenAI"),
-            )
-            .await
-            .expect("create should succeed");
+        let created = ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("create should succeed");
 
         // Other tenant should not be able to delete.
-        let err = repo
-            .delete(&conn, &scope_for(tenant_b), created.id)
+        let err = ProviderRepository::delete(&repo, &conn, &scope_for(tenant_b), created.id)
             .await
             .expect_err("should be not found for other tenant");
 
@@ -685,8 +997,7 @@ mod tests {
         );
 
         // Original tenant's provider should still exist.
-        let found = repo
-            .find_by_id(&conn, &scope_for(tenant_a), created.id)
+        let found = ProviderRepository::find_by_id(&repo, &conn, &scope_for(tenant_a), created.id)
             .await
             .expect("provider should still exist");
 
@@ -706,25 +1017,21 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        repo.create(
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_req("openai", "OpenAI"),
+        ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create openai");
-        repo.create(
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_req("anthropic", "Anthropic"),
+        ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_req("anthropic", "Anthropic"),
         )
         .await
         .expect("create anthropic");
 
         let query = ODataQuery::default();
-        let page = repo.list(&conn, &scope, &query).await.expect("list should succeed");
+        let page = ProviderRepository::list(&repo, &conn, &scope, &query)
+            .await
+            .expect("list should succeed");
 
         assert_eq!(page.items.len(), 2);
         assert!(page.items.iter().any(|p| p.slug == "openai"));
@@ -740,18 +1047,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        repo.create(
-            &conn,
-            &scope_for(tenant_a),
-            tenant_a,
-            &make_create_req("openai", "OpenAI"),
+        ProviderRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("tenant A create");
 
         // Tenant B should see no providers.
-        let page = repo
-            .list(&conn, &scope_for(tenant_b), &ODataQuery::default())
+        let page = ProviderRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -772,18 +1075,14 @@ mod tests {
         let gts_anthropic =
             gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.anthropic.v1~");
 
-        repo.create(
-            &conn,
-            &scope,
-            tenant_id,
+        ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id,
             &CreateProviderRequestV1::builder("openai", "OpenAI", gts_openai).build(),
         )
         .await
         .expect("create openai");
-        repo.create(
-            &conn,
-            &scope,
-            tenant_id,
+        ProviderRepository::create(
+            &repo, &conn, &scope, tenant_id,
             &CreateProviderRequestV1::builder("anthropic", "Anthropic", gts_anthropic).build(),
         )
         .await
@@ -797,8 +1096,7 @@ mod tests {
             ..Default::default()
         };
 
-        let page = repo
-            .list(&conn, &scope, &query)
+        let page = ProviderRepository::list(&repo, &conn, &scope, &query)
             .await
             .expect("filtered list should succeed");
         assert_eq!(page.items.len(), 1);
@@ -816,10 +1114,8 @@ mod tests {
 
         // Create 4 providers.
         for i in 0..4 {
-            repo.create(
-                &conn,
-                &scope,
-                tenant_id,
+            ProviderRepository::create(
+                &repo, &conn, &scope, tenant_id,
                 &make_create_req(&format!("provider-{i}"), &format!("Provider {i}")),
             )
             .await
@@ -832,8 +1128,7 @@ mod tests {
             ..Default::default()
         };
 
-        let page = repo
-            .list(&conn, &scope, &query)
+        let page = ProviderRepository::list(&repo, &conn, &scope, &query)
             .await
             .expect("list with limit should succeed");
         assert_eq!(page.items.len(), 2);
@@ -847,5 +1142,772 @@ mod tests {
     fn repo_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<SeaOrmRepository>();
+    }
+
+    // =========================================================================
+    // ModelRepository tests
+    // =========================================================================
+
+    /// Helper: create a provider for model tests.
+    async fn create_test_provider(
+        repo: &SeaOrmRepository,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        slug: &str,
+    ) -> (Uuid, String) {
+        let p = ProviderRepository::create(repo, conn, scope, tenant_id, &make_create_req(slug, slug))
+            .await
+            .expect("create test provider");
+        (p.id, p.slug)
+    }
+
+    /// Helper: create a model for test purposes.
+    /// Uses JSON roundtrip for `ModelInfoV1` (which is `#[non_exhaustive]`
+    /// in the SDK crate).
+    fn make_create_model_req(
+        provider_slug: &str,
+        provider_model_id: &str,
+    ) -> CreateModelRequestV1 {
+        let gts_leaf = "cf.genai._.openai.v1~";
+        let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
+
+        let info_value = serde_json::json!({
+            "gts_type": gts_type,
+            "display_name": format!("Test {provider_model_id}"),
+            "description": null,
+            "family": "test-family",
+            "vendor": "TestVendor",
+            "managed": false,
+            "architecture": "transformer",
+            "size_bytes": null,
+            "format": "api-only",
+            "region": null,
+            "hosted_by": null,
+            "last_release_at": null,
+            "reasoning_level": null,
+            "version": null,
+            "sort_order": null,
+            "icon": null,
+            "multiplier_display": null,
+            "performance": {
+                "response_latency_ms": null,
+                "tokens_per_second": null
+            },
+            "additional_info": {},
+            "supported_api": ["completion"],
+            "provider_model_id": provider_model_id,
+            "capabilities": {
+                "vision": { "enabled": true, "supported_mime_types": ["image/jpeg"] },
+                "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+                "function_calling": true,
+                "response_schema": false,
+                "streaming": true,
+                "file_input": { "enabled": false, "supported_mime_types": [] },
+                "image_generation": { "enabled": false, "supported_mime_types": [] },
+                "audio_input": { "enabled": false, "supported_mime_types": [] },
+                "audio_output": { "enabled": false, "supported_mime_types": [] },
+                "code_interpreter": false,
+                "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+            },
+            "disabled_capabilities": {
+                "vision": { "disabled": false, "disabled_mime_types": [] },
+                "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+                "function_calling": false,
+                "response_schema": false,
+                "streaming": false,
+                "file_input": { "disabled": false, "disabled_mime_types": [] },
+                "image_generation": { "disabled": false, "disabled_mime_types": [] },
+                "audio_input": { "disabled": false, "disabled_mime_types": [] },
+                "audio_output": { "disabled": false, "disabled_mime_types": [] },
+                "code_interpreter": false,
+                "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+            },
+            "context_window": {
+                "max_input_tokens": 8192,
+                "max_output_tokens": 4096
+            },
+            "default_parameters": {
+                "temperature": null, "top_p": null, "max_output_tokens": null,
+                "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
+                "top_logprobs": null, "truncation": null, "service_tier": null,
+                "parallel_tool_calls": null, "text": null, "reasoning": null,
+                "tool_choice": null, "store": null
+            },
+            "allow_parameter_override": false,
+            "allow_extra_params": [],
+            "provider_settings": {}
+        });
+
+        let info = serde_json::from_value(info_value).expect("ModelInfoV1 from test JSON");
+
+        CreateModelRequestV1 {
+            provider_slug: provider_slug.to_owned(),
+            lifecycle_status: crate::LifecycleStatus::Production,
+            approval_status: None,
+            info,
+        }
+    }
+
+    // =======================================================================
+    // create — models
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_create_stores_model() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let model = ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect("create model");
+
+        assert_eq!(model.canonical_id, "openai::gpt-4o");
+        assert_eq!(model.lifecycle_status, crate::LifecycleStatus::Production);
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn model_create_with_initial_approval() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        req.approval_status = Some(crate::ApprovalStatus::Approved);
+        let model = ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect("create model");
+
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn model_create_duplicate_canonical_id_rejected() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect("first create");
+
+        // Second create with same canonical_id must fail.
+        let err = ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect_err("duplicate canonical_id should be rejected");
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected Validation for duplicate, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_create_provider_not_found() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let req = make_create_model_req("nonexistent-provider", "gpt-4o");
+        let err = ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect_err("nonexistent provider should be rejected");
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected Validation for missing provider, got {err:?}"
+        );
+    }
+
+    // =======================================================================
+    // find_by_canonical
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_find_by_canonical_returns_model() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let created = ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect("create model");
+
+        let found = ModelRepository::find_by_canonical(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("find_by_canonical");
+        assert_eq!(found.id, created.id);
+        assert_eq!(found.canonical_id, "openai::gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn model_find_by_canonical_not_found() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let scope = scope_for(test_tenant());
+
+        let err = ModelRepository::find_by_canonical(&repo, &conn, &scope, "nonexistent::model")
+            .await
+            .expect_err("should return not found");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_find_by_canonical_tenant_isolation() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_a = test_tenant();
+        let tenant_b = other_tenant();
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope_for(tenant_a), tenant_a, "openai").await;
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let _created = ModelRepository::create(&repo, &conn, &scope_for(tenant_a), tenant_a, &req)
+            .await
+            .expect("create model");
+
+        // Other tenant should not see this model.
+        let err = ModelRepository::find_by_canonical(&repo, &conn, &scope_for(tenant_b), "openai::gpt-4o")
+            .await
+            .expect_err("should be not found for other tenant");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got {err:?}"
+        );
+    }
+
+    // =======================================================================
+    // update — models
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_update_changes_fields() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let _created = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        let updated = ModelRepository::update(
+            &repo, &conn, &scope, "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+        assert_eq!(updated.lifecycle_status, crate::LifecycleStatus::Preview);
+        // Canonical ID must remain unchanged.
+        assert_eq!(updated.canonical_id, "openai::gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn model_update_not_found() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let scope = scope_for(test_tenant());
+
+        let err = ModelRepository::update(
+            &repo, &conn, &scope, "nonexistent::model",
+            &UpdateModelRequestV1 {
+                lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("should return not found");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got {err:?}"
+        );
+    }
+
+    // =======================================================================
+    // soft_delete
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_soft_delete_sets_deprecated() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let _created = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete should succeed");
+
+        // After soft-delete, direct fetch should show deprecated.
+        let found = ModelRepository::find_by_canonical(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("find_by_canonical after soft delete");
+        assert_eq!(found.lifecycle_status, crate::LifecycleStatus::Deprecated);
+    }
+
+    #[tokio::test]
+    async fn model_soft_delete_hides_from_list() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete");
+
+        // Default list must NOT include the deprecated model.
+        let page = ModelRepository::list(&repo, &conn, &scope, &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert!(
+            page.items.is_empty(),
+            "deprecated model should be hidden from default list"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_soft_delete_not_found() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let scope = scope_for(test_tenant());
+
+        let err = ModelRepository::soft_delete(&repo, &conn, &scope, "nonexistent::model")
+            .await
+            .expect_err("should return not found");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got {err:?}"
+        );
+    }
+
+    // =======================================================================
+    // list — models
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_list_returns_all_non_deprecated() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create gpt-4o");
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+        )
+        .await
+        .expect("create gpt-4o-mini");
+
+        let page = ModelRepository::list(&repo, &conn, &scope, &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert!(!page.items.is_empty(), "should list non-deprecated models");
+    }
+
+    #[tokio::test]
+    async fn model_list_tenant_isolation() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_a = test_tenant();
+        let tenant_b = other_tenant();
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope_for(tenant_a), tenant_a, "openai").await;
+        ModelRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        let page = ModelRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert!(page.items.is_empty(), "tenant B should see no models");
+    }
+
+    #[tokio::test]
+    async fn model_list_respects_limit() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+
+        for i in 0..4 {
+            ModelRepository::create(
+                &repo, &conn, &scope, tenant_id,
+                &make_create_model_req(&provider_slug, &format!("model-{i}")),
+            )
+            .await
+            .expect("create model");
+        }
+
+        let query = ODataQuery {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let page = ModelRepository::list(&repo, &conn, &scope, &query)
+            .await
+            .expect("list with limit");
+        assert_eq!(page.items.len(), 2);
+    }
+
+    // =======================================================================
+    // Approval operations
+    // =======================================================================
+
+    #[tokio::test]
+    async fn approval_get_default_is_pending() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        let status = ModelRepository::get_approval(&repo, &conn, &scope, model.id)
+            .await
+            .expect("get approval");
+        assert_eq!(status, crate::ApprovalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn approval_set_updates_status_and_denormalized_column() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Approve
+        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
+            .await
+            .expect("set approval");
+
+        // Verify via get_approval.
+        let status = ModelRepository::get_approval(&repo, &conn, &scope, model.id)
+            .await
+            .expect("get approval");
+        assert_eq!(status, crate::ApprovalStatus::Approved);
+
+        // Verify denormalized column on model read.
+        let found = ModelRepository::find_by_canonical(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("find model");
+        assert_eq!(found.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn approval_set_reject_then_revoke() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Rejected)
+            .await
+            .expect("reject");
+        assert_eq!(
+            ModelRepository::get_approval(&repo, &conn, &scope, model.id)
+                .await
+                .expect("get approval"),
+            crate::ApprovalStatus::Rejected
+        );
+
+        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Revoked)
+            .await
+            .expect("revoke");
+        assert_eq!(
+            ModelRepository::get_approval(&repo, &conn, &scope, model.id)
+                .await
+                .expect("get approval"),
+            crate::ApprovalStatus::Revoked
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_delete_resets_to_pending() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
+            .await
+            .expect("approve");
+
+        ModelRepository::delete_approval(&repo, &conn, &scope, model.id)
+            .await
+            .expect("delete approval");
+
+        assert_eq!(
+            ModelRepository::get_approval(&repo, &conn, &scope, model.id)
+                .await
+                .expect("get approval"),
+            crate::ApprovalStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_cross_tenant_isolation() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_a = test_tenant();
+        let tenant_b = other_tenant();
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope_for(tenant_a), tenant_a, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Tenant b cannot find the model, so approval ops won't succeed on it
+        // (the model doesn't exist in tenant_b's scope).
+        let err = ModelRepository::get_approval(&repo, &conn, &scope_for(tenant_b), model.id)
+            .await
+            .expect_err("should fail for other tenant");
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound for cross-tenant approval, got {err:?}"
+        );
+    }
+
+    // =======================================================================
+    // Model list OData filtering
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_list_filters_by_approval_status() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        let model = ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
+            .await
+            .expect("approve");
+
+        // Create another model with pending status.
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+        )
+        .await
+        .expect("create model");
+
+        // Filter by approval_status eq 'approved'
+        let parsed = toolkit_odata::parse_filter_string("approval_status eq 'approved'")
+            .expect("parse filter");
+        let query = ODataQuery {
+            filter: Some(Box::new(parsed.into_expr())),
+            ..Default::default()
+        };
+        let page = ModelRepository::list(&repo, &conn, &scope, &query)
+            .await
+            .expect("filtered list");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].approval_status,
+            crate::ApprovalStatus::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn model_list_filters_by_gts_type() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Filter by gts_type (denormalized column).
+        let gts_str = "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~";
+        let parsed =
+            toolkit_odata::parse_filter_string(&format!("gts_type eq '{gts_str}'"))
+                .expect("parse filter");
+        let query = ODataQuery {
+            filter: Some(Box::new(parsed.into_expr())),
+            ..Default::default()
+        };
+        let page = ModelRepository::list(&repo, &conn, &scope, &query)
+            .await
+            .expect("filtered list");
+        assert_eq!(page.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn model_list_filters_by_vision_capability() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        ModelRepository::create(
+            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Filter by cap_vision true
+        let parsed = toolkit_odata::parse_filter_string("vision eq true")
+            .expect("parse filter");
+        let query = ODataQuery {
+            filter: Some(Box::new(parsed.into_expr())),
+            ..Default::default()
+        };
+        let page = ModelRepository::list(&repo, &conn, &scope, &query)
+            .await
+            .expect("filtered list");
+        assert_eq!(page.items.len(), 1);
     }
 }
