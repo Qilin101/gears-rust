@@ -632,7 +632,7 @@ async fn child_inherits_provider_and_model_from_parent() {
 
     // Create provider and model in the parent tenant (via direct repo calls
     // to isolate from service-layer cache interactions).
-    let (_provider_id, provider_slug) =
+    let (provider_id, provider_slug) =
         create_provider_direct(&repo, &conn, parent_tenant(), "openai").await;
     create_model_direct(&repo, &conn, parent_tenant(), &provider_slug, "gpt-4o").await;
 
@@ -684,7 +684,7 @@ async fn child_inherits_provider_and_model_from_parent() {
 
     // ── Child can get the inherited provider directly ───────────────────────
     let inherited_provider = service
-        .get_provider(&ctx, _provider_id)
+        .get_provider(&ctx, provider_id)
         .await
         .expect("child get inherited provider");
     assert_eq!(inherited_provider.slug, "openai");
