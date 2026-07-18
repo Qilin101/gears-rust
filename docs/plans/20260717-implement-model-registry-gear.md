@@ -265,10 +265,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/gear.rs`
 
-- [ ] implement `Gear::init` (load config, get `DBProvider`, build repo + cache + service, fetch `tenant-resolver` and `authz-resolver` clients from `ClientHub`, register `LocalClient` as `dyn ModelRegistryClientV1`)
-- [ ] implement `DatabaseCapability::migrations` returning `Migrator::migrations()` and `RestApiCapability::register_rest` calling `routes::register_routes`
-- [ ] write gear tests (default construction, migrations non-empty) mirroring simple-user-settings
-- [ ] run `cargo build`/`clippy` for the crate — must pass before next task
+- [x] implement `Gear::init` (load config, get `DBProvider`, build repo + cache + service, fetch `tenant-resolver` and `authz-resolver` clients from `ClientHub`, register `LocalClient` as `dyn ModelRegistryClientV1`)
+- [x] implement `DatabaseCapability::migrations` returning `Migrator::migrations()` and `RestApiCapability::register_rest` calling `routes::register_routes`
+- [x] write gear tests (default construction, migrations non-empty) mirroring simple-user-settings
+- [x] run `cargo build`/`clippy` for the crate — must pass before next task
 
 ### Task 18: End-to-end gear integration tests
 
