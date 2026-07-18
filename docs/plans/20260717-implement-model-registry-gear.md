@@ -38,7 +38,7 @@ Implement the `model-registry` gear **implementation crate** (`gears/model-regis
 
 - **unit tests**: required for every task — mappers (round-trip JSONB), OData field mapping, cache behavior (TTL/isolation), service logic (inheritance, shadowing, approval resolve, cache-first), error mapping. Follow `#[cfg(test)] mod tests` and `*_test.rs` conventions already in the reference gears.
 - **integration tests**: SeaORM repository tests against SQLite (`toolkit-db` `sqlite` feature; mirror `cargo test -p modkit-db --features "sqlite,integration"` style used elsewhere). Cover providers CRUD, models CRUD, OData list with `$filter`/`$top`/`$skip`, approval read/write, tenant scoping.
-- **e2e**: the repo has Python e2e under `testing/` (`make e2e-local`). New REST endpoints get e2e coverage in the same task that exposes them if the existing harness is exercised for other gears; otherwise integration tests plus manual verification (see Post-Completion).
+- **e2e**: skipped — the repo's e2e framework (`make e2e-local`) is not currently working. Integration tests cover the REST endpoints end-to-end against SQLite.
 - treat integration tests with the same rigor as unit tests (must pass before next task).
 
 ## Progress Tracking
@@ -276,7 +276,6 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/tests/integration.rs`
 
 - [ ] write an integration test booting the gear (or service+repo+cache) against SQLite: provider create → model create → get_tenant_model (cache-first) → list with OData filter → update approval → soft-delete; assert tenant isolation and inheritance across a parent/child tenant pair
-- [ ] add REST-level e2e coverage in `testing/` if the existing Python harness is wired for other gears (otherwise note manual verification in Post-Completion)
 - [ ] run `cargo test -p cf-gears-model-registry --features sqlite -- --nocapture` — must pass before next task
 
 ### Task 19: Verify acceptance criteria
