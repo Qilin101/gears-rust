@@ -248,6 +248,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             }
         }
 
+        // 6. Re-apply pagination limit to the merged result set (ancestors
+        //    were fetched without pagination to enable correct shadowing,
+        //    but the merged set may exceed the caller's requested limit).
+        if let Some(limit) = query.limit {
+            let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+            page.items.truncate(limit_usize);
+        }
+
         Ok(page)
     }
 
@@ -534,6 +542,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             }
         }
 
+        // 6. Re-apply pagination limit to the merged result set (ancestors
+        //    were fetched without pagination to enable correct shadowing,
+        //    but the merged set may exceed the caller's requested limit).
+        if let Some(limit) = query.limit {
+            let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+            page.items.truncate(limit_usize);
+        }
+
         Ok(page)
     }
 
@@ -677,26 +693,28 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // Search own tenant first
         let own_tenant_id = inheritance.tenant_id();
         let own_scope = AccessScope::for_tenants(vec![own_tenant_id]);
-        if self
+        match self
             .provider_repo
             .find_by_slug(conn, &own_scope, slug)
             .await
-            .is_ok()
         {
-            return Ok(own_tenant_id);
+            Ok(_) => return Ok(own_tenant_id),
+            Err(DomainError::ProviderNotFoundBySlug { .. }) => { /* continue searching */ }
+            Err(e) => return Err(e),
         }
 
         // Search ancestor tenants in chain order (closest first)
         for ancestor in &inheritance.ancestors {
             let ancestor_id = ancestor.id.0;
             let ancestor_scope = AccessScope::for_tenants(vec![ancestor_id]);
-            if self
+            match self
                 .provider_repo
                 .find_by_slug(conn, &ancestor_scope, slug)
                 .await
-                .is_ok()
             {
-                return Ok(ancestor_id);
+                Ok(_) => return Ok(ancestor_id),
+                Err(DomainError::ProviderNotFoundBySlug { .. }) => { /* continue */ }
+                Err(e) => return Err(e),
             }
         }
 

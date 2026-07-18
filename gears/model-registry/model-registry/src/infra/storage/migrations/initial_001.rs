@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS models (
     cap_reasoning_effort        {bool_} NOT NULL DEFAULT 0,
     PRIMARY KEY (id),
     UNIQUE (tenant_id, canonical_id),
-    FOREIGN KEY (provider_id) REFERENCES providers(id)
+    FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS model_approvals (

@@ -330,7 +330,9 @@ pub async fn update_model(
             .performance
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| {
-                    CanonicalError::internal(format!("invalid performance: {e}")).create()
+                    ModelRegistryResourceError::invalid_argument()
+                        .with_field_violation("performance", e.to_string(), "INVALID_PERFORMANCE")
+                        .create()
                 })
             })
             .transpose()?,
@@ -338,7 +340,9 @@ pub async fn update_model(
             .capabilities
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| {
-                    CanonicalError::internal(format!("invalid capabilities: {e}")).create()
+                    ModelRegistryResourceError::invalid_argument()
+                        .with_field_violation("capabilities", e.to_string(), "INVALID_CAPABILITIES")
+                        .create()
                 })
             })
             .transpose()?,
@@ -346,7 +350,13 @@ pub async fn update_model(
             .disabled_capabilities
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| {
-                    CanonicalError::internal(format!("invalid disabled_capabilities: {e}")).create()
+                    ModelRegistryResourceError::invalid_argument()
+                        .with_field_violation(
+                            "disabled_capabilities",
+                            e.to_string(),
+                            "INVALID_DISABLED_CAPABILITIES",
+                        )
+                        .create()
                 })
             })
             .transpose()?,
@@ -354,7 +364,13 @@ pub async fn update_model(
             .context_window
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| {
-                    CanonicalError::internal(format!("invalid context_window: {e}")).create()
+                    ModelRegistryResourceError::invalid_argument()
+                        .with_field_violation(
+                            "context_window",
+                            e.to_string(),
+                            "INVALID_CONTEXT_WINDOW",
+                        )
+                        .create()
                 })
             })
             .transpose()?,
@@ -362,7 +378,13 @@ pub async fn update_model(
             .default_parameters
             .map(|v| {
                 serde_json::from_value(v).map_err(|e| {
-                    CanonicalError::internal(format!("invalid default_parameters: {e}")).create()
+                    ModelRegistryResourceError::invalid_argument()
+                        .with_field_violation(
+                            "default_parameters",
+                            e.to_string(),
+                            "INVALID_DEFAULT_PARAMETERS",
+                        )
+                        .create()
                 })
             })
             .transpose()?,
