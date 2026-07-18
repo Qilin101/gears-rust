@@ -18,7 +18,8 @@ fn assert_mapping(err: DomainError, expected_status: u16, expected_gts_prefix: &
     let status = canon.status_code();
     let gts_type = canon.gts_type();
     assert_eq!(
-        status, expected_status,
+        status,
+        expected_status,
         "expected HTTP {expected_status}, got {status} for {}",
         canon.gts_type()
     );
@@ -47,7 +48,10 @@ fn assert_mapping_with_detail(
         "gts_type mismatch"
     );
     assert!(
-        canon.detail().to_lowercase().contains(&expected_detail_substring.to_lowercase()),
+        canon
+            .detail()
+            .to_lowercase()
+            .contains(&expected_detail_substring.to_lowercase()),
         "expected detail containing '{expected_detail_substring}', got '{}'",
         canon.detail()
     );
@@ -173,8 +177,7 @@ fn internal_maps_to_500() {
 #[test]
 fn internal_with_source_maps_to_500() {
     let upstream = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "rst");
-    let canon: CanonicalError =
-        DomainError::internal_from("upstream failed", upstream).into();
+    let canon: CanonicalError = DomainError::internal_from("upstream failed", upstream).into();
     assert_eq!(canon.status_code(), 500);
     assert!(canon.gts_type().contains("internal"));
 }
@@ -182,8 +185,7 @@ fn internal_with_source_maps_to_500() {
 #[test]
 fn database_maps_to_500() {
     use toolkit_db::DbError;
-    let canon: CanonicalError =
-        DomainError::Database(DbError::UnknownDsn("test".into())).into();
+    let canon: CanonicalError = DomainError::Database(DbError::UnknownDsn("test".into())).into();
     assert_eq!(canon.status_code(), 500);
     assert!(canon.gts_type().contains("internal"));
 }
@@ -213,7 +215,8 @@ fn all_error_variants_have_valid_status() {
         let canon: CanonicalError = err.into();
         let status = canon.status_code();
         assert_eq!(
-            status, expected_status,
+            status,
+            expected_status,
             "expected HTTP {expected_status}, got {status} for {}",
             canon.gts_type()
         );

@@ -7,10 +7,10 @@
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
-use toolkit_db::odata::sea_orm_filter::{paginate_odata, LimitCfg};
+use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
-    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt,
-    SecureOnConflict, secure_update_with_scope,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
+    secure_update_with_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
@@ -25,7 +25,9 @@ use crate::{
 
 use super::entity::{self, model, provider};
 use super::mapper;
-use super::odata_mapper::{ModelFilterField, ModelODataMapper, ProviderFilterField, ProviderODataMapper};
+use super::odata_mapper::{
+    ModelFilterField, ModelODataMapper, ProviderFilterField, ProviderODataMapper,
+};
 
 // =============================================================================
 // ScopeError → DomainError
@@ -99,10 +101,7 @@ impl ProviderRepository for SeaOrmRepository {
         let entity = provider::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(provider::Column::Slug.eq(slug)),
-            )
+            .filter(Condition::all().add(provider::Column::Slug.eq(slug)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -156,10 +155,7 @@ impl ProviderRepository for SeaOrmRepository {
         let existing = provider::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(provider::Column::Slug.eq(req.slug())),
-            )
+            .filter(Condition::all().add(provider::Column::Slug.eq(req.slug())))
             .one(conn)
             .await
             .map_err(map_scope_error)?;
@@ -182,10 +178,7 @@ impl ProviderRepository for SeaOrmRepository {
         let entity = provider::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(provider::Column::Slug.eq(req.slug())),
-            )
+            .filter(Condition::all().add(provider::Column::Slug.eq(req.slug())))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -261,10 +254,7 @@ impl ModelRepository for SeaOrmRepository {
         let entity = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::CanonicalId.eq(canonical_id)),
-            )
+            .filter(Condition::all().add(model::Column::CanonicalId.eq(canonical_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -283,35 +273,26 @@ impl ModelRepository for SeaOrmRepository {
         // shows only active, non-deprecated models. If the caller explicitly
         // wants deprecated models, they must add `lifecycle_status eq 'deprecated'`
         // to the OData filter.
-        let base = model::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::LifecycleStatus.ne("deprecated"))
-                    .add(model::Column::LifecycleStatus.ne("sunset")),
-            );
+        let base = model::Entity::find().secure().scope_with(scope).filter(
+            Condition::all()
+                .add(model::Column::LifecycleStatus.ne("deprecated"))
+                .add(model::Column::LifecycleStatus.ne("sunset")),
+        );
 
-        let page = paginate_odata::<
-            ModelFilterField,
-            ModelODataMapper,
-            model::Entity,
-            ModelV1,
-            _,
-            C,
-        >(
-            base,
-            conn,
-            query,
-            ("canonical_id", SortDir::Asc),
-            LimitCfg {
-                default: 20,
-                max: 100,
-            },
-            |m| mapper::model_entity_to_v1(&m),
-        )
-        .await
-        .map_err(|e| DomainError::internal(format!("OData pagination failed: {e}")))?;
+        let page =
+            paginate_odata::<ModelFilterField, ModelODataMapper, model::Entity, ModelV1, _, C>(
+                base,
+                conn,
+                query,
+                ("canonical_id", SortDir::Asc),
+                LimitCfg {
+                    default: 20,
+                    max: 100,
+                },
+                |m| mapper::model_entity_to_v1(&m),
+            )
+            .await
+            .map_err(|e| DomainError::internal(format!("OData pagination failed: {e}")))?;
 
         Ok(page)
     }
@@ -329,10 +310,7 @@ impl ModelRepository for SeaOrmRepository {
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::CanonicalId.eq(&canonical_id)),
-            )
+            .filter(Condition::all().add(model::Column::CanonicalId.eq(&canonical_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?;
@@ -348,10 +326,7 @@ impl ModelRepository for SeaOrmRepository {
         let provider_entity = provider::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(provider::Column::Slug.eq(&req.provider_slug)),
-            )
+            .filter(Condition::all().add(provider::Column::Slug.eq(&req.provider_slug)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -361,7 +336,8 @@ impl ModelRepository for SeaOrmRepository {
             )))?;
 
         let initial_approval = req.approval_status.unwrap_or(ApprovalStatus::Pending);
-        let am = mapper::model_create_active_model(tenant_id, provider_entity.id, req, initial_approval);
+        let am =
+            mapper::model_create_active_model(tenant_id, provider_entity.id, req, initial_approval);
 
         let _ = model::Entity::insert(am.clone())
             .secure()
@@ -375,10 +351,7 @@ impl ModelRepository for SeaOrmRepository {
         let entity = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::CanonicalId.eq(&canonical_id)),
-            )
+            .filter(Condition::all().add(model::Column::CanonicalId.eq(&canonical_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -398,10 +371,7 @@ impl ModelRepository for SeaOrmRepository {
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::CanonicalId.eq(canonical_id)),
-            )
+            .filter(Condition::all().add(model::Column::CanonicalId.eq(canonical_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -430,10 +400,7 @@ impl ModelRepository for SeaOrmRepository {
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::CanonicalId.eq(canonical_id)),
-            )
+            .filter(Condition::all().add(model::Column::CanonicalId.eq(canonical_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -462,10 +429,7 @@ impl ModelRepository for SeaOrmRepository {
         let entity = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::Id.eq(model_id)),
-            )
+            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -488,10 +452,7 @@ impl ModelRepository for SeaOrmRepository {
         let entity = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::Id.eq(model_id)),
-            )
+            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -547,10 +508,7 @@ impl ModelRepository for SeaOrmRepository {
         let entity = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(model::Column::Id.eq(model_id)),
-            )
+            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
             .one(conn)
             .await
             .map_err(map_scope_error)?
@@ -618,7 +576,7 @@ mod tests {
     use crate::CreateProviderRequestV1;
     use sea_orm_migration::MigratorTrait;
     use toolkit_db::migration_runner::run_migrations_for_testing;
-    use toolkit_db::{DbError, DBProvider, connect_db, ConnectOpts};
+    use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 
     use crate::infra::storage::migrations::Migrator;
 
@@ -656,14 +614,12 @@ mod tests {
     }
 
     fn make_create_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
-        let gts =
-            gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
         CreateProviderRequestV1::builder(slug, name, gts).build()
     }
 
     fn make_full_create_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
-        let gts =
-            gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
         CreateProviderRequestV1::builder(slug, name, gts)
             .managed(true)
             .metadata(serde_json::json!({"region": "us-east-1"}))
@@ -686,7 +642,11 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
@@ -728,7 +688,11 @@ mod tests {
         let tenant_b = other_tenant();
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
@@ -758,7 +722,11 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let provider = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
@@ -782,7 +750,11 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let provider = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_full_create_req("anthropic", "Anthropic"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_full_create_req("anthropic", "Anthropic"),
         )
         .await
         .expect("create should succeed");
@@ -808,13 +780,21 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("first create should succeed");
 
         let err = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI Duplicate"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI Duplicate"),
         )
         .await
         .expect_err("duplicate slug should be rejected");
@@ -835,13 +815,21 @@ mod tests {
         let tenant_b = other_tenant();
 
         ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("tenant A create should succeed");
 
         let provider_b = ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_b), tenant_b, &make_create_req("openai", "OpenAI B"),
+            &repo,
+            &conn,
+            &scope_for(tenant_b),
+            tenant_b,
+            &make_create_req("openai", "OpenAI B"),
         )
         .await
         .expect("tenant B create with same slug should succeed");
@@ -864,13 +852,20 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
 
         let updated = ProviderRepository::update(
-            &repo, &conn, &scope, created.id,
+            &repo,
+            &conn,
+            &scope,
+            created.id,
             &UpdateProviderRequestV1 {
                 name: Some("OpenAI Updated".into()),
                 managed: Some(true),
@@ -895,7 +890,10 @@ mod tests {
         let scope = scope_for(test_tenant());
 
         let err = ProviderRepository::update(
-            &repo, &conn, &scope, Uuid::nil(),
+            &repo,
+            &conn,
+            &scope,
+            Uuid::nil(),
             &UpdateProviderRequestV1 {
                 name: Some("N/A".into()),
                 ..Default::default()
@@ -920,14 +918,21 @@ mod tests {
         let tenant_b = other_tenant();
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
 
         // Other tenant should not be able to update.
         let err = ProviderRepository::update(
-            &repo, &conn, &scope_for(tenant_b), created.id,
+            &repo,
+            &conn,
+            &scope_for(tenant_b),
+            created.id,
             &UpdateProviderRequestV1 {
                 name: Some("Hacked".into()),
                 ..Default::default()
@@ -956,7 +961,11 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
@@ -1004,7 +1013,11 @@ mod tests {
         let tenant_b = other_tenant();
 
         let created = ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create should succeed");
@@ -1041,12 +1054,20 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("create openai");
         ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_req("anthropic", "Anthropic"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_req("anthropic", "Anthropic"),
         )
         .await
         .expect("create anthropic");
@@ -1071,15 +1092,20 @@ mod tests {
         let tenant_b = other_tenant();
 
         ProviderRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_req("openai", "OpenAI"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
         )
         .await
         .expect("tenant A create");
 
         // Tenant B should see no providers.
-        let page = ProviderRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
-            .await
-            .expect("list should succeed");
+        let page =
+            ProviderRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
+                .await
+                .expect("list should succeed");
 
         assert!(page.items.is_empty(), "tenant B should see no providers");
     }
@@ -1099,13 +1125,19 @@ mod tests {
             gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.anthropic.v1~");
 
         ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id,
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
             &CreateProviderRequestV1::builder("openai", "OpenAI", gts_openai).build(),
         )
         .await
         .expect("create openai");
         ProviderRepository::create(
-            &repo, &conn, &scope, tenant_id,
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
             &CreateProviderRequestV1::builder("anthropic", "Anthropic", gts_anthropic).build(),
         )
         .await
@@ -1138,7 +1170,10 @@ mod tests {
         // Create 4 providers.
         for i in 0..4 {
             ProviderRepository::create(
-                &repo, &conn, &scope, tenant_id,
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
                 &make_create_req(&format!("provider-{i}"), &format!("Provider {i}")),
             )
             .await
@@ -1179,19 +1214,17 @@ mod tests {
         tenant_id: Uuid,
         slug: &str,
     ) -> (Uuid, String) {
-        let p = ProviderRepository::create(repo, conn, scope, tenant_id, &make_create_req(slug, slug))
-            .await
-            .expect("create test provider");
+        let p =
+            ProviderRepository::create(repo, conn, scope, tenant_id, &make_create_req(slug, slug))
+                .await
+                .expect("create test provider");
         (p.id, p.slug)
     }
 
     /// Helper: create a model for test purposes.
     /// Uses JSON roundtrip for `ModelInfoV1` (which is `#[non_exhaustive]`
     /// in the SDK crate).
-    fn make_create_model_req(
-        provider_slug: &str,
-        provider_model_id: &str,
-    ) -> CreateModelRequestV1 {
+    fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> CreateModelRequestV1 {
         let gts_leaf = "cf.genai._.openai.v1~";
         let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
 
@@ -1424,9 +1457,14 @@ mod tests {
             .expect("create model");
 
         // Other tenant should not see this model.
-        let err = ModelRepository::find_by_canonical(&repo, &conn, &scope_for(tenant_b), "openai::gpt-4o")
-            .await
-            .expect_err("should be not found for other tenant");
+        let err = ModelRepository::find_by_canonical(
+            &repo,
+            &conn,
+            &scope_for(tenant_b),
+            "openai::gpt-4o",
+        )
+        .await
+        .expect_err("should be not found for other tenant");
 
         assert!(
             matches!(&err, DomainError::ModelNotFound { .. }),
@@ -1450,13 +1488,20 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let _created = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
         let updated = ModelRepository::update(
-            &repo, &conn, &scope, "openai::gpt-4o",
+            &repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o",
             &UpdateModelRequestV1 {
                 lifecycle_status: Some(crate::LifecycleStatus::Preview),
                 ..Default::default()
@@ -1479,7 +1524,10 @@ mod tests {
         let scope = scope_for(test_tenant());
 
         let err = ModelRepository::update(
-            &repo, &conn, &scope, "nonexistent::model",
+            &repo,
+            &conn,
+            &scope,
+            "nonexistent::model",
             &UpdateModelRequestV1 {
                 lifecycle_status: Some(crate::LifecycleStatus::Preview),
                 ..Default::default()
@@ -1510,7 +1558,11 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let _created = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1538,7 +1590,11 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1592,12 +1648,20 @@ mod tests {
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
 
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create gpt-4o");
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
         )
         .await
         .expect("create gpt-4o-mini");
@@ -1620,14 +1684,19 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope_for(tenant_a), tenant_a, "openai").await;
         ModelRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        let page = ModelRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
-            .await
-            .expect("list should succeed");
+        let page =
+            ModelRepository::list(&repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
+                .await
+                .expect("list should succeed");
         assert!(page.items.is_empty(), "tenant B should see no models");
     }
 
@@ -1645,7 +1714,10 @@ mod tests {
 
         for i in 0..4 {
             ModelRepository::create(
-                &repo, &conn, &scope, tenant_id,
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
                 &make_create_model_req(&provider_slug, &format!("model-{i}")),
             )
             .await
@@ -1678,7 +1750,11 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1701,15 +1777,25 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
         // Approve
-        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
-            .await
-            .expect("set approval");
+        ModelRepository::set_approval(
+            &repo,
+            &conn,
+            &scope,
+            model.id,
+            crate::ApprovalStatus::Approved,
+        )
+        .await
+        .expect("set approval");
 
         // Verify via get_approval.
         let status = ModelRepository::get_approval(&repo, &conn, &scope, model.id)
@@ -1736,14 +1822,24 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Rejected)
-            .await
-            .expect("reject");
+        ModelRepository::set_approval(
+            &repo,
+            &conn,
+            &scope,
+            model.id,
+            crate::ApprovalStatus::Rejected,
+        )
+        .await
+        .expect("reject");
         assert_eq!(
             ModelRepository::get_approval(&repo, &conn, &scope, model.id)
                 .await
@@ -1751,9 +1847,15 @@ mod tests {
             crate::ApprovalStatus::Rejected
         );
 
-        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Revoked)
-            .await
-            .expect("revoke");
+        ModelRepository::set_approval(
+            &repo,
+            &conn,
+            &scope,
+            model.id,
+            crate::ApprovalStatus::Revoked,
+        )
+        .await
+        .expect("revoke");
         assert_eq!(
             ModelRepository::get_approval(&repo, &conn, &scope, model.id)
                 .await
@@ -1774,14 +1876,24 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
-            .await
-            .expect("approve");
+        ModelRepository::set_approval(
+            &repo,
+            &conn,
+            &scope,
+            model.id,
+            crate::ApprovalStatus::Approved,
+        )
+        .await
+        .expect("approve");
 
         ModelRepository::delete_approval(&repo, &conn, &scope, model.id)
             .await
@@ -1807,7 +1919,11 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope_for(tenant_a), tenant_a, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope_for(tenant_a), tenant_a, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1839,18 +1955,32 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         let model = ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        ModelRepository::set_approval(&repo, &conn, &scope, model.id, crate::ApprovalStatus::Approved)
-            .await
-            .expect("approve");
+        ModelRepository::set_approval(
+            &repo,
+            &conn,
+            &scope,
+            model.id,
+            crate::ApprovalStatus::Approved,
+        )
+        .await
+        .expect("approve");
 
         // Create another model with pending status.
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
         )
         .await
         .expect("create model");
@@ -1884,16 +2014,19 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
         // Filter by gts_type (denormalized column).
         let gts_str = "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~";
-        let parsed =
-            toolkit_odata::parse_filter_string(&format!("gts_type eq '{gts_str}'"))
-                .expect("parse filter");
+        let parsed = toolkit_odata::parse_filter_string(&format!("gts_type eq '{gts_str}'"))
+            .expect("parse filter");
         let query = ODataQuery {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()
@@ -1916,14 +2049,17 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &make_create_model_req(&provider_slug, "gpt-4o"),
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
         )
         .await
         .expect("create model");
 
         // Filter by cap_vision true
-        let parsed = toolkit_odata::parse_filter_string("vision eq true")
-            .expect("parse filter");
+        let parsed = toolkit_odata::parse_filter_string("vision eq true").expect("parse filter");
         let query = ODataQuery {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()

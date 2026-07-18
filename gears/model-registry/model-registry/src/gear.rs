@@ -90,8 +90,7 @@ impl Gear for ModelRegistryGear {
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
         // Register LocalClient as ModelRegistryClientV1 in ClientHub
-        let local_client: Arc<dyn ModelRegistryClientV1> =
-            Arc::new(LocalClient::new(service));
+        let local_client: Arc<dyn ModelRegistryClientV1> = Arc::new(LocalClient::new(service));
         ctx.client_hub().register(local_client);
 
         info!("model-registry gear initialized successfully");

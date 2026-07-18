@@ -144,13 +144,9 @@ impl DomainError {
 impl From<DomainError> for crate::ModelRegistryError {
     fn from(e: DomainError) -> Self {
         match e {
-            DomainError::ModelNotFound { canonical_id } => {
-                Self::model_not_found(canonical_id)
-            }
+            DomainError::ModelNotFound { canonical_id } => Self::model_not_found(canonical_id),
             DomainError::ProviderNotFound { id } => Self::provider_not_found(id),
-            DomainError::ModelDeprecated { canonical_id } => {
-                Self::model_deprecated(canonical_id)
-            }
+            DomainError::ModelDeprecated { canonical_id } => Self::model_deprecated(canonical_id),
             DomainError::ModelNotApproved { canonical_id } => {
                 Self::model_not_approved(canonical_id)
             }
@@ -169,9 +165,10 @@ impl From<EnforcerError> for DomainError {
     fn from(e: EnforcerError) -> Self {
         match e {
             EnforcerError::Denied { deny_reason } => {
-                let msg = deny_reason
-                    .as_ref()
-                    .map_or_else(|| "access denied".to_owned(), |r| format!("access denied: {r:?}"));
+                let msg = deny_reason.as_ref().map_or_else(
+                    || "access denied".to_owned(),
+                    |r| format!("access denied: {r:?}"),
+                );
                 Self::forbidden(msg)
             }
             EnforcerError::EvaluationFailed(err) => {
@@ -286,8 +283,7 @@ mod tests {
 
     #[test]
     fn internal_with_source_converts_to_sdk() {
-        let upstream =
-            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "rst");
+        let upstream = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "rst");
         let domain = DomainError::internal_from("oagw call failed", upstream);
         let sdk: ModelRegistryError = domain.into();
         assert_eq!(sdk.to_string(), "internal error: oagw call failed");
@@ -338,9 +334,6 @@ mod tests {
     #[test]
     fn invalid_transition_display() {
         let err = DomainError::invalid_transition("bad state");
-        assert_eq!(
-            err.to_string(),
-            "invalid state transition: bad state"
-        );
+        assert_eq!(err.to_string(), "invalid state transition: bad state");
     }
 }

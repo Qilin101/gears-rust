@@ -5,7 +5,7 @@
 //! is feature-gated behind `cfg(feature = "redis")`.
 
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,12 +46,7 @@ pub trait CacheService: Send + Sync {
     ///
     /// A `ttl_seconds` of 0 means the entry expires immediately (effectively
     /// a no-op store — the next `get` will always miss).
-    async fn set<T: Serialize + Send + Sync>(
-        &self,
-        key: &str,
-        value: &T,
-        ttl_seconds: u64,
-    );
+    async fn set<T: Serialize + Send + Sync>(&self, key: &str, value: &T, ttl_seconds: u64);
 
     /// Remove a single entry from cache.
     async fn delete(&self, key: &str);
@@ -108,12 +103,7 @@ impl CacheService for InMemoryCache {
         serde_json::from_slice(&entry.data).ok()
     }
 
-    async fn set<T: Serialize + Send + Sync>(
-        &self,
-        key: &str,
-        value: &T,
-        ttl_seconds: u64,
-    ) {
+    async fn set<T: Serialize + Send + Sync>(&self, key: &str, value: &T, ttl_seconds: u64) {
         let Ok(data) = serde_json::to_vec(value) else {
             tracing::warn!("InMemoryCache::set: serialization failed, skipping cache write");
             return;
@@ -156,12 +146,7 @@ impl CacheService for RedisCache {
         unimplemented!("RedisCache not yet implemented")
     }
 
-    async fn set<T: Serialize + Send + Sync>(
-        &self,
-        _key: &str,
-        _value: &T,
-        _ttl_seconds: u64,
-    ) {
+    async fn set<T: Serialize + Send + Sync>(&self, _key: &str, _value: &T, _ttl_seconds: u64) {
         unimplemented!("RedisCache not yet implemented")
     }
 
@@ -202,7 +187,10 @@ mod tests {
     async fn test_cache_key_format() {
         let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let key = cache_key(&tenant_id, "model", "openai::gpt-4");
-        assert_eq!(key, "mr:00000000-0000-0000-0000-000000000001:model:openai::gpt-4");
+        assert_eq!(
+            key,
+            "mr:00000000-0000-0000-0000-000000000001:model:openai::gpt-4"
+        );
     }
 
     #[tokio::test]
@@ -350,9 +338,19 @@ mod tests {
             .await;
 
         // Both instances share the same underlying data
-        assert!(cloned.get::<TestValue>(&cache_key(&t1, "model", "m1")).await.is_some());
+        assert!(
+            cloned
+                .get::<TestValue>(&cache_key(&t1, "model", "m1"))
+                .await
+                .is_some()
+        );
 
         cloned.invalidate_tenant(t1).await;
-        assert!(cache.get::<TestValue>(&cache_key(&t1, "model", "m1")).await.is_none());
+        assert!(
+            cache
+                .get::<TestValue>(&cache_key(&t1, "model", "m1"))
+                .await
+                .is_none()
+        );
     }
 }

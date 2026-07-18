@@ -38,9 +38,7 @@ pub async fn get_provider(
         serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
             CanonicalError::internal(format!("provider serialization: {e}")).create()
         })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("provider DTO conversion: {e}")).create()
-        })?;
+        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
     Ok(Json(dto))
 }
 
@@ -59,9 +57,7 @@ pub async fn list_providers(
             serde_json::from_value(serde_json::to_value(p).map_err(|e| {
                 CanonicalError::internal(format!("provider serialization: {e}")).create()
             })?)
-            .map_err(|e| {
-                CanonicalError::internal(format!("provider DTO conversion: {e}")).create()
-            })
+            .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())
         })
         .collect::<Result<Vec<_>, CanonicalError>>()?;
 
@@ -70,9 +66,8 @@ pub async fn list_providers(
         page_info: super::dto::PageInfoDto {
             next_cursor: page.page_info.next_cursor,
             prev_cursor: page.page_info.prev_cursor,
-            limit: u32::try_from(page.page_info.limit).map_err(|_| {
-                CanonicalError::internal("page limit exceeds u32 range").create()
-            })?,
+            limit: u32::try_from(page.page_info.limit)
+                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
         },
     }))
 }
@@ -108,9 +103,7 @@ pub async fn create_provider(
         serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
             CanonicalError::internal(format!("provider serialization: {e}")).create()
         })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("provider DTO conversion: {e}")).create()
-        })?;
+        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
@@ -148,9 +141,7 @@ pub async fn update_provider(
         serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
             CanonicalError::internal(format!("provider serialization: {e}")).create()
         })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("provider DTO conversion: {e}")).create()
-        })?;
+        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
     Ok(Json(dto))
 }
 
@@ -175,13 +166,11 @@ pub async fn get_model(
     Path(canonical_id): Path<String>,
 ) -> ApiResult<JsonBody<ModelDto>> {
     let model = svc.get_tenant_model(&ctx, &canonical_id).await?;
-    let dto: ModelDto =
-        serde_json::from_value(serde_json::to_value(model).map_err(|e| {
-            CanonicalError::internal(format!("model serialization: {e}")).create()
-        })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("model DTO conversion: {e}")).create()
-        })?;
+    let dto: ModelDto = serde_json::from_value(
+        serde_json::to_value(model)
+            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
+    )
+    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
     Ok(Json(dto))
 }
 
@@ -200,9 +189,7 @@ pub async fn list_models(
             serde_json::from_value(serde_json::to_value(m).map_err(|e| {
                 CanonicalError::internal(format!("model serialization: {e}")).create()
             })?)
-            .map_err(|e| {
-                CanonicalError::internal(format!("model DTO conversion: {e}")).create()
-            })
+            .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())
         })
         .collect::<Result<Vec<_>, CanonicalError>>()?;
 
@@ -211,9 +198,8 @@ pub async fn list_models(
         page_info: super::dto::PageInfoDto {
             next_cursor: page.page_info.next_cursor,
             prev_cursor: page.page_info.prev_cursor,
-            limit: u32::try_from(page.page_info.limit).map_err(|_| {
-                CanonicalError::internal("page limit exceeds u32 range").create()
-            })?,
+            limit: u32::try_from(page.page_info.limit)
+                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
         },
     }))
 }
@@ -225,18 +211,16 @@ pub async fn create_model(
     Json(dto): Json<CreateModelRequestDto>,
 ) -> ApiResult<(StatusCode, JsonBody<ModelDto>)> {
     // Parse lifecycle status string to SDK enum
-    let lifecycle_status = serde_json::from_value(serde_json::Value::String(
-        dto.lifecycle_status,
-    ))
-    .map_err(|e| {
-        ModelRegistryResourceError::invalid_argument()
-            .with_field_violation(
-                "lifecycle_status",
-                e.to_string(),
-                "INVALID_LIFECYCLE_STATUS",
-            )
-            .create()
-    })?;
+    let lifecycle_status = serde_json::from_value(serde_json::Value::String(dto.lifecycle_status))
+        .map_err(|e| {
+            ModelRegistryResourceError::invalid_argument()
+                .with_field_violation(
+                    "lifecycle_status",
+                    e.to_string(),
+                    "INVALID_LIFECYCLE_STATUS",
+                )
+                .create()
+        })?;
 
     // Parse approval status (optional)
     let approval_status = match dto.approval_status {
@@ -272,13 +256,11 @@ pub async fn create_model(
     };
 
     let model = svc.create_model(&ctx, &req).await?;
-    let dto: ModelDto =
-        serde_json::from_value(serde_json::to_value(model).map_err(|e| {
-            CanonicalError::internal(format!("model serialization: {e}")).create()
-        })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("model DTO conversion: {e}")).create()
-        })?;
+    let dto: ModelDto = serde_json::from_value(
+        serde_json::to_value(model)
+            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
+    )
+    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
@@ -363,13 +345,11 @@ pub async fn update_model(
     };
 
     let model = svc.update_model(&ctx, &canonical_id, &sdk_req).await?;
-    let dto: ModelDto =
-        serde_json::from_value(serde_json::to_value(model).map_err(|e| {
-            CanonicalError::internal(format!("model serialization: {e}")).create()
-        })?)
-        .map_err(|e| {
-            CanonicalError::internal(format!("model DTO conversion: {e}")).create()
-        })?;
+    let dto: ModelDto = serde_json::from_value(
+        serde_json::to_value(model)
+            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
+    )
+    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
     Ok(Json(dto))
 }
 

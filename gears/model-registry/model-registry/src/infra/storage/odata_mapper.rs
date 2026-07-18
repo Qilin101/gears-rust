@@ -175,9 +175,7 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
             ModelFilterField::Vision => sea_orm::Value::Bool(Some(m.cap_vision)),
             ModelFilterField::FunctionCalling => sea_orm::Value::Bool(Some(m.cap_function_calling)),
             ModelFilterField::Streaming => sea_orm::Value::Bool(Some(m.cap_streaming)),
-            ModelFilterField::ReasoningEffort => {
-                sea_orm::Value::Bool(Some(m.cap_reasoning_effort))
-            }
+            ModelFilterField::ReasoningEffort => sea_orm::Value::Bool(Some(m.cap_reasoning_effort)),
         }
     }
 }
@@ -254,15 +252,9 @@ impl ODataFieldMapping<ProviderFilterField> for ProviderODataMapper {
         field: ProviderFilterField,
     ) -> sea_orm::Value {
         match field {
-            ProviderFilterField::Slug => {
-                sea_orm::Value::String(Some(Box::new(m.slug.clone())))
-            }
-            ProviderFilterField::Name => {
-                sea_orm::Value::String(Some(Box::new(m.name.clone())))
-            }
-            ProviderFilterField::Status => {
-                sea_orm::Value::String(Some(Box::new(m.status.clone())))
-            }
+            ProviderFilterField::Slug => sea_orm::Value::String(Some(Box::new(m.slug.clone()))),
+            ProviderFilterField::Name => sea_orm::Value::String(Some(Box::new(m.name.clone()))),
+            ProviderFilterField::Status => sea_orm::Value::String(Some(Box::new(m.status.clone()))),
             ProviderFilterField::GtsType => {
                 sea_orm::Value::String(Some(Box::new(m.gts_type.clone())))
             }
@@ -308,9 +300,14 @@ mod tests {
     #[test]
     fn model_field_names_match_expected() {
         let expected = expected_model_field_names();
-        let actual: Vec<&str> =
-            ModelFilterField::FIELDS.iter().map(FilterField::name).collect();
-        assert_eq!(actual, expected, "model filter field names must match the API contract");
+        let actual: Vec<&str> = ModelFilterField::FIELDS
+            .iter()
+            .map(FilterField::name)
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "model filter field names must match the API contract"
+        );
     }
 
     #[test]
@@ -322,10 +319,18 @@ mod tests {
                 | ModelFilterField::FunctionCalling
                 | ModelFilterField::Streaming
                 | ModelFilterField::ReasoningEffort => {
-                    assert_eq!(field.kind(), FieldKind::Bool, "field {field:?} should be Bool");
+                    assert_eq!(
+                        field.kind(),
+                        FieldKind::Bool,
+                        "field {field:?} should be Bool"
+                    );
                 }
                 _ => {
-                    assert_eq!(field.kind(), FieldKind::String, "field {field:?} should be String");
+                    assert_eq!(
+                        field.kind(),
+                        FieldKind::String,
+                        "field {field:?} should be String"
+                    );
                 }
             }
         }
@@ -336,7 +341,11 @@ mod tests {
         use sea_orm::Iden;
         fn assert_col(f: ModelFilterField, expected: &str) {
             let actual = ModelODataMapper::map_field(f);
-            assert_eq!(actual.to_string(), expected, "field {f:?} should map to column {expected}");
+            assert_eq!(
+                actual.to_string(),
+                expected,
+                "field {f:?} should map to column {expected}"
+            );
         }
 
         assert_col(ModelFilterField::CanonicalId, "canonical_id");
@@ -408,7 +417,10 @@ mod tests {
         // `OData` layer maps to real columns, not JSONB paths
         assert_eq!(ModelFilterField::from_name("info.gts_type"), None);
         assert_eq!(ModelFilterField::from_name("info.supported_api"), None);
-        assert_eq!(ModelFilterField::from_name("info.capabilities.vision"), None);
+        assert_eq!(
+            ModelFilterField::from_name("info.capabilities.vision"),
+            None
+        );
         assert_eq!(ModelFilterField::from_name("info.vendor"), None);
     }
 
@@ -512,10 +524,17 @@ mod tests {
     #[test]
     fn provider_field_names_match_expected() {
         let expected: Vec<&str> = vec![
-            "slug", "name", "status", "gts_type", "managed", "discovery_enabled",
+            "slug",
+            "name",
+            "status",
+            "gts_type",
+            "managed",
+            "discovery_enabled",
         ];
-        let actual: Vec<&str> =
-            ProviderFilterField::FIELDS.iter().map(FilterField::name).collect();
+        let actual: Vec<&str> = ProviderFilterField::FIELDS
+            .iter()
+            .map(FilterField::name)
+            .collect();
         assert_eq!(
             actual, expected,
             "provider filter field names must match the API contract"
@@ -579,7 +598,10 @@ mod tests {
     #[test]
     fn provider_rejects_non_allowlisted_fields() {
         assert_eq!(ProviderFilterField::from_name("metadata"), None);
-        assert_eq!(ProviderFilterField::from_name("discovery_interval_seconds"), None);
+        assert_eq!(
+            ProviderFilterField::from_name("discovery_interval_seconds"),
+            None
+        );
         assert_eq!(ProviderFilterField::from_name("unknown_field"), None);
     }
 

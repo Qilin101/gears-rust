@@ -11,8 +11,8 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use super::repo::{ModelRepository, ProviderRepository};
 use super::cache::CacheService;
+use super::repo::{ModelRepository, ProviderRepository};
 use super::service::Service;
 use crate::{
     CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryClientV1, ModelRegistryError,
@@ -107,10 +107,7 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync, C: C
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<ProviderV1, ModelRegistryError> {
-        self.service
-            .get_provider(ctx, id)
-            .await
-            .map_err(Into::into)
+        self.service.get_provider(ctx, id).await.map_err(Into::into)
     }
 
     async fn list_providers(
@@ -174,12 +171,11 @@ mod tests {
 
     use super::*;
     use crate::domain::cache::InMemoryCache;
-    use crate::domain::repo::{ModelRepository, ProviderRepository};
     use crate::domain::error::DomainError;
+    use crate::domain::repo::{ModelRepository, ProviderRepository};
     use crate::{
-        ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1,
-        ModelRegistryError, ModelV1, ProviderV1, UpdateModelRequestV1,
-        UpdateProviderRequestV1,
+        ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryError, ModelV1,
+        ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
     };
     use toolkit_db::ConnectOpts;
 
@@ -353,8 +349,10 @@ mod tests {
             _: &SecurityContext,
             _: tenant_resolver_sdk::TenantId,
             _: &tenant_resolver_sdk::GetAncestorsOptions,
-        ) -> Result<tenant_resolver_sdk::GetAncestorsResponse, tenant_resolver_sdk::TenantResolverError>
-        {
+        ) -> Result<
+            tenant_resolver_sdk::GetAncestorsResponse,
+            tenant_resolver_sdk::TenantResolverError,
+        > {
             Ok(tenant_resolver_sdk::GetAncestorsResponse {
                 tenant: tenant_resolver_sdk::TenantRef {
                     id: tenant_resolver_sdk::TenantId(Uuid::nil()),
@@ -371,8 +369,10 @@ mod tests {
             _: &SecurityContext,
             _: tenant_resolver_sdk::TenantId,
             _: &tenant_resolver_sdk::GetDescendantsOptions,
-        ) -> Result<tenant_resolver_sdk::GetDescendantsResponse, tenant_resolver_sdk::TenantResolverError>
-        {
+        ) -> Result<
+            tenant_resolver_sdk::GetDescendantsResponse,
+            tenant_resolver_sdk::TenantResolverError,
+        > {
             unimplemented!()
         }
         async fn is_ancestor(
@@ -437,26 +437,17 @@ mod tests {
     fn test_domain_error_to_sdk_error_mapping() {
         // All 10 variants (Database maps to Internal, so 11 total).
         let cases: Vec<(DomainError, &str)> = vec![
-            (
-                DomainError::model_not_found("m1"),
-                "model not found: m1",
-            ),
+            (DomainError::model_not_found("m1"), "model not found: m1"),
             (
                 DomainError::provider_not_found(Uuid::nil()),
                 "provider not found: 00000000-0000-0000-0000-000000000000",
             ),
-            (
-                DomainError::model_deprecated("m1"),
-                "model deprecated: m1",
-            ),
+            (DomainError::model_deprecated("m1"), "model deprecated: m1"),
             (
                 DomainError::model_not_approved("m1"),
                 "model not approved for tenant: m1",
             ),
-            (
-                DomainError::forbidden("no access"),
-                "forbidden: no access",
-            ),
+            (DomainError::forbidden("no access"), "forbidden: no access"),
             (
                 DomainError::provider_disabled(Uuid::nil()),
                 "provider disabled: 00000000-0000-0000-0000-000000000000",
@@ -473,10 +464,7 @@ mod tests {
                 DomainError::validation("invalid"),
                 "validation error: invalid",
             ),
-            (
-                DomainError::internal("oops"),
-                "internal error: oops",
-            ),
+            (DomainError::internal("oops"), "internal error: oops"),
         ];
 
         for (domain, expected_msg) in cases {
@@ -499,15 +487,12 @@ mod tests {
     #[tokio::test]
     async fn test_local_client_construction() {
         // We need a PolicyEnforcer — use the permissive mock.
-        let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(
-            Arc::new(MockPermissiveAuthZ),
-        );
+        let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockPermissiveAuthZ));
 
         let raw_db = toolkit_db::connect_db("sqlite::memory:", ConnectOpts::default())
             .await
             .expect("in-memory SQLite");
-        let db: toolkit_db::DBProvider<toolkit_db::DbError> =
-            toolkit_db::DBProvider::new(raw_db);
+        let db: toolkit_db::DBProvider<toolkit_db::DbError> = toolkit_db::DBProvider::new(raw_db);
 
         let service = Arc::new(crate::domain::service::Service::new(
             Arc::new(db),

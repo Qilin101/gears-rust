@@ -22,17 +22,15 @@ use authz_resolver_sdk::pep::{PolicyEnforcer, ResourceType};
 use tenant_resolver_sdk::TenantResolverClient;
 use toolkit_db::DBProvider;
 use toolkit_odata::{ODataQuery, Page};
-use toolkit_security::{pep_properties, AccessScope, SecurityContext};
+use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
-use super::cache::{cache_key, CacheService};
+use super::cache::{CacheService, cache_key};
 use super::error::DomainError;
-use super::inheritance::{resolve_ancestors, cache_ttl_seconds, Ownership};
+use super::inheritance::{Ownership, cache_ttl_seconds, resolve_ancestors};
 use super::repo::{ModelRepository, ProviderRepository};
 use crate::config::ModelRegistryConfig;
-use crate::{
-    CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1,
-};
+use crate::{CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1};
 
 // ---------------------------------------------------------------------------
 // Authorization resource type constants
@@ -160,11 +158,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET)
             .await?;
 
-        match self
-            .provider_repo
-            .find_by_id(&conn, &own_scope, id)
-            .await
-        {
+        match self.provider_repo.find_by_id(&conn, &own_scope, id).await {
             Ok(provider) => {
                 let key = cache_key(&own_tenant_id, "provider", &id.to_string());
                 let ttl = cache_ttl_seconds(Ownership::Own, &self.config);
@@ -221,10 +215,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let own_scope = self
             .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
             .await?;
-        let mut page = self
-            .provider_repo
-            .list(&conn, &own_scope, &query)
-            .await?;
+        let mut page = self.provider_repo.list(&conn, &own_scope, &query).await?;
 
         // 4. Get all providers from each ancestor
         let mut ancestor_providers: Vec<ProviderV1> = Vec::new();
@@ -306,10 +297,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let scope = self
             .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
             .await?;
-        let provider = self
-            .provider_repo
-            .update(&conn, &scope, id, req)
-            .await?;
+        let provider = self.provider_repo.update(&conn, &scope, id, req).await?;
 
         // 3. Invalidate cache
         let tenant_id = ctx.subject_tenant_id();
@@ -389,7 +377,6 @@ impl<R, M, C> Service<R, M, C> {
         }
         Ok(())
     }
-
 }
 
 // ── Model read operations (Task 12) ────────────────────────────────────
@@ -505,10 +492,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let own_scope = self
             .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
             .await?;
-        let mut page = self
-            .model_repo
-            .list(&conn, &own_scope, &query)
-            .await?;
+        let mut page = self.model_repo.list(&conn, &own_scope, &query).await?;
 
         // 4. Get all models from each ancestor
         let mut ancestor_models: Vec<crate::ModelV1> = Vec::new();
@@ -611,10 +595,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
         // 3. Validate lifecycle state transitions
         if let Some(new_lifecycle) = &req.lifecycle_status {
-            Self::validate_lifecycle_transition(
-                existing.lifecycle_status,
-                *new_lifecycle,
-            )?;
+            Self::validate_lifecycle_transition(existing.lifecycle_status, *new_lifecycle)?;
         }
 
         // 4. If approval_status is being changed, write to model_approvals
@@ -728,7 +709,7 @@ mod tests {
         TenantResolverError, TenantStatus,
     };
     use toolkit_db::migration_runner::run_migrations_for_testing;
-    use toolkit_db::{connect_db, ConnectOpts, DbError, DBProvider};
+    use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
     use toolkit_odata::ODataQuery;
     use toolkit_security::{AccessScope, SecurityContext};
     use uuid::Uuid;
@@ -954,8 +935,7 @@ mod tests {
     }
 
     fn make_create_req(slug: &str, name: &str) -> crate::CreateProviderRequestV1 {
-        let gts =
-            gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
         crate::CreateProviderRequestV1::builder(slug, name, gts).build()
     }
 
@@ -1070,7 +1050,11 @@ mod tests {
         slug: &str,
     ) -> (Uuid, String) {
         let p = crate::domain::repo::ProviderRepository::create(
-            repo, conn, scope, tenant_id, &make_create_req(slug, slug),
+            repo,
+            conn,
+            scope,
+            tenant_id,
+            &make_create_req(slug, slug),
         )
         .await
         .expect("create test provider");
@@ -1180,7 +1164,8 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        let model = create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        let model =
+            create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Pre-populate cache.
         let cache = InMemoryCache::new();
@@ -1189,9 +1174,17 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(result.is_ok(), "cache hit should succeed, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "cache hit should succeed, got: {:?}",
+            result.err()
+        );
 
         let found = result.unwrap();
         assert_eq!(found.canonical_id, "openai::gpt-4o");
@@ -1213,14 +1206,28 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        let _model = create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        let _model =
+            create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
-        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(result.is_ok(), "cache miss + DB populate should succeed, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "cache miss + DB populate should succeed, got: {:?}",
+            result.err()
+        );
 
         let found = result.unwrap();
         assert_eq!(found.canonical_id, "openai::gpt-4o");
@@ -1241,7 +1248,11 @@ mod tests {
         let db = setup_db().await;
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
         let err = service
             .get_tenant_model(&ctx, "nonexistent::model")
             .await
@@ -1270,15 +1281,17 @@ mod tests {
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Soft-delete the model.
-        crate::domain::repo::ModelRepository::soft_delete(
-            &repo, &conn, &scope, "openai::gpt-4o",
-        )
-        .await
-        .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let err = service
             .get_tenant_model(&ctx, "openai::gpt-4o")
             .await
@@ -1360,9 +1373,18 @@ mod tests {
         let key = cache_key(&tenant_id, "model", "openai::gpt-4o-old");
         cache.set(&key, &deprecated_model, 1800).await;
 
-        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache);
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache,
+        );
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let err = service
             .get_tenant_model(&ctx, "openai::gpt-4o-old")
             .await
@@ -1392,17 +1414,24 @@ mod tests {
         // Create model with initial approved status
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Pending);
-        let _model = crate::domain::repo::ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &req,
-        )
-        .await
-        .expect("create model with pending approval");
+        let _model =
+            crate::domain::repo::ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+                .await
+                .expect("create model with pending approval");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(result.is_ok(), "pending model should be returned, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "pending model should be returned, got: {:?}",
+            result.err()
+        );
 
         let found = result.unwrap();
         // Approval status should be populated (not fail-closed).
@@ -1422,17 +1451,24 @@ mod tests {
 
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        let _model = crate::domain::repo::ModelRepository::create(
-            &repo, &conn, &scope, tenant_id, &req,
-        )
-        .await
-        .expect("create model with approved status");
+        let _model =
+            crate::domain::repo::ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+                .await
+                .expect("create model with approved status");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(result.is_ok(), "approved model should be returned, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "approved model should be returned, got: {:?}",
+            result.err()
+        );
 
         let found = result.unwrap();
         assert_eq!(found.approval_status, crate::ApprovalStatus::Approved);
@@ -1455,7 +1491,15 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(&repo, &conn, &parent_scope, parent_tid, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         // Child tenant should inherit parent's model.
         let config = ModelRegistryConfig {
@@ -1465,9 +1509,17 @@ mod tests {
         };
         let service = build_service(db, TwoAncestorsResolver, config);
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(child_tid).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
         let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(result.is_ok(), "inherited model should be found, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "inherited model should be found, got: {:?}",
+            result.err()
+        );
 
         let found = result.unwrap();
         assert_eq!(found.canonical_id, "openai::gpt-4o");
@@ -1488,11 +1540,23 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o-mini").await;
+        create_test_model(
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o-mini",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let page = service
             .list_tenant_models(&ctx, ODataQuery::default())
             .await
@@ -1519,18 +1583,33 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o-mini").await;
+        create_test_model(
+            &repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o-mini",
+        )
+        .await;
 
         // Soft-delete gpt-4o-mini
         crate::domain::repo::ModelRepository::soft_delete(
-            &repo, &conn, &scope, "openai::gpt-4o-mini",
+            &repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o-mini",
         )
         .await
         .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let page = service
             .list_tenant_models(&ctx, ODataQuery::default())
             .await
@@ -1557,11 +1636,23 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
             create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(&repo, &conn, &parent_scope, parent_tid, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(child_tid).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
         let page = service
             .list_tenant_models(&ctx, ODataQuery::default())
             .await
@@ -1594,12 +1685,32 @@ mod tests {
             create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
 
         // Create model with same canonical_id in both tenants.
-        create_test_model(&repo, &conn, &child_scope, child_tid, &child_provider_slug, "gpt-4o").await;
-        create_test_model(&repo, &conn, &parent_scope, parent_tid, &parent_provider_slug, "gpt-4o").await;
+        create_test_model(
+            &repo,
+            &conn,
+            &child_scope,
+            child_tid,
+            &child_provider_slug,
+            "gpt-4o",
+        )
+        .await;
+        create_test_model(
+            &repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(child_tid).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
         let page = service
             .list_tenant_models(&ctx, ODataQuery::default())
             .await
@@ -1628,14 +1739,23 @@ mod tests {
         // Create 3 models
         for i in 0..3 {
             create_test_model(
-                &repo, &conn, &scope, tenant_id, &provider_slug, &format!("model-{i}"),
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
+                &provider_slug,
+                &format!("model-{i}"),
             )
             .await;
         }
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let query = ODataQuery {
             limit: Some(2),
             ..Default::default()
@@ -1669,7 +1789,11 @@ mod tests {
         // Tenant B should see no models (no ancestors relationship).
         let service_a = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx_b = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_b).build().expect("ctx");
+        let ctx_b = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_b)
+            .build()
+            .expect("ctx");
         let page = service_a
             .list_tenant_models(&ctx_b, ODataQuery::default())
             .await
@@ -1701,7 +1825,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx_b = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_b).build().expect("ctx");
+        let ctx_b = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_b)
+            .build()
+            .expect("ctx");
         let err = service
             .get_tenant_model(&ctx_b, "openai::gpt-4o")
             .await
@@ -1731,8 +1859,15 @@ mod tests {
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
         let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
-        let model = service.create_model(&ctx, &req).await.expect("create model");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let model = service
+            .create_model(&ctx, &req)
+            .await
+            .expect("create model");
 
         assert_eq!(model.canonical_id, "openai::gpt-4o");
         assert_eq!(model.lifecycle_status, crate::LifecycleStatus::Production);
@@ -1754,8 +1889,15 @@ mod tests {
 
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
-        let model = service.create_model(&ctx, &req).await.expect("create model");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let model = service
+            .create_model(&ctx, &req)
+            .await
+            .expect("create model");
 
         assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
     }
@@ -1778,8 +1920,15 @@ mod tests {
 
         // Child tenant should be able to create a model referencing the parent's provider.
         let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(child_tid).build().expect("ctx");
-        let model = service.create_model(&ctx, &req).await.expect("create model with inherited provider");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let model = service
+            .create_model(&ctx, &req)
+            .await
+            .expect("create model with inherited provider");
 
         assert_eq!(model.canonical_id, "openai::gpt-4o");
         assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
@@ -1792,7 +1941,11 @@ mod tests {
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
         let req = make_create_model_req("nonexistent", "gpt-4o");
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
         let err = service
             .create_model(&ctx, &req)
             .await
@@ -1872,17 +2025,35 @@ mod tests {
         let stale_key = cache_key(&tenant_id, "model", "stale-key");
         cache.set(&stale_key, &stale_model, 1800).await;
 
-        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
 
         // The stale key should still be in cache before create.
-        assert!(cache.get::<crate::ModelV1>(&stale_key).await.is_some(), "stale entry should be present before create");
+        assert!(
+            cache.get::<crate::ModelV1>(&stale_key).await.is_some(),
+            "stale entry should be present before create"
+        );
 
         let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
-        let _model = service.create_model(&ctx, &req).await.expect("create model");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let _model = service
+            .create_model(&ctx, &req)
+            .await
+            .expect("create model");
 
         // After create, all tenant entries should be invalidated (including the stale key).
-        assert!(cache.get::<crate::ModelV1>(&stale_key).await.is_none(), "stale entry should be invalidated after create");
+        assert!(
+            cache.get::<crate::ModelV1>(&stale_key).await.is_none(),
+            "stale entry should be invalidated after create"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1903,7 +2074,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let updated = service
             .update_model(
                 &ctx,
@@ -1934,7 +2109,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
 
         // Approve
         let updated = service
@@ -1993,7 +2172,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let updated = service
             .update_model(
                 &ctx,
@@ -2017,7 +2200,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
         let err = service
             .update_model(
                 &ctx,
@@ -2049,15 +2236,17 @@ mod tests {
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Soft-delete (deprecate) the model manually via the repo.
-        crate::domain::repo::ModelRepository::soft_delete(
-            &repo, &conn, &scope, "openai::gpt-4o",
-        )
-        .await
-        .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let err = service
             .update_model(
                 &ctx,
@@ -2089,21 +2278,37 @@ mod tests {
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
-        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
 
         // Pre-populate cache with the model
         let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
         let _model_ref = service
             .get_tenant_model(
-                &SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx"),
+                &SecurityContext::builder()
+                    .subject_id(Uuid::new_v4())
+                    .subject_tenant_id(tenant_id)
+                    .build()
+                    .expect("ctx"),
                 "openai::gpt-4o",
             )
             .await
             .expect("get model to populate cache");
-        assert!(cache.get::<crate::ModelV1>(&key).await.is_some(), "model should be cached");
+        assert!(
+            cache.get::<crate::ModelV1>(&key).await.is_some(),
+            "model should be cached"
+        );
 
         // Update the model
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let _updated = service
             .update_model(
                 &ctx,
@@ -2117,7 +2322,10 @@ mod tests {
             .expect("update model");
 
         // Cache should be invalidated
-        assert!(cache.get::<crate::ModelV1>(&key).await.is_none(), "cache should be invalidated after update");
+        assert!(
+            cache.get::<crate::ModelV1>(&key).await.is_none(),
+            "cache should be invalidated after update"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2138,7 +2346,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         service
             .delete_model(&ctx, "openai::gpt-4o")
             .await
@@ -2162,7 +2374,11 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
         let err = service
             .delete_model(&ctx, "nonexistent::model")
             .await
@@ -2187,17 +2403,29 @@ mod tests {
         create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
-        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
 
         // Pre-populate cache with the model via get
-        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
         let _model_ref = service
             .get_tenant_model(&ctx, "openai::gpt-4o")
             .await
             .expect("get model to populate cache");
 
         let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        assert!(cache.get::<crate::ModelV1>(&key).await.is_some(), "model should be cached before delete");
+        assert!(
+            cache.get::<crate::ModelV1>(&key).await.is_some(),
+            "model should be cached before delete"
+        );
 
         // Delete the model
         service
@@ -2206,6 +2434,9 @@ mod tests {
             .expect("delete model");
 
         // Cache should be invalidated
-        assert!(cache.get::<crate::ModelV1>(&key).await.is_none(), "cache should be invalidated after delete");
+        assert!(
+            cache.get::<crate::ModelV1>(&key).await.is_none(),
+            "cache should be invalidated after delete"
+        );
     }
 }

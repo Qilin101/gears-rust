@@ -3,7 +3,7 @@
 //! Each [`DomainError`] variant maps to a canonical error category with the
 //! appropriate HTTP status code per the Technical Details in the plan.
 
-use toolkit_canonical_errors::{resource_error, CanonicalError};
+use toolkit_canonical_errors::{CanonicalError, resource_error};
 
 use crate::domain::error::DomainError;
 
@@ -70,11 +70,9 @@ impl From<DomainError> for CanonicalError {
             }
 
             // ── 422 Invalid Argument ───────────────────────────────────
-            DomainError::Validation { message } => {
-                ModelRegistryResourceError::invalid_argument()
-                    .with_format(message)
-                    .create()
-            }
+            DomainError::Validation { message } => ModelRegistryResourceError::invalid_argument()
+                .with_format(message)
+                .create(),
 
             // ── 500 Internal ───────────────────────────────────────────
             DomainError::Internal { detail, source } => {

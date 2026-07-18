@@ -86,10 +86,9 @@ pub fn provider_create_active_model(
         managed: Set(req.managed()),
         metadata: Set(req.metadata().cloned()),
         discovery_enabled: Set(req.discovery_enabled()),
-        discovery_interval_seconds: Set(
-            req.discovery_interval_seconds()
-                .map(|v| i32::try_from(v).unwrap_or(i32::MAX)),
-        ),
+        discovery_interval_seconds: Set(req
+            .discovery_interval_seconds()
+            .map(|v| i32::try_from(v).unwrap_or(i32::MAX))),
         created_at: Set(chrono::Utc::now()),
         updated_at: Set(chrono::Utc::now()),
     }
@@ -122,7 +121,8 @@ pub fn provider_update_active_model(
         active.discovery_enabled = Set(discovery_enabled);
     }
     if let Some(interval) = req.discovery_interval_seconds {
-        active.discovery_interval_seconds = Set(interval.map(|v| i32::try_from(v).unwrap_or(i32::MAX)));
+        active.discovery_interval_seconds =
+            Set(interval.map(|v| i32::try_from(v).unwrap_or(i32::MAX)));
     }
 
     active.updated_at = Set(chrono::Utc::now());

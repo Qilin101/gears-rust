@@ -19,8 +19,8 @@ use tenant_resolver_sdk::{
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::config::ModelRegistryConfig;
 use super::error::DomainError;
+use crate::config::ModelRegistryConfig;
 
 // ---------------------------------------------------------------------------
 // Ownership
@@ -161,9 +161,7 @@ impl InheritanceContext {
         // Index items by chain position, filter out tenants not in chain.
         let mut indexed: Vec<(usize, Uuid, T)> = items
             .into_iter()
-            .filter_map(|(tid, item)| {
-                pos_in_chain.get(&tid).map(|&pos| (pos, tid, item))
-            })
+            .filter_map(|(tid, item)| pos_in_chain.get(&tid).map(|&pos| (pos, tid, item)))
             .collect();
 
         // Sort by chain position: closest tenant first.
@@ -217,9 +215,7 @@ pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
             },
         )
         .await
-        .map_err(|e| {
-            DomainError::internal_from("tenant-resolver ancestors call failed", e)
-        })?;
+        .map_err(|e| DomainError::internal_from("tenant-resolver ancestors call failed", e))?;
 
     Ok(InheritanceContext::new(tenant_id, response.ancestors))
 }
@@ -250,9 +246,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use tenant_resolver_sdk::{
-        GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse,
-        GetTenantsOptions, IsAncestorOptions, TenantInfo, TenantResolverError,
-        TenantStatus,
+        GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse, GetTenantsOptions,
+        IsAncestorOptions, TenantInfo, TenantResolverError, TenantStatus,
     };
 
     // ── Mock TenantResolverClient ─────────────────────────────────────────
@@ -445,10 +440,7 @@ mod tests {
     #[test]
     fn test_additive_visibility_own_only() {
         let ctx = InheritanceContext::new(child_id(), make_ancestors());
-        let items = vec![
-            (child_id(), "openai"),
-            (child_id(), "anthropic"),
-        ];
+        let items = vec![(child_id(), "openai"), (child_id(), "anthropic")];
         let result = ctx.apply_additive_visibility(items, |s| *s);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].1, "openai");
@@ -653,9 +645,7 @@ mod tests {
             _id: TenantId,
             _options: &GetAncestorsOptions,
         ) -> Result<GetAncestorsResponse, TenantResolverError> {
-            Err(TenantResolverError::Internal(
-                "resolver unavailable".into(),
-            ))
+            Err(TenantResolverError::Internal("resolver unavailable".into()))
         }
 
         async fn get_descendants(
@@ -692,10 +682,7 @@ mod tests {
         // The source chain should include the original resolver error.
         match &err {
             DomainError::Internal { source, .. } => {
-                let source_msg = source
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
+                let source_msg = source.as_ref().map(ToString::to_string).unwrap_or_default();
                 assert!(
                     source_msg.contains("resolver unavailable"),
                     "expected source to mention 'resolver unavailable', got: {source_msg}"

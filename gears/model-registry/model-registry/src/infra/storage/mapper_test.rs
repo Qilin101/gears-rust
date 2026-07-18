@@ -200,7 +200,8 @@ fn provider_entity_to_v1_disabled() {
 
 #[test]
 fn provider_entity_to_v1_no_metadata() {
-    let mut entity = make_provider_entity(test_provider_id(), test_tenant_id(), "no-meta", "active");
+    let mut entity =
+        make_provider_entity(test_provider_id(), test_tenant_id(), "no-meta", "active");
     entity.metadata = None;
     let v1 = provider_entity_to_v1(&entity);
 

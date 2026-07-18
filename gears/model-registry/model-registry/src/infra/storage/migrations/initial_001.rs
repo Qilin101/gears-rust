@@ -11,9 +11,17 @@ impl MigrationTrait for Migration {
         let conn = manager.get_connection();
 
         let (uuid, bool_, tstz, jsonb_nullable, tstz_nullable) = match backend {
-            sea_orm::DatabaseBackend::Postgres => ("UUID", "BOOLEAN", "TIMESTAMPTZ", "JSONB", "TIMESTAMPTZ"),
-            sea_orm::DatabaseBackend::MySql => ("VARCHAR(36)", "BOOLEAN", "DATETIME(6)", "JSON", "DATETIME(6)"),
-            sea_orm::DatabaseBackend::Sqlite => ("TEXT", "BOOLEAN", "TEXT", "TEXT",  "TEXT"),
+            sea_orm::DatabaseBackend::Postgres => {
+                ("UUID", "BOOLEAN", "TIMESTAMPTZ", "JSONB", "TIMESTAMPTZ")
+            }
+            sea_orm::DatabaseBackend::MySql => (
+                "VARCHAR(36)",
+                "BOOLEAN",
+                "DATETIME(6)",
+                "JSON",
+                "DATETIME(6)",
+            ),
+            sea_orm::DatabaseBackend::Sqlite => ("TEXT", "BOOLEAN", "TEXT", "TEXT", "TEXT"),
         };
 
         let sql = format!(

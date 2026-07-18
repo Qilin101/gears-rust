@@ -43,7 +43,6 @@ pub struct Model {
     // ═══════════════════════════════════════════════════════════════════
     // Denormalized filterable columns (promoted from `info`)
     // ═══════════════════════════════════════════════════════════════════
-
     /// GTS schema chain identifier (e.g. `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`).
     pub gts_type: Option<String>,
     /// Model vendor (e.g. `OpenAI`, `Meta`).

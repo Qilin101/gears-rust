@@ -1,7 +1,7 @@
 //! End-to-end integration tests for the Model Registry gear.
 //!
 //! These tests construct a full service stack (real `SeaOrmRepository` over
-//! in-memory SQLite, real `InMemoryCache`, real `PolicyEnforcer` backed by a
+//! in-memory `SQLite`, real `InMemoryCache`, real `PolicyEnforcer` backed by a
 //! mock `AuthZResolverClient`, and configurable mock `TenantResolverClient`)
 //! and drive the complete provider→model→approval→soft-delete lifecycle.
 //!
@@ -9,13 +9,13 @@
 //!
 //! | Test | Flow | What it verifies |
 //! |------|------|------------------|
-//! | `full_lifecycle_single_tenant` | create provider → create model → get → list with OData → update approval → soft-delete | P1 happy path end-to-end |
+//! | `full_lifecycle_single_tenant` | create provider → create model → get → list with `OData` → update approval → soft-delete | P1 happy path end-to-end |
 //! | `tenant_isolation` | two tenants, data created in A only | B cannot see A's data |
 //! | `inheritance_parent_child` | parent owns provider + model; child has no data | child inherits via ancestor chain |
-//! | `child_shadows_parent` | parent + child own same canonical_id | child shadows parent |
+//! | `child_shadows_parent` | parent + child own same `canonical_id` | child shadows parent |
 //! | `cache_first_get` | second read hits cache | cache-first read behaviour |
 //!
-//! All tests run against an in-memory SQLite database with the production
+//! All tests run against an in-memory `SQLite` database with the production
 //! migration applied, giving high confidence the storage layer works
 //! end-to-end without needing Postgres.
 
@@ -28,10 +28,6 @@ use async_trait::async_trait;
 use authz_resolver_sdk::{
     AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
 };
-use model_registry::{
-    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus, ModelV1,
-    UpdateModelRequestV1, UpdateProviderRequestV1,
-};
 use model_registry::config::ModelRegistryConfig;
 use model_registry::domain::cache::InMemoryCache;
 use model_registry::domain::error::DomainError;
@@ -39,15 +35,19 @@ use model_registry::domain::repo::{ModelRepository, ProviderRepository};
 use model_registry::domain::service::Service;
 use model_registry::infra::storage::migrations::Migrator;
 use model_registry::infra::storage::sea_orm_repo::SeaOrmRepository;
+use model_registry::{
+    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus, ModelV1,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
+};
 use sea_orm_migration::MigratorTrait;
 use tenant_resolver_sdk::{
     GetAncestorsOptions, GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse,
-    GetTenantsOptions, IsAncestorOptions, TenantId, TenantRef, TenantResolverClient,
-    TenantResolverError, TenantInfo, TenantStatus,
+    GetTenantsOptions, IsAncestorOptions, TenantId, TenantInfo, TenantRef, TenantResolverClient,
+    TenantResolverError, TenantStatus,
 };
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::DBRunner;
-use toolkit_db::{connect_db, ConnectOpts, DbError, DBProvider};
+use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_odata::{ODataQuery, parse_filter_string};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
@@ -249,7 +249,7 @@ impl TenantResolverClient for OneAncestorResolver {
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Set up an in-memory SQLite database with all migrations applied.
+/// Set up an in-memory `SQLite` database with all migrations applied.
 async fn setup_db() -> DBProvider<DbError> {
     let opts = ConnectOpts {
         max_conns: Some(1),
@@ -373,8 +373,7 @@ fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
 ) -> Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache> {
-    let enforcer =
-        authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
+    let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
     Service::new(
         Arc::new(db),
         Arc::new(SeaOrmRepository::new()),
@@ -395,9 +394,15 @@ async fn create_provider_direct(
     slug: &str,
 ) -> (Uuid, String) {
     let scope = scope_for(tenant_id);
-    let p = ProviderRepository::create(repo, conn, &scope, tenant_id, &make_create_provider_req(slug, slug))
-        .await
-        .expect("create provider in test setup");
+    let p = ProviderRepository::create(
+        repo,
+        conn,
+        &scope,
+        tenant_id,
+        &make_create_provider_req(slug, slug),
+    )
+    .await
+    .expect("create provider in test setup");
     (p.id, p.slug)
 }
 
@@ -411,7 +416,11 @@ async fn create_model_direct(
 ) -> ModelV1 {
     let scope = scope_for(tenant_id);
     ModelRepository::create(
-        repo, conn, &scope, tenant_id, &make_create_model_req(provider_slug, provider_model_id),
+        repo,
+        conn,
+        &scope,
+        tenant_id,
+        &make_create_model_req(provider_slug, provider_model_id),
     )
     .await
     .expect("create model in test setup")
@@ -735,8 +744,7 @@ async fn cache_first_get_returns_cached_model() {
     // Create data directly via repo connection.
     {
         let conn = db2.conn().expect("db connection");
-        let (_pid, slug) =
-            create_provider_direct(&repo, &conn, tenant_a(), "openai").await;
+        let (_pid, slug) = create_provider_direct(&repo, &conn, tenant_a(), "openai").await;
         let _original = create_model_direct(&repo, &conn, tenant_a(), &slug, "gpt-4o").await;
     }
 

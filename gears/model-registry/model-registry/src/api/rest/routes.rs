@@ -90,11 +90,7 @@ pub fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::get_provider)
-        .json_response_with_schema::<dto::ProviderDto>(
-            openapi,
-            StatusCode::OK,
-            "Provider details",
-        )
+        .json_response_with_schema::<dto::ProviderDto>(openapi, StatusCode::OK, "Provider details")
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
@@ -111,11 +107,7 @@ pub fn register_routes(
         .require_license_features::<License>([])
         .json_request::<dto::UpdateProviderRequestDto>(openapi, "Provider update data")
         .handler(handlers::update_provider)
-        .json_response_with_schema::<dto::ProviderDto>(
-            openapi,
-            StatusCode::OK,
-            "Provider updated",
-        )
+        .json_response_with_schema::<dto::ProviderDto>(openapi, StatusCode::OK, "Provider updated")
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -176,11 +168,7 @@ pub fn register_routes(
         .require_license_features::<License>([])
         .json_request::<dto::CreateModelRequestDto>(openapi, "Model creation data")
         .handler(handlers::create_model)
-        .json_response_with_schema::<dto::ModelDto>(
-            openapi,
-            StatusCode::CREATED,
-            "Model created",
-        )
+        .json_response_with_schema::<dto::ModelDto>(openapi, StatusCode::CREATED, "Model created")
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -199,11 +187,7 @@ pub fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::get_model)
-        .json_response_with_schema::<dto::ModelDto>(
-            openapi,
-            StatusCode::OK,
-            "Model details",
-        )
+        .json_response_with_schema::<dto::ModelDto>(openapi, StatusCode::OK, "Model details")
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
@@ -220,11 +204,7 @@ pub fn register_routes(
         .require_license_features::<License>([])
         .json_request::<dto::UpdateModelRequestDto>(openapi, "Model update data")
         .handler(handlers::update_model)
-        .json_response_with_schema::<dto::ModelDto>(
-            openapi,
-            StatusCode::OK,
-            "Model updated",
-        )
+        .json_response_with_schema::<dto::ModelDto>(openapi, StatusCode::OK, "Model updated")
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
