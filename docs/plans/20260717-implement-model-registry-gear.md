@@ -191,10 +191,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/domain/inheritance.rs`
 - Modify: `gears/model-registry/model-registry/src/domain/mod.rs`
 
-- [ ] add a helper that, given `SecurityContext` + `TenantResolverClient`, returns the ancestor tenant chain and computes the additive visible set with child-shadowing by slug (providers) / canonical_id (models) per DESIGN §2.1 "Additive Inheritance"
-- [ ] define ownership classification (own vs inherited) to drive cache TTL selection
-- [ ] write tests with a mocked `TenantResolverClient`: additive union, child shadows parent by slug, child cannot expand beyond parent, single-tenant (no ancestors) case
-- [ ] run tests — must pass before next task
+- [x] add a helper that, given `SecurityContext` + `TenantResolverClient`, returns the ancestor tenant chain and computes the additive visible set with child-shadowing by slug (providers) / canonical_id (models) per DESIGN §2.1 "Additive Inheritance"
+- [x] define ownership classification (own vs inherited) to drive cache TTL selection
+- [x] write tests with a mocked `TenantResolverClient`: additive union, child shadows parent by slug, child cannot expand beyond parent, single-tenant (no ancestors) case
+- [x] run tests — must pass before next task
 
 ### Task 11: ModelRegistryService — providers operations
 
