@@ -136,8 +136,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Verify basic authorization (user can "get" providers)
-        self.derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET)
+        // 1. Derive access scope (authorization check + DB scope)
+        let own_scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -154,9 +155,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 4. Cache miss — search own tenant DB
         let conn = self.db.conn().map_err(DomainError::from)?;
         let own_tenant_id = ctx.subject_tenant_id();
-        let own_scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET)
-            .await?;
 
         match self.provider_repo.find_by_id(&conn, &own_scope, id).await {
             Ok(provider) => {
@@ -203,8 +201,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         query: ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
+        // 1. Derive access scope (authorization check + DB scope)
+        let own_scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -212,9 +211,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant providers with OData
-        let own_scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
-            .await?;
         let mut page = self.provider_repo.list(&conn, &own_scope, &query).await?;
 
         // 4. Get all providers from each ancestor
@@ -267,16 +263,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 1. Validate slug format
         Self::validate_slug(req.slug())?;
 
-        // 2. Verify authorization
-        let tenant_id = ctx.subject_tenant_id();
-        self.derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::CREATE)
+        // 2. Derive access scope (authorization check + DB scope)
+        let scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::CREATE)
             .await?;
 
         // 3. Create via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::CREATE)
-            .await?;
+        let tenant_id = ctx.subject_tenant_id();
         let provider = self
             .provider_repo
             .create(&conn, &scope, tenant_id, req)
@@ -298,15 +292,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         id: Uuid,
         req: &UpdateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
+        // 1. Derive access scope (authorization check + DB scope)
+        let scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
             .await?;
 
         // 2. Update via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
-            .await?;
         let provider = self.provider_repo.update(&conn, &scope, id, req).await?;
 
         // 3. Invalidate cache
@@ -324,15 +316,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<(), DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::DELETE)
+        // 1. Derive access scope (authorization check + DB scope)
+        let scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::DELETE)
             .await?;
 
         // 2. Delete via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::DELETE)
-            .await?;
         self.provider_repo.delete(&conn, &scope, id).await?;
 
         // 3. Invalidate cache
@@ -406,8 +396,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         canonical_id: &str,
     ) -> Result<crate::ModelV1, DomainError> {
-        // 1. Verify authorization (user can "get" models)
-        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET)
+        // 1. Derive access scope (authorization check + DB scope)
+        let own_scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -417,11 +408,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         for tenant_id in inheritance.chain_ids() {
             let key = cache_key(tenant_id, "model", canonical_id);
             if let Some(model) = self.cache.get::<crate::ModelV1>(&key).await {
-                // Return ModelDeprecated if the cached model is deprecated or sunset
+                // Return ModelDeprecated if the cached model is deprecated or sunset.
+                // Delete the stale cache entry so it doesn't accumulate.
                 if matches!(
                     model.lifecycle_status,
                     crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
                 ) {
+                    self.cache.delete(&key).await;
                     return Err(DomainError::model_deprecated(canonical_id));
                 }
                 return Ok(model);
@@ -431,9 +424,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 4. Cache miss — search own tenant DB
         let conn = self.db.conn().map_err(DomainError::from)?;
         let own_tenant_id = ctx.subject_tenant_id();
-        let own_scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET)
-            .await?;
 
         match self
             .model_repo
@@ -468,8 +458,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 .await
             {
                 Ok(model) => {
-                    // If deprecated, return ModelDeprecated before caching
-                    if model.lifecycle_status == crate::LifecycleStatus::Deprecated {
+                    // If deprecated or sunset, return ModelDeprecated before caching
+                    if matches!(
+                        model.lifecycle_status,
+                        crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+                    ) {
                         return Err(DomainError::model_deprecated(canonical_id));
                     }
                     let key = cache_key(&ancestor_id, "model", canonical_id);
@@ -496,8 +489,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         query: ODataQuery,
     ) -> Result<Page<crate::ModelV1>, DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
+        // 1. Derive access scope (authorization check + DB scope)
+        let own_scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -505,9 +499,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant models with OData
-        let own_scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
-            .await?;
         let mut page = self.model_repo.list(&conn, &own_scope, &query).await?;
 
         // 4. Get all models from each ancestor
@@ -601,15 +592,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         canonical_id: &str,
         req: &crate::UpdateModelRequestV1,
     ) -> Result<crate::ModelV1, DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
+        // 1. Derive access scope (authorization check + DB scope)
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
             .await?;
 
         let tenant_id = ctx.subject_tenant_id();
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
-            .await?;
 
         // 2. Fetch existing model to validate state transitions and get model_id
         let existing = self
@@ -622,24 +611,26 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             Self::validate_lifecycle_transition(existing.lifecycle_status, *new_lifecycle)?;
         }
 
-        // 4. If approval_status is being changed, write to model_approvals
-        //    (the P1 direct-write path). This keeps both the `model_approvals`
-        //    table and the denormalized `models.approval_status` column in sync.
+        // 4. Update model fields first (PATCH semantics via mapper), then
+        //    write approval_status to model_approvals if requested. Ordering is
+        //    deliberate: both operations are idempotent, so if `set_approval`
+        //    fails after `update` succeeds, the caller can safely retry.
+        //
+        //    A full DB transaction wrapping both writes would be ideal but is
+        //    deferred because the toolkit's `DBProvider::transaction` error type
+        //    (`DbError`) does not compose with `DomainError`.
+        let model = self
+            .model_repo
+            .update(&conn, &scope, canonical_id, req)
+            .await?;
+
         if let Some(approval_status) = req.approval_status {
             self.model_repo
                 .set_approval(&conn, &scope, existing.id, approval_status)
                 .await?;
         }
 
-        // 5. Update model fields (PATCH semantics via mapper). The mapper
-        //    handles approval_status too, but since set_approval above already
-        //    updated the denormalized column, this is a no-op for that field.
-        let model = self
-            .model_repo
-            .update(&conn, &scope, canonical_id, req)
-            .await?;
-
-        // 6. Invalidate cache
+        // 5. Invalidate cache
         self.cache.invalidate_tenant(tenant_id).await;
 
         Ok(model)
@@ -654,15 +645,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         canonical_id: &str,
     ) -> Result<(), DomainError> {
-        // 1. Verify authorization
-        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
+        // 1. Derive access scope (authorization check + DB scope)
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
             .await?;
 
         // 2. Soft-delete via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
-            .await?;
         self.model_repo
             .soft_delete(&conn, &scope, canonical_id)
             .await?;

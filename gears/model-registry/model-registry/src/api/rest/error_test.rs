@@ -137,12 +137,11 @@ fn provider_conflict_maps_to_409() {
 }
 
 #[test]
-fn provider_disabled_maps_to_409() {
-    assert_mapping_with_detail(
+fn provider_disabled_maps_to_403() {
+    assert_mapping(
         DomainError::provider_disabled(Uuid::nil()),
-        409,
-        "gts.cf.core.errors.err.v1~cf.core.err.already_exists",
-        "disabled",
+        403,
+        "gts.cf.core.errors.err.v1~cf.core.err.permission_denied",
     );
 }
 
@@ -214,7 +213,8 @@ fn all_error_variants_have_valid_status() {
         (DomainError::model_not_approved("m1"), 403),
         (DomainError::forbidden("x"), 403),
         (DomainError::provider_conflict("s"), 409),
-        (DomainError::provider_disabled(Uuid::nil()), 409),
+        (DomainError::provider_has_models(Uuid::nil(), 3), 409),
+        (DomainError::provider_disabled(Uuid::nil()), 403),
         (DomainError::invalid_transition("t"), 400),
         (DomainError::validation("v"), 400),
         (DomainError::internal("e"), 500),

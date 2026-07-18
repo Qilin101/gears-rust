@@ -44,6 +44,9 @@ pub enum ModelRegistryError {
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
 
+    #[error("provider has {model_count} existing model(s): {id}")]
+    ProviderHasModels { id: Uuid, model_count: u64 },
+
     /// Catch-all for unexpected failures (DB/cache/OAGW/etc.). `detail` is a
     /// short human-readable summary; `source` carries the underlying error
     /// when available, accessible via `std::error::Error::source`.
@@ -125,6 +128,11 @@ impl ModelRegistryError {
     #[must_use]
     pub fn provider_conflict(slug: impl Into<String>) -> Self {
         Self::ProviderConflict { slug: slug.into() }
+    }
+
+    #[must_use]
+    pub fn provider_has_models(id: Uuid, model_count: u64) -> Self {
+        Self::ProviderHasModels { id, model_count }
     }
 
     /// Construct an `Internal` error with a free-form detail string and no

@@ -32,6 +32,7 @@ use model_registry_sdk::models::{
 };
 use sea_orm::Set;
 use serde_json::json;
+use tracing;
 use uuid::Uuid;
 
 use super::entity;
@@ -366,18 +367,19 @@ fn apply_info_patches(info: &mut ModelInfoV1, req: &UpdateModelRequestV1) -> boo
 
 /// Convert a `ProviderStatus` to its lowercase storage string.
 #[must_use]
-#[allow(clippy::match_same_arms)]
 fn provider_status_str(status: ProviderStatus) -> String {
     match status {
         ProviderStatus::Active => "active".to_owned(),
         ProviderStatus::Disabled => "disabled".to_owned(),
-        _ => "active".to_owned(),
+        _ => {
+            tracing::error!(?status, "unknown ProviderStatus variant, defaulting to active");
+            "active".to_owned()
+        }
     }
 }
 
 /// Convert a `LifecycleStatus` to its lowercase storage string.
 #[must_use]
-#[allow(clippy::match_same_arms)]
 fn lifecycle_status_str(status: LifecycleStatus) -> String {
     match status {
         LifecycleStatus::Production => "production".to_owned(),
@@ -385,20 +387,25 @@ fn lifecycle_status_str(status: LifecycleStatus) -> String {
         LifecycleStatus::Experimental => "experimental".to_owned(),
         LifecycleStatus::Deprecated => "deprecated".to_owned(),
         LifecycleStatus::Sunset => "sunset".to_owned(),
-        _ => "production".to_owned(),
+        _ => {
+            tracing::error!(?status, "unknown LifecycleStatus variant, defaulting to production");
+            "production".to_owned()
+        }
     }
 }
 
 /// Convert an `ApprovalStatus` to its lowercase storage string.
 #[must_use]
-#[allow(clippy::match_same_arms)]
 fn approval_status_str(status: ApprovalStatus) -> String {
     match status {
         ApprovalStatus::Pending => "pending".to_owned(),
         ApprovalStatus::Approved => "approved".to_owned(),
         ApprovalStatus::Rejected => "rejected".to_owned(),
         ApprovalStatus::Revoked => "revoked".to_owned(),
-        _ => "pending".to_owned(),
+        _ => {
+            tracing::error!(?status, "unknown ApprovalStatus variant, defaulting to pending");
+            "pending".to_owned()
+        }
     }
 }
 
@@ -420,34 +427,10 @@ fn supported_api_str(api: SupportedApi) -> String {
         SupportedApi::Completion => "completion".to_owned(),
         SupportedApi::Embedding => "embedding".to_owned(),
         SupportedApi::Batch => "batch".to_owned(),
-        _ => "unknown".to_owned(),
-    }
-}
-
-/// Parse a comma-separated `supported_api` string back into a `HashSet`.
-#[allow(dead_code)]
-fn parse_supported_api_set(s: Option<&str>) -> std::collections::HashSet<SupportedApi> {
-    let mut apis = std::collections::HashSet::new();
-    if let Some(s) = s {
-        for part in s.split(',') {
-            let part = part.trim();
-            if !part.is_empty()
-                && let Some(api) = supported_api_from_str(part)
-            {
-                apis.insert(api);
-            }
+        _ => {
+            tracing::error!(?api, "unknown SupportedApi variant, defaulting to unknown");
+            "unknown".to_owned()
         }
-    }
-    apis
-}
-
-#[allow(dead_code)]
-fn supported_api_from_str(s: &str) -> Option<SupportedApi> {
-    match s {
-        "completion" => Some(SupportedApi::Completion),
-        "embedding" => Some(SupportedApi::Embedding),
-        "batch" => Some(SupportedApi::Batch),
-        _ => None,
     }
 }
 
