@@ -180,10 +180,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/cache.rs`
 
-- [ ] define `CacheService` trait: `get`, `set` (with TTL), `delete`, `invalidate_tenant`; key format `mr:{tenant_id}:{entity}:{id}` (DESIGN §3.6)
-- [ ] implement `InMemoryCache` (TTL-aware, tenant-prefixed, `Send + Sync`); gate a future `RedisCache` behind a `redis` cargo feature (declared, not implemented — leave a `#[cfg(feature="redis")]` stub or TODO)
-- [ ] write tests: set/get hit, TTL expiry (own vs inherited), delete, `invalidate_tenant` clears only that tenant's keys, cross-tenant isolation
-- [ ] run tests — must pass before next task
+- [x] define `CacheService` trait: `get`, `set` (with TTL), `delete`, `invalidate_tenant`; key format `mr:{tenant_id}:{entity}:{id}` (DESIGN §3.6)
+- [x] implement `InMemoryCache` (TTL-aware, tenant-prefixed, `Send + Sync`); gate a future `RedisCache` behind a `redis` cargo feature (declared, not implemented — leave a `#[cfg(feature="redis")]` stub or TODO)
+- [x] write tests: set/get hit, TTL expiry (own vs inherited), delete, `invalidate_tenant` clears only that tenant's keys, cross-tenant isolation
+- [x] run tests — must pass before next task
 
 ### Task 10: Tenant inheritance resolver helper
 

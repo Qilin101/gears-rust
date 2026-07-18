@@ -64,8 +64,11 @@ thiserror = { workspace = true }
 # Observability
 tracing = { workspace = true }
 
+# Async runtime
+tokio = { workspace = true, features = ["sync"] }
+
 # Gear registration
 inventory = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
