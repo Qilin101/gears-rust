@@ -1,7 +1,7 @@
 //! Provider-plugin API trait for the LLM Gateway.
 //!
 //! A provider plugin isolates one LLM provider (`OpenAI`, Anthropic, Google, …)
-//! behind [`LlmGatewayProviderPluginClient`]. It owns two things the core
+//! behind [`LlmGatewayProviderPluginClientV1`]. It owns two things the core
 //! Gateway does not: translation (Open Responses ⇆ provider-native format) and
 //! transport (the provider call, performed through the Outbound API Gateway).
 //!
@@ -37,7 +37,7 @@ use crate::models::plugin::{ProviderCallCtx, ProviderPluginCapabilities};
 /// [`LlmGatewayError`], which the core maps to the Open Responses error
 /// contract.
 #[async_trait]
-pub trait LlmGatewayProviderPluginClient: Send + Sync {
+pub trait LlmGatewayProviderPluginClientV1: Send + Sync {
     /// Report integration-level capabilities for this provider integration.
     /// Provider-wide and local — no external call.
     fn capabilities(&self) -> ProviderPluginCapabilities;

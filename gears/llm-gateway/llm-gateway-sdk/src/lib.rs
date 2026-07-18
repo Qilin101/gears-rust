@@ -52,4 +52,4 @@ pub use models::tools::{
     AspectRatio, FunctionTool, ImageGenerationTool, ImageOutputFormat, ImageQuality,
     ImageResponseFormat, Resolution, Schema, Tool, ToolInlineGts, ToolReference,
 };
-pub use plugin_api::LlmGatewayProviderPluginClient;
+pub use plugin_api::LlmGatewayProviderPluginClientV1;

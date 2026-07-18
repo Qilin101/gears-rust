@@ -1,6 +1,6 @@
 //! Models for the provider-plugin interface.
 //!
-//! A provider plugin (see [`crate::plugin_api::LlmGatewayProviderPluginClient`])
+//! A provider plugin (see [`crate::plugin_api::LlmGatewayProviderPluginClientV1`])
 //! isolates one LLM provider behind a common trait. These types carry the
 //! per-call context the core Gateway hands to a plugin and the integration-level
 //! capabilities a plugin reports. Per-model feature capabilities (vision,
