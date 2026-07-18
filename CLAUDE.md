@@ -128,6 +128,23 @@ Start with `guidelines/README.md`. Then:
 | Dependencies changes | `guidelines/DEPENDENCIES.md` |
 | REST API design | `guidelines/DNA/REST/API.md` |
 
+## Recurring Patterns
+
+### OData Filtering Requires Real Columns
+
+The toolkit OData layer (`FieldToColumn::map_field` in `libs/toolkit-db/src/odata/sea_orm_filter.rs`) maps each filter field to exactly one real SeaORM `Column`. There is **no JSONB-path filtering** and no join support. If a gear needs OData filtering on fields stored inside a JSONB column, those fields must be **promoted to real columns** on the table, with B-tree indexes (not GIN, which would break SQLite dev/test). The JSONB column remains the source of truth; the real columns are rewritten on every create/update to stay in sync. See `gears/model-registry/model-registry/src/infra/storage/mapper.rs` for the projection pattern.
+
+### Integration Tests with SQLite + Mocked Clients
+
+Integration tests against SQLite follow this pattern:
+1. `setup_db()` — create in-memory SQLite DB with migrations applied via `run_migrations_for_testing`
+2. Define mock structs implementing SDK client traits (e.g., `TenantResolverClient`, `AuthZResolverClient`)
+3. `build_service(db, resolver)` — construct the `Service` with the real repo, cache, and mocked clients
+4. Write tests using `service.create_provider/get_provider/...` through the real service layer
+5. For cache tests, clone `DBProvider` before service construction to hold a separate connection for direct repo bypass
+
+See `gears/model-registry/model-registry/tests/integration.rs` for a complete example.
+
 ## Code Style
 
 - Rust Edition 2024, stable toolchain, MSRV 1.96.0 (`rust-toolchain.toml`)

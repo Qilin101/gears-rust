@@ -51,14 +51,14 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 
 #### Functional Drivers
 
-- [ ] `p1` — `cpt-cf-model-registry-fr-tenant-isolation` — Tenant ID prefix in cache keys, query filters enforce tenant scope
-- [ ] `p1` — `cpt-cf-model-registry-fr-authorization` — Role-based + GTS-based access control via SecurityContext
-- [ ] `p1` — `cpt-cf-model-registry-fr-input-validation` — DTO validation in REST layer, domain validation in service
-- [ ] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL strategy
-- [ ] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup with DB fallback, approval status check
-- [ ] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — OData pagination with capability/provider filtering
-- [ ] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models + direct `ModelApproval` status writes (no Approval Service in P1); same REST surface continues to accept admin calls in P2 but routes through Approval Service
-- [ ] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support
+- [x] `p1` — `cpt-cf-model-registry-fr-tenant-isolation` — Tenant ID prefix in cache keys, query filters enforce tenant scope
+- [x] `p1` — `cpt-cf-model-registry-fr-authorization` — Role-based + GTS-based access control via SecurityContext
+- [x] `p1` — `cpt-cf-model-registry-fr-input-validation` — DTO validation in REST layer, domain validation in service
+- [x] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL strategy
+- [x] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup with DB fallback, approval status check
+- [x] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — OData pagination with capability/provider filtering
+- [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models + direct `ModelApproval` status writes (no Approval Service in P1); same REST surface continues to accept admin calls in P2 but routes through Approval Service
+- [x] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support
 - [ ] `p1` — `cpt-cf-model-registry-fr-model-pricing` — AICredits cost data per tier (sync/batch/cached)
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-discovery` — OAGW integration, provider plugin abstraction
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-approval` — Approval Service integration, event-driven status sync; replaces P1 admin-direct status writes on the same endpoints
@@ -979,7 +979,7 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | info | JSONB | NOT NULL | Serialized `ModelInfoV1` common envelope — **`gts_type`** (the GTS schema chain that discriminates `provider_settings`), `display_name`, `description`, `family`, `vendor`, the infrastructure fields **`managed`** (`bool`, per-model — distinct from the per-provider `providers.managed` column) / **`architecture`** / **`size_bytes`** / **`format`**, `region`, `hosted_by`, `last_release_at`, `reasoning_level`, `version`, UI hints (`sort_order`, `icon`, `multiplier_display`), `performance`, `additional_info`, the promoted `supported_api` and `provider_model_id`, the structured `capabilities` / `disabled_capabilities` / `context_window` sub-objects, the user-facing **`default_parameters`** (`DefaultInferenceParametersV1`, mirroring the inference-knob subset of `gts.cf.llmgw.core.create_response_body.v1~`), and the flat per-model override fields **`allow_parameter_override`** (`bool`) and **`allow_extra_params`** (array of strings) |
 | provider_settings | JSONB | NOT NULL | Polymorphic provider settings JSON whose shape is identified by the row's `info.gts_type`. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives as flat fields (`allow_parameter_override`, `allow_extra_params`) on `info`. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
 
-`ModelV1::approval_status` is **not** stored on this table — it's resolved on read from the Approval Service per the §2.1 "Approval Service Delegation" principle.
+`ModelV1::approval_status` is resolved on read from the `models.approval_status` denormalized column in P1 (the `model_approvals` table is the record-of-record seam; see P1 Implementation Deviations at the end of §3.6).
 
 **Indexes**: (tenant_id), (tenant_id, canonical_id) UNIQUE, (provider_id), (lifecycle_status)
 
@@ -1230,6 +1230,14 @@ Several Design checklist domains are intentionally **not addressed** by this DES
 - **CORS, network segmentation, output encoding (SEC-DESIGN-004 details) — Deferred to platform**: REST traffic terminates at `api-gateway` which owns CORS policy, ingress filtering, network segmentation (private subnet for module → DB / Redis / OAGW links), and HTML/text output encoding. Model Registry returns JSON only; bytes are not transformed downstream.
 - **Replication, sharding, hot/warm/cold tiering, archival (DATA-DESIGN-001 details) — Deferred to platform**: PostgreSQL replication topology, read-replicas, sharding policy, and archival lifecycle are properties of the platform's database deployment. The module is partition-friendly (every table is `tenant_id`-scoped) so future sharding by `tenant_id` does not require schema changes; until that ships, the platform's single-cluster deployment is the operating posture.
 - **Feature flags / canary / blue-green / rollback (REL-DESIGN-005 details) — Deferred to platform**: deployment-rollout primitives are owned by the platform deployment pipeline. Module-internal phase gating (P1/P2/P3/P4 capability flags, `discovery_enabled` per provider, the `managed` provider flag) lives in DB columns and Cargo features rather than a runtime feature-flag service.
+
+### P1 Implementation Deviations
+
+The P1 implementation introduces two intentional deviations from the DESIGN document above, driven by the absence of the Approval Service and the toolkit OData layer's column-mapping constraint:
+
+1. **Approval stored locally (denormalized on `models` table)**: The DESIGN states that `ModelV1::approval_status` is resolved from Approval Service on read, and the `models` table has no `approval_status` column. However, P1 does not integrate with Approval Service — approval status is stored in a local `model_approvals` table (the record-of-record seam) AND denormalized onto `models.approval_status` for fast OData filtering. This preserves the P1→P2 seam: P2 swaps only the approval write path to route through Approval Service, removing the direct-write path in `update_model`, while the denormalized column continues to serve read/filter operations.
+
+2. **OData-filterable fields promoted to real columns (no JSONB GIN indexes)**: The DESIGN specifies JSONB GIN indexes on `info` for OData filtering on nested fields like `capabilities.vision.enabled`. The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` — there is no JSONB-path filtering and no join support. Therefore, the P1-filterable subset of `info.*` fields (`gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, capability flags `cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`) plus `approval_status` are promoted to real columns with B-tree indexes. The `info` JSONB column remains the full source of truth; the denormalized columns are rewritten on every create/update to stay in sync.
 
 ## 5. Traceability
 
