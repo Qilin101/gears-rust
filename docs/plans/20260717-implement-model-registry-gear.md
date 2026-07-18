@@ -222,10 +222,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 
-- [ ] implement `create_model` (provider-exists check incl. inherited providers, canonical_id derivation, default approval `Pending`, optional initial `approval_status`), `update_model` (PATCH non-status fields directly + `approval_status` transition written directly to `model_approvals` in P1), `delete_model` (soft-delete)
-- [ ] invalidate affected cache entries on every write; validate state transitions (`InvalidTransition` where illegal)
-- [ ] write unit tests: create with/without initial approval, update fields, approve/reject/revoke via `approval_status`, invalid transition rejected, soft-delete, cache invalidation, provider-not-found on create
-- [ ] run tests — must pass before next task
+- [x] implement `create_model` (provider-exists check incl. inherited providers, canonical_id derivation, default approval `Pending`, optional initial `approval_status`), `update_model` (PATCH non-status fields directly + `approval_status` transition written directly to `model_approvals` in P1), `delete_model` (soft-delete)
+- [x] invalidate affected cache entries on every write; validate state transitions (`InvalidTransition` where illegal)
+- [x] write unit tests: create with/without initial approval, update fields, approve/reject/revoke via `approval_status`, invalid transition rejected, soft-delete, cache invalidation, provider-not-found on create
+- [x] run tests — must pass before next task
 
 ### Task 14: LocalClient implementing ModelRegistryClientV1
 

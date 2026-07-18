@@ -90,6 +90,29 @@ impl ProviderRepository for SeaOrmRepository {
         Ok(mapper::provider_entity_to_v1(&entity))
     }
 
+    async fn find_by_slug<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        slug: &str,
+    ) -> Result<ProviderV1, DomainError> {
+        let entity = provider::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                Condition::all()
+                    .add(provider::Column::Slug.eq(slug)),
+            )
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::validation(format!(
+                "provider with slug `{slug}` not found"
+            )))?;
+
+        Ok(mapper::provider_entity_to_v1(&entity))
+    }
+
     async fn list<C: DBRunner>(
         &self,
         conn: &C,

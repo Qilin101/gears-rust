@@ -30,7 +30,9 @@ use super::error::DomainError;
 use super::inheritance::{resolve_ancestors, cache_ttl_seconds, Ownership};
 use super::repo::{ModelRepository, ProviderRepository};
 use crate::config::ModelRegistryConfig;
-use crate::{CreateProviderRequestV1, ProviderV1, UpdateProviderRequestV1};
+use crate::{
+    CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1,
+};
 
 // ---------------------------------------------------------------------------
 // Authorization resource type constants
@@ -368,6 +370,26 @@ impl<R, M, C> Service<R, M, C> {
         }
         Ok(())
     }
+
+    /// Validate lifecycle state transitions.
+    ///
+    /// Rules:
+    /// - `Deprecated` and `Sunset` are terminal — no transitions out.
+    /// - Any status can transition to `Deprecated`.
+    /// - All other transitions are permitted (promotion, demotion).
+    fn validate_lifecycle_transition(
+        from: LifecycleStatus,
+        to: LifecycleStatus,
+    ) -> Result<(), DomainError> {
+        // Terminal states: cannot transition OUT of Deprecated or Sunset.
+        if matches!(from, LifecycleStatus::Deprecated | LifecycleStatus::Sunset) {
+            return Err(DomainError::invalid_transition(format!(
+                "cannot transition from terminal status {from:?} to {to:?}"
+            )));
+        }
+        Ok(())
+    }
+
 }
 
 // ── Model read operations (Task 12) ────────────────────────────────────
@@ -518,45 +540,177 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
     /// Create a new model.
     ///
-    /// **Task 13**: implement.
-    #[allow(dead_code, unreachable_code, clippy::unused_async)]
+    /// Validates the provider slug, checks that the provider exists (own tenant
+    /// or inherited from an ancestor), derives `canonical_id` from
+    /// `provider_slug::info.provider_model_id`, writes the initial approval
+    /// status (defaults to `Pending`), and invalidates the own-tenant cache.
     pub async fn create_model(
         &self,
-        _ctx: &SecurityContext,
-        _req: &crate::CreateModelRequestV1,
+        ctx: &SecurityContext,
+        req: &crate::CreateModelRequestV1,
     ) -> Result<crate::ModelV1, DomainError> {
-        todo!("implemented in Task 13")
+        // 1. Validate provider_slug format
+        Self::validate_slug(&req.provider_slug)?;
+
+        // 2. Verify authorization
+        let tenant_id = ctx.subject_tenant_id();
+        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::CREATE)
+            .await?;
+
+        // 3. Resolve ancestor chain
+        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+
+        // 4. Find the provider in own or ancestor tenants and build a scope
+        //    that can resolve the FK.
+        let provider_tenant_id = self
+            .find_provider_tenant(&conn, &inheritance, &req.provider_slug)
+            .await?;
+
+        let scope = AccessScope::for_tenants(vec![tenant_id, provider_tenant_id]);
+
+        // 5. Create via repo (handles canonical_id derivation, approval default)
+        let model = self
+            .model_repo
+            .create(&conn, &scope, tenant_id, req)
+            .await?;
+
+        // 6. Invalidate own tenant cache
+        self.cache.invalidate_tenant(tenant_id).await;
+
+        Ok(model)
     }
 
     /// Update a model (PATCH semantics) including approval status.
     ///
-    /// **Task 13**: implement.
-    #[allow(dead_code, unreachable_code, clippy::unused_async)]
+    /// Applies non-status field patches directly via the repository, and writes
+    /// `approval_status` transitions to `model_approvals` (P1 direct-write
+    /// path). Validates lifecycle state transitions. Invalidates cache on
+    /// success.
     pub async fn update_model(
         &self,
-        _ctx: &SecurityContext,
-        _canonical_id: &str,
-        _req: &crate::UpdateModelRequestV1,
+        ctx: &SecurityContext,
+        canonical_id: &str,
+        req: &crate::UpdateModelRequestV1,
     ) -> Result<crate::ModelV1, DomainError> {
-        todo!("implemented in Task 13")
+        // 1. Verify authorization
+        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
+            .await?;
+
+        let tenant_id = ctx.subject_tenant_id();
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
+            .await?;
+
+        // 2. Fetch existing model to validate state transitions and get model_id
+        let existing = self
+            .model_repo
+            .find_by_canonical(&conn, &scope, canonical_id)
+            .await?;
+
+        // 3. Validate lifecycle state transitions
+        if let Some(new_lifecycle) = &req.lifecycle_status {
+            Self::validate_lifecycle_transition(
+                existing.lifecycle_status,
+                *new_lifecycle,
+            )?;
+        }
+
+        // 4. If approval_status is being changed, write to model_approvals
+        //    (the P1 direct-write path). This keeps both the `model_approvals`
+        //    table and the denormalized `models.approval_status` column in sync.
+        if let Some(approval_status) = req.approval_status {
+            self.model_repo
+                .set_approval(&conn, &scope, existing.id, approval_status)
+                .await?;
+        }
+
+        // 5. Update model fields (PATCH semantics via mapper). The mapper
+        //    handles approval_status too, but since set_approval above already
+        //    updated the denormalized column, this is a no-op for that field.
+        let model = self
+            .model_repo
+            .update(&conn, &scope, canonical_id, req)
+            .await?;
+
+        // 6. Invalidate cache
+        self.cache.invalidate_tenant(tenant_id).await;
+
+        Ok(model)
     }
 
-    /// Soft-delete a model.
+    /// Soft-delete a model by canonical ID.
     ///
-    /// **Task 13**: implement.
-    #[allow(dead_code, unreachable_code, clippy::unused_async)]
+    /// Sets `lifecycle_status` to `Deprecated` and records the deprecation
+    /// timestamp. Invalidates the own-tenant cache on success.
     pub async fn delete_model(
         &self,
-        _ctx: &SecurityContext,
-        _canonical_id: &str,
+        ctx: &SecurityContext,
+        canonical_id: &str,
     ) -> Result<(), DomainError> {
-        todo!("implemented in Task 13")
+        // 1. Verify authorization
+        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
+            .await?;
+
+        // 2. Soft-delete via repo
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
+            .await?;
+        self.model_repo
+            .soft_delete(&conn, &scope, canonical_id)
+            .await?;
+
+        // 3. Invalidate cache
+        let tenant_id = ctx.subject_tenant_id();
+        self.cache.invalidate_tenant(tenant_id).await;
+
+        Ok(())
+    }
+
+    /// Find the provider tenant that owns a given slug, searching own tenant
+    /// first then ancestor tenants in chain order.
+    ///
+    /// Returns the tenant ID where the provider was found, or a `Validation`
+    /// error if the provider does not exist in any tenant in the chain.
+    async fn find_provider_tenant(
+        &self,
+        conn: &impl toolkit_db::secure::DBRunner,
+        inheritance: &super::inheritance::InheritanceContext,
+        slug: &str,
+    ) -> Result<Uuid, DomainError> {
+        // Search own tenant first
+        let own_tenant_id = inheritance.tenant_id();
+        let own_scope = AccessScope::for_tenants(vec![own_tenant_id]);
+        if self
+            .provider_repo
+            .find_by_slug(conn, &own_scope, slug)
+            .await
+            .is_ok()
+        {
+            return Ok(own_tenant_id);
+        }
+
+        // Search ancestor tenants in chain order (closest first)
+        for ancestor in &inheritance.ancestors {
+            let ancestor_id = ancestor.id.0;
+            let ancestor_scope = AccessScope::for_tenants(vec![ancestor_id]);
+            if self
+                .provider_repo
+                .find_by_slug(conn, &ancestor_scope, slug)
+                .await
+                .is_ok()
+            {
+                return Ok(ancestor_id);
+            }
+        }
+
+        Err(DomainError::validation(format!(
+            "provider with slug `{slug}` not found in own or ancestor tenants"
+        )))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1557,5 +1711,501 @@ mod tests {
             matches!(&err, DomainError::ModelNotFound { .. }),
             "expected ModelNotFound for cross-tenant, got: {err:?}"
         );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // create_model
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_create_model_success() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let model = service.create_model(&ctx, &req).await.expect("create model");
+
+        assert_eq!(model.canonical_id, "openai::gpt-4o");
+        assert_eq!(model.lifecycle_status, crate::LifecycleStatus::Production);
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_create_model_with_initial_approval() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        req.approval_status = Some(crate::ApprovalStatus::Approved);
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let model = service.create_model(&ctx, &req).await.expect("create model");
+
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn test_create_model_with_inherited_provider() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let parent_tid = parent_id();
+        let child_tid = child_tenant();
+
+        // Create provider in the parent tenant only.
+        let parent_scope = scope_for(parent_tid);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        // Child tenant should be able to create a model referencing the parent's provider.
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(child_tid).build().expect("ctx");
+        let model = service.create_model(&ctx, &req).await.expect("create model with inherited provider");
+
+        assert_eq!(model.canonical_id, "openai::gpt-4o");
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_create_model_provider_not_found() {
+        let db = setup_db().await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let req = make_create_model_req("nonexistent", "gpt-4o");
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let err = service
+            .create_model(&ctx, &req)
+            .await
+            .expect_err("nonexistent provider should fail");
+
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected Validation for missing provider, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_model_cache_invalidation() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Pre-populate cache with a stale entry.
+        let cache = InMemoryCache::new();
+        let stale_model: crate::ModelV1 = serde_json::from_str(r#"{
+            "id": "00000000-0000-0000-0000-000000000099",
+            "canonical_id": "openai::gpt-4o",
+            "lifecycle_status": "production",
+            "approval_status": "pending",
+            "info": {
+                "gts_type": "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~",
+                "display_name": "stale",
+                "description": null, "family": null, "vendor": null, "managed": false,
+                "architecture": null, "size_bytes": null, "format": null,
+                "region": null, "hosted_by": null, "last_release_at": null,
+                "reasoning_level": null, "version": null, "sort_order": null,
+                "icon": null, "multiplier_display": null,
+                "performance": { "response_latency_ms": null, "tokens_per_second": null },
+                "additional_info": {},
+                "supported_api": ["completion"],
+                "provider_model_id": "gpt-4o-old",
+                "capabilities": {
+                    "vision": { "enabled": false, "supported_mime_types": [] },
+                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+                    "function_calling": false, "response_schema": false, "streaming": false,
+                    "file_input": { "enabled": false, "supported_mime_types": [] },
+                    "image_generation": { "enabled": false, "supported_mime_types": [] },
+                    "audio_input": { "enabled": false, "supported_mime_types": [] },
+                    "audio_output": { "enabled": false, "supported_mime_types": [] },
+                    "code_interpreter": false,
+                    "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+                },
+                "disabled_capabilities": {
+                    "vision": { "disabled": false, "disabled_mime_types": [] },
+                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+                    "function_calling": false, "response_schema": false, "streaming": false,
+                    "file_input": { "disabled": false, "disabled_mime_types": [] },
+                    "image_generation": { "disabled": false, "disabled_mime_types": [] },
+                    "audio_input": { "disabled": false, "disabled_mime_types": [] },
+                    "audio_output": { "disabled": false, "disabled_mime_types": [] },
+                    "code_interpreter": false,
+                    "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+                },
+                "context_window": { "max_input_tokens": 0, "max_output_tokens": null, "output_vector_size": null },
+                "default_parameters": {
+                    "temperature": null, "top_p": null, "max_output_tokens": null,
+                    "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
+                    "top_logprobs": null, "truncation": null, "service_tier": null,
+                    "parallel_tool_calls": null, "text": null, "reasoning": null,
+                    "tool_choice": null, "store": null
+                },
+                "allow_parameter_override": false,
+                "allow_extra_params": [],
+                "provider_settings": null
+            }
+        }"#).expect("ModelV1 from JSON");
+        let stale_key = cache_key(&tenant_id, "model", "stale-key");
+        cache.set(&stale_key, &stale_model, 1800).await;
+
+        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+
+        // The stale key should still be in cache before create.
+        assert!(cache.get::<crate::ModelV1>(&stale_key).await.is_some(), "stale entry should be present before create");
+
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let _model = service.create_model(&ctx, &req).await.expect("create model");
+
+        // After create, all tenant entries should be invalidated (including the stale key).
+        assert!(cache.get::<crate::ModelV1>(&stale_key).await.is_none(), "stale entry should be invalidated after create");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // update_model
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_update_model_lifecycle_status() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update lifecycle status");
+
+        assert_eq!(updated.lifecycle_status, crate::LifecycleStatus::Preview);
+        assert_eq!(updated.canonical_id, "openai::gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn test_update_model_approval_status() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+
+        // Approve
+        let updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    approval_status: Some(crate::ApprovalStatus::Approved),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("approve model");
+        assert_eq!(updated.approval_status, crate::ApprovalStatus::Approved);
+
+        // Reject
+        let updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    approval_status: Some(crate::ApprovalStatus::Rejected),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("reject model");
+        assert_eq!(updated.approval_status, crate::ApprovalStatus::Rejected);
+
+        // Revoke
+        let updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    approval_status: Some(crate::ApprovalStatus::Revoked),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("revoke model");
+        assert_eq!(updated.approval_status, crate::ApprovalStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn test_update_model_both_fields_and_approval() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                    approval_status: Some(crate::ApprovalStatus::Approved),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update both fields and approval");
+
+        assert_eq!(updated.lifecycle_status, crate::LifecycleStatus::Preview);
+        assert_eq!(updated.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn test_update_model_not_found() {
+        let db = setup_db().await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let err = service
+            .update_model(
+                &ctx,
+                "nonexistent::model",
+                &crate::UpdateModelRequestV1 {
+                    lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("nonexistent model should fail");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_model_invalid_transition_from_deprecated() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        // Soft-delete (deprecate) the model manually via the repo.
+        crate::domain::repo::ModelRepository::soft_delete(
+            &repo, &conn, &scope, "openai::gpt-4o",
+        )
+        .await
+        .expect("soft delete");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let err = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    lifecycle_status: Some(crate::LifecycleStatus::Production),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("transition from deprecated should fail");
+
+        assert!(
+            matches!(&err, DomainError::InvalidTransition { .. }),
+            "expected InvalidTransition, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_model_cache_invalidation() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+
+        // Pre-populate cache with the model
+        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
+        let _model_ref = service
+            .get_tenant_model(
+                &SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx"),
+                "openai::gpt-4o",
+            )
+            .await
+            .expect("get model to populate cache");
+        assert!(cache.get::<crate::ModelV1>(&key).await.is_some(), "model should be cached");
+
+        // Update the model
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let _updated = service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    lifecycle_status: Some(crate::LifecycleStatus::Preview),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update model");
+
+        // Cache should be invalidated
+        assert!(cache.get::<crate::ModelV1>(&key).await.is_none(), "cache should be invalidated after update");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // delete_model
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_delete_model_soft_deletes() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        service
+            .delete_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("delete model");
+
+        // After soft-delete, direct fetch should return ModelDeprecated.
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("deprecated model should return error");
+
+        assert!(
+            matches!(&err, DomainError::ModelDeprecated { .. }),
+            "expected ModelDeprecated after soft-delete, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_model_not_found() {
+        let db = setup_db().await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(test_tenant()).build().expect("ctx");
+        let err = service
+            .delete_model(&ctx, "nonexistent::model")
+            .await
+            .expect_err("nonexistent model should fail");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { .. }),
+            "expected ModelNotFound, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_model_cache_invalidation() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let repo = SeaOrmRepository;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(db, NoAncestorsResolver, ModelRegistryConfig::default(), cache.clone());
+
+        // Pre-populate cache with the model via get
+        let ctx = SecurityContext::builder().subject_id(Uuid::new_v4()).subject_tenant_id(tenant_id).build().expect("ctx");
+        let _model_ref = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("get model to populate cache");
+
+        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
+        assert!(cache.get::<crate::ModelV1>(&key).await.is_some(), "model should be cached before delete");
+
+        // Delete the model
+        service
+            .delete_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("delete model");
+
+        // Cache should be invalidated
+        assert!(cache.get::<crate::ModelV1>(&key).await.is_none(), "cache should be invalidated after delete");
     }
 }

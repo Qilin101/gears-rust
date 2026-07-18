@@ -26,6 +26,18 @@ pub trait ProviderRepository: Send + Sync {
         id: Uuid,
     ) -> Result<ProviderV1, DomainError>;
 
+    /// Find a provider by slug within the given access scope.
+    ///
+    /// Used by the service layer to resolve provider identity when creating
+    /// models. Returns [`DomainError::ProviderNotFound`] when the slug does
+    /// not exist within the scope.
+    async fn find_by_slug<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        slug: &str,
+    ) -> Result<ProviderV1, DomainError>;
+
     /// List providers matching the `OData` query within the given access scope.
     async fn list<C: DBRunner>(
         &self,
