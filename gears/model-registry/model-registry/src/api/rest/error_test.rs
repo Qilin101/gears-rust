@@ -156,11 +156,11 @@ fn invalid_transition_maps_to_400() {
 }
 
 // ---------------------------------------------------------------------------
-// 422 — Invalid Argument
+// 400 — Invalid Argument
 // ---------------------------------------------------------------------------
 
 #[test]
-fn validation_maps_to_422() {
+fn validation_maps_to_400() {
     assert_mapping_with_detail(
         DomainError::validation("slug cannot be empty"),
         400,

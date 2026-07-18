@@ -576,11 +576,21 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        // 4. Find the provider in own or ancestor tenants and build a scope
-        //    that can resolve the FK.
+        // 4. Find the provider in own or ancestor tenants, verify it is
+        //    active (not disabled), and build a scope that can resolve the FK.
         let provider_tenant_id = self
             .find_provider_tenant(&conn, &inheritance, &req.provider_slug)
             .await?;
+
+        let provider_scope = AccessScope::for_tenants(vec![provider_tenant_id]);
+        let provider = self
+            .provider_repo
+            .find_by_slug(&conn, &provider_scope, &req.provider_slug)
+            .await?;
+
+        if !matches!(provider.status, crate::ProviderStatus::Active) {
+            return Err(DomainError::ProviderDisabled { id: provider.id });
+        }
 
         let scope = AccessScope::for_tenants(vec![tenant_id, provider_tenant_id]);
 
@@ -627,6 +637,19 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             Self::validate_lifecycle_transition(existing.lifecycle_status, *new_lifecycle)?;
         }
 
+        // 3b. Prevent approval changes on terminal-lifecycle models (deprecated
+        //     or sunset) since those states are effectively read-only.
+        if req.approval_status.is_some()
+            && matches!(
+                existing.lifecycle_status,
+                crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+            )
+        {
+            return Err(DomainError::invalid_transition(
+                "cannot modify approval status on a deprecated or sunset model",
+            ));
+        }
+
         // 4. Update model fields first (PATCH semantics via mapper), then
         //    write approval_status to model_approvals if requested. Ordering is
         //    deliberate: both operations are idempotent, so if `set_approval`
@@ -635,7 +658,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         //    A full DB transaction wrapping both writes would be ideal but is
         //    deferred because the toolkit's `DBProvider::transaction` error type
         //    (`DbError`) does not compose with `DomainError`.
-        let model = self
+        //
+        //    Note: model_update_active_model does NOT set approval_status (that
+        //    is handled exclusively by set_approval below), so we must patch the
+        //    returned model to reflect the new value after set_approval succeeds.
+        let mut model = self
             .model_repo
             .update(&conn, &scope, canonical_id, req)
             .await?;
@@ -644,6 +671,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             self.model_repo
                 .set_approval(&conn, &scope, existing.id, approval_status)
                 .await?;
+            model.approval_status = approval_status;
         }
 
         // 5. Invalidate cache

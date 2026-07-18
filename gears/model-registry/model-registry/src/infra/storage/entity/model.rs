@@ -84,7 +84,7 @@ pub enum Relation {
         from = "Column::ProviderId",
         to = "super::provider::Column::Id",
         on_update = "NoAction",
-        on_delete = "NoAction"
+        on_delete = "Restrict"
     )]
     Provider,
     #[sea_orm(has_many = "super::model_approval::Entity")]

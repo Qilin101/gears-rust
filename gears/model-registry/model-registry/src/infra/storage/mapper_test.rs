@@ -561,7 +561,10 @@ fn model_update_approval_status() {
 
     let am = model_update_active_model(&entity, &req);
 
-    assert_eq!(am.approval_status.unwrap(), "rejected");
+    // model_update_active_model does NOT set approval_status — that is
+    // handled exclusively by set_approval in the service layer. Verify
+    // the mapper preserves the existing value unchanged.
+    assert_eq!(am.approval_status.unwrap(), "approved");
 }
 
 #[test]

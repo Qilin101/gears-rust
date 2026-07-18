@@ -79,7 +79,7 @@ impl From<DomainError> for CanonicalError {
                     .create()
             }
 
-            // ── 422 Invalid Argument ───────────────────────────────────
+            // ── 400 Invalid Argument ───────────────────────────────────
             DomainError::Validation { message } => ModelRegistryResourceError::invalid_argument()
                 .with_format(message)
                 .create(),

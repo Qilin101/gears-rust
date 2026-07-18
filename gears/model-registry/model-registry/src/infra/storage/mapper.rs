@@ -226,6 +226,10 @@ pub fn model_create_active_model(
 /// `Some(...)` fields, re-serializes `info` JSONB if any info field changed,
 /// and re-projects the denormalized filterable columns.
 ///
+/// NOTE: `approval_status` is intentionally NOT handled here — it is written
+/// exclusively by the service layer's `set_approval` call, which atomically
+/// updates both `model_approvals` and the denormalized column.
+///
 /// Immutable fields (`canonical_id`, `provider_slug`, `info.provider_model_id`,
 /// `info.gts_type`) are silently ignored if present in the request.
 #[allow(clippy::cognitive_complexity)]
@@ -241,12 +245,9 @@ pub fn model_update_active_model(
         active.lifecycle_status = Set(lifecycle_status_str(*lifecycle));
     }
 
-    // — Approval status —
-    if let Some(status) = &req.approval_status {
-        active.approval_status = Set(approval_status_str(*status));
-    }
-
-    // — Info-based fields: deserialize existing info, apply patches, re-serialize —
+    // — Approval status (handled exclusively by set_approval in the service
+    //   layer, which writes to both model_approvals and the denormalized
+    //   column atomically via on_conflict upsert). —
     let mut info: Option<ModelInfoV1> = existing
         .info
         .as_ref()
