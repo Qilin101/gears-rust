@@ -1,3 +1,4 @@
+use authz_resolver_sdk::pep::EnforcerError;
 use toolkit_db::DbError;
 use uuid::Uuid;
 
@@ -160,6 +161,25 @@ impl From<DomainError> for crate::ModelRegistryError {
             DomainError::Validation { message } => Self::validation(message),
             DomainError::Internal { detail, source } => Self::Internal { detail, source },
             DomainError::Database(db_err) => Self::internal(db_err.to_string()),
+        }
+    }
+}
+
+impl From<EnforcerError> for DomainError {
+    fn from(e: EnforcerError) -> Self {
+        match e {
+            EnforcerError::Denied { deny_reason } => {
+                let msg = deny_reason
+                    .as_ref()
+                    .map_or_else(|| "access denied".to_owned(), |r| format!("access denied: {r:?}"));
+                Self::forbidden(msg)
+            }
+            EnforcerError::EvaluationFailed(err) => {
+                Self::internal_from("authorization evaluation failed", err)
+            }
+            EnforcerError::CompileFailed(err) => {
+                Self::internal_from("authorization constraint compilation failed", err)
+            }
         }
     }
 }

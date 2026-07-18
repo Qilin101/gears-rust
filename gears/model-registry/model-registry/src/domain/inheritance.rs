@@ -201,7 +201,7 @@ impl InheritanceContext {
 ///
 /// Returns [`DomainError::Internal`] when the tenant-resolver call fails
 /// (network error, invalid response, etc.).
-pub async fn resolve_ancestors<T: TenantResolverClient>(
+pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
     resolver: &T,
     ctx: &SecurityContext,
 ) -> Result<InheritanceContext, DomainError> {

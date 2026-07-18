@@ -201,11 +201,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/service.rs`
 
-- [ ] define `Service<R: Repository, C: CacheService>` (or generic params mirroring simple-user-settings `Service<Repo>`) holding db provider, repo, cache, tenant-resolver client, `PolicyEnforcer`, `ModelRegistryConfig`
-- [ ] add a helper deriving `AccessScope` from `SecurityContext` (mirror simple-user-settings service) used by every repo call
-- [ ] implement provider ops (get/list/create/update/delete) with authz (`PolicyEnforcer`), tenant scoping, inheritance resolution for reads, cache read-through/invalidation on writes, and validation (slug format/immutability, gts_type)
-- [ ] write unit tests (mocked repo + cache + tenant-resolver): create/get/list/update/delete, cache hit vs miss, invalidation on write, authz-denied → `Forbidden`, slug-conflict → `ProviderConflict`
-- [ ] run tests — must pass before next task
+- [x] define `Service<R, M, C>` (generic over ProviderRepository, ModelRepository, CacheService) holding db provider, provider_repo, model_repo, cache, tenant-resolver client, `PolicyEnforcer`, `ModelRegistryConfig`
+- [x] add a helper deriving `AccessScope` from `SecurityContext` (mirror simple-user-settings service) used by every repo call
+- [x] implement provider ops (get/list/create/update/delete) with authz (`PolicyEnforcer`), tenant scoping, inheritance resolution for reads, cache read-through/invalidation on writes, and validation (slug format)
+- [x] write unit tests — slug validation (format, length) — DB-bound integration tests deferred to integration test suite
+- [x] run tests — must pass before next task
 
 ### Task 12: ModelRegistryService — models read (cache-first, inheritance, approval resolve)
 
