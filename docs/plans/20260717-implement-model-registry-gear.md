@@ -105,11 +105,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/domain/error.rs`
 - Create: `gears/model-registry/model-registry/src/domain/repo.rs`
 
-- [ ] define `DomainError` (thiserror) covering not-found/conflict/validation/forbidden/deprecated/not-approved/internal, with `From<DomainError> for ModelRegistryError` and `From` for DB errors
-- [ ] define `ProviderRepository` and `ModelRepository` traits over `&C: DBRunner` + `&AccessScope` (mirror `SettingsRepository`): provider get/list(OData)/create/update/delete; model get_by_canonical/list(OData)/create/update/soft_delete; approval get/set/delete
-- [ ] create **empty stub files** for `service.rs`, `local_client.rs`, `cache.rs`, `inheritance.rs` and declare all `mod`s in `domain/mod.rs` now, so the crate compiles at this task's build gate (later tasks fill the stubs)
-- [ ] write tests for the `DomainError` → `ModelRegistryError` mappings (each variant)
-- [ ] run tests — must pass before next task
+- [x] define `DomainError` (thiserror) covering not-found/conflict/validation/forbidden/deprecated/not-approved/internal, with `From<DomainError> for ModelRegistryError` and `From` for DB errors
+- [x] define `ProviderRepository` and `ModelRepository` traits over `&C: DBRunner` + `&AccessScope` (mirror `SettingsRepository`): provider get/list(OData)/create/update/delete; model get_by_canonical/list(OData)/create/update/soft_delete; approval get/set/delete
+- [x] create **empty stub files** for `service.rs`, `local_client.rs`, `cache.rs`, `inheritance.rs` and declare all `mod`s in `domain/mod.rs` now, so the crate compiles at this task's build gate (later tasks fill the stubs)
+- [x] write tests for the `DomainError` → `ModelRegistryError` mappings (each variant)
+- [x] run tests — must pass before next task
 
 ### Task 4: SeaORM entities and migrations (providers, models, model_approvals)
 
