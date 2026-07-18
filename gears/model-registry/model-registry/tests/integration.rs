@@ -1,0 +1,968 @@
+//! End-to-end integration tests for the Model Registry gear.
+//!
+//! These tests construct a full service stack (real `SeaOrmRepository` over
+//! in-memory SQLite, real `InMemoryCache`, real `PolicyEnforcer` backed by a
+//! mock `AuthZResolverClient`, and configurable mock `TenantResolverClient`)
+//! and drive the complete provider→model→approval→soft-delete lifecycle.
+//!
+//! ## Test matrix
+//!
+//! | Test | Flow | What it verifies |
+//! |------|------|------------------|
+//! | `full_lifecycle_single_tenant` | create provider → create model → get → list with OData → update approval → soft-delete | P1 happy path end-to-end |
+//! | `tenant_isolation` | two tenants, data created in A only | B cannot see A's data |
+//! | `inheritance_parent_child` | parent owns provider + model; child has no data | child inherits via ancestor chain |
+//! | `child_shadows_parent` | parent + child own same canonical_id | child shadows parent |
+//! | `cache_first_get` | second read hits cache | cache-first read behaviour |
+//!
+//! All tests run against an in-memory SQLite database with the production
+//! migration applied, giving high confidence the storage layer works
+//! end-to-end without needing Postgres.
+
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use authz_resolver_sdk::{
+    AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
+};
+use model_registry::{
+    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus, ModelV1,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
+};
+use model_registry::config::ModelRegistryConfig;
+use model_registry::domain::cache::InMemoryCache;
+use model_registry::domain::error::DomainError;
+use model_registry::domain::repo::{ModelRepository, ProviderRepository};
+use model_registry::domain::service::Service;
+use model_registry::infra::storage::migrations::Migrator;
+use model_registry::infra::storage::sea_orm_repo::SeaOrmRepository;
+use sea_orm_migration::MigratorTrait;
+use tenant_resolver_sdk::{
+    GetAncestorsOptions, GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse,
+    GetTenantsOptions, IsAncestorOptions, TenantId, TenantRef, TenantResolverClient,
+    TenantResolverError, TenantInfo, TenantStatus,
+};
+use toolkit_db::migration_runner::run_migrations_for_testing;
+use toolkit_db::secure::DBRunner;
+use toolkit_db::{connect_db, ConnectOpts, DbError, DBProvider};
+use toolkit_odata::{ODataQuery, parse_filter_string};
+use toolkit_security::{AccessScope, SecurityContext};
+use uuid::Uuid;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test tenant IDs
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn tenant_a() -> Uuid {
+    Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
+}
+
+fn tenant_b() -> Uuid {
+    Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap()
+}
+
+fn child_tenant() -> Uuid {
+    Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap()
+}
+
+fn parent_tenant() -> Uuid {
+    Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Mock AuthZResolverClient — always permissive with Eq constraint
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct MockAuthZ;
+
+#[async_trait]
+impl AuthZResolverClient for MockAuthZ {
+    async fn evaluate(
+        &self,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        let tenant_id = request
+            .subject
+            .properties
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_else(Uuid::nil);
+
+        Ok(EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::EvaluationResponseContext {
+                constraints: vec![authz_resolver_sdk::constraints::Constraint {
+                    predicates: vec![authz_resolver_sdk::constraints::Predicate::Eq(
+                        authz_resolver_sdk::constraints::EqPredicate {
+                            property: "owner_tenant_id".to_owned(),
+                            value: serde_json::json!(tenant_id.to_string()),
+                        },
+                    )],
+                }],
+                deny_reason: None,
+            },
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Mock TenantResolverClient variants
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Returns no ancestors (single-tenant scenario).
+struct NoAncestorsResolver;
+
+#[async_trait]
+impl TenantResolverClient for NoAncestorsResolver {
+    async fn get_ancestors(
+        &self,
+        _ctx: &SecurityContext,
+        id: TenantId,
+        _options: &GetAncestorsOptions,
+    ) -> Result<GetAncestorsResponse, TenantResolverError> {
+        Ok(GetAncestorsResponse {
+            tenant: TenantRef {
+                id,
+                status: TenantStatus::Active,
+                tenant_type: None,
+                parent_id: None,
+                self_managed: false,
+            },
+            ancestors: vec![],
+        })
+    }
+
+    async fn get_tenant(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_root_tenant(
+        &self,
+        _: &SecurityContext,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_tenants(
+        &self,
+        _: &SecurityContext,
+        _: &[TenantId],
+        _: &GetTenantsOptions,
+    ) -> Result<Vec<TenantInfo>, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_descendants(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: &GetDescendantsOptions,
+    ) -> Result<GetDescendantsResponse, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn is_ancestor(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: TenantId,
+        _: &IsAncestorOptions,
+    ) -> Result<bool, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+}
+
+/// Returns a fixed parent-child ancestor chain: child → parent.
+struct OneAncestorResolver;
+
+#[async_trait]
+impl TenantResolverClient for OneAncestorResolver {
+    async fn get_ancestors(
+        &self,
+        _ctx: &SecurityContext,
+        id: TenantId,
+        _options: &GetAncestorsOptions,
+    ) -> Result<GetAncestorsResponse, TenantResolverError> {
+        Ok(GetAncestorsResponse {
+            tenant: TenantRef {
+                id,
+                status: TenantStatus::Active,
+                tenant_type: None,
+                parent_id: Some(TenantId(parent_tenant())),
+                self_managed: false,
+            },
+            ancestors: vec![TenantRef {
+                id: TenantId(parent_tenant()),
+                status: TenantStatus::Active,
+                tenant_type: None,
+                parent_id: None,
+                self_managed: false,
+            }],
+        })
+    }
+
+    async fn get_tenant(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_root_tenant(
+        &self,
+        _: &SecurityContext,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_tenants(
+        &self,
+        _: &SecurityContext,
+        _: &[TenantId],
+        _: &GetTenantsOptions,
+    ) -> Result<Vec<TenantInfo>, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_descendants(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: &GetDescendantsOptions,
+    ) -> Result<GetDescendantsResponse, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn is_ancestor(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: TenantId,
+        _: &IsAncestorOptions,
+    ) -> Result<bool, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Set up an in-memory SQLite database with all migrations applied.
+async fn setup_db() -> DBProvider<DbError> {
+    let opts = ConnectOpts {
+        max_conns: Some(1),
+        min_conns: Some(1),
+        ..Default::default()
+    };
+    let db = connect_db("sqlite::memory:", opts)
+        .await
+        .expect("in-memory SQLite connection");
+
+    run_migrations_for_testing(&db, Migrator::migrations())
+        .await
+        .expect("apply initial migration");
+
+    DBProvider::<DbError>::new(db)
+}
+
+fn scope_for(tenant_id: Uuid) -> AccessScope {
+    AccessScope::for_tenants(vec![tenant_id])
+}
+
+fn security_context(tenant_id: Uuid) -> SecurityContext {
+    SecurityContext::builder()
+        .subject_id(Uuid::new_v4())
+        .subject_tenant_id(tenant_id)
+        .build()
+        .expect("SecurityContext")
+}
+
+fn make_provider_gts() -> gts::GtsTypeId {
+    gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~")
+}
+
+fn make_create_provider_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
+    CreateProviderRequestV1::builder(slug, name, make_provider_gts()).build()
+}
+
+fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> CreateModelRequestV1 {
+    let gts_leaf = "cf.genai._.openai.v1~";
+    let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
+
+    let info_value = serde_json::json!({
+        "gts_type": gts_type,
+        "display_name": format!("Test {provider_model_id}"),
+        "description": null,
+        "family": "test-family",
+        "vendor": "TestVendor",
+        "managed": false,
+        "architecture": "transformer",
+        "size_bytes": null,
+        "format": "api-only",
+        "region": null,
+        "hosted_by": null,
+        "last_release_at": null,
+        "reasoning_level": null,
+        "version": null,
+        "sort_order": null,
+        "icon": null,
+        "multiplier_display": null,
+        "performance": {
+            "response_latency_ms": null,
+            "tokens_per_second": null
+        },
+        "additional_info": {},
+        "supported_api": ["completion"],
+        "provider_model_id": provider_model_id,
+        "capabilities": {
+            "vision": { "enabled": true, "supported_mime_types": ["image/jpeg"] },
+            "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+            "function_calling": true,
+            "response_schema": false,
+            "streaming": true,
+            "file_input": { "enabled": false, "supported_mime_types": [] },
+            "image_generation": { "enabled": false, "supported_mime_types": [] },
+            "audio_input": { "enabled": false, "supported_mime_types": [] },
+            "audio_output": { "enabled": false, "supported_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+        },
+        "disabled_capabilities": {
+            "vision": { "disabled": false, "disabled_mime_types": [] },
+            "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+            "function_calling": false,
+            "response_schema": false,
+            "streaming": false,
+            "file_input": { "disabled": false, "disabled_mime_types": [] },
+            "image_generation": { "disabled": false, "disabled_mime_types": [] },
+            "audio_input": { "disabled": false, "disabled_mime_types": [] },
+            "audio_output": { "disabled": false, "disabled_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+        },
+        "context_window": {
+            "max_input_tokens": 8192,
+            "max_output_tokens": 4096
+        },
+        "default_parameters": {
+            "temperature": null, "top_p": null, "max_output_tokens": null,
+            "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
+            "top_logprobs": null, "truncation": null, "service_tier": null,
+            "parallel_tool_calls": null, "text": null, "reasoning": null,
+            "tool_choice": null, "store": null
+        },
+        "allow_parameter_override": false,
+        "allow_extra_params": [],
+        "provider_settings": {}
+    });
+
+    let info = serde_json::from_value(info_value).expect("ModelInfoV1 from test JSON");
+
+    CreateModelRequestV1 {
+        provider_slug: provider_slug.to_owned(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: None,
+        info,
+    }
+}
+
+/// Build a full `Service` instance for integration testing.
+fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
+    db: DBProvider<DbError>,
+    tenant_resolver: R,
+) -> Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache> {
+    let enforcer =
+        authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
+    Service::new(
+        Arc::new(db),
+        Arc::new(SeaOrmRepository::new()),
+        Arc::new(SeaOrmRepository::new()),
+        Arc::new(InMemoryCache::new()),
+        Arc::new(tenant_resolver),
+        enforcer,
+        ModelRegistryConfig::default(),
+    )
+}
+
+/// Create a provider in the given tenant via the repository directly (bypassing
+/// the service/authz layer for test setup purposes).
+async fn create_provider_direct(
+    repo: &SeaOrmRepository,
+    conn: &impl DBRunner,
+    tenant_id: Uuid,
+    slug: &str,
+) -> (Uuid, String) {
+    let scope = scope_for(tenant_id);
+    let p = ProviderRepository::create(repo, conn, &scope, tenant_id, &make_create_provider_req(slug, slug))
+        .await
+        .expect("create provider in test setup");
+    (p.id, p.slug)
+}
+
+/// Create a model in the given tenant via the repository directly.
+async fn create_model_direct(
+    repo: &SeaOrmRepository,
+    conn: &impl DBRunner,
+    tenant_id: Uuid,
+    provider_slug: &str,
+    provider_model_id: &str,
+) -> ModelV1 {
+    let scope = scope_for(tenant_id);
+    ModelRepository::create(
+        repo, conn, &scope, tenant_id, &make_create_model_req(provider_slug, provider_model_id),
+    )
+    .await
+    .expect("create model in test setup")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. Full lifecycle: provider → model → get → list (OData) → approval → delete
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn full_lifecycle_single_tenant() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let tenant_id = tenant_a();
+    let ctx = security_context(tenant_id);
+
+    // ── Step 1: Create a provider ───────────────────────────────────────────
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    assert_eq!(provider.slug, "openai");
+    assert_eq!(provider.name, "OpenAI");
+
+    // ── Step 2: Create a model ──────────────────────────────────────────────
+    let model = service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model");
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+    assert_eq!(model.lifecycle_status, LifecycleStatus::Production);
+    assert_eq!(model.approval_status, ApprovalStatus::Pending);
+
+    // ── Step 3: get_tenant_model (cache miss → DB populate) ─────────────────
+    let fetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model");
+    assert_eq!(fetched.canonical_id, "openai::gpt-4o");
+    assert_eq!(fetched.approval_status, ApprovalStatus::Pending);
+
+    // ── Step 4: get_tenant_model again (cache hit) ──────────────────────────
+    let cached = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model from cache");
+    assert_eq!(cached.canonical_id, "openai::gpt-4o");
+
+    // ── Step 5: List with OData filter ──────────────────────────────────────
+    let parsed = parse_filter_string("approval_status eq 'pending'").expect("parse filter");
+    let query = ODataQuery {
+        filter: Some(Box::new(parsed.into_expr())),
+        ..Default::default()
+    };
+    let page = service
+        .list_tenant_models(&ctx, query)
+        .await
+        .expect("list models with OData filter");
+    assert_eq!(page.items.len(), 1, "one pending model should be listed");
+    assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+
+    // ── Step 6: Update approval to Approved ─────────────────────────────────
+    let approved = service
+        .update_model(
+            &ctx,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                approval_status: Some(ApprovalStatus::Approved),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("approve model");
+    assert_eq!(approved.approval_status, ApprovalStatus::Approved);
+
+    // ── Step 7: Verify the approval persisted by reading back ───────────────
+    let refetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get approved model");
+    // After cache invalidation from update, the read comes from DB.
+    assert_eq!(refetched.approval_status, ApprovalStatus::Approved);
+
+    // ── Step 8: Soft-delete the model ───────────────────────────────────────
+    service
+        .delete_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("soft-delete model");
+
+    // ── Step 9: Verify deprecated model returns ModelDeprecated on direct get
+    let deprecated_err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("deprecated model should error");
+    assert!(
+        matches!(deprecated_err, DomainError::ModelDeprecated { .. }),
+        "expected ModelDeprecated, got {deprecated_err:?}"
+    );
+
+    // ── Step 10: Verify deprecated model is hidden from default list ────────
+    let list_after = service
+        .list_tenant_models(&ctx, ODataQuery::default())
+        .await
+        .expect("list models after soft-delete");
+    assert!(
+        list_after.items.is_empty(),
+        "deprecated model should be hidden from list"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. Tenant isolation: data from tenant A is invisible to tenant B
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn tenant_isolation() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx_a = security_context(tenant_a());
+    let ctx_b = security_context(tenant_b());
+
+    // Create provider and model in tenant A.
+    let provider = service
+        .create_provider(&ctx_a, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider in tenant A");
+    let _model = service
+        .create_model(&ctx_a, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model in tenant A");
+
+    // Tenant B should not see any providers.
+    let providers_page = service
+        .list_providers(&ctx_b, ODataQuery::default())
+        .await
+        .expect("list providers as tenant B");
+    assert!(
+        providers_page.items.is_empty(),
+        "tenant B should see no providers"
+    );
+
+    // Tenant B should not see any models.
+    let models_page = service
+        .list_tenant_models(&ctx_b, ODataQuery::default())
+        .await
+        .expect("list models as tenant B");
+    assert!(
+        models_page.items.is_empty(),
+        "tenant B should see no models"
+    );
+
+    // Tenant B should not be able to get the model.
+    let get_err = service
+        .get_tenant_model(&ctx_b, "openai::gpt-4o")
+        .await
+        .expect_err("tenant B get model should fail");
+    assert!(
+        matches!(get_err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound, got {get_err:?}"
+    );
+
+    // Tenant B should not be able to get the provider.
+    let get_provider_err = service
+        .get_provider(&ctx_b, provider.id)
+        .await
+        .expect_err("tenant B get provider should fail");
+    assert!(
+        matches!(get_provider_err, DomainError::ProviderNotFound { .. }),
+        "expected ProviderNotFound, got {get_provider_err:?}"
+    );
+
+    // Tenant B should not be able to update the model.
+    let update_err = service
+        .update_model(
+            &ctx_b,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                approval_status: Some(ApprovalStatus::Approved),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("tenant B update model should fail");
+    assert!(
+        matches!(update_err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound, got {update_err:?}"
+    );
+
+    // Tenant B should not be able to delete the model.
+    let delete_err = service
+        .delete_model(&ctx_b, "openai::gpt-4o")
+        .await
+        .expect_err("tenant B delete model should fail");
+    assert!(
+        matches!(delete_err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound, got {delete_err:?}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. Inheritance: child tenant inherits provider + model from parent
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn child_inherits_provider_and_model_from_parent() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let repo = SeaOrmRepository::new();
+
+    // Create provider and model in the parent tenant (via direct repo calls
+    // to isolate from service-layer cache interactions).
+    let (_provider_id, provider_slug) =
+        create_provider_direct(&repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&repo, &conn, parent_tenant(), &provider_slug, "gpt-4o").await;
+
+    // Child tenant uses the service with the ancestor-chain resolver.
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // ── Child can list the inherited model ──────────────────────────────────
+    let models_page = service
+        .list_tenant_models(&ctx, ODataQuery::default())
+        .await
+        .expect("child list inherited models");
+    assert_eq!(
+        models_page.items.len(),
+        1,
+        "child should inherit exactly 1 model"
+    );
+    assert_eq!(
+        models_page.items[0].canonical_id, "openai::gpt-4o",
+        "inherited model canonical_id must match"
+    );
+
+    // ── Child can get the inherited model directly ──────────────────────────
+    let inherited = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("child get inherited model");
+    assert_eq!(inherited.canonical_id, "openai::gpt-4o");
+    assert_eq!(
+        inherited.approval_status,
+        ApprovalStatus::Pending,
+        "inherited model should have populated approval_status"
+    );
+
+    // ── Child can list inherited providers ──────────────────────────────────
+    let providers_page = service
+        .list_providers(&ctx, ODataQuery::default())
+        .await
+        .expect("child list inherited providers");
+    assert_eq!(
+        providers_page.items.len(),
+        1,
+        "child should inherit exactly 1 provider"
+    );
+    assert_eq!(
+        providers_page.items[0].slug, "openai",
+        "inherited provider slug must match"
+    );
+
+    // ── Child can get the inherited provider directly ───────────────────────
+    let inherited_provider = service
+        .get_provider(&ctx, _provider_id)
+        .await
+        .expect("child get inherited provider");
+    assert_eq!(inherited_provider.slug, "openai");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. Child shadows parent: child creates model with same canonical_id as parent
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn child_shadows_parent_by_same_canonical_id() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let repo = SeaOrmRepository::new();
+
+    // Create provider and model in the parent tenant.
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    // Create the SAME provider slug AND model canonical_id in the child tenant.
+    let (_child_provider_id, child_slug) =
+        create_provider_direct(&repo, &conn, child_tenant(), "openai").await;
+    create_model_direct(&repo, &conn, child_tenant(), &child_slug, "gpt-4o").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // Child's list should show exactly 1 model (child shadows parent).
+    let page = service
+        .list_tenant_models(&ctx, ODataQuery::default())
+        .await
+        .expect("child list models");
+    assert_eq!(
+        page.items.len(),
+        1,
+        "shadowing should produce exactly 1 model"
+    );
+    assert_eq!(
+        page.items[0].canonical_id, "openai::gpt-4o",
+        "model canonical_id should match"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. Cache-first read: second get_tenant_model hits cache
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cache_first_get_returns_cached_model() {
+    // Clone the DBProvider so we can get a raw connection for direct repo
+    // mutations after the service is built (Arc<Db> behind the scenes).
+    let db = setup_db().await;
+    let db2 = db.clone();
+    let repo = SeaOrmRepository::new();
+
+    // Create data directly via repo connection.
+    {
+        let conn = db2.conn().expect("db connection");
+        let (_pid, slug) =
+            create_provider_direct(&repo, &conn, tenant_a(), "openai").await;
+        let _original = create_model_direct(&repo, &conn, tenant_a(), &slug, "gpt-4o").await;
+    }
+
+    // Build service (consumes original db, stored in Arc inside).
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    // First read: cache miss, populates cache.
+    let first = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("first get (cache miss)");
+    assert_eq!(first.canonical_id, "openai::gpt-4o");
+    assert_eq!(first.lifecycle_status, LifecycleStatus::Production);
+
+    // Update the model via repo directly to bypass cache invalidation.
+    // We use the cloned DBProvider to get a fresh connection.
+    let conn2 = db2.conn().expect("db connection");
+    ModelRepository::update(
+        &repo,
+        &conn2,
+        &scope_for(tenant_a()),
+        "openai::gpt-4o",
+        &UpdateModelRequestV1 {
+            lifecycle_status: Some(LifecycleStatus::Preview),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("direct update bypassing cache invalidation");
+
+    // Second read: cache hit, returns stale data (not the updated Preview).
+    let second = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("second get (cache hit)");
+    assert_eq!(
+        second.lifecycle_status,
+        LifecycleStatus::Production,
+        "cache hit should return stale (Production) value, not updated Preview"
+    );
+    assert_eq!(
+        second.canonical_id, "openai::gpt-4o",
+        "canonical_id should still match"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. Full OData filtering on models
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn odata_filters_work_on_denormalized_columns() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let tenant_id = tenant_a();
+    let ctx = security_context(tenant_id);
+
+    // Create provider.
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    // Create two models with different providers but same vendor/family.
+    let _model1 = service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model gpt-4o");
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("anthropic", "Anthropic"))
+        .await
+        .expect("create provider anthropic");
+
+    // Create a second provider with different slug for second model.
+    // (The model's provider settings reference the provider slug;
+    //  the `gts_type` in the info drives the denormalized column.)
+    let mut model2_req = make_create_model_req("openai", "gpt-4o-mini");
+    model2_req.info = {
+        let mut info_val = serde_json::to_value(&model2_req.info).expect("serialize info");
+        if let Some(obj) = info_val.as_object_mut() {
+            obj.insert("provider_model_id".into(), serde_json::json!("gpt-4o-mini"));
+        }
+        serde_json::from_value(info_val).expect("deserialize modified info")
+    };
+    let _model2 = service
+        .create_model(&ctx, &model2_req)
+        .await
+        .expect("create model gpt-4o-mini");
+
+    // Approve model1.
+    service
+        .update_model(
+            &ctx,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                approval_status: Some(ApprovalStatus::Approved),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("approve gpt-4o");
+
+    // ── Filter by approval_status eq 'approved' ─────────────────────────────
+    let parsed = parse_filter_string("approval_status eq 'approved'").expect("parse");
+    let page = service
+        .list_tenant_models(
+            &ctx,
+            ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list filtered by approval_status");
+    assert_eq!(page.items.len(), 1, "only gpt-4o is approved");
+    assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+
+    // ── Filter by vision eq true ────────────────────────────────────────────
+    let parsed = parse_filter_string("vision eq true").expect("parse");
+    let page = service
+        .list_tenant_models(
+            &ctx,
+            ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list filtered by vision capability");
+    // Both models have vision=true in the test data.
+    assert_eq!(page.items.len(), 2, "both models have vision");
+
+    // ── Filter by function_calling eq true ──────────────────────────────────
+    let parsed = parse_filter_string("function_calling eq true").expect("parse");
+    let page = service
+        .list_tenant_models(
+            &ctx,
+            ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list filtered by function_calling");
+    assert_eq!(page.items.len(), 2, "both models have function_calling");
+
+    // ── Filter by streaming eq true ─────────────────────────────────────────
+    let parsed = parse_filter_string("streaming eq true").expect("parse");
+    let page = service
+        .list_tenant_models(
+            &ctx,
+            ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list filtered by streaming");
+    assert_eq!(page.items.len(), 2, "both models have streaming");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. Providers CRUD via service layer
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn provider_crud_through_service() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let tenant_id = tenant_a();
+    let ctx = security_context(tenant_id);
+
+    // ── Create ──────────────────────────────────────────────────────────────
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    let provider_id = provider.id;
+
+    // ── Get ─────────────────────────────────────────────────────────────────
+    let fetched = service
+        .get_provider(&ctx, provider_id)
+        .await
+        .expect("get provider");
+    assert_eq!(fetched.id, provider_id);
+    assert_eq!(fetched.slug, "openai");
+
+    // ── List ────────────────────────────────────────────────────────────────
+    let page = service
+        .list_providers(&ctx, ODataQuery::default())
+        .await
+        .expect("list providers");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].slug, "openai");
+
+    // ── Update ──────────────────────────────────────────────────────────────
+    let updated = service
+        .update_provider(
+            &ctx,
+            provider_id,
+            &UpdateProviderRequestV1 {
+                name: Some("OpenAI Updated".into()),
+                managed: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update provider");
+    assert_eq!(updated.name, "OpenAI Updated");
+    assert!(updated.managed);
+    assert_eq!(updated.slug, "openai", "slug should be immutable");
+
+    // ── Delete ──────────────────────────────────────────────────────────────
+    service
+        .delete_provider(&ctx, provider_id)
+        .await
+        .expect("delete provider");
+
+    let get_after_delete = service
+        .get_provider(&ctx, provider_id)
+        .await
+        .expect_err("get deleted provider should fail");
+    assert!(
+        matches!(get_after_delete, DomainError::ProviderNotFound { .. }),
+        "expected ProviderNotFound, got {get_after_delete:?}"
+    );
+}

@@ -275,8 +275,8 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] write an integration test booting the gear (or service+repo+cache) against SQLite: provider create → model create → get_tenant_model (cache-first) → list with OData filter → update approval → soft-delete; assert tenant isolation and inheritance across a parent/child tenant pair
-- [ ] run `cargo test -p cf-gears-model-registry --features sqlite -- --nocapture` — must pass before next task
+- [x] write an integration test booting the gear (or service+repo+cache) against SQLite: provider create → model create → get_tenant_model (cache-first) → list with OData filter → update approval → soft-delete; assert tenant isolation and inheritance across a parent/child tenant pair
+- [x] run `cargo test -p cf-gears-model-registry --features sqlite -- --nocapture` — must pass before next task
 
 ### Task 19: Verify acceptance criteria
 
