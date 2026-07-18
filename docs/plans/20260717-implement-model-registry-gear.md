@@ -148,11 +148,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/storage/odata_mapper.rs`
 
-- [ ] implement `FieldToColumn` for a model filter-field enum, mapping each allowed field to a **real `models` column** (the denormalized columns from Task 4): `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, and capability-flag columns; use `map_value` for any enum-string↔storage translation; reject non-allowlisted fields (incl. `provider_settings.*`, `default_parameters.*`, per-MIME array fields) with a validation error
-- [ ] implement `FieldToColumn` for a provider filter-field enum (`slug`, `name`, `status`, `gts_type`, `managed`, `discovery_enabled`)
-- [ ] apply `$top`/`$skip`/`$orderby`/`$select` via `toolkit_odata`/`toolkit-db` `paginate_odata` helpers (mirror chat-engine `odata_mapper.rs`)
-- [ ] write tests for allowed field translation (each field → column), rejected fields, `map_value` enum translation, and pagination bounds (default/max page size from config)
-- [ ] run tests — must pass before next task
+- [x] implement `FieldToColumn` for a model filter-field enum, mapping each allowed field to a **real `models` column** (the denormalized columns from Task 4): `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, and capability-flag columns; use `map_value` for any enum-string↔storage translation; reject non-allowlisted fields (incl. `provider_settings.*`, `default_parameters.*`, per-MIME array fields) with a validation error
+- [x] implement `FieldToColumn` for a provider filter-field enum (`slug`, `name`, `status`, `gts_type`, `managed`, `discovery_enabled`)
+- [x] apply `$top`/`$skip`/`$orderby`/`$select` via `toolkit_odata`/`toolkit-db` `paginate_odata` helpers (mirror chat-engine `odata_mapper.rs`) — mappers implement `ODataFieldMapping` for use with `paginate_odata`
+- [x] write tests for allowed field translation (each field → column), rejected fields, `map_value` enum translation, and pagination bounds (default/max page size from config)
+- [x] run tests — must pass before next task
 
 ### Task 7: SeaORM repository — providers CRUD (secure)
 
