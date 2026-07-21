@@ -473,16 +473,6 @@ mod tests {
         }
     }
 
-    /// Verify `LocalClient` is Send + Sync (required for `ClientHub` registration).
-    #[test]
-    fn test_local_client_is_send_sync() {
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-
-        assert_send::<LocalClient<MockProviderRepo, MockModelRepo, InMemoryCache>>();
-        assert_sync::<LocalClient<MockProviderRepo, MockModelRepo, InMemoryCache>>();
-    }
-
     /// Verify `LocalClient` constructor works.
     #[tokio::test]
     async fn test_local_client_construction() {

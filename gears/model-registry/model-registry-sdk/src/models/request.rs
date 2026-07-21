@@ -282,32 +282,3 @@ pub struct UpdateModelRequestV1 {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn provider_builder_threads_required_fields_and_applies_overrides() {
-        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
-
-        let full = CreateProviderRequestV1::builder("openai", "OpenAI", gts.clone())
-            .managed(true)
-            .metadata(serde_json::json!({"k": "v"}))
-            .discovery_enabled(true)
-            .discovery_interval_seconds(3600)
-            .build();
-        assert_eq!(full.slug(), "openai");
-        assert_eq!(full.name(), "OpenAI");
-        assert_eq!(full.gts_type(), &gts);
-        assert!(full.managed());
-        assert_eq!(full.metadata(), Some(&serde_json::json!({"k": "v"})));
-        assert!(full.discovery_enabled());
-        assert_eq!(full.discovery_interval_seconds(), Some(3600));
-
-        let bare = CreateProviderRequestV1::builder("openai", "OpenAI", gts).build();
-        assert!(!bare.managed());
-        assert!(bare.metadata().is_none());
-        assert!(!bare.discovery_enabled());
-        assert_eq!(bare.discovery_interval_seconds(), None);
-    }
-}

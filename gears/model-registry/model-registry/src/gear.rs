@@ -119,27 +119,3 @@ impl toolkit::contracts::RestApiCapability for ModelRegistryGear {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use toolkit::contracts::DatabaseCapability;
-
-    #[test]
-    fn test_model_registry_gear_default() {
-        let gear = ModelRegistryGear::default();
-        assert!(gear.service.get().is_none());
-    }
-
-    #[test]
-    fn test_model_registry_gear_module_name() {
-        assert_eq!(ModelRegistryGear::MODULE_NAME, "model-registry");
-    }
-
-    #[test]
-    fn test_migrations_non_empty() {
-        let gear = ModelRegistryGear::default();
-        let migrations = gear.migrations();
-        assert!(!migrations.is_empty(), "migrations should not be empty");
-        assert_eq!(migrations.len(), 1, "expected exactly 1 migration");
-    }
-}

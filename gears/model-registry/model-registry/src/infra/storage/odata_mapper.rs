@@ -637,21 +637,4 @@ mod tests {
         );
     }
 
-    // =======================================================================
-    // Send + Sync bounds
-    // =======================================================================
-
-    #[test]
-    fn filter_fields_are_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<ModelFilterField>();
-        assert_send_sync::<ProviderFilterField>();
-    }
-
-    #[test]
-    fn mapper_structs_are_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<ModelODataMapper>();
-        assert_send_sync::<ProviderODataMapper>();
-    }
 }

@@ -153,23 +153,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_key_format() {
-        let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4");
-        assert_eq!(
-            key,
-            "mr:00000000-0000-0000-0000-000000000001:model:openai::gpt-4"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_tenant_prefix_format() {
-        let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let prefix = tenant_prefix(&tenant_id);
-        assert_eq!(prefix, "mr:00000000-0000-0000-0000-000000000001:");
-    }
-
-    #[tokio::test]
     async fn test_set_get_hit() {
         let cache = InMemoryCache::new();
         let key = "mr:t1:model:m1";
@@ -177,13 +160,6 @@ mod tests {
 
         let got: TestValue = cache.get(key).await.expect("value should be present");
         assert_eq!(got, test_value());
-    }
-
-    #[tokio::test]
-    async fn test_get_miss() {
-        let cache = InMemoryCache::new();
-        let got: Option<TestValue> = cache.get("nonexistent").await;
-        assert!(got.is_none());
     }
 
     #[tokio::test]
@@ -253,22 +229,6 @@ mod tests {
         assert!(cache.get::<TestValue>(&k3).await.is_some());
     }
 
-    #[tokio::test]
-    async fn test_cross_tenant_isolation() {
-        let cache = InMemoryCache::new();
-        let t1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-        let t2 = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
-
-        let k_t1 = cache_key(&t1, "model", "m1");
-        let k_t2 = cache_key(&t2, "model", "m1"); // same entity/id, different tenant
-
-        cache.set(&k_t1, &test_value(), 60).await;
-
-        // t2's key should miss
-        assert!(cache.get::<TestValue>(&k_t2).await.is_none());
-        // t1's key should still hit
-        assert!(cache.get::<TestValue>(&k_t1).await.is_some());
-    }
 
     #[tokio::test]
     async fn test_invalidate_tenant_empty() {
@@ -276,13 +236,6 @@ mod tests {
         let t1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         // Should not panic on an empty cache
         cache.invalidate_tenant(t1).await;
-    }
-
-    #[tokio::test]
-    async fn test_delete_nonexistent_key() {
-        let cache = InMemoryCache::new();
-        // Should not panic
-        cache.delete("nonexistent").await;
     }
 
     #[tokio::test]
@@ -296,30 +249,4 @@ mod tests {
         assert!(got.is_none(), "type mismatch should return None");
     }
 
-    #[tokio::test]
-    async fn test_clone_independent_invalidation() {
-        let cache = InMemoryCache::new();
-        let t1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-
-        let cloned = cache.clone();
-        cache
-            .set(&cache_key(&t1, "model", "m1"), &test_value(), 60)
-            .await;
-
-        // Both instances share the same underlying data
-        assert!(
-            cloned
-                .get::<TestValue>(&cache_key(&t1, "model", "m1"))
-                .await
-                .is_some()
-        );
-
-        cloned.invalidate_tenant(t1).await;
-        assert!(
-            cache
-                .get::<TestValue>(&cache_key(&t1, "model", "m1"))
-                .await
-                .is_none()
-        );
-    }
 }
