@@ -1,4 +1,4 @@
-<!-- Updated: 2026-06-23 by Constructor Tech -->
+<!-- Updated: 2026-07-23 by Constructor Tech -->
 
 # Technical Design — Model Registry
 
@@ -57,7 +57,7 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 - [x] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL strategy
 - [x] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup with DB fallback, approval status check
 - [x] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — OData pagination with capability/provider filtering
-- [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models + direct `ModelApproval` status writes (no Approval Service in P1); same REST surface continues to accept admin calls in P2 but routes through Approval Service
+- [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models + direct `model_approvals` status writes (no Approval Service in P1); same REST surface continues to accept admin calls in P2 but routes through Approval Service
 - [x] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support
 - [ ] `p1` — `cpt-cf-model-registry-fr-model-pricing` — AICredits cost data per tier (sync/batch/cached)
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-discovery` — OAGW integration, provider plugin abstraction
@@ -487,7 +487,7 @@ The trade-off comparison against the rejected alternatives — a tagged enum (`A
 - **Provider slug immutability**: once a provider is created, its `slug` cannot change — changing it would invalidate every `canonical_id = {provider_slug}::{provider_model_id}` referencing it. Enforced at the application layer in the service.
 - **Canonical model ID format**: `{provider_slug}::{provider_model_id}` is the only canonical form; aliases resolve to canonical IDs but never to other aliases.
 - **`info.gts_type` discriminator immutability**: once a model is created, `gts_type` cannot change without a model replacement — it determines the on-disk shape of `provider_settings` and the typed view consumers narrow to.
-- **Approval status not stored on `models`**: `ModelV1::approval_status` is resolved on read from Approval Service per §2.1 "Approval Service Delegation". The discovery write path never writes approval state.
+- **Approval status denormalized on `models`**: `ModelV1::approval_status` is read from the `models.approval_status` column, which mirrors the `model_approvals` row of record. P1 writes status directly to `model_approvals` (admin surface) and updates the denormalized column in the same transaction; P2 swaps the write path to route through Approval Service while the denormalized column continues to serve reads and OData filtering. The discovery write path never writes approval state.
 - **Tenant-scoped uniqueness**: `(tenant_id, slug)` is unique per provider, `(tenant_id, canonical_id)` is unique per model, `(tenant_id, name)` is unique per alias, `(tenant_id, lower(name))` is unique per tag (case-insensitive), and `(tenant_id, model_id, tag_id)` is unique per tag assignment.
 - **Tag managed independently of models**: a tag's lifecycle (create/update/delete) is decoupled from the catalog; deleting a tag cascades only to its `model_tags` rows within the owning tenant scope and never mutates `models`.
 - **Cache-key tenant prefix**: every cache key is prefixed with `mr:{tenant_id}:` — no tenantless keys exist.
@@ -978,14 +978,45 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp |
 | info | JSONB | NOT NULL | Serialized `ModelInfoV1` common envelope — **`gts_type`** (the GTS schema chain that discriminates `provider_settings`), `display_name`, `description`, `family`, `vendor`, the infrastructure fields **`managed`** (`bool`, per-model — distinct from the per-provider `providers.managed` column) / **`architecture`** / **`size_bytes`** / **`format`**, `region`, `hosted_by`, `last_release_at`, `reasoning_level`, `version`, UI hints (`sort_order`, `icon`, `multiplier_display`), `performance`, `additional_info`, the promoted `supported_api` and `provider_model_id`, the structured `capabilities` / `disabled_capabilities` / `context_window` sub-objects, the user-facing **`default_parameters`** (`DefaultInferenceParametersV1`, mirroring the inference-knob subset of `gts.cf.llmgw.core.create_response_body.v1~`), and the flat per-model override fields **`allow_parameter_override`** (`bool`) and **`allow_extra_params`** (array of strings) |
 | provider_settings | JSONB | NOT NULL | Polymorphic provider settings JSON whose shape is identified by the row's `info.gts_type`. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives as flat fields (`allow_parameter_override`, `allow_extra_params`) on `info`. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
+| gts_type | VARCHAR(255) | | Denormalized from `info.gts_type` for OData filtering |
+| vendor | VARCHAR(255) | | Denormalized from `info.vendor` for OData filtering |
+| family | VARCHAR(255) | | Denormalized from `info.family` for OData filtering |
+| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized per-model managed flag from `info.managed` |
+| architecture | VARCHAR(255) | | Denormalized from `info.architecture` for OData filtering |
+| format | VARCHAR(255) | | Denormalized from `info.format` for OData filtering |
+| provider_model_id | VARCHAR(255) | | Denormalized from `info.provider_model_id` for OData filtering |
+| supported_api | VARCHAR(50) | | Denormalized from `info.supported_api` for OData filtering |
+| approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | Denormalized approval status mirrored from `model_approvals` (see §3.6 `model_approvals` table). P1 writes status directly into `model_approvals` (admin surface); the denormalized column is updated in the same write so reads and OData filtering never need a join |
+| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.vision.enabled` for OData filtering |
+| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.function_calling` for OData filtering |
+| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.streaming` for OData filtering |
+| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.reasoning.effort` for OData filtering |
 
-`ModelV1::approval_status` is resolved on read from the `models.approval_status` denormalized column in P1 (the `model_approvals` table is the record-of-record seam; see P1 Implementation Deviations at the end of §3.6).
+The `info` JSONB column is the full source of truth. The denormalized columns listed above are rewritten on every create/update to stay in sync, and exist solely to serve OData filtering — the toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
 
 **Indexes**: (tenant_id), (tenant_id, canonical_id) UNIQUE, (provider_id), (lifecycle_status)
 
-**JSONB GIN Indexes** (for OData filtering on nested fields):
-- `info` GIN on `gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `supported_api`, `provider_model_id`, plus capability flags (`capabilities.vision.enabled`, `capabilities.function_calling`, `capabilities.streaming`, `capabilities.reasoning.effort`)
-- `provider_settings`: no GIN index in v1 — the per-provider shapes vary, so per-provider filter paths are deferred (see §3.3 OData)
+**B-tree Indexes** (on the denormalized columns for OData filtering):
+- `(gts_type)`, `(vendor)`, `(family)`, `(architecture)`, `(format)`, `(provider_model_id)`, `(supported_api)`, `(approval_status)`
+- capability flags: `(cap_vision)`, `(cap_function_calling)`, `(cap_streaming)`, `(cap_reasoning_effort)`
+
+`provider_settings`: no per-provider index in v1 — the per-provider shapes vary, so per-provider filter paths are deferred (see §3.3 OData).
+
+#### Table: model_approvals
+
+**ID**: `cpt-cf-model-registry-dbtable-model-approvals`
+
+Record of approval status per `(tenant_id, model_id)`. Authoritative write target for approval status in P1 (admin surface). The denormalized `models.approval_status` column is kept in sync on every write so OData filtering and hot reads operate without a join. In P2 the write path swaps to Approval Service; the row of record moves to the external service and `model_approvals` remains a local read seam mirrored on incoming `approval.status_changed` events.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| tenant_id | UUID | PK, NOT NULL | Owner tenant |
+| model_id | UUID | PK, FK, NOT NULL | Foreign key to `models.id` (cascade on delete) |
+| approval_status | VARCHAR(50) | NOT NULL | `pending` / `approved` / `rejected` / `revoked` |
+| created_at | TIMESTAMPTZ | NOT NULL | First write timestamp |
+| updated_at | TIMESTAMPTZ | NOT NULL | Last write timestamp |
+
+**Indexes**: PK `(tenant_id, model_id)`, FK on `model_id`
 
 #### Table: provider_health (P3)
 
@@ -1178,8 +1209,8 @@ Outbound calls and the discovery scheduler carry explicit reliability policies:
 
 Known module-level debt is tracked here for visibility; phase-by-phase remediation lives in `DECOMPOSITION.md` once it is generated:
 
-- **P1 admin-direct approval writes**: `cpt-cf-model-registry-fr-manual-model-management` writes `ModelApproval.status` directly in P1; replaced by `approval-service` integration in P2 (`cpt-cf-model-registry-fr-model-approval`). Cleanup: remove direct DB write path once Approval Service ships.
-- **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-leaf JSONB GIN indexes and an OData mapping per provider.
+- **P1 admin-direct approval writes**: `cpt-cf-model-registry-fr-manual-model-management` writes `model_approvals.status` directly in P1; replaced by `approval-service` integration in P2 (`cpt-cf-model-registry-fr-model-approval`). Cleanup: route the write path through Approval Service and treat `model_approvals` as a mirror of the upstream state once Approval Service ships.
+- **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-provider OData mappings and the matching promoted columns / indexes.
 - **Inherited-cache TTL trade-off**: child tenants pick up parent provider/approval changes via the 5-minute inherited-data TTL rather than explicit invalidation; tightens to event-driven invalidation only when an O(tenant-tree) walk becomes acceptable.
 - **Scheduler stability**: the per-provider distributed lock relies on a healthy lock service; degraded lock service serializes through the next tick. Migration path: when the platform ships its native job scheduler, replace the in-module loop with a job adapter.
 
@@ -1230,14 +1261,6 @@ Several Design checklist domains are intentionally **not addressed** by this DES
 - **CORS, network segmentation, output encoding (SEC-DESIGN-004 details) — Deferred to platform**: REST traffic terminates at `api-gateway` which owns CORS policy, ingress filtering, network segmentation (private subnet for module → DB / Redis / OAGW links), and HTML/text output encoding. Model Registry returns JSON only; bytes are not transformed downstream.
 - **Replication, sharding, hot/warm/cold tiering, archival (DATA-DESIGN-001 details) — Deferred to platform**: PostgreSQL replication topology, read-replicas, sharding policy, and archival lifecycle are properties of the platform's database deployment. The module is partition-friendly (every table is `tenant_id`-scoped) so future sharding by `tenant_id` does not require schema changes; until that ships, the platform's single-cluster deployment is the operating posture.
 - **Feature flags / canary / blue-green / rollback (REL-DESIGN-005 details) — Deferred to platform**: deployment-rollout primitives are owned by the platform deployment pipeline. Module-internal phase gating (P1/P2/P3/P4 capability flags, `discovery_enabled` per provider, the `managed` provider flag) lives in DB columns and Cargo features rather than a runtime feature-flag service.
-
-### P1 Implementation Deviations
-
-The P1 implementation introduces two intentional deviations from the DESIGN document above, driven by the absence of the Approval Service and the toolkit OData layer's column-mapping constraint:
-
-1. **Approval stored locally (denormalized on `models` table)**: The DESIGN states that `ModelV1::approval_status` is resolved from Approval Service on read, and the `models` table has no `approval_status` column. However, P1 does not integrate with Approval Service — approval status is stored in a local `model_approvals` table (the record-of-record seam) AND denormalized onto `models.approval_status` for fast OData filtering. This preserves the P1→P2 seam: P2 swaps only the approval write path to route through Approval Service, removing the direct-write path in `update_model`, while the denormalized column continues to serve read/filter operations.
-
-2. **OData-filterable fields promoted to real columns (no JSONB GIN indexes)**: The DESIGN specifies JSONB GIN indexes on `info` for OData filtering on nested fields like `capabilities.vision.enabled`. The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` — there is no JSONB-path filtering and no join support. Therefore, the P1-filterable subset of `info.*` fields (`gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, capability flags `cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`) plus `approval_status` are promoted to real columns with B-tree indexes. The `info` JSONB column remains the full source of truth; the denormalized columns are rewritten on every create/update to stay in sync.
 
 ## 5. Traceability
 
