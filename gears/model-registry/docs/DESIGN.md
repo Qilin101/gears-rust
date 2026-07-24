@@ -63,7 +63,7 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-discovery` — OAGW integration, provider plugin abstraction
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-approval` — Approval Service integration, event-driven status sync; replaces P1 admin-direct status writes on the same endpoints
 - [ ] `p2` — `cpt-cf-model-registry-fr-bulk-operations` — Batch approval via Approval Service
-- [ ] `p2` — `cpt-cf-model-registry-fr-manual-trigger` — Discovery API endpoint, rate-limited (health probe trigger added in P3)
+- [ ] `p2` — `cpt-cf-model-registry-fr-manual-trigger` — Manual discovery API endpoint (`POST /providers/{id}/discover`), rate-limited; the same endpoint is the integration point for optional external schedulers (platform scheduler, Kubernetes CronJob) — the module does not embed its own scheduler (health probe trigger added in P3)
 - [ ] `p3` — `cpt-cf-model-registry-fr-auto-approval` — Approval Service criteria schema, rule evaluation delegation
 - [ ] `p3` — `cpt-cf-model-registry-fr-health-monitoring` — Health status derived from discovery calls, stored per provider
 - [ ] `p3` — `cpt-cf-model-registry-fr-alias-management` — Alias table with tenant hierarchy resolution
@@ -83,7 +83,7 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 | `cpt-cf-model-registry-nfr-scale` | 10K tenants, 2M models | Repository + Cache | Cache isolation by tenant, indexed queries, connection pooling | Load testing at scale targets |
 | `cpt-cf-model-registry-nfr-rate-limiting` | Admin ops rate limited | API Layer | Rate limit middleware, configurable per-operation limits | Rate limit metrics, 429 response monitoring |
 
-**Error budgets & alerting thresholds**: Availability NFR `99.9%` translates to a 30-day error budget of ~43 minutes of downtime per month; latency NFR `<10ms P99 on get_tenant_model` is alerted on a 5-minute rolling window above `15ms` (warn) / `25ms` (page). The discovery path is excluded from the user-facing latency SLO — its budget is `next_discovery_at` slip > 2× `discovery_interval_seconds` for any provider. Module-level alerting routes to the platform observability stack (see §4 Out of Scope "Observability") so dashboards/alerts/runbooks live alongside the platform's other modules.
+**Error budgets & alerting thresholds**: Availability NFR `99.9%` translates to a 30-day error budget of ~43 minutes of downtime per month; latency NFR `<10ms P99 on get_tenant_model` is alerted on a 5-minute rolling window above `15ms` (warn) / `25ms` (page). The discovery path is excluded from the user-facing latency SLO — its budget is end-to-end discovery latency above the configured `discovery_interval_seconds` per provider. Module-level alerting routes to the platform observability stack (see §4 Out of Scope "Observability") so dashboards/alerts/runbooks live alongside the platform's other modules.
 
 #### Architecture Decisions
 
@@ -165,6 +165,14 @@ Providers and approvals inherit down the tenant hierarchy additively. Child tena
 **ID**: `cpt-cf-model-registry-principle-approval-delegation`
 
 Model Registry does not implement approval workflow logic. It delegates to a generic Approval Service that handles state machine, concurrency control, and audit trail. Model Registry registers models as approvable resources and reacts to approval status change events.
+
+#### Discovery Plugin Extensibility (P2)
+
+**ID**: `cpt-cf-model-registry-principle-discovery-plugin-extensibility`
+
+**Phase**: P2 — model discovery is manual-only in P1; plugin-based discovery lands with the P2 discovery capability.
+
+Model Registry does not hard-code provider-specific discovery protocols. Each provider's GTS type is served by exactly one discovery plugin selected from the registered set. Adding a new provider's discovery capability requires only shipping a new plugin — no changes to existing plugins and no changes to the registry's core discovery path. Plugin payloads are GTS-typed so per-plugin settings schemas evolve independently.
 
 #### Conflict Ordering
 
@@ -587,11 +595,12 @@ SeaORM-based repository implementation. Handles CRUD operations, tenant-scoped q
 
 #### Extension Points
 
-The module exposes three deliberate extension points and two API stability zones:
+The module exposes four deliberate extension points and two API stability zones:
 
 - **Pluggable cache backend** (compile-time): `CacheService` trait with feature-gated implementations (`RedisCache`, `InMemoryCache`). New backends plug in via Cargo feature flag, no runtime plugin loading.
 - **Open-ended provider settings** (runtime via GTS): per-provider settings types live under `model-registry-sdk/src/models/providers/` (one file per provider — `OpenAiSettingsV1`, `AnthropicSettingsV1`, …). Adding a new provider does **not** require touching shared code; operators can also wire unknown providers through the raw-JSON default carrier (`serde_json::Value`) without an SDK release.
 - **ClientHub trait surfaces**: `ModelRegistryClient` is the SDK-stable trait that consumers depend on; in-process consumers resolve it via ClientHub, OoP consumers via gRPC. New transports plug in without changing the trait.
+- **Pluggable discovery plugins (P2, runtime registration)**: per-provider discovery plugins implement the `DiscoveryPlugin` trait (`cpt-cf-model-registry-contract-discovery-plugin`). Plugins register a `GtsTypeId` (the provider GTS type they serve) and a `GtsTypeId` (the discovery-settings schema they accept). Plugin selection is by exact match on the provider's GTS type; a missing plugin for one provider fails that provider's discovery run only and MUST NOT block other providers (`cpt-cf-model-registry-nfr-discovery-plugin-isolation`). New providers onboard by adding a plugin registration — no edits to existing plugins or the core discovery path (`cpt-cf-model-registry-nfr-discovery-plugin-extensibility`). Discovery-settings payloads are validated against the plugin's declared GTS schema before any network call.
 
 **API stability zones**:
 
@@ -617,8 +626,8 @@ The module exposes three deliberate extension points and two API stability zones
 | `DELETE` | `/model-registry/v1/models/{canonical_id}` | Soft-delete model (mark `deprecated`) | P1 |
 | `GET` | `/model-registry/v1/providers` | List tenant providers | P1 |
 | `GET` | `/model-registry/v1/providers/{id}` | Get provider by ID | P1 |
-| `POST` | `/model-registry/v1/providers` | Register new provider | P1 |
-| `PATCH` | `/model-registry/v1/providers/{id}` | Update provider (status, discovery config) | P1 |
+| `POST` | `/model-registry/v1/providers` | Register new provider (P1: slug/name/gts_type/status/metadata; **P2** also accepts `discovery_settings`, validated against the selected plugin's settings GTS schema with `validation_error` (400) on mismatch) | P1 (+P2 `discovery_settings`) |
+| `PATCH` | `/model-registry/v1/providers/{id}` | Update provider (status, discovery config, **P2** `discovery_settings`) | P1 (+P2 `discovery_settings`) |
 | `DELETE` | `/model-registry/v1/providers/{id}` | Delete provider | P1 |
 | `POST` | `/model-registry/v1/providers/{id}/discover` | Trigger model discovery | P2 |
 | `POST` | `/model-registry/v1/models/bulk-approve` | Batch approve models (`approve_models([])`, `reject_models([])`) via Approval Service | P2 |
@@ -747,16 +756,20 @@ sequenceDiagram
 
 **ID**: `cpt-cf-model-registry-seq-model-discovery`
 
-**Use cases**: `cpt-cf-model-registry-usecase-model-discovery`
+**Use cases**: `cpt-cf-model-registry-usecase-model-discovery`, `cpt-cf-model-registry-usecase-manual-discovery`, `cpt-cf-model-registry-usecase-auto-discover-via-plugin`
 
-**Actors**: `cpt-cf-model-registry-actor-platform-admin`
+**Actors**: `cpt-cf-model-registry-actor-platform-admin`, `cpt-cf-model-registry-actor-tenant-admin`
 
-**Open design question — provider-level discovery routing.** Specific calls made to the specific provider should be handled by provider-specific discovery plugin. Discovery plugins design is an open question to be addressed later.
+**Phase**: P2 — P1 has no discovery; manual catalog entries only.
+
+**Plugin-routed discovery (P2).** Per-provider discovery protocol details are encapsulated by `DiscoveryPlugin` implementations registered against the provider's GTS type. The registry selects the plugin that matches the provider's GTS type, validates the GTS-typed discovery-settings payload against the plugin's declared schema, then hands OAGW routing context to the plugin. The plugin calls the provider's model-list endpoint through OAGW and returns `model definitions` to the registry; the registry reconciles them against the catalog.
 
 ```mermaid
 sequenceDiagram
     actor Admin
     participant MR as ModelRegistry
+    participant Registry as DiscoveryPluginRegistry
+    participant Plugin as DiscoveryPlugin
     participant OAGW as OutboundAPIGW
     participant Provider as ProviderAPI
     participant DB as PostgreSQL
@@ -765,18 +778,23 @@ sequenceDiagram
 
     Admin->>MR: trigger_discovery(provider_id)
     MR->>DB: SELECT provider WHERE id
-    DB-->>MR: provider config
-    MR->>OAGW: GET /models 
-    OAGW->>Provider: GET /models (with credentials)
-    Provider-->>OAGW: models list
-    OAGW-->>MR: models list
+    DB-->>MR: provider config (gts_type, discovery settings)
+    MR->>Registry: select(gts_type)
+    alt auto discovert plugin found
+        Registry-->>MR: DiscoveryPlugin
+        MR->>Plugin: discover(settings, oagw_context)
+        Plugin->>OAGW: GET /models (via OAGW)
+        OAGW->>Provider: GET /models (with credentials)
+        Provider-->>OAGW: models list
+        OAGW-->>Plugin: models list
+        Plugin-->>MR: model definitions
+    end
 
-    loop For each model
+    loop For each model definition
         alt New Model
-            MR->>DB: INSERT model
-            MR->>Approval: register_approvable(model_id) [status=pending in Approval Service]
+            MR->>DB: INSERT model (approval_status=pending)
         else Existing Model
-            MR->>DB: UPDATE model metadata
+            MR->>DB: UPDATE model metadata (approval_status unchanged)
         else Missing Model
             MR->>DB: UPDATE model (deprecated_at=now)
         end
@@ -786,7 +804,81 @@ sequenceDiagram
     MR-->>Admin: discovery_result
 ```
 
-**Description**: Fetches models from provider API via OAGW, updates catalog (new models as pending, existing models updated, missing models deprecated), and invalidates cache for the owner tenant. Child tenants that inherit these models are **not** explicitly invalidated — they rely on the shorter TTL for inherited data (5 minutes vs 30 minutes for own data) to pick up changes. Explicitly invalidating all descendant caches would require traversing the tenant tree on every discovery run.
+**Description**: Discovers models via the registered discovery plugin matching the provider's GTS type, then reconciles the plugin's model definitions against the catalog (new models as `pending`, existing models updated, absent models deprecated), and invalidates cache for the owner tenant. Child tenants that inherit these models are **not** explicitly invalidated — they rely on the shorter TTL for inherited data (5 minutes vs 30 minutes for own data) to pick up changes. Explicitly invalidating all descendant caches would require traversing the tenant tree on every discovery run.
+
+**Failure isolation** (per `cpt-cf-model-registry-nfr-discovery-plugin-isolation`): a panic, timeout, or unrecoverable error from one plugin MUST NOT terminate the surrounding discovery flow. The registry catches the failure, records it on the audit log for the affected provider, and returns an error response for that call. Concurrent or subsequent calls for other `(tenant, provider)` pairs proceed independently. Whether the caller is an admin or an external scheduler, one provider's plugin failure does not block discovery for any other provider.
+
+**Trigger mechanism** (per `cpt-cf-model-registry-fr-model-discovery`): discovery is manual by default (admin via API, P2 `cpt-cf-model-registry-usecase-manual-discovery` / UC-017). Optional automation lives outside the module — an external scheduler (platform scheduler, Kubernetes CronJob) calls the discovery API. The module does **not** embed scheduling. Manual triggers are rate-limited per `cpt-cf-model-registry-nfr-rate-limiting`.
+
+#### Discovery Plugin Architecture (P2)
+
+**Phase**: P2 — not implemented in P1.
+
+**IDs**: `cpt-cf-model-registry-fr-discovery-plugins`, `cpt-cf-model-registry-fr-discovery-settings`, `cpt-cf-model-registry-fr-discovery-model-output`, `cpt-cf-model-registry-nfr-discovery-plugin-isolation`, `cpt-cf-model-registry-nfr-discovery-plugin-extensibility`
+
+**Use cases**: `cpt-cf-model-registry-usecase-add-discovery-plugin`, `cpt-cf-model-registry-usecase-auto-discover-via-plugin`
+
+##### Plugin Contract
+
+Each discovery plugin implements the `DiscoveryPlugin` trait and registers two GTS-typed identifiers at registration time:
+
+| Registration field | GTS type | Purpose |
+|--------------------|----------|---------|
+| `serves_gts_type` | Provider GTS type (e.g. `gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~`) | The provider type this plugin serves. Plugin selection is exact match on the provider's `info.gts_type`. |
+| `accepts_settings_gts_type` | Discovery-settings GTS type (plugin-declared) | The schema of the `discovery_settings` payload this plugin expects. |
+
+**Selection rule**: exactly one plugin per provider GTS type. If the registry has no plugin for a provider's GTS type, the discovery request is rejected with a `validation_error` (400) **before** any plugin invocation or network call.
+
+**Settings validation**: the registry validates the `discovery_settings` payload against `accepts_settings_gts_type` before handing control to the plugin. A schema mismatch returns `validation_error` (400) with no network call.
+
+##### Plugin Output: Model Definitions
+
+A plugin returns a set of `model definitions`. Each definition MUST carry at minimum:
+
+1. `provider_model_id` — the provider-assigned identifier used to construct `canonical_id = {provider_slug}::{provider_model_id}`.
+2. `display_name` — human-readable label.
+3. The capability flags and metadata fields required to produce a complete `ModelInfoV1` catalog entry.
+
+##### Catalog Reconciliation
+
+The registry reconciles plugin output against the current catalog per `(tenant_id, provider_id)`:
+
+| Catalog state | Reconciliation action |
+|---------------|----------------------|
+| New model (not in catalog) | Insert with `approval_status = pending` |
+| Existing model (in catalog) | Update mutable metadata. **`approval_status` is never changed by discovery.** |
+| Missing model (in catalog, not in plugin output) | Soft-delete: set `lifecycle_status = deprecated` and `deprecated_at = now` |
+
+Reconciliation MUST be idempotent: running discovery twice for the same `(tenant, provider)` pair with no intervening provider changes produces the same catalog state.
+
+##### Plugin Lifecycle and Plugin Onboarding
+
+A new provider's discovery capability ships as a new `DiscoveryPlugin` implementation registered with the plugin registry (no edits to existing plugins or the core discovery path). Onboarding flow (per `cpt-cf-model-registry-usecase-add-discovery-plugin` / UC-025):
+
+1. Platform admin registers the new provider in the registry (UC-006), specifying the provider's GTS type and a discovery-settings payload conforming to the plugin's declared settings GTS type.
+2. Registry validates that a plugin is registered for the provider's GTS type.
+3. Registry validates the discovery-settings payload against the plugin's settings GTS type.
+4. Admin triggers discovery (UC-017).
+5. Registry selects the plugin, passes the validated settings + OAGW routing context.
+6. Plugin returns model definitions; registry ingests them per the reconciliation table above.
+
+Successfully onboarding one provider MUST NOT alter catalog entries belonging to any other provider.
+
+##### Failure Isolation
+
+Plugin invocation is wrapped at the `(tenant_id, provider_id)` boundary. A panic, timeout, or unrecoverable error from one plugin:
+
+- Records the failure for the affected provider (audit log entry: `provider_id, plugin_gts_type, tenant_id, actor_id, timestamp, outcome=failure, reason`).
+- Surfaces as an error response on the `POST /providers/{id}/discover` call for that `(tenant_id, provider_id)` pair.
+- Does not affect concurrent or subsequent calls for other `(tenant_id, provider_id)` pairs — the registry has no shared mutable state across calls beyond the per-`(tenant_id, provider_id)` distributed lock.
+- Triggers `provider discovery health` updates once P3 health monitoring ships (`cpt-cf-model-registry-fr-health-monitoring`). P2 discovery records invocation outcomes only.
+
+##### Audit Events (P2)
+
+| Event | Fields |
+|-------|--------|
+| `Discovery plugin invoked` | `provider_id`, `plugin_gts_type`, `tenant_id`, `actor_id`, `timestamp`, `outcome` (success/failure) |
+| `Discovery settings validation failed` | `provider_id`, `plugin_gts_type`, `tenant_id`, `actor_id`, `timestamp`, `reason` |
 
 #### Model Approval Integration
 
@@ -889,44 +981,6 @@ sequenceDiagram
 
 **Description**: When a provider call fails, OAGW surfaces the error to Model Registry, which records the failure on `provider_health` (`consecutive_failures`, `last_error`, `last_error_message`). No catalog rows are mutated and no cache entries are invalidated. Tenant reads (`get_tenant_model`, `list_tenant_models`) continue to serve cached and persisted catalog data — this is the degraded-mode contract from `cpt-cf-model-registry-fr-degraded-mode`. Repeated failures flip provider health to `unhealthy`, which is exposed via `GET /providers/{id}/health` so operators can see provider-level issues without inferring them from discovery latency. Approval checks remain fail-closed per the availability NFR; data already approved before the outage stays accessible.
 
-#### Scheduled (Long-Running) Discovery
-
-**ID**: `cpt-cf-model-registry-seq-discovery-scheduling`
-
-**Use cases**: `cpt-cf-model-registry-usecase-model-discovery`
-
-**Actors**: `cpt-cf-model-registry-actor-platform-admin`
-
-```mermaid
-sequenceDiagram
-    participant Scheduler as DiscoveryScheduler
-    participant MR as ModelRegistry
-    participant Lock as DistributedLock
-    participant Disc as DiscoveryFlow
-    participant Health as ProviderHealth
-    participant DB as PostgreSQL
-
-    note over Scheduler: tick on configured interval
-
-    Scheduler->>MR: schedule_due_discoveries()
-    MR->>DB: SELECT providers WHERE discovery_enabled = true AND next_discovery_at <= now()
-    DB-->>MR: due providers
-    loop For each due provider
-        MR->>Lock: acquire(mr:discovery:{provider_id}, lease)
-        alt lock acquired
-            MR->>Disc: run_discovery(provider_id)
-            Disc-->>MR: outcome (latency, model deltas)
-            MR->>Health: record_outcome(provider_id, latency, status)
-            MR->>DB: SET next_discovery_at = now() + discovery_interval_seconds
-            MR->>Lock: release
-        else lock held by sibling
-            MR-->>Scheduler: skip (covered by another instance)
-        end
-    end
-```
-
-**Description**: Discovery runs as an asynchronous, long-running operation managed outside the request lifecycle. A scheduler tick selects providers with `discovery_enabled = true` whose `next_discovery_at` is due and queues each into the discovery flow under a per-provider distributed lock so only one instance runs a given provider at a time. The lock lease is shorter than the slowest expected discovery so a crashed instance is recovered automatically by the next tick. Outcomes update `provider_health` regardless of success or failure, and only the writer that held the lock advances `next_discovery_at`. Manual triggers (`POST /providers/{id}/discover`) reuse the same lock and the same write path, so a manual run blocks the next scheduled run for the lock-lease window and avoids duplicate work. The scheduler itself is stateless — instances coordinate solely through the lock service and the `next_discovery_at` column.
-
 #### Event Catalog
 
 | Event | Producer | Consumer (this module) | Schema location | Ordering / Replay |
@@ -954,7 +1008,8 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | managed | BOOLEAN | NOT NULL, DEFAULT false | Whether Gears can manage this provider (e.g. install/unload models on ollama, lm_studio) |
 | metadata | JSONB | | Provider-specific metadata, GTS-typed (e.g. `gts.cf.genai.models.provider.v1~x.genai.local.provider.v1~` for local providers with capabilities like `install_model`, `import_model`, `streaming`) |
 | discovery_enabled | BOOLEAN | NOT NULL, DEFAULT false | Discovery feature flag |
-| discovery_interval_seconds | INTEGER | | Discovery interval |
+| discovery_interval_seconds | INTEGER | | **P2.** Discovery interval hint for external schedulers. The module does not run an in-module scheduler; the value is read by the platform scheduler / Kubernetes CronJob when deciding when to call `POST /providers/{id}/discover`. NULL means "no cadence configured — trigger manually only". |
+| discovery_settings | JSONB | | **P2.** GTS-typed discovery-settings payload for the selected `DiscoveryPlugin`. Validated against the plugin's `accepts_settings_gts_type` on provider create/update before any network call; rejected with `validation_error` (400) on schema mismatch. NULL when discovery is disabled or no plugin is selected for this provider's `gts_type`. Stored separately from `metadata` because (a) it carries a distinct validation contract (the plugin's settings GTS schema) and (b) it is read on every discovery invocation. |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp |
 
@@ -1101,7 +1156,7 @@ Three module-level technology risks are tracked:
 
 - **SeaORM major-version churn**: SeaORM has shipped breaking changes between minor releases historically. Mitigation: pin minor version in `Cargo.toml`, gate upgrades behind the integration test suite, encapsulate SeaORM behind the repository trait so call sites do not depend on SeaORM types.
 - **Redis operational cost at scale**: at the 10K+ tenants × 2M+ models target, a managed Redis cluster becomes a meaningful infra line item. Mitigation: pluggable cache (`cpt-cf-model-registry-adr-pluggable-cache`) lets small deployments use `InMemoryCache`; large deployments accept the cost as the documented trade-off.
-- **OAGW single point of egress**: every provider call routes through OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); an OAGW outage halts all discovery. Mitigation: degraded-mode catalog reads continue from cache and DB (§3.5 Discovery Failure); discovery resumes automatically when OAGW recovers via the next scheduler tick.
+- **OAGW single point of egress**: every provider call routes through OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); an OAGW outage halts all discovery. Mitigation: degraded-mode catalog reads continue from cache and DB (§3.5 Discovery Failure); discovery resumes on the next manual trigger or external scheduler tick once OAGW recovers.
 
 ## 4. Additional Context
 
@@ -1182,17 +1237,17 @@ The registry serves a high read:write ratio and chooses a deliberate consistency
 
 This subsection records the capacity-planning, cost-allocation, and cost-data-lifecycle posture for v1; it materializes ARCH-DESIGN-010 and is bounded by the NFR allocation in §1.2.
 
-- **Capacity planning**: Targets are 10 000 tenants × 200 models = 2 million catalog rows (`cpt-cf-model-registry-nfr-scale`) and ≤ 10 ms P99 on `get_tenant_model` (`cpt-cf-model-registry-nfr-performance`) at 99.9% availability (`cpt-cf-model-registry-nfr-availability`). The hot path is fronted by the cache, sized for ~5% working-set of the catalog at 99.9% hit rate; the database is sized for the full 2M rows with the indexes listed in §3.6. Per-tenant model counts above 10× the median (~2 000 models) are treated as outliers and trigger an operator review of the tenant's discovery scope rather than a capacity expansion. Discovery throughput is bounded by the per-provider lock and the `discovery_interval_seconds` setting on each provider; aggregate provider load is OAGW's concern via its rate-limit configuration.
+- **Capacity planning**: Targets are 10 000 tenants × 200 models = 2 million catalog rows (`cpt-cf-model-registry-nfr-scale`) and ≤ 10 ms P99 on `get_tenant_model` (`cpt-cf-model-registry-nfr-performance`) at 99.9% availability (`cpt-cf-model-registry-nfr-availability`). The hot path is fronted by the cache, sized for ~5% working-set of the catalog at 99.9% hit rate; the database is sized for the full 2M rows with the indexes listed in §3.6. Per-tenant model counts above 10× the median (~2 000 models) are treated as outliers and trigger an operator review of the tenant's discovery scope rather than a capacity expansion. Discovery throughput is bounded by the per-provider distributed lock — at most one in-flight discovery per provider per cluster regardless of caller (admin or external scheduler); aggregate provider load is OAGW's concern via its rate-limit configuration.
 - **Cost-allocation strategy by scale**: The `CacheService` backend is selected at compile time per deployment profile. Small / single-node deployments (<1K tenants, <100K models) use `InMemoryCache` and pay no Redis infrastructure cost — the database's own query cache provides comparable latency at this scale. Production deployments (10K+ tenants, 2M+ models) use `RedisCache` for cross-instance cache consistency and horizontal scale; this is the only configuration where Redis infrastructure cost (managed Redis cluster, network, replication) becomes a line item. The trade-off is documented in `cpt-cf-model-registry-adr-pluggable-cache`.
 - **AICredits cost-data lifecycle**: Per-model token and built-in-tool pricing live in each provider settings struct's nested `cost` block (`OpenAiCost`, `AnthropicCost`) as `u64` micro-credits (×1 000 000 scaling) and are persisted in the polymorphic `provider_settings` JSONB column. Cost data is updated by the same discovery write path as the rest of the model — no separate cost-sync job runs. Historical pricing is not retained inside the registry; price changes overwrite in place. The AICredits accounting subsystem consumes the registry's current cost view at gateway request time and is responsible for its own historical ledger. When a model is deprecated, its `cost` block is preserved on the row until tenant deletion so in-flight billing reconciliation can still resolve the price that applied at the time of consumption.
 
 ### Fault Tolerance Policies
 
-Outbound calls and the discovery scheduler carry explicit reliability policies:
+Outbound calls (discovery and provider health probes, both routed through OAGW) carry explicit reliability policies:
 
 - **Retries on dependency calls**: ClientHub-mediated calls to `tenant-resolver`, `approval-service`, and `outbound-api-gateway` use 3 attempts with exponential backoff (50ms → 200ms → 800ms) and ±25% jitter. Reads are always retryable; writes are retried only on transport-level failures (connection reset, 5xx with `Retry-After`) — never on 4xx, never on `ApprovalService` 409 conflicts.
 - **Timeouts**: `tenant-resolver.get_ancestor_chain` 200ms; `approval-service.get_status` 200ms; OAGW discovery 30s per provider with circuit-breaking delegated to OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); cache `get` 50ms with DB fallback.
-- **Bulkheads**: The per-provider distributed lock on discovery (§3.5 "Scheduled Discovery") is the explicit bulkhead — at most one in-flight discovery per provider per cluster, regardless of scheduler/manual triggers. Cache-write fan-out on tenant-deletion is bounded by an N-key batch invalidation rather than a per-key loop.
+- **Bulkheads**: The per-provider distributed lock on discovery is the explicit bulkhead — at most one in-flight discovery per provider per cluster, regardless of caller (admin or external scheduler). Cache-write fan-out on tenant-deletion is bounded by an N-key batch invalidation rather than a per-key loop.
 - **Fail-closed on approval check**: Per `cpt-cf-model-registry-nfr-availability`, an approval-service outage causes `get_tenant_model` to deny rather than allow; cached approved status remains readable until TTL expiry.
 
 ### Dependency SLAs
@@ -1212,7 +1267,7 @@ Known module-level debt is tracked here for visibility; phase-by-phase remediati
 - **P1 admin-direct approval writes**: `cpt-cf-model-registry-fr-manual-model-management` writes `model_approvals.status` directly in P1; replaced by `approval-service` integration in P2 (`cpt-cf-model-registry-fr-model-approval`). Cleanup: route the write path through Approval Service and treat `model_approvals` as a mirror of the upstream state once Approval Service ships.
 - **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-provider OData mappings and the matching promoted columns / indexes.
 - **Inherited-cache TTL trade-off**: child tenants pick up parent provider/approval changes via the 5-minute inherited-data TTL rather than explicit invalidation; tightens to event-driven invalidation only when an O(tenant-tree) walk becomes acceptable.
-- **Scheduler stability**: the per-provider distributed lock relies on a healthy lock service; degraded lock service serializes through the next tick. Migration path: when the platform ships its native job scheduler, replace the in-module loop with a job adapter.
+- **Distributed-lock stability**: the per-provider discovery lock relies on a healthy lock service; degraded lock service serializes calls through the lock-lease window. The lock service is platform-owned; this module does not run its own scheduler.
 
 ### Documentation Strategy
 
