@@ -275,42 +275,56 @@ mod tests {
     }
 
     /// Verify the entity compiles with the new column layout (no `info`
-    /// field) by asserting all 17 promoted scalar fields + 4 JSONB
-    /// sub-object fields are directly accessible on a constructed entity.
+    /// field) by asserting representative values for all 17 promoted scalar
+    /// fields + 5 JSONB sub-object fields are directly accessible on a
+    /// constructed entity.
     #[test]
     fn entity_has_new_column_layout() {
         let entity = make_full_model_entity();
 
-        // `info` field is gone (compile-time check via struct literal; this
-        // test confirms the column can be constructed without it).
-        let _ = entity.id;
+        assert_eq!(entity.id, test_id());
+        assert_eq!(entity.provider_id, test_provider());
+        assert_eq!(entity.tenant_id, test_tenant());
+        assert_eq!(entity.canonical_id, "openai::gpt-4o");
+        assert_eq!(entity.lifecycle_status, "production");
+        assert!(entity.deprecated_at.is_none());
+    }
 
-        // All 17 promoted scalar columns are accessible with their expected
-        // types.
-        let _: String = entity.display_name;
-        let _: Option<String> = entity.description;
-        let _: Option<i64> = entity.size_bytes;
-        let _: Option<String> = entity.region;
-        let _: Option<String> = entity.hosted_by;
-        let _: Option<DateTime<Utc>> = entity.last_release_at;
-        let _: Option<String> = entity.reasoning_level;
-        let _: Option<String> = entity.version;
-        let _: Option<i32> = entity.sort_order;
-        let _: Option<String> = entity.icon;
-        let _: Option<String> = entity.multiplier_display;
-        let _: Option<i32> = entity.perf_response_latency_ms;
-        let _: Option<i32> = entity.perf_tokens_per_second;
-        let _: i32 = entity.ctx_max_input_tokens;
-        let _: Option<i32> = entity.ctx_max_output_tokens;
-        let _: Option<i32> = entity.ctx_output_vector_size;
-        let _: bool = entity.allow_parameter_override;
+    /// Verify representative values for all 17 promoted scalar columns
+    /// survive the fixture (a stub-default would silently pass type checks).
+    #[test]
+    fn entity_has_promoted_scalar_values() {
+        let entity = make_full_model_entity();
 
-        // All 5 JSONB sub-object columns are accessible.
-        let _: Option<serde_json::Value> = entity.capabilities_full;
-        let _: Option<serde_json::Value> = entity.default_parameters;
-        let _: Option<serde_json::Value> = entity.additional_info;
-        let _: Option<serde_json::Value> = entity.disabled_capabilities_full;
-        let _: Option<serde_json::Value> = entity.allow_extra_params;
+        assert_eq!(entity.display_name, "GPT-4o");
+        assert_eq!(entity.description.as_deref(), Some("OpenAI's flagship model"));
+        assert!(entity.size_bytes.is_none());
+        assert_eq!(entity.region.as_deref(), Some("us-east-1"));
+        assert_eq!(entity.hosted_by.as_deref(), Some("OpenAI"));
+        assert!(entity.last_release_at.is_none());
+        assert_eq!(entity.reasoning_level.as_deref(), Some("high"));
+        assert_eq!(entity.version.as_deref(), Some("1.0"));
+        assert_eq!(entity.sort_order, Some(10));
+        assert!(entity.icon.is_none());
+        assert_eq!(entity.multiplier_display.as_deref(), Some("1x"));
+        assert_eq!(entity.perf_response_latency_ms, Some(500));
+        assert_eq!(entity.perf_tokens_per_second, Some(100));
+        assert_eq!(entity.ctx_max_input_tokens, 128_000);
+        assert_eq!(entity.ctx_max_output_tokens, Some(16_384));
+        assert!(entity.ctx_output_vector_size.is_none());
+        assert!(entity.allow_parameter_override);
+    }
+
+    /// Verify all 5 JSONB sub-object columns are populated on the fixture.
+    #[test]
+    fn entity_has_jsonb_sub_object_values() {
+        let entity = make_full_model_entity();
+
+        assert!(entity.capabilities_full.is_some());
+        assert!(entity.default_parameters.is_some());
+        assert!(entity.additional_info.is_some());
+        assert!(entity.disabled_capabilities_full.is_some());
+        assert!(entity.allow_extra_params.is_some());
     }
 
     /// Verify `default_parameters`, `capabilities_full`, `additional_info`,

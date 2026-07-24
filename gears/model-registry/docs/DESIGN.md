@@ -95,7 +95,7 @@ The following ADRs capture the load-bearing decisions that shape this design. Ea
 | `cpt-cf-model-registry-adr-tenant-inheritance` | Additive provider/approval inheritance with child-shadowing semantics | `cpt-cf-model-registry-principle-additive-inheritance` |
 | `cpt-cf-model-registry-adr-approval-delegation` | Delegate approval workflow (state machine, notifications, audit) to generic Approval Service | `cpt-cf-model-registry-principle-approval-delegation` |
 | `cpt-cf-model-registry-adr-oagw-provider-access` | All provider API calls route through Outbound API Gateway (no direct provider calls) | `cpt-cf-model-registry-constraint-oagw-dependency` |
-| `cpt-cf-model-registry-adr-gts-typed-provider-settings` | GTS-typed provider settings: `ModelInfoV1<P: GtsSchema = serde_json::Value>` envelope with per-provider GTS leaves; `info.gts_type` is the canonical discriminator for storage and the SDK | `cpt-cf-model-registry-component-sdk` |
+| `cpt-cf-model-registry-adr-gts-typed-provider-settings` | GTS-typed provider settings: `ModelInfoV1<P: GtsSchema = serde_json::Value>` envelope with per-provider GTS leaves; `gts_type` is the canonical discriminator for storage and the SDK | `cpt-cf-model-registry-component-sdk` |
 
 ### 1.3 Architecture Layers
 
@@ -645,12 +645,12 @@ The module exposes four deliberate extension points and two API stability zones:
 **Tag identifier in the API**: tags are addressed by their UUID `id` in path parameters and request bodies — **never** by `name`. A tag `name` is free-form (may contain spaces and other characters that do not round-trip safely as a URL path segment), so it is supplied only in the create/update request body and returned in responses, while `{tag_id}` is the stable, URL-safe handle for all path-addressed operations.
 
 **OData Support**:
-- `$filter`: `lifecycle_status`, `approval_status`, `info.gts_type`, `info.supported_api`, `info.provider_model_id`, `info.capabilities.vision.enabled`, `info.capabilities.function_calling`, `info.capabilities.streaming`, `info.capabilities.reasoning.effort`, `info.vendor`, `info.family`, `info.managed`, `info.architecture`, `info.format`, `tag` (P3). The `tag` filter is **not** an `info`-JSONB path — tags are relational, so the filter compiles to a join/`EXISTS` against the `model_tags` table scoped to the request tenant (subset matching: a model matches when it carries all requested tags). The `tag` predicate matches on the tag **name** as a quoted OData literal (e.g. `tag eq 'best for reasoning'`); this is a URL-encoded query-string value, not a path segment, so free-form names round-trip safely here — the id-only rule applies to path-addressed operations. `tag_id eq '<uuid>'` is also accepted for callers that already hold the id. Provider family is discriminated by exact-match or prefix-match on `info.gts_type` against the schema chain (e.g. `info.gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). Filtering on the `MediaCapability.supported_mime_types` arrays (and the analogous `file_input` / `image_generation` / `audio_input` / `audio_output` `enabled` flags) is **not exposed in v1** — the OData filter layer maps fields to flat enum variants, and per-MIME-type predicates require array-membership semantics that aren't in scope yet. **Per-provider settings fields and `default_parameters` are also not filterable in v1** — the per-provider JSONB shapes vary; provider-specific and parameter-default filter spaces are deferred.
+- `$filter`: `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `capabilities.vision.enabled`, `capabilities.function_calling`, `capabilities.streaming`, `capabilities.reasoning.effort`, `vendor`, `family`, `managed`, `architecture`, `format`, `tag` (P3). All filterable fields are typed scalar columns on `models` — none of the listed names are JSONB-path expressions. The `tag` filter is **not** an `info`-JSONB path — tags are relational, so the filter compiles to a join/`EXISTS` against the `model_tags` table scoped to the request tenant (subset matching: a model matches when it carries all requested tags). The `tag` predicate matches on the tag **name** as a quoted OData literal (e.g. `tag eq 'best for reasoning'`); this is a URL-encoded query-string value, not a path segment, so free-form names round-trip safely here — the id-only rule applies to path-addressed operations. `tag_id eq '<uuid>'` is also accepted for callers that already hold the id. Provider family is discriminated by exact-match or prefix-match on `gts_type` against the schema chain (e.g. `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). Filtering on the `MediaCapability.supported_mime_types` arrays (and the analogous `file_input` / `image_generation` / `audio_input` / `audio_output` `enabled` flags) is **not exposed in v1** — the OData filter layer maps fields to flat enum variants, and per-MIME-type predicates require array-membership semantics that aren't in scope yet. **Per-provider settings fields and `default_parameters` are also not filterable in v1** — the per-provider JSONB shapes vary; provider-specific and parameter-default filter spaces are deferred.
 - `$select`: field projection
 - `$top`, `$skip`: pagination
 - `$orderby`: sorting
 
-**Versioning Policy**: All endpoints carry a `/v1/` URL prefix. v1 is **additive-only** — new optional fields, new endpoints, and new enum variants may ship without a major bump. Breaking changes (renamed fields, removed endpoints, narrowed enum sets, semantic changes) ship as `/v2/` with `/v1/` retained for one platform release as the deprecation window. Per-provider GTS leaves are versioned independently from the URL path: `OpenAiSettingsV1` and a future `OpenAiSettingsV2` may coexist in the catalog and are discriminated at runtime by `info.gts_type`; consumers narrow to whichever generation matches.
+**Versioning Policy**: All endpoints carry a `/v1/` URL prefix. v1 is **additive-only** — new optional fields, new endpoints, and new enum variants may ship without a major bump. Breaking changes (renamed fields, removed endpoints, narrowed enum sets, semantic changes) ship as `/v2/` with `/v1/` retained for one platform release as the deprecation window. Per-provider GTS leaves are versioned independently from the URL path: `OpenAiSettingsV1` and a future `OpenAiSettingsV2` may coexist in the catalog and are discriminated at runtime by `gts_type`; consumers narrow to whichever generation matches.
 
 | Dependency Gear    | Interface Used | Purpose |
 |-------------------|----------------|---------|
@@ -1038,23 +1038,23 @@ The `info` JSONB column has been **dropped** (2026-07-24). Every `ModelInfoV1` f
 
 | Column | Type | Constraints | Source field |
 |--------|------|-------------|--------------|
-| display_name | TEXT | NOT NULL, DEFAULT `''` | `info.display_name` |
-| description | TEXT | NULL | `info.description` |
-| size_bytes | BIGINT | NULL | `info.size_bytes` |
-| region | VARCHAR(64) | NULL | `info.region` |
-| hosted_by | VARCHAR(64) | NULL | `info.hosted_by` |
-| last_release_at | TIMESTAMPTZ | NULL | `info.last_release_at` |
-| reasoning_level | VARCHAR(32) | NULL | `info.reasoning_level` |
-| version | VARCHAR(64) | NULL | `info.version` |
-| sort_order | INTEGER | NULL | `info.sort_order` |
-| icon | TEXT | NULL | `info.icon` |
-| multiplier_display | VARCHAR(32) | NULL | `info.multiplier_display` |
-| perf_response_latency_ms | INTEGER | NULL | `info.performance.response_latency_ms` |
-| perf_tokens_per_second | INTEGER | NULL | `info.performance.tokens_per_second` |
-| ctx_max_input_tokens | INTEGER | NOT NULL, DEFAULT `0` | `info.context_window.max_input_tokens` |
-| ctx_max_output_tokens | INTEGER | NULL | `info.context_window.max_output_tokens` |
-| ctx_output_vector_size | INTEGER | NULL | `info.context_window.output_vector_size` |
-| allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT `0` | `info.allow_parameter_override` |
+| display_name | TEXT | NOT NULL, DEFAULT `''` | `display_name` |
+| description | TEXT | NULL | `description` |
+| size_bytes | BIGINT | NULL | `size_bytes` |
+| region | VARCHAR(64) | NULL | `region` |
+| hosted_by | VARCHAR(64) | NULL | `hosted_by` |
+| last_release_at | TIMESTAMPTZ | NULL | `last_release_at` |
+| reasoning_level | VARCHAR(32) | NULL | `reasoning_level` |
+| version | VARCHAR(64) | NULL | `version` |
+| sort_order | INTEGER | NULL | `sort_order` |
+| icon | TEXT | NULL | `icon` |
+| multiplier_display | VARCHAR(32) | NULL | `multiplier_display` |
+| perf_response_latency_ms | INTEGER | NULL | `performance.response_latency_ms` |
+| perf_tokens_per_second | INTEGER | NULL | `performance.tokens_per_second` |
+| ctx_max_input_tokens | INTEGER | NOT NULL, DEFAULT `0` | `context_window.max_input_tokens` |
+| ctx_max_output_tokens | INTEGER | NULL | `context_window.max_output_tokens` |
+| ctx_output_vector_size | INTEGER | NULL | `context_window.output_vector_size` |
+| allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT `0` | `allow_parameter_override` |
 
 The `NOT NULL DEFAULT`s keep `SQLite` cheap to write (it cannot `ALTER ADD NOT NULL`); the application layer always populates real values on create/update. Type abbreviations (`TEXT` / `INTEGER` / `BIGINT`) are the SQLite rendering of the portable types shown in `migrations/initial_001.rs` (PostgreSQL gets `BIGINT` for `size_bytes`; SQLite maps everything to `TEXT`/`INTEGER` for portability).
 
@@ -1082,19 +1082,19 @@ The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval
 
 | Column | Type | Constraints | Source |
 |--------|------|-------------|--------|
-| gts_type | VARCHAR(255) | NULL | `info.gts_type` (scalar discriminator for `provider_settings`) |
-| vendor | VARCHAR(255) | NULL | `info.vendor` |
-| family | VARCHAR(255) | NULL | `info.family` |
-| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Per-model managed flag from `info.managed` (distinct from per-provider `providers.managed`) |
-| architecture | VARCHAR(255) | NULL | `info.architecture` |
-| format | VARCHAR(255) | NULL | `info.format` |
-| provider_model_id | VARCHAR(255) | NULL | `info.provider_model_id` |
-| supported_api | VARCHAR(50) | NULL | `info.supported_api` |
+| gts_type | VARCHAR(255) | NULL | `gts_type` (scalar discriminator for `provider_settings`) |
+| vendor | VARCHAR(255) | NULL | `vendor` |
+| family | VARCHAR(255) | NULL | `family` |
+| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Per-model managed flag from `managed` (distinct from per-provider `providers.managed`) |
+| architecture | VARCHAR(255) | NULL | `architecture` |
+| format | VARCHAR(255) | NULL | `format` |
+| provider_model_id | VARCHAR(255) | NULL | `provider_model_id` |
+| supported_api | VARCHAR(50) | NULL | `supported_api` |
 | approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | Mirrored from `model_approvals` (see §3.6). P1 writes status directly into `model_approvals`; the denormalized column updates in the same write so reads and OData filtering never need a join |
-| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.vision.enabled` |
-| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.function_calling` |
-| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.streaming` |
-| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.reasoning.effort` |
+| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.vision.enabled` |
+| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.function_calling` |
+| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.streaming` |
+| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.reasoning.effort` |
 
 Scalar columns are the source of truth; the four additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`. On the read path the mapper rebuilds the in-memory `ModelInfoV1` JSON by stitching the 17 scalar columns + 5 JSONB sub-objects + `provider_settings` via `serde_json::json!{...}` then `serde_json::from_value::<ModelV1>(value)` (same JSON-value-then-roundtrip pattern as the defensive `build_minimal_info` fallback). The 4 OData-filterable capability booleans come from scalar columns on read; they override anything in `capabilities_full` JSONB (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
 
@@ -1197,7 +1197,7 @@ Join table for the many-to-many Model ↔ Tag relationship. Assignments are tena
 
 #### Migrations & Schema Versioning
 
-Schema migrations are managed by SeaORM migration scripts under `model-registry/src/infrastructure/migrations/`. Each migration is forward-only, idempotent on repeated apply, and named `mYYYYMMDD_HHMM_<slug>.rs`. The polymorphic JSONB columns (`info`, `provider_settings`) version their **payload** shape independently from the table schema: the GTS schema chain in `info.gts_type` (e.g. `OpenAiSettingsV1` vs a future `OpenAiSettingsV2`) is the per-row payload version, so one row may use `V1` while a freshly-discovered row uses `V2` without a table migration. SeaORM migrations are reserved for column-level changes (new columns, indexes, constraints); JSONB-payload evolution rides the GTS leaf schema bump.
+Schema migrations are managed by SeaORM migration scripts under `model-registry/src/infrastructure/migrations/`. Each migration is forward-only, idempotent on repeated apply, and named `mYYYYMMDD_HHMM_<slug>.rs`. The polymorphic JSONB column `provider_settings` versions its **payload** shape independently from the table schema: the GTS schema chain in `gts_type` (e.g. `OpenAiSettingsV1` vs a future `OpenAiSettingsV2`) is the per-row payload version, so one row may use `V1` while a freshly-discovered row uses `V2` without a table migration. SeaORM migrations are reserved for column-level changes (new columns, indexes, constraints); JSONB-payload evolution rides the GTS leaf schema bump.
 
 #### Technology Risks
 

@@ -90,6 +90,8 @@ pub fn provider_create_active_model(
     tenant_id: Uuid,
     req: &CreateProviderRequestV1,
 ) -> entity::provider::ActiveModel {
+    // Single timestamp for both created_at and updated_at so they match exactly.
+    let now = chrono::Utc::now();
     entity::provider::ActiveModel {
         id: Set(Uuid::new_v4()),
         tenant_id: Set(tenant_id),
@@ -103,8 +105,8 @@ pub fn provider_create_active_model(
         discovery_interval_seconds: Set(req
             .discovery_interval_seconds()
             .map(|v| i32::try_from(v).unwrap_or(i32::MAX))),
-        created_at: Set(chrono::Utc::now()),
-        updated_at: Set(chrono::Utc::now()),
+        created_at: Set(now),
+        updated_at: Set(now),
     }
 }
 
@@ -463,6 +465,9 @@ pub fn model_create_active_model(
     let provider_settings_json = serde_json::to_value(&req.info.provider_settings)
         .expect("CreateModelRequestV1.info.provider_settings re-serialization cannot fail");
 
+    // Single timestamp for both created_at and updated_at so they match exactly.
+    let now = chrono::Utc::now();
+
     let cap_full = build_capabilities_full_for_create(&req.info.capabilities);
     let disabled_full = serde_json::to_value(&req.info.disabled_capabilities)
         .expect("disabled_capabilities re-serialization cannot fail");
@@ -485,8 +490,8 @@ pub fn model_create_active_model(
         } else {
             Some(provider_settings_json)
         }),
-        created_at: Set(chrono::Utc::now()),
-        updated_at: Set(chrono::Utc::now()),
+        created_at: Set(now),
+        updated_at: Set(now),
         // 17 promoted scalar columns
         display_name: Set(req.info.display_name.clone()),
         description: Set(req.info.description.clone()),
