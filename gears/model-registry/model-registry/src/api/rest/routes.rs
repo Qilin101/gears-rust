@@ -235,4 +235,3 @@ pub fn register_routes(
 
     router
 }
-

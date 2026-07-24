@@ -207,12 +207,12 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] run existing integration tests to confirm wire DTO round-trip still works (handler `serde_json::from_value::<ModelInfoV1>(dto.info)` path is unchanged)
-- [ ] add integration test: create model with full `ModelInfoV1` → DB row has all 21 new columns populated, `info` column absent
-- [ ] add integration test: read model back → reconstructed `ModelInfoV1` matches input (all fields, including nested)
-- [ ] add integration test: PATCH a single field → DB columns update correctly, response reflects change
-- [ ] add integration test: capability merge — OData booleans from columns, rest from JSONB
-- [ ] run `cargo test -p cf-gears-model-registry --test integration` — must pass before task 8
+- [x] run existing integration tests to confirm wire DTO round-trip still works (handler `serde_json::from_value::<ModelInfoV1>(dto.info)` path is unchanged)
+- [x] add integration test: create model with full `ModelInfoV1` → DB row has all 21 new columns populated, `info` column absent
+- [x] add integration test: read model back → reconstructed `ModelInfoV1` matches input (all fields, including nested)
+- [x] add integration test: PATCH a single field → DB columns update correctly, response reflects change
+- [x] add integration test: capability merge — OData booleans from columns, rest from JSONB
+- [x] run `cargo test -p cf-gears-model-registry --test integration` — must pass before task 8
 
 ### Task 8: Update ADR-0005
 

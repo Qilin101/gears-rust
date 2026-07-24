@@ -233,7 +233,6 @@ mod tests {
         assert!(cache.get::<TestValue>(&k3).await.is_some());
     }
 
-
     #[tokio::test]
     async fn test_invalidate_tenant_empty() {
         let cache = InMemoryCache::new();
@@ -252,5 +251,4 @@ mod tests {
         let got: Option<TestValue> = cache.get(key).await;
         assert!(got.is_none(), "type mismatch should return None");
     }
-
 }

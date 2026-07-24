@@ -63,11 +63,9 @@ impl From<DomainError> for CanonicalError {
                     .with_resource(slug)
                     .create()
             }
-            DomainError::ProviderDisabled { id } => {
-                ModelRegistryResourceError::permission_denied()
-                    .with_reason(format!("Provider {id} is disabled"))
-                    .create()
-            }
+            DomainError::ProviderDisabled { id } => ModelRegistryResourceError::permission_denied()
+                .with_reason(format!("Provider {id} is disabled"))
+                .create(),
             DomainError::ProviderHasModels { id, .. } => {
                 ModelRegistryResourceError::already_exists("Provider has existing models")
                     .with_resource(id.to_string())

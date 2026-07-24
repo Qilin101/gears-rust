@@ -12,7 +12,7 @@ use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
     secure_update_with_scope,
 };
-use toolkit_odata::{normalize_filter_for_hash, ODataQuery, Page, SortDir};
+use toolkit_odata::{ODataQuery, Page, SortDir, normalize_filter_for_hash};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -289,13 +289,10 @@ impl ProviderRepository for SeaOrmRepository {
 /// / sunset models is omitted so their filter works as intended.
 #[must_use]
 fn filter_references_lifecycle_status(query: &ODataQuery) -> bool {
-    query
-        .filter
-        .as_ref()
-        .is_some_and(|expr| {
-            let normalized = normalize_filter_for_hash(expr);
-            normalized.contains("id(lifecycle_status)")
-        })
+    query.filter.as_ref().is_some_and(|expr| {
+        let normalized = normalize_filter_for_hash(expr);
+        normalized.contains("id(lifecycle_status)")
+    })
 }
 
 #[async_trait]

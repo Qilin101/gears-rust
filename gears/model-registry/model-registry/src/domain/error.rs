@@ -174,7 +174,9 @@ impl From<DomainError> for crate::ModelRegistryError {
             DomainError::Forbidden(msg) => Self::forbidden(msg),
             DomainError::ProviderDisabled { id } => Self::provider_disabled(id),
             DomainError::ProviderConflict { slug } => Self::provider_conflict(slug),
-            DomainError::ProviderHasModels { id, model_count } => { Self::provider_has_models(id, model_count) }
+            DomainError::ProviderHasModels { id, model_count } => {
+                Self::provider_has_models(id, model_count)
+            }
             DomainError::InvalidTransition { detail } => Self::invalid_transition(detail),
             DomainError::Validation { message } => Self::validation(message),
             DomainError::Internal { detail, source } => Self::Internal { detail, source },
@@ -345,10 +347,7 @@ mod tests {
     #[test]
     fn provider_not_found_by_slug_display() {
         let err = DomainError::provider_not_found_by_slug("openai");
-        assert_eq!(
-            err.to_string(),
-            "provider with slug `openai` not found"
-        );
+        assert_eq!(err.to_string(), "provider with slug `openai` not found");
     }
 
     #[test]
@@ -380,6 +379,9 @@ mod tests {
         let id = Uuid::new_v4();
         let domain = DomainError::provider_has_models(id, 5);
         let sdk: ModelRegistryError = domain.into();
-        assert_eq!(sdk.to_string(), format!("provider has 5 existing model(s): {id}"));
+        assert_eq!(
+            sdk.to_string(),
+            format!("provider has 5 existing model(s): {id}")
+        );
     }
 }

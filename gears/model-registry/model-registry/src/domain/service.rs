@@ -93,7 +93,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// The DB column is `i32`, so values exceeding `i32::MAX` must be rejected
     /// at the application layer rather than silently truncated.
     fn validate_discovery_interval(interval: Option<u32>) -> Result<(), DomainError> {
-        if let Some(v) = interval && v > i32::MAX as u32 {
+        if let Some(v) = interval
+            && v > i32::MAX as u32
+        {
             return Err(DomainError::validation(format!(
                 "discovery_interval_seconds must not exceed {} (i32::MAX), got {v}",
                 i32::MAX,

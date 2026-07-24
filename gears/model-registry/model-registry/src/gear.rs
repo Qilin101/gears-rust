@@ -118,4 +118,3 @@ impl toolkit::contracts::RestApiCapability for ModelRegistryGear {
         Ok(router)
     }
 }
-

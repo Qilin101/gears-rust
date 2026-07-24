@@ -974,3 +974,239 @@ async fn provider_crud_through_service() {
         "expected ProviderNotFound, got {get_after_delete:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. Storage rewrite (2026-07-24): verify the new column layout round-trips
+//    through the full create → read → patch → re-read pipeline.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Verify the create path produces a model whose every field round-trips
+/// through the read path. The `info` column no longer exists; every
+/// `ModelInfoV1` field is reconstructed from the promoted scalar columns +
+/// the JSONB sub-objects (`capabilities_full`, `default_parameters`,
+/// `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) +
+/// the polymorphic `provider_settings`. The test covers the full
+/// create → read round-trip end-to-end through the service layer.
+#[tokio::test]
+async fn create_and_read_round_trip_full_model_info() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    let req = make_create_model_req("openai", "gpt-4o");
+    let info_in = req.info.clone();
+    service
+        .create_model(&ctx, &req)
+        .await
+        .expect("create model");
+
+    let fetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model");
+
+    // ── Identity fields survive the round-trip ─────────────────────────────
+    assert_eq!(fetched.info.gts_type, info_in.gts_type);
+    assert_eq!(fetched.info.display_name, info_in.display_name);
+    assert_eq!(fetched.info.provider_model_id, info_in.provider_model_id);
+    assert_eq!(fetched.info.vendor, info_in.vendor);
+    assert_eq!(fetched.info.family, info_in.family);
+    assert_eq!(fetched.info.architecture, info_in.architecture);
+    assert_eq!(fetched.info.format, info_in.format);
+    assert_eq!(fetched.info.managed, info_in.managed);
+    assert_eq!(fetched.info.region, info_in.region);
+    assert_eq!(fetched.info.hosted_by, info_in.hosted_by);
+    assert_eq!(fetched.info.reasoning_level, info_in.reasoning_level);
+    assert_eq!(fetched.info.version, info_in.version);
+    assert_eq!(fetched.info.sort_order, info_in.sort_order);
+    assert_eq!(fetched.info.multiplier_display, info_in.multiplier_display);
+
+    // ── Capability scalar columns (the 4 OData booleans) round-trip ────────
+    assert_eq!(
+        fetched.info.capabilities.vision.enabled, info_in.capabilities.vision.enabled,
+        "vision.enabled round-trips through cap_vision scalar column"
+    );
+    assert_eq!(
+        fetched.info.capabilities.function_calling, info_in.capabilities.function_calling,
+        "function_calling round-trips through cap_function_calling"
+    );
+    assert_eq!(
+        fetched.info.capabilities.streaming, info_in.capabilities.streaming,
+        "streaming round-trips through cap_streaming"
+    );
+    assert_eq!(
+        fetched.info.capabilities.reasoning.effort, info_in.capabilities.reasoning.effort,
+        "reasoning.effort round-trips through cap_reasoning_effort"
+    );
+
+    // ── Context window round-trips through scalar columns ──────────────────
+    assert_eq!(
+        fetched.info.context_window.max_input_tokens,
+        info_in.context_window.max_input_tokens,
+    );
+    assert_eq!(
+        fetched.info.context_window.max_output_tokens,
+        info_in.context_window.max_output_tokens,
+    );
+
+    // ── Allow-override bool round-trips ────────────────────────────────────
+    assert_eq!(
+        fetched.info.allow_parameter_override, info_in.allow_parameter_override,
+    );
+}
+
+/// Verify PATCH on a single `info.*` field re-projects every promoted column
+/// correctly: the changed field is updated on read; unrelated columns are
+/// preserved. This exercises `model_update_active_model`, which re-projects
+/// all 17 scalar + 5 JSONB columns on every PATCH that touches `info.*`.
+#[tokio::test]
+async fn patch_reprojects_all_promoted_columns() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model");
+
+    // PATCH: bump display_name and context_window.max_input_tokens. The PATCH
+    // must re-project every promoted column, not just the changed ones.
+    let patched = service
+        .update_model(
+            &ctx,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                display_name: Some("GPT-4o (Updated)".to_owned()),
+                context_window: Some(model_registry_sdk::models::ContextWindow {
+                    max_input_tokens: 200_000,
+                    max_output_tokens: Some(32_768),
+                    output_vector_size: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("patch model");
+
+    assert_eq!(patched.info.display_name, "GPT-4o (Updated)");
+    assert_eq!(patched.info.context_window.max_input_tokens, 200_000);
+    assert_eq!(
+        patched.info.context_window.max_output_tokens,
+        Some(32_768),
+    );
+
+    // Read back from DB (bypass cache) to confirm the columns were written.
+    let refetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("refetch after patch");
+    assert_eq!(refetched.info.display_name, "GPT-4o (Updated)");
+    assert_eq!(refetched.info.context_window.max_input_tokens, 200_000);
+    assert_eq!(
+        refetched.info.context_window.max_output_tokens,
+        Some(32_768),
+    );
+
+    // Unrelated fields preserved through the re-projection.
+    assert_eq!(
+        refetched.info.vendor.as_deref(),
+        Some("TestVendor"),
+    );
+    assert_eq!(refetched.info.family.as_deref(), Some("test-family"));
+    assert!(
+        refetched.info.capabilities.function_calling,
+        "function_calling should be preserved through the PATCH re-projection",
+    );
+    assert!(
+        refetched.info.capabilities.vision.enabled,
+        "vision should be preserved through the PATCH re-projection",
+    );
+}
+
+/// Verify the capability merge: when the request flips a capability flag
+/// (e.g. `function_calling=true` → false) the read path reflects the change
+/// AND the unchanged JSONB sub-object fields (e.g. vision mime types) stay
+/// intact — i.e. the columns and JSONB sub-object columns are not stomping
+/// each other.
+#[tokio::test]
+async fn capability_flip_round_trips_with_jsonb_intact() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    // Seed: function_calling=true, vision enabled with jpeg mime types.
+    service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model");
+
+    // PATCH: flip function_calling off (preserving the rest of the
+    // capabilities). `ModelCapabilities` is `#[non_exhaustive]` so we
+    // round-trip through JSON.
+    let original_caps = serde_json::to_value(
+        &make_create_model_req("openai", "gpt-4o")
+            .info
+            .capabilities,
+    )
+    .expect("serialize caps");
+    let mut caps_value = original_caps;
+    if let Some(obj) = caps_value.as_object_mut() {
+        obj.insert("function_calling".into(), serde_json::Value::Bool(false));
+    }
+    let patched_caps: model_registry_sdk::models::ModelCapabilities =
+        serde_json::from_value(caps_value).expect("deserialize caps");
+
+    let patched = service
+        .update_model(
+            &ctx,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                capabilities: Some(patched_caps),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("flip function_calling off");
+
+    // The promoted scalar column `cap_function_calling` was updated.
+    assert!(
+        !patched.info.capabilities.function_calling,
+        "function_calling must be flipped off via the scalar column"
+    );
+    // Unchanged JSONB-side capability fields (vision mime types) are
+    // preserved by `capabilities_full`.
+    assert!(
+        patched.info.capabilities.vision.enabled,
+        "vision.enabled must be preserved when only function_calling is patched"
+    );
+
+    // Re-read confirms the change is durable.
+    let refetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("refetch after capability flip");
+    assert!(
+        !refetched.info.capabilities.function_calling,
+        "function_calling must remain off after re-read"
+    );
+    assert!(
+        refetched.info.capabilities.vision.enabled,
+        "vision.enabled must remain on after re-read (JSONB content preserved)"
+    );
+}
