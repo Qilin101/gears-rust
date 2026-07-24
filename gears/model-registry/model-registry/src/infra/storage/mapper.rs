@@ -895,8 +895,22 @@ fn supported_api_denorm_to_json_array(s: Option<&str>) -> Vec<String> {
     items
 }
 
-/// Build a minimal `ModelInfoV1` from the denormalized columns when the `info`
-/// JSONB is missing or corrupt.
+/// Build a minimal `ModelInfoV1` from the denormalized columns when the
+/// required discriminator fields (`gts_type`, `provider_model_id`) are
+/// missing or corrupt on the row.
+///
+/// This is the **graceful-degradation path** — with the post-2026-07-24
+/// schema, every `ModelInfoV1` field lives in either a scalar column or a
+/// small JSONB sub-object, so the regular read path in
+/// [`build_model_info_v1`] is authoritative. This fallback is only invoked
+/// when `gts_type` / `provider_model_id` are NULL (legacy rows, raw SQL
+/// inserts that bypassed the application layer, or in-flight migration).
+///
+/// Required scalar columns (`display_name`, `ctx_max_input_tokens`,
+/// `allow_parameter_override`) have `NOT NULL DEFAULT`s at the DB level, so
+/// they are always populated. Only the denormalized filterable columns
+/// (`gts_type`, `provider_model_id`) remain nullable.
+#[must_use]
 fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
     // Since ModelInfoV1 and its inner types are #[non_exhaustive], construct via
     // JSON roundtrip.
@@ -904,31 +918,35 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
         .gts_type
         .as_deref()
         .unwrap_or("gts.cf.genai.model.info.v1~");
-    let display_name = format!("model-{}", e.canonical_id);
+    let display_name = if e.display_name.is_empty() {
+        format!("model-{}", e.canonical_id)
+    } else {
+        e.display_name.clone()
+    };
 
     let value = json!({
         "gts_type": gts_type_str,
         "display_name": display_name,
-        "description": null,
+        "description": e.description,
         "family": e.family,
         "vendor": e.vendor,
         "managed": e.managed,
         "architecture": e.architecture,
         "size_bytes": null,
         "format": e.format,
-        "region": null,
-        "hosted_by": null,
-        "last_release_at": null,
-        "reasoning_level": null,
-        "version": null,
-        "sort_order": null,
-        "icon": null,
-        "multiplier_display": null,
+        "region": e.region,
+        "hosted_by": e.hosted_by,
+        "last_release_at": e.last_release_at,
+        "reasoning_level": e.reasoning_level,
+        "version": e.version,
+        "sort_order": e.sort_order,
+        "icon": e.icon,
+        "multiplier_display": e.multiplier_display,
         "performance": {
-            "response_latency_ms": null,
-            "tokens_per_second": null
+            "response_latency_ms": e.perf_response_latency_ms,
+            "tokens_per_second": e.perf_tokens_per_second
         },
-        "additional_info": {},
+        "additional_info": e.additional_info.clone().unwrap_or_else(|| json!({})),
         "supported_api": supported_api_denorm_to_json_array(e.supported_api.as_deref()),
         "provider_model_id": e.provider_model_id.as_deref().unwrap_or(""),
         "capabilities": {
@@ -958,69 +976,44 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
             "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
         },
         "context_window": {
-            "max_input_tokens": 0,
-            "max_output_tokens": null,
-            "output_vector_size": null
+            "max_input_tokens": e.ctx_max_input_tokens,
+            "max_output_tokens": e.ctx_max_output_tokens,
+            "output_vector_size": e.ctx_output_vector_size
         },
-        "default_parameters": {
-            "temperature": null,
-            "top_p": null,
-            "max_output_tokens": null,
-            "max_tool_calls": null,
-            "presence_penalty": null,
-            "frequency_penalty": null,
-            "top_logprobs": null,
-            "truncation": null,
-            "service_tier": null,
-            "parallel_tool_calls": null,
-            "text": null,
-            "reasoning": null,
-            "tool_choice": null,
-            "store": null
-        },
-        "allow_parameter_override": false,
-        "allow_extra_params": [],
-        "provider_settings": null
+        "default_parameters": merge_default_parameters(e.default_parameters.as_ref()),
+        "allow_parameter_override": e.allow_parameter_override,
+        "allow_extra_params": e.allow_extra_params.clone().unwrap_or_else(|| json!([])),
+        "provider_settings": e.provider_settings.clone().unwrap_or(serde_json::Value::Null),
     });
     // SAFETY: the JSON template above is constructed from entity fields with
-    // known types. A failure here indicates a programming error or a corrupt
-    // denormalized column (e.g. a new SupportedApi variant was added but the
-    // column wasn't updated). Degrade gracefully rather than panicking.
+    // known types. A failure here indicates a programming error (e.g. a new
+    // field was added to `ModelInfoV1` but the fallback wasn't updated).
+    // Use a single defensive fallback to the bare identity fields rather
+    // than a chain of nested unwraps — DB defaults guarantee the required
+    // columns are populated.
     serde_json::from_value(value).unwrap_or_else(|err| {
         tracing::warn!(
             error = %err,
-            "ModelInfoV1 roundtrip from denormalized columns failed, using fallback"
+            canonical_id = %e.canonical_id,
+            "ModelInfoV1 roundtrip from denormalized columns failed, using minimal fallback"
         );
-        // Minimal fallback: only identity fields. The inner fallback is a
-        // hardcoded static JSON that should always deserialize — if it
-        // somehow doesn't, the all-null static JSON is the last resort.
+        // Bare-bones fallback: only the two identity fields. Construct via a
+        // separate JSON value to give `serde_json::from_value` another chance
+        // to produce a valid `ModelInfoV1`. The remaining fields use their
+        // serde defaults (empty strings / null / empty Vec / etc.).
         serde_json::from_value(json!({
             "gts_type": gts_type_str,
             "display_name": display_name,
         }))
-        .unwrap_or_else(|_| {
-            serde_json::from_value(json!({
-                "gts_type": "gts.cf.genai.model.info.v1~",
-                "display_name": "model-(unknown)",
-            }))
-            .unwrap_or_else(|_| {
-                // Unreachable: the hardcoded JSON contains only primitive
-                // types that always deserialize into the required fields.
-                tracing::error!(
-                    "all ModelInfoV1 fallback attempts failed - this is a programming bug"
-                );
-                // Last resort: all-null value will produce a struct with
-                // gts_type="" and display_name="" via serde defaults.
-                serde_json::from_value(serde_json::Value::Object(serde_json::Map::default()))
-                    .unwrap_or_else(|_| {
-                        // If even serde defaults fail, ModelInfoV1's schema
-                        // has changed incompatibly — but serde should always
-                        // produce a valid value from an empty object since
-                        // the struct uses Option<T> for non-required fields.
-                        // This panic is a last resort for a programming error.
-                        panic!("ModelInfoV1 is no longer constructible from an empty JSON object")
-                    })
-            })
+        .unwrap_or_else(|fallback_err| {
+            // Last resort — if even the bare identity fields fail to
+            // deserialize, the schema is fundamentally incompatible. This
+            // should never happen with the SDK types; panic so we notice.
+            tracing::error!(
+                error = %fallback_err,
+                "all ModelInfoV1 fallback attempts failed - this is a programming bug"
+            );
+            panic!("ModelInfoV1 is no longer constructible from a minimal JSON object")
         })
     })
 }

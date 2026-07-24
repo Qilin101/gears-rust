@@ -473,6 +473,222 @@ fn model_entity_to_v1_fallback_when_info_null() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Task 5 — `build_minimal_info` fallback path
+// Triggered when required discriminator columns (`gts_type`, `provider_model_id`)
+// are missing or corrupt. Verifies graceful degradation with DB defaults in
+// place: `display_name` and `ctx_max_input_tokens` always populated (DB-level
+// NOT NULL DEFAULTs); only the denormalized filterable columns are nullable.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn build_minimal_info_triggered_when_gts_type_missing() {
+    // Missing `gts_type` (the discriminator for `provider_settings` polymorphism)
+    // triggers the fallback path. The fallback must use a default `gts_type`
+    // string and reconstruct a valid `ModelInfoV1`.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.gts_type = None;
+    // All other columns have valid values from `make_model_entity`.
+
+    let model = model_entity_to_v1(&entity);
+
+    // `build_minimal_info` uses the default gts_type prefix as a fallback.
+    assert_eq!(
+        model.info.gts_type.to_string(),
+        "gts.cf.genai.model.info.v1~"
+    );
+    // `display_name` was populated by the entity fixture — keep it (don't
+    // synthesize a placeholder when the column has a real value).
+    assert_eq!(model.info.display_name, "GPT-4o");
+    // Required scalar columns are projected.
+    assert_eq!(model.info.context_window.max_input_tokens, 128_000);
+    assert!(model.info.allow_parameter_override);
+}
+
+#[test]
+fn build_minimal_info_triggered_when_provider_model_id_missing() {
+    // Missing `provider_model_id` triggers the fallback path. The fallback
+    // must use an empty `provider_model_id` string and still reconstruct a
+    // valid `ModelInfoV1`.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.provider_model_id = None;
+    // Keep gts_type populated.
+
+    let model = model_entity_to_v1(&entity);
+
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+    // `display_name` was populated by the entity fixture.
+    assert_eq!(model.info.display_name, "GPT-4o");
+    // `provider_model_id` falls back to empty string in the JSON reconstruction.
+    assert_eq!(model.info.provider_model_id, "");
+}
+
+#[test]
+fn build_minimal_info_uses_synthesized_display_name_when_empty() {
+    // When `display_name` is the empty string (DB DEFAULT ''), the fallback
+    // synthesizes a placeholder from `canonical_id`. This should rarely
+    // happen in practice (the application layer always sets a real name) but
+    // the fallback must not panic.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.display_name = String::new();
+    entity.gts_type = None; // trigger fallback
+
+    let model = model_entity_to_v1(&entity);
+
+    // Synthesized from canonical_id.
+    assert_eq!(model.info.display_name, "model-openai::gpt-4o");
+}
+
+#[test]
+fn build_minimal_info_preserves_zero_ctx_max_input_tokens() {
+    // When `ctx_max_input_tokens` is 0 (DB DEFAULT 0), the fallback must
+    // emit it as 0 on the wire — NOT silently substitute a non-zero value.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.ctx_max_input_tokens = 0;
+    entity.gts_type = None; // trigger fallback
+
+    let model = model_entity_to_v1(&entity);
+
+    assert_eq!(model.info.context_window.max_input_tokens, 0);
+    assert_eq!(model.info.context_window.max_output_tokens, Some(16_384));
+}
+
+#[test]
+fn build_minimal_info_preserves_scalar_capability_columns() {
+    // The 4 scalar capability booleans live in dedicated columns and are NOT
+    // computed from JSONB — they must be projected as-is even in the fallback
+    // path. Verify all 4 booleans are reconstructed correctly.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    // Flip all 4 booleans to distinct values so each is independently verifiable.
+    entity.cap_vision = false;
+    entity.cap_function_calling = true;
+    entity.cap_streaming = false;
+    entity.cap_reasoning_effort = true;
+    entity.gts_type = None; // trigger fallback
+
+    let model = model_entity_to_v1(&entity);
+
+    assert!(!model.info.capabilities.vision.enabled);
+    assert!(model.info.capabilities.function_calling);
+    assert!(!model.info.capabilities.streaming);
+    assert!(model.info.capabilities.reasoning.effort);
+}
+
+#[test]
+fn build_minimal_info_projects_all_promoted_scalar_columns() {
+    // Comprehensive test: when the fallback triggers, every promoted scalar
+    // column should still be projected onto the wire.
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.description = Some("Some description".to_owned());
+    entity.region = Some("eu-west-1".to_owned());
+    entity.hosted_by = Some("Azure".to_owned());
+    entity.reasoning_level = Some("medium".to_owned());
+    entity.version = Some("2.0".to_owned());
+    entity.sort_order = Some(42);
+    entity.icon = Some("https://example.com/icon.png".to_owned());
+    entity.multiplier_display = Some("2x".to_owned());
+    entity.perf_response_latency_ms = Some(250);
+    entity.perf_tokens_per_second = Some(200);
+    entity.ctx_max_input_tokens = 200_000;
+    entity.ctx_max_output_tokens = Some(8_192);
+    entity.ctx_output_vector_size = Some(1536);
+    entity.allow_parameter_override = false;
+    entity.gts_type = None; // trigger fallback
+
+    let model = model_entity_to_v1(&entity);
+
+    assert_eq!(
+        model.info.description.as_deref(),
+        Some("Some description")
+    );
+    assert_eq!(model.info.region.as_deref(), Some("eu-west-1"));
+    assert_eq!(model.info.hosted_by.as_deref(), Some("Azure"));
+    assert_eq!(model.info.reasoning_level.as_deref(), Some("medium"));
+    assert_eq!(model.info.version.as_deref(), Some("2.0"));
+    assert_eq!(model.info.sort_order, Some(42));
+    assert_eq!(
+        model.info.icon.as_deref(),
+        Some("https://example.com/icon.png")
+    );
+    assert_eq!(model.info.multiplier_display.as_deref(), Some("2x"));
+    assert_eq!(model.info.performance.response_latency_ms, Some(250));
+    assert_eq!(model.info.performance.tokens_per_second, Some(200));
+    assert_eq!(model.info.context_window.max_input_tokens, 200_000);
+    assert_eq!(model.info.context_window.max_output_tokens, Some(8_192));
+    assert_eq!(model.info.context_window.output_vector_size, Some(1536));
+    assert!(!model.info.allow_parameter_override);
+}
+
+#[test]
+fn build_minimal_info_does_not_trigger_when_required_fields_present() {
+    // Sanity check: when `gts_type` and `provider_model_id` are both present,
+    // the regular read path (not the fallback) is used. The regular path
+    // projects the values from `display_name` (a real value) and uses the
+    // rich JSONB columns for capabilities.
+    let info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let info_json = serde_json::to_value(&info).expect("serialize");
+
+    let entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        Some(info_json),
+    );
+    // All scalar columns populated by `make_model_entity`; both discriminators
+    // are present (no need to set None here).
+
+    let model = model_entity_to_v1(&entity);
+
+    // Regular path: full capabilities come from the JSONB-rich read path.
+    assert_eq!(
+        model.info.gts_type.to_string(),
+        "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~"
+    );
+    assert_eq!(model.info.display_name, "GPT-4o");
+    // Vision mime types come from `capabilities_full` JSONB (full read path).
+    assert_eq!(
+        model.info.capabilities.vision.supported_mime_types,
+        vec!["image/png".to_owned()]
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Denormalized columns after create
 // ═══════════════════════════════════════════════════════════════════════════════
 

@@ -183,10 +183,10 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/mapper.rs`
 
-- [ ] keep `build_minimal_info` (lines 468-589) as defensive fallback — since `display_name` and `ctx_max_input_tokens` will always be populated post-migration (with DEFAULTs if missing), it rarely triggers
-- [ ] simplify the graceful-degradation pattern where possible (remove redundant null-handling now that DB defaults are in place)
-- [ ] write tests for `build_minimal_info` fallback path: triggered when `display_name` is empty or `ctx_max_input_tokens` is 0
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 6
+- [x] keep `build_minimal_info` (lines 468-589) as defensive fallback — since `display_name` and `ctx_max_input_tokens` will always be populated post-migration (with DEFAULTs if missing), it rarely triggers
+- [x] simplify the graceful-degradation pattern where possible (remove redundant null-handling now that DB defaults are in place)
+- [x] write tests for `build_minimal_info` fallback path: triggered when `display_name` is empty or `ctx_max_input_tokens` is 0
+- [x] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 6
 
 ### Task 6: Update test fixtures and targeted test fixes
 
