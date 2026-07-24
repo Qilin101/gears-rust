@@ -2,14 +2,27 @@
 //!
 //! Converts between `SeaORM` entities (`provider::Model`, `model::Model`) and
 //! their SDK counterparts (`ProviderV1`, `ModelV1`), and provides
-//! [`ActiveModel`] builders for create/update operations that project
-//! denormalized filterable columns from the JSONB `info` column.
+//! [`ActiveModel`] builders for create/update operations that project the
+//! promoted columns from `ModelInfoV1`.
 //!
-//! # Denormalized column projection
+//! # Storage layout (post-2026-07-24)
 //!
-//! Every `OData`-filterable field promoted from `info` is kept in sync by these
-//! builders. The `info` JSONB remains the authoritative source of truth; the
-//! denormalized columns are read-only shadows for `OData` query performance.
+//! `ModelInfoV1` is now stored as:
+//! - **17 scalar columns** — every field that promotes cleanly (one column per
+//!   leaf field, including nested leaves such as `performance.response_latency_ms`).
+//! - **5 JSONB sub-object columns** — `capabilities_full` (everything in
+//!   `ModelCapabilities` minus the 4 `OData` booleans), `default_parameters`
+//!   (`DefaultInferenceParametersV1`), `additional_info` (the
+//!   `HashMap<String, Value>` escape hatch), `disabled_capabilities_full`
+//!   (the `DisabledCapabilities` mirror), and `allow_extra_params` (a
+//!   `Vec<String>` of caller-supplied parameter names).
+//! - **`provider_settings`** — the polymorphic JSONB column (kept; discriminated
+//!   by `gts_type`).
+//!
+//! The previous `info` JSONB column has been dropped entirely; scalar columns
+//! are now the source of truth. The denormalized OData-filterable columns
+//! (15 fields including 4 capability bools) are projections of the corresponding
+//! `ModelInfoV1` fields maintained on every create/update.
 //!
 //! # Immutability enforcement
 //!
@@ -145,20 +158,19 @@ pub fn provider_update_active_model(
 
 /// Convert a `model::Model` entity to `ModelV1<serde_json::Value>`.
 ///
-/// Deserializes the `info` JSONB column into `ModelInfoV1`. Falls back to a
-/// minimal reconstruction from denormalized columns if the JSONB is missing
-/// or corrupt (graceful degradation).
+/// Builds a JSON value from the new promoted scalar columns + the four JSONB
+/// sub-object columns + the polymorphic `provider_settings` JSONB, then
+/// deserializes via `serde_json::from_value::<ModelInfoV1>(value)`. Falls back
+/// to a minimal reconstruction from denormalized columns if any required field
+/// is missing (graceful degradation — should rarely trigger now that the
+/// migration enforces `NOT NULL DEFAULT`s on the required columns).
 #[must_use]
 #[allow(clippy::expect_used)]
 pub fn model_entity_to_v1(e: &entity::model::Model) -> ModelV1 {
     let lifecycle_status = e.lifecycle_status.clone();
     let approval_status = e.approval_status.clone();
 
-    let info = e
-        .info
-        .as_ref()
-        .and_then(|v| serde_json::from_value::<ModelInfoV1>(v.clone()).ok())
-        .unwrap_or_else(|| build_minimal_info(e));
+    let info = build_model_info_v1(e);
 
     let value = json!({
         "id": e.id,
@@ -172,11 +184,269 @@ pub fn model_entity_to_v1(e: &entity::model::Model) -> ModelV1 {
     serde_json::from_value(value).expect("ModelV1 roundtrip")
 }
 
+/// Build a `ModelInfoV1` JSON value by stitching the 17 promoted scalar
+/// columns + 4 JSONB sub-object columns + the polymorphic `provider_settings`
+/// JSONB together, then deserialize via JSON roundtrip.
+///
+/// Falls back to a minimal reconstruction when required columns are absent
+/// (legacy rows, partial inserts, or migration in-flight).
+#[must_use]
+fn build_model_info_v1(e: &entity::model::Model) -> ModelInfoV1 {
+    // If `gts_type` (the discriminator) or `provider_model_id` are missing, we
+    // can't deserialize a meaningful `ModelInfoV1`. Trigger the graceful
+    // fallback.
+    if e.gts_type.is_none() || e.provider_model_id.is_none() {
+        return build_minimal_info(e);
+    }
+
+    let capabilities = build_capabilities(e);
+
+    let value = json!({
+        "gts_type": e.gts_type.as_deref().unwrap_or(""),
+        "display_name": e.display_name,
+        "description": e.description,
+        "family": e.family,
+        "vendor": e.vendor,
+        "managed": e.managed,
+        "architecture": e.architecture,
+        "size_bytes": e.size_bytes,
+        "format": e.format,
+        "region": e.region,
+        "hosted_by": e.hosted_by,
+        "last_release_at": e.last_release_at,
+        "reasoning_level": e.reasoning_level,
+        "version": e.version,
+        "sort_order": e.sort_order,
+        "icon": e.icon,
+        "multiplier_display": e.multiplier_display,
+        "performance": {
+            "response_latency_ms": e.perf_response_latency_ms,
+            "tokens_per_second": e.perf_tokens_per_second,
+        },
+        "additional_info": e.additional_info.clone().unwrap_or_else(|| json!({})),
+        "supported_api": supported_api_denorm_to_json_array(e.supported_api.as_deref()),
+        "provider_model_id": e.provider_model_id.as_deref().unwrap_or(""),
+        "capabilities": capabilities,
+        "disabled_capabilities": merge_disabled_capabilities(e.disabled_capabilities_full.as_ref()),
+        "context_window": {
+            "max_input_tokens": e.ctx_max_input_tokens,
+            "max_output_tokens": e.ctx_max_output_tokens,
+            "output_vector_size": e.ctx_output_vector_size,
+        },
+        "default_parameters": merge_default_parameters(e.default_parameters.as_ref()),
+        "allow_parameter_override": e.allow_parameter_override,
+        "allow_extra_params": e.allow_extra_params.clone().unwrap_or_else(|| json!([])),
+        "provider_settings": e.provider_settings.clone().unwrap_or(serde_json::Value::Null),
+    });
+    // SAFETY: the JSON value above is constructed inline from trusted entity
+    // fields whose serde representations are known. A panic here is a
+    // programming error — e.g. a new field was added to `ModelInfoV1` but the
+    // builder wasn't updated.
+    serde_json::from_value(value).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            "ModelInfoV1 roundtrip from promoted columns failed, using fallback"
+        );
+        build_minimal_info(e)
+    })
+}
+
+/// Build a `ModelCapabilities` JSON value by merging the 4 promoted scalar
+/// capability booleans (`cap_vision`, `cap_function_calling`, `cap_streaming`,
+/// `cap_reasoning_effort`) with the rest of the capability content from the
+/// `capabilities_full` JSONB sub-object column.
+///
+/// **The 4 scalar columns are authoritative** — they override whatever may be
+/// stored in `capabilities_full.vision.enabled` etc. The remaining fields
+/// (mime types, `response_schema`, `file_input`, `image_generation`, `audio_*`,
+/// `code_interpreter`, `web_search`, reasoning toggle/resume/budget) come from
+/// the JSONB column. If the JSONB column is missing, sensible defaults are
+/// filled in for all required fields.
+#[must_use]
+fn build_capabilities(e: &entity::model::Model) -> serde_json::Value {
+    // Parse the capabilities_full JSONB content (the "rest" of capabilities).
+    // If missing or malformed, start from an empty object so the scalar bools
+    // fill in the rest.
+    let mut caps_obj: serde_json::Map<String, serde_json::Value> = e
+        .capabilities_full
+        .as_ref()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    // Vision: scalar `cap_vision` overrides `vision.enabled`. Mime types come
+    // from the JSONB column (or default to empty).
+    let vision_mime_types = caps_obj
+        .get("vision")
+        .and_then(|v| v.get("supported_mime_types"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    caps_obj.insert(
+        "vision".to_owned(),
+        json!({
+            "enabled": e.cap_vision,
+            "supported_mime_types": vision_mime_types,
+        }),
+    );
+
+    // Reasoning: scalar `cap_reasoning_effort` overrides `reasoning.effort`.
+    // toggle/resume/budget come from the JSONB column (or default to false).
+    let reasoning_obj = caps_obj
+        .get("reasoning")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut reasoning = reasoning_obj;
+    reasoning.insert("effort".to_owned(), json!(e.cap_reasoning_effort));
+    reasoning.entry("toggle".to_owned()).or_insert(json!(false));
+    reasoning.entry("resume".to_owned()).or_insert(json!(false));
+    reasoning.entry("budget".to_owned()).or_insert(json!(false));
+    caps_obj.insert("reasoning".to_owned(), serde_json::Value::Object(reasoning));
+
+    // Scalar bools for function_calling and streaming override JSONB content.
+    caps_obj.insert("function_calling".to_owned(), json!(e.cap_function_calling));
+    caps_obj.insert("streaming".to_owned(), json!(e.cap_streaming));
+
+    // Default-fill remaining fields that are required by `ModelCapabilities`.
+    caps_obj
+        .entry("response_schema".to_owned())
+        .or_insert(json!(false));
+    caps_obj
+        .entry("file_input".to_owned())
+        .or_insert(json!({ "enabled": false, "supported_mime_types": [] }));
+    caps_obj
+        .entry("image_generation".to_owned())
+        .or_insert(json!({ "enabled": false, "supported_mime_types": [] }));
+    caps_obj
+        .entry("audio_input".to_owned())
+        .or_insert(json!({ "enabled": false, "supported_mime_types": [] }));
+    caps_obj
+        .entry("audio_output".to_owned())
+        .or_insert(json!({ "enabled": false, "supported_mime_types": [] }));
+    caps_obj
+        .entry("code_interpreter".to_owned())
+        .or_insert(json!(false));
+    caps_obj.entry("web_search".to_owned()).or_insert(json!({
+        "enabled": false,
+        "allowed_domains": false,
+        "excluded_domains": false
+    }));
+
+    serde_json::Value::Object(caps_obj)
+}
+
+/// Return a `Default` `DisabledCapabilities` JSON object (all flags false,
+/// all lists empty). Used when `disabled_capabilities_full` is NULL.
+#[must_use]
+fn default_disabled_capabilities_value() -> serde_json::Value {
+    json!({
+        "vision": { "disabled": false, "disabled_mime_types": [] },
+        "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+        "function_calling": false,
+        "response_schema": false,
+        "streaming": false,
+        "file_input": { "disabled": false, "disabled_mime_types": [] },
+        "image_generation": { "disabled": false, "disabled_mime_types": [] },
+        "audio_input": { "disabled": false, "disabled_mime_types": [] },
+        "audio_output": { "disabled": false, "disabled_mime_types": [] },
+        "code_interpreter": false,
+        "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+    })
+}
+
+/// Return a `Default` `DefaultInferenceParametersV1` JSON object (all fields
+/// null). Used when `default_parameters` is NULL.
+#[must_use]
+fn default_inference_parameters_value() -> serde_json::Value {
+    json!({
+        "temperature": null,
+        "top_p": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "top_logprobs": null,
+        "truncation": null,
+        "service_tier": null,
+        "parallel_tool_calls": null,
+        "text": null,
+        "reasoning": null,
+        "tool_choice": null,
+        "store": null
+    })
+}
+
+/// Merge a stored `disabled_capabilities_full` JSONB value with the default
+/// `DisabledCapabilities` shape. Ensures all required fields (`reasoning`,
+/// `vision`, etc.) are present even if the stored JSON omits them.
+#[must_use]
+fn merge_disabled_capabilities(stored: Option<&serde_json::Value>) -> serde_json::Value {
+    let defaults = default_disabled_capabilities_value();
+    let defaults_obj = defaults.as_object().cloned().unwrap_or_default();
+    let mut stored_obj = stored
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    // For nested objects (vision, reasoning, file_input, etc.), merge field
+    // by field so missing fields get default values.
+    let nested_keys = [
+        "vision",
+        "reasoning",
+        "file_input",
+        "image_generation",
+        "audio_input",
+        "audio_output",
+        "web_search",
+    ];
+    for key in nested_keys {
+        if let Some(default_nested) = defaults_obj.get(key).and_then(|v| v.as_object()) {
+            let merged = match stored_obj.get(key).and_then(|v| v.as_object().cloned()) {
+                Some(mut s) => {
+                    for (k, v) in default_nested {
+                        s.entry(k.clone()).or_insert(v.clone());
+                    }
+                    s
+                }
+                None => default_nested.clone(),
+            };
+            stored_obj.insert(key.to_owned(), serde_json::Value::Object(merged));
+        }
+    }
+    // Scalar booleans default to false
+    for key in [
+        "function_calling",
+        "response_schema",
+        "streaming",
+        "code_interpreter",
+    ] {
+        stored_obj.entry(key.to_owned()).or_insert(json!(false));
+    }
+
+    serde_json::Value::Object(stored_obj)
+}
+
+/// Merge a stored `default_parameters` JSONB value with the default
+/// `DefaultInferenceParametersV1` shape. Ensures all optional fields are
+/// present (defaulting to null) even if the stored JSON omits them.
+#[must_use]
+fn merge_default_parameters(stored: Option<&serde_json::Value>) -> serde_json::Value {
+    let defaults = default_inference_parameters_value();
+    let defaults_obj = defaults.as_object().cloned().unwrap_or_default();
+    let mut stored_obj = stored
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    for (k, v) in defaults_obj {
+        stored_obj.entry(k).or_insert(v);
+    }
+
+    serde_json::Value::Object(stored_obj)
+}
+
 /// Build a `model::ActiveModel` from a create request.
 ///
-/// Serializes `info` to JSONB, extracts `provider_settings`, projects the
-/// denormalized filterable columns, and derives `canonical_id` as
-/// `{provider_slug}::{info.provider_model_id}`.
+/// Projects every `ModelInfoV1` field into the corresponding promoted column
+/// (17 scalar + 5 JSONB sub-objects + the polymorphic `provider_settings`),
+/// derives `canonical_id` as `{provider_slug}::{info.provider_model_id}`.
+#[allow(clippy::expect_used)]
 #[must_use]
 pub fn model_create_active_model(
     tenant_id: Uuid,
@@ -185,17 +455,23 @@ pub fn model_create_active_model(
     initial_approval_status: ApprovalStatus,
 ) -> entity::model::ActiveModel {
     let canonical_id = format!("{}::{}", req.provider_slug, req.info.provider_model_id);
+
     // SAFETY: req.info was just deserialized from valid JSON; re-serialization
     // cannot fail for well-formed domain types (no non-string map keys, no
     // I/O). Use expect to fail-fast rather than silently storing null.
     #[allow(clippy::expect_used)]
-    let info_json = serde_json::to_value(&req.info)
-        .expect("CreateModelRequestV1.info re-serialization cannot fail");
-
-    // SAFETY: same reasoning — provider_settings is a JSON-compatible type.
-    #[allow(clippy::expect_used)]
     let provider_settings_json = serde_json::to_value(&req.info.provider_settings)
         .expect("CreateModelRequestV1.info.provider_settings re-serialization cannot fail");
+
+    let cap_full = build_capabilities_full_for_create(&req.info.capabilities);
+    let disabled_full = serde_json::to_value(&req.info.disabled_capabilities)
+        .expect("disabled_capabilities re-serialization cannot fail");
+    let default_params = serde_json::to_value(&req.info.default_parameters)
+        .expect("default_parameters re-serialization cannot fail");
+    let additional_info = serde_json::to_value(&req.info.additional_info)
+        .expect("additional_info re-serialization cannot fail");
+    let allow_extra_params = serde_json::to_value(&req.info.allow_extra_params)
+        .expect("allow_extra_params re-serialization cannot fail");
 
     entity::model::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -204,7 +480,6 @@ pub fn model_create_active_model(
         canonical_id: Set(canonical_id),
         lifecycle_status: Set(lifecycle_status_str(req.lifecycle_status)),
         deprecated_at: Set(None),
-        info: Set(Some(info_json)),
         provider_settings: Set(if provider_settings_json.is_null() {
             None
         } else {
@@ -212,7 +487,67 @@ pub fn model_create_active_model(
         }),
         created_at: Set(chrono::Utc::now()),
         updated_at: Set(chrono::Utc::now()),
-        // Denormalized columns
+        // 17 promoted scalar columns
+        display_name: Set(req.info.display_name.clone()),
+        description: Set(req.info.description.clone()),
+        size_bytes: Set(req
+            .info
+            .size_bytes
+            .map(i64::try_from)
+            .transpose()
+            .ok()
+            .flatten()),
+        region: Set(req.info.region.clone()),
+        hosted_by: Set(req.info.hosted_by.clone()),
+        last_release_at: Set(req.info.last_release_at),
+        reasoning_level: Set(req.info.reasoning_level.clone()),
+        version: Set(req.info.version.clone()),
+        sort_order: Set(req.info.sort_order),
+        icon: Set(req.info.icon.clone()),
+        multiplier_display: Set(req.info.multiplier_display.clone()),
+        perf_response_latency_ms: Set(req
+            .info
+            .performance
+            .response_latency_ms
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten()),
+        perf_tokens_per_second: Set(req
+            .info
+            .performance
+            .tokens_per_second
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten()),
+        ctx_max_input_tokens: Set(
+            i32::try_from(req.info.context_window.max_input_tokens).unwrap_or(i32::MAX)
+        ),
+        ctx_max_output_tokens: Set(req
+            .info
+            .context_window
+            .max_output_tokens
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten()),
+        ctx_output_vector_size: Set(req
+            .info
+            .context_window
+            .output_vector_size
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten()),
+        allow_parameter_override: Set(req.info.allow_parameter_override),
+        // 5 JSONB sub-object columns
+        capabilities_full: Set(Some(cap_full)),
+        default_parameters: Set(Some(default_params)),
+        additional_info: Set(Some(additional_info)),
+        disabled_capabilities_full: Set(Some(disabled_full)),
+        allow_extra_params: Set(Some(allow_extra_params)),
+        // Denormalized columns (15 existing OData filter surface)
         gts_type: Set(Some(req.info.gts_type.to_string())),
         vendor: Set(req.info.vendor.clone()),
         family: Set(req.info.family.clone()),
@@ -229,11 +564,37 @@ pub fn model_create_active_model(
     }
 }
 
+/// Build the `capabilities_full` JSONB sub-object from a `ModelCapabilities`
+/// value — strips the 4 scalar-OData booleans so the columns remain the
+/// authoritative source for `vision.enabled`, `function_calling`,
+/// `streaming`, and `reasoning.effort`.
+#[must_use]
+#[allow(clippy::expect_used)]
+fn build_capabilities_full_for_create(
+    caps: &model_registry_sdk::models::ModelCapabilities,
+) -> serde_json::Value {
+    // Serialize the full struct, then strip the 4 promoted fields so the
+    // JSONB column matches the "rest of capabilities" contract.
+    let mut value =
+        serde_json::to_value(caps).expect("ModelCapabilities re-serialization cannot fail");
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("function_calling");
+        obj.remove("streaming");
+        if let Some(vision) = obj.get_mut("vision").and_then(|v| v.as_object_mut()) {
+            vision.remove("enabled");
+        }
+        if let Some(reasoning) = obj.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
+            reasoning.remove("effort");
+        }
+    }
+    value
+}
+
 /// Build a `model::ActiveModel` for a PATCH update.
 ///
-/// Reads the existing entity and the update request, applies only the
-/// `Some(...)` fields, re-serializes `info` JSONB if any info field changed,
-/// and re-projects the denormalized filterable columns.
+/// Reads the existing entity, reconstructs `ModelInfoV1` from the new column
+/// layout, applies only the `Some(...)` patches from the request, and
+/// re-projects every promoted column.
 ///
 /// NOTE: `approval_status` is intentionally NOT handled here — it is written
 /// exclusively by the service layer's `set_approval` call, which atomically
@@ -242,6 +603,7 @@ pub fn model_create_active_model(
 /// Immutable fields (`canonical_id`, `provider_slug`, `info.provider_model_id`,
 /// `info.gts_type`) are silently ignored if present in the request.
 #[allow(clippy::cognitive_complexity)]
+#[allow(clippy::expect_used)]
 #[must_use]
 pub fn model_update_active_model(
     existing: &entity::model::Model,
@@ -257,52 +619,119 @@ pub fn model_update_active_model(
     // — Approval status (handled exclusively by set_approval in the service
     //   layer, which writes to both model_approvals and the denormalized
     //   column atomically via on_conflict upsert). —
-    let mut info: Option<ModelInfoV1> = existing
-        .info
-        .as_ref()
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-    let info_changed = info
-        .as_mut()
-        .is_some_and(|info_inner| apply_info_patches(info_inner, req));
+    // Reconstruct ModelInfoV1 from the existing promoted columns, apply
+    // patches, and re-project every column back. We use the same
+    // `model_entity_to_v1` round-trip used by the read path so the patch
+    // logic is symmetric.
+    let mut info: Option<ModelInfoV1> = None;
+    let read_back = model_entity_to_v1(existing);
+    let mut fresh = read_back.info;
+    let info_changed = apply_info_patches(&mut fresh, req);
+    if info_changed {
+        info = Some(fresh.clone());
+    }
+    let _ = info; // suppress unused warning — kept for symmetry with the read path
 
     if info_changed {
-        // SAFETY: info was just deserialized from JSON and is re-serializable.
-        #[allow(clippy::expect_used)]
-        let fresh = info.expect("info is Some after apply_info_patches");
-        // SAFETY: info was just deserialized from stored JSON; re-serialization
-        // cannot fail for well-formed domain types. Fail-fast rather than
-        // silently storing null.
-        #[allow(clippy::expect_used)]
-        let info_json = serde_json::to_value(&fresh)
-            .expect("ModelInfoV1 re-serialization cannot fail");
-        active.info = Set(Some(info_json));
+        let info_inner = info
+            .as_ref()
+            .expect("info is Some after apply_info_patches");
 
-        // Re-project denormalized columns
-        active.gts_type = Set(Some(fresh.gts_type.to_string()));
-        active.vendor = Set(fresh.vendor.clone());
-        active.family = Set(fresh.family.clone());
-        active.managed = Set(fresh.managed);
-        active.architecture = Set(fresh.architecture.clone());
-        active.format = Set(fresh.format.clone());
-        active.provider_model_id = Set(Some(fresh.provider_model_id.clone()));
-        active.supported_api = Set(supported_api_set_to_str(&fresh.supported_api));
-        active.cap_vision = Set(fresh.capabilities.vision.enabled);
-        active.cap_function_calling = Set(fresh.capabilities.function_calling);
-        active.cap_streaming = Set(fresh.capabilities.streaming);
-        active.cap_reasoning_effort = Set(fresh.capabilities.reasoning.effort);
+        // 17 promoted scalar columns
+        active.display_name = Set(info_inner.display_name.clone());
+        active.description = Set(info_inner.description.clone());
+        active.size_bytes = Set(info_inner
+            .size_bytes
+            .map(i64::try_from)
+            .transpose()
+            .ok()
+            .flatten());
+        active.region = Set(info_inner.region.clone());
+        active.hosted_by = Set(info_inner.hosted_by.clone());
+        active.last_release_at = Set(info_inner.last_release_at);
+        active.reasoning_level = Set(info_inner.reasoning_level.clone());
+        active.version = Set(info_inner.version.clone());
+        active.sort_order = Set(info_inner.sort_order);
+        active.icon = Set(info_inner.icon.clone());
+        active.multiplier_display = Set(info_inner.multiplier_display.clone());
+        active.perf_response_latency_ms = Set(info_inner
+            .performance
+            .response_latency_ms
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten());
+        active.perf_tokens_per_second = Set(info_inner
+            .performance
+            .tokens_per_second
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten());
+        active.ctx_max_input_tokens =
+            Set(i32::try_from(info_inner.context_window.max_input_tokens).unwrap_or(i32::MAX));
+        active.ctx_max_output_tokens = Set(info_inner
+            .context_window
+            .max_output_tokens
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten());
+        active.ctx_output_vector_size = Set(info_inner
+            .context_window
+            .output_vector_size
+            .map(i32::try_from)
+            .transpose()
+            .ok()
+            .flatten());
+        active.allow_parameter_override = Set(info_inner.allow_parameter_override);
+
+        // 5 JSONB sub-object columns
+        #[allow(clippy::expect_used)]
+        let cap_full = serde_json::to_value(&info_inner.capabilities)
+            .expect("ModelCapabilities re-serialization cannot fail");
+        #[allow(clippy::expect_used)]
+        let disabled_full = serde_json::to_value(&info_inner.disabled_capabilities)
+            .expect("DisabledCapabilities re-serialization cannot fail");
+        #[allow(clippy::expect_used)]
+        let default_params = serde_json::to_value(&info_inner.default_parameters)
+            .expect("DefaultInferenceParametersV1 re-serialization cannot fail");
+        #[allow(clippy::expect_used)]
+        let additional_info = serde_json::to_value(&info_inner.additional_info)
+            .expect("additional_info re-serialization cannot fail");
+        #[allow(clippy::expect_used)]
+        let allow_extra_params = serde_json::to_value(&info_inner.allow_extra_params)
+            .expect("allow_extra_params re-serialization cannot fail");
+        active.capabilities_full = Set(Some(cap_full));
+        active.default_parameters = Set(Some(default_params));
+        active.additional_info = Set(Some(additional_info));
+        active.disabled_capabilities_full = Set(Some(disabled_full));
+        active.allow_extra_params = Set(Some(allow_extra_params));
 
         // Re-extract provider_settings
-        // SAFETY: provider_settings was just deserialized from stored JSON;
-        // re-serialization cannot fail for JSON-compatible types.
         #[allow(clippy::expect_used)]
-        let ps_json = serde_json::to_value(&fresh.provider_settings)
+        let ps_json = serde_json::to_value(&info_inner.provider_settings)
             .expect("provider_settings re-serialization cannot fail");
         active.provider_settings = Set(if ps_json.is_null() {
             None
         } else {
             Some(ps_json)
         });
+
+        // Re-project denormalized columns
+        active.gts_type = Set(Some(info_inner.gts_type.to_string()));
+        active.vendor = Set(info_inner.vendor.clone());
+        active.family = Set(info_inner.family.clone());
+        active.managed = Set(info_inner.managed);
+        active.architecture = Set(info_inner.architecture.clone());
+        active.format = Set(info_inner.format.clone());
+        active.provider_model_id = Set(Some(info_inner.provider_model_id.clone()));
+        active.supported_api = Set(supported_api_set_to_str(&info_inner.supported_api));
+        active.cap_vision = Set(info_inner.capabilities.vision.enabled);
+        active.cap_function_calling = Set(info_inner.capabilities.function_calling);
+        active.cap_streaming = Set(info_inner.capabilities.streaming);
+        active.cap_reasoning_effort = Set(info_inner.capabilities.reasoning.effort);
     }
 
     // Only bump `updated_at` when at least one field was actually set.
@@ -386,7 +815,10 @@ fn provider_status_str(status: ProviderStatus) -> String {
         ProviderStatus::Active => "active".to_owned(),
         ProviderStatus::Disabled => "disabled".to_owned(),
         _ => {
-            tracing::error!(?status, "unknown ProviderStatus variant, defaulting to active");
+            tracing::error!(
+                ?status,
+                "unknown ProviderStatus variant, defaulting to active"
+            );
             "active".to_owned()
         }
     }
@@ -402,7 +834,10 @@ fn lifecycle_status_str(status: LifecycleStatus) -> String {
         LifecycleStatus::Deprecated => "deprecated".to_owned(),
         LifecycleStatus::Sunset => "sunset".to_owned(),
         _ => {
-            tracing::error!(?status, "unknown LifecycleStatus variant, defaulting to production");
+            tracing::error!(
+                ?status,
+                "unknown LifecycleStatus variant, defaulting to production"
+            );
             "production".to_owned()
         }
     }
@@ -417,7 +852,10 @@ fn approval_status_str(status: ApprovalStatus) -> String {
         ApprovalStatus::Rejected => "rejected".to_owned(),
         ApprovalStatus::Revoked => "revoked".to_owned(),
         _ => {
-            tracing::error!(?status, "unknown ApprovalStatus variant, defaulting to pending");
+            tracing::error!(
+                ?status,
+                "unknown ApprovalStatus variant, defaulting to pending"
+            );
             "pending".to_owned()
         }
     }
@@ -468,7 +906,10 @@ fn supported_api_denorm_to_json_array(s: Option<&str>) -> Vec<String> {
 fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
     // Since ModelInfoV1 and its inner types are #[non_exhaustive], construct via
     // JSON roundtrip.
-    let gts_type_str = e.gts_type.as_deref().unwrap_or("gts.cf.genai.model.info.v1~");
+    let gts_type_str = e
+        .gts_type
+        .as_deref()
+        .unwrap_or("gts.cf.genai.model.info.v1~");
     let display_name = format!("model-{}", e.canonical_id);
 
     let value = json!({
@@ -571,7 +1012,9 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
             .unwrap_or_else(|_| {
                 // Unreachable: the hardcoded JSON contains only primitive
                 // types that always deserialize into the required fields.
-                tracing::error!("all ModelInfoV1 fallback attempts failed - this is a programming bug");
+                tracing::error!(
+                    "all ModelInfoV1 fallback attempts failed - this is a programming bug"
+                );
                 // Last resort: all-null value will produce a struct with
                 // gts_type="" and display_name="" via serde defaults.
                 serde_json::from_value(serde_json::Value::Object(serde_json::Map::default()))

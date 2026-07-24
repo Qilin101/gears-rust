@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS models (
     lifecycle_status            VARCHAR(50) NOT NULL,
     deprecated_at               {tstz_nullable},
     -- The `info` JSONB column has been dropped (2026-07-24). The 17 scalar columns
-    -- below + 4 JSONB sub-object columns + `provider_settings` are the new source of truth.
+    -- below + 5 JSONB sub-object columns + `provider_settings` are the new source of truth.
     provider_settings           {jsonb_nullable},
 
     -- ════════════════════════════════════════════════════════════════════════
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS models (
     allow_parameter_override    {bool_} NOT NULL DEFAULT 0,
 
     -- ════════════════════════════════════════════════════════════════════════
-    -- 4 JSONB sub-object columns (replacing the rest of `info`)
+    -- 5 JSONB sub-object columns (replacing the rest of `info`)
     -- ════════════════════════════════════════════════════════════════════════
     -- Capability fields NOT promoted to scalar columns (everything in `ModelCapabilities`
     -- minus the 4 OData booleans stored as scalar columns above).
@@ -101,6 +101,10 @@ CREATE TABLE IF NOT EXISTS models (
     additional_info             {jsonb_nullable},
     -- Symmetric with `capabilities_full` for the `disabled_capabilities` map.
     disabled_capabilities_full  {jsonb_nullable},
+    -- `allow_extra_params`: flat `Vec<String>` of caller-supplied parameter
+    -- names permitted alongside the request (added 2026-07-24 to satisfy the
+    -- `allow_extra_params` user decision in the plan).
+    allow_extra_params          {jsonb_nullable},
 
     created_at                  {tstz} NOT NULL,
     updated_at                  {tstz} NOT NULL,
@@ -232,7 +236,7 @@ mod tests {
         );
     }
 
-    /// Verify the 17 new scalar columns + 4 JSONB sub-object columns exist on `models`.
+    /// Verify the 17 new scalar columns + 5 JSONB sub-object columns exist on `models`.
     #[tokio::test]
     async fn models_new_columns_present() {
         let conn = sea_orm::Database::connect("sqlite::memory:")
@@ -304,12 +308,13 @@ mod tests {
             );
         }
 
-        // 4 JSONB sub-object columns (TEXT on SQLite, nullable).
+        // 5 JSONB sub-object columns (TEXT on SQLite, nullable).
         for col_name in [
             "capabilities_full",
             "default_parameters",
             "additional_info",
             "disabled_capabilities_full",
+            "allow_extra_params",
         ] {
             let actual = columns
                 .iter()

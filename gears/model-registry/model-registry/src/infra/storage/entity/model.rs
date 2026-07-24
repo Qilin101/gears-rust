@@ -10,12 +10,13 @@ use uuid::Uuid;
 ///
 /// - **17 scalar columns** hold the fields that promote cleanly to typed
 ///   columns (one column per `ModelInfoV1` field, or per nested-struct leaf).
-/// - **4 JSONB sub-object columns** hold the `ModelInfoV1` sub-objects that
+/// - **5 JSONB sub-object columns** hold the `ModelInfoV1` sub-objects that
 ///   don't promote cleanly: `capabilities_full` (everything in
-///   `ModelCapabilities` minus the 4 OData booleans),
+///   `ModelCapabilities` minus the 4 `OData` booleans),
 ///   `default_parameters` (`DefaultInferenceParametersV1`),
-///   `additional_info` (`HashMap<String, serde_json::Value>`), and
-///   `disabled_capabilities_full` (`DisabledCapabilities`).
+///   `additional_info` (`HashMap<String, serde_json::Value>`),
+///   `disabled_capabilities_full` (`DisabledCapabilities`), and
+///   `allow_extra_params` (`Vec<String>` of caller-supplied parameter names).
 /// - **`provider_settings`** is the polymorphic JSONB column storing the raw
 ///   provider-specific settings payload (the `P` in `ModelInfoV1<P>`), keyed
 ///   by the scalar `gts_type` discriminator.
@@ -86,9 +87,9 @@ pub struct Model {
     pub allow_parameter_override: bool,
 
     // ═══════════════════════════════════════════════════════════════════
-    // 4 JSONB sub-object columns (the rest of `ModelInfoV1`)
+    // 5 JSONB sub-object columns (the rest of `ModelInfoV1`)
     // ═══════════════════════════════════════════════════════════════════
-    /// `ModelCapabilities` minus the 4 OData booleans stored as scalar
+    /// `ModelCapabilities` minus the 4 `OData` booleans stored as scalar
     /// columns below (`cap_vision`, `cap_function_calling`, `cap_streaming`,
     /// `cap_reasoning_effort`).
     #[sea_orm(column_type = "JsonBinary", nullable)]
@@ -102,6 +103,11 @@ pub struct Model {
     /// `DisabledCapabilities` (mirrors `capabilities_full`).
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub disabled_capabilities_full: Option<serde_json::Value>,
+    /// `allow_extra_params: Vec<String>` of caller-supplied parameter names
+    /// permitted alongside the request (added 2026-07-24 per the plan's
+    /// `allow_extra_params` user decision).
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub allow_extra_params: Option<serde_json::Value>,
 
     // ═══════════════════════════════════════════════════════════════════
     // Denormalized filterable columns (15 existing OData filter surface)
@@ -250,6 +256,7 @@ mod tests {
                 "code_interpreter": false,
                 "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
             })),
+            allow_extra_params: Some(json!(["custom_param", "trace_id"])),
             // 13 existing filterable columns
             gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
             vendor: Some("OpenAI".to_owned()),
@@ -298,15 +305,17 @@ mod tests {
         let _: Option<i32> = entity.ctx_output_vector_size;
         let _: bool = entity.allow_parameter_override;
 
-        // All 4 JSONB sub-object columns are accessible.
+        // All 5 JSONB sub-object columns are accessible.
         let _: Option<serde_json::Value> = entity.capabilities_full;
         let _: Option<serde_json::Value> = entity.default_parameters;
         let _: Option<serde_json::Value> = entity.additional_info;
         let _: Option<serde_json::Value> = entity.disabled_capabilities_full;
+        let _: Option<serde_json::Value> = entity.allow_extra_params;
     }
 
     /// Verify `default_parameters`, `capabilities_full`, `additional_info`,
-    /// and `disabled_capabilities_full` accept arbitrary JSON values.
+    /// `disabled_capabilities_full`, and `allow_extra_params` accept arbitrary
+    /// JSON values.
     #[test]
     fn jsonb_sub_object_columns_accept_arbitrary_json() {
         let mut entity = make_full_model_entity();
@@ -315,6 +324,7 @@ mod tests {
         entity.default_parameters = Some(json!(null));
         entity.additional_info = Some(json!({}));
         entity.disabled_capabilities_full = None;
+        entity.allow_extra_params = Some(json!(["x", "y"]));
 
         // Direct field comparisons — entity is not Serialize, so we can't
         // round-trip through serde_json::to_value.
@@ -328,6 +338,10 @@ mod tests {
         );
         assert_eq!(entity.additional_info.as_ref().unwrap(), &json!({}));
         assert!(entity.disabled_capabilities_full.is_none());
+        assert_eq!(
+            entity.allow_extra_params.as_ref().unwrap(),
+            &json!(["x", "y"])
+        );
     }
 
     /// Verify NOT NULL scalar columns hold concrete values when populated.
@@ -342,7 +356,7 @@ mod tests {
         assert!(entity.allow_parameter_override);
     }
 
-    /// Verify the entity can be cloned (DeriveEntityModel provides Clone),
+    /// Verify the entity can be cloned (`DeriveEntityModel` provides Clone),
     /// demonstrating field-by-field layout works end-to-end.
     #[test]
     fn entity_clone_preserves_all_columns() {
@@ -363,6 +377,7 @@ mod tests {
             entity.disabled_capabilities_full,
             cloned.disabled_capabilities_full
         );
+        assert_eq!(entity.allow_extra_params, cloned.allow_extra_params);
         assert_eq!(entity.provider_settings, cloned.provider_settings);
     }
 }

@@ -141,8 +141,14 @@ fn make_model_entity(
     provider_id: Uuid,
     tenant_id: Uuid,
     canonical_id: &str,
-    info: Option<serde_json::Value>,
+    _info: Option<serde_json::Value>,
 ) -> entity::model::Model {
+    // The previous fixture took `info: Option<serde_json::Value>` for legacy
+    // JSONB tests. The post-2026-07-24 schema has no `info` column — instead,
+    // the 17 scalar columns + 5 JSONB sub-object columns carry the same
+    // payload. Task 6 will fully rewrite this fixture; for now we populate
+    // representative scalar fields so the lib compiles.
+    let _ = canonical_id;
     entity::model::Model {
         id,
         provider_id,
@@ -150,10 +156,62 @@ fn make_model_entity(
         canonical_id: canonical_id.to_owned(),
         lifecycle_status: "production".to_owned(),
         deprecated_at: None,
-        info,
         provider_settings: Some(openai_settings()),
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        // 17 promoted scalar columns
+        display_name: "GPT-4o".to_owned(),
+        description: Some("OpenAI's flagship model".to_owned()),
+        size_bytes: None,
+        region: Some("us-east-1".to_owned()),
+        hosted_by: Some("OpenAI".to_owned()),
+        last_release_at: None,
+        reasoning_level: Some("high".to_owned()),
+        version: Some("1.0".to_owned()),
+        sort_order: Some(10),
+        icon: None,
+        multiplier_display: Some("1x".to_owned()),
+        perf_response_latency_ms: Some(500),
+        perf_tokens_per_second: Some(100),
+        ctx_max_input_tokens: 128_000,
+        ctx_max_output_tokens: Some(16_384),
+        ctx_output_vector_size: None,
+        allow_parameter_override: true,
+        // 5 JSONB sub-object columns
+        capabilities_full: Some(json!({
+            "vision": { "supported_mime_types": ["image/png"] },
+            "reasoning": { "toggle": false, "resume": false, "budget": false },
+            "response_schema": true,
+            "file_input": { "enabled": false, "supported_mime_types": [] },
+            "image_generation": { "enabled": false, "supported_mime_types": [] },
+            "audio_input": { "enabled": false, "supported_mime_types": [] },
+            "audio_output": { "enabled": false, "supported_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+        })),
+        default_parameters: Some(json!({
+            "temperature": null, "top_p": null, "max_output_tokens": null,
+            "max_tool_calls": null, "presence_penalty": null,
+            "frequency_penalty": null, "top_logprobs": null,
+            "truncation": null, "service_tier": null,
+            "parallel_tool_calls": null, "text": null, "reasoning": null,
+            "tool_choice": null, "store": null
+        })),
+        additional_info: Some(json!({})),
+        disabled_capabilities_full: Some(json!({
+            "vision": { "disabled": false, "disabled_mime_types": [] },
+            "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
+            "function_calling": false,
+            "response_schema": false,
+            "streaming": false,
+            "file_input": { "disabled": false, "disabled_mime_types": [] },
+            "image_generation": { "disabled": false, "disabled_mime_types": [] },
+            "audio_input": { "disabled": false, "disabled_mime_types": [] },
+            "audio_output": { "disabled": false, "disabled_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+        })),
+        allow_extra_params: Some(json!(["custom_param"])),
         // Denormalized columns
         gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
         vendor: Some("OpenAI".to_owned()),
@@ -322,13 +380,20 @@ fn model_entity_to_v1_anthropic() {
 
     let info_json = serde_json::to_value(&info).expect("serialize");
 
-    let entity = make_model_entity(
+    // Post-2026-07-24: scalar columns are authoritative. Override the entity's
+    // vendor/family/provider_model_id/gts_type scalars so they match the
+    // anthropic info payload.
+    let mut entity = make_model_entity(
         test_model_id(),
         test_provider_id(),
         test_tenant_id(),
         "anthropic::claude-sonnet-4-20250514",
         Some(info_json),
     );
+    entity.vendor = Some("Anthropic".to_owned());
+    entity.family = Some("claude".to_owned());
+    entity.provider_model_id = Some("claude-sonnet-4-20250514".to_owned());
+    entity.gts_type = Some("gts.cf.genai.model.info.v1~cf.genai._.anthropic.v1~".to_owned());
 
     let model = model_entity_to_v1(&entity);
 
@@ -353,16 +418,17 @@ fn model_entity_to_v1_unknown_provider() {
     }
 
     let info_json = serde_json::to_value(&info).expect("serialize");
-    let entity = entity::model::Model {
-        provider_settings: Some(raw_settings),
-        ..make_model_entity(
-            test_model_id(),
-            test_provider_id(),
-            test_tenant_id(),
-            "custom::custom-model",
-            Some(info_json),
-        )
-    };
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "custom::custom-model",
+        Some(info_json),
+    );
+    entity.provider_settings = Some(raw_settings);
+    entity.vendor = Some("Custom".to_owned());
+    entity.provider_model_id = Some("custom-model".to_owned());
+    entity.gts_type = Some("gts.cf.genai.model.info.v1~cf.genai._.custom.v1~".to_owned());
 
     let model = model_entity_to_v1(&entity);
 
@@ -379,13 +445,23 @@ fn model_entity_to_v1_unknown_provider() {
 
 #[test]
 fn model_entity_to_v1_fallback_when_info_null() {
-    let entity = make_model_entity(
+    // Repurposed post-2026-07-24: `info` column is gone. With `display_name`
+    // and `ctx_max_input_tokens` now required scalar columns (with DB
+    // defaults), the read path reconstructs a full `ModelInfoV1` from the
+    // promoted columns — no fallback needed. This test now confirms that
+    // even with default placeholder values, the entity reconstructs without
+    // panic.
+    let mut entity = make_model_entity(
         test_model_id(),
         test_provider_id(),
         test_tenant_id(),
         "openai::gpt-4o",
         None,
     );
+    entity.display_name = String::new();
+    entity.ctx_max_input_tokens = 0;
+    entity.gts_type = None;
+    entity.provider_model_id = None;
 
     let model = model_entity_to_v1(&entity);
 
@@ -433,7 +509,9 @@ fn model_create_denormalized_match_info() {
     assert!(am.cap_function_calling.unwrap());
     assert!(am.cap_streaming.unwrap());
     assert!(am.cap_reasoning_effort.unwrap());
-    assert!(am.info.unwrap().is_some());
+    // Post-2026-07-24: `info` column is gone; the promoted columns carry the
+    // same data instead. Spot-check one of the new JSONB sub-object columns.
+    assert!(am.capabilities_full.unwrap().is_some());
 }
 
 #[test]
@@ -520,21 +598,27 @@ fn model_update_no_changes_preserves_columns() {
 
 #[test]
 fn model_entity_to_v1_handles_malformed_jsonb() {
-    let entity = entity::model::Model {
-        info: Some(json!({"this is": "not valid", "gts_type": 12345})),
-        ..make_model_entity(
-            test_model_id(),
-            test_provider_id(),
-            test_tenant_id(),
-            "openai::gpt-4o",
-            None,
-        )
-    };
+    // Post-2026-07-24: `info` column is gone. Repurposed: when the
+    // polymorphic `provider_settings` JSONB is missing, the read path
+    // returns null on the wire. (The previous "malformed JSONB" test no
+    // longer applies because there is no `info` JSONB column to corrupt.)
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        None,
+    );
+    entity.provider_settings = None;
 
     let model = model_entity_to_v1(&entity);
 
     assert_eq!(model.canonical_id, "openai::gpt-4o");
-    assert_eq!(model.info.display_name, "model-openai::gpt-4o");
+    assert_eq!(model.info.display_name, "GPT-4o");
+    assert!(
+        model.info.provider_settings.is_null(),
+        "missing provider_settings JSONB must surface as null on the wire"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -612,4 +696,596 @@ fn model_entity_to_v1_preserves_provider_settings() {
     let ps = &model.info.provider_settings;
     assert_eq!(ps.get("oagw_alias"), Some(&json!("openai-prod")));
     assert_eq!(ps.get("temperature"), Some(&json!(0.7)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task 3 — read-path round-trip with all 21 promoted columns populated
+// (17 scalar + 5 JSONB sub-object columns)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[allow(clippy::cognitive_complexity)]
+fn model_entity_to_v1_round_trips_all_21_columns() {
+    // Build an entity with every promoted column populated, then read it back
+    // and verify every field lands on the SDK `ModelInfoV1` correctly.
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: Some(json!({"oagw_alias": "openai-prod", "temperature": 0.7})),
+        created_at: now,
+        updated_at: now,
+        // 17 promoted scalar columns
+        display_name: "GPT-4o".to_owned(),
+        description: Some("OpenAI's flagship model".to_owned()),
+        size_bytes: Some(0),
+        region: Some("us-east-1".to_owned()),
+        hosted_by: Some("OpenAI".to_owned()),
+        last_release_at: None,
+        reasoning_level: Some("high".to_owned()),
+        version: Some("1.0".to_owned()),
+        sort_order: Some(10),
+        icon: Some("https://example.com/gpt-4o.png".to_owned()),
+        multiplier_display: Some("1x".to_owned()),
+        perf_response_latency_ms: Some(500),
+        perf_tokens_per_second: Some(100),
+        ctx_max_input_tokens: 128_000,
+        ctx_max_output_tokens: Some(16_384),
+        ctx_output_vector_size: None,
+        allow_parameter_override: true,
+        // 5 JSONB sub-object columns
+        capabilities_full: Some(json!({
+            "vision": { "supported_mime_types": ["image/png", "image/jpeg"] },
+            "reasoning": { "toggle": false, "resume": false, "budget": false },
+            "response_schema": true,
+            "file_input": { "enabled": false, "supported_mime_types": [] },
+            "image_generation": { "enabled": false, "supported_mime_types": [] },
+            "audio_input": { "enabled": false, "supported_mime_types": [] },
+            "audio_output": { "enabled": false, "supported_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+        })),
+        default_parameters: Some(json!({
+            "temperature": 0.7,
+            "top_p": null,
+            "max_output_tokens": null
+        })),
+        additional_info: Some(json!({"region": "us-east", "internal_owner": "team-a"})),
+        disabled_capabilities_full: Some(json!({
+            "vision": { "disabled": false, "disabled_mime_types": [] },
+            "function_calling": false,
+            "streaming": false
+        })),
+        allow_extra_params: Some(json!(["custom_param", "trace_id"])),
+        // Denormalized columns
+        gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
+        vendor: Some("OpenAI".to_owned()),
+        family: Some("gpt-4".to_owned()),
+        managed: false,
+        architecture: Some("transformer".to_owned()),
+        format: Some("api-only".to_owned()),
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: Some("completion".to_owned()),
+        approval_status: "approved".to_owned(),
+        cap_vision: true,
+        cap_function_calling: true,
+        cap_streaming: true,
+        cap_reasoning_effort: true,
+    };
+
+    let model = model_entity_to_v1(&entity);
+
+    // Scalar field round-trip
+    assert_eq!(model.info.display_name, "GPT-4o");
+    assert_eq!(
+        model.info.description.as_deref(),
+        Some("OpenAI's flagship model")
+    );
+    assert_eq!(model.info.region.as_deref(), Some("us-east-1"));
+    assert_eq!(model.info.hosted_by.as_deref(), Some("OpenAI"));
+    assert_eq!(model.info.reasoning_level.as_deref(), Some("high"));
+    assert_eq!(model.info.version.as_deref(), Some("1.0"));
+    assert_eq!(model.info.sort_order, Some(10));
+    assert_eq!(
+        model.info.icon.as_deref(),
+        Some("https://example.com/gpt-4o.png")
+    );
+    assert_eq!(model.info.multiplier_display.as_deref(), Some("1x"));
+    assert_eq!(model.info.performance.response_latency_ms, Some(500));
+    assert_eq!(model.info.performance.tokens_per_second, Some(100));
+    assert_eq!(model.info.context_window.max_input_tokens, 128_000);
+    assert_eq!(model.info.context_window.max_output_tokens, Some(16_384));
+    assert!(model.info.allow_parameter_override);
+
+    // JSONB sub-object round-trip
+    assert!(
+        model.info.capabilities.vision.enabled,
+        "scalar `cap_vision` must override JSONB"
+    );
+    assert_eq!(
+        model.info.capabilities.vision.supported_mime_types,
+        vec!["image/png".to_owned(), "image/jpeg".to_owned()],
+        "vision mime types must come from JSONB"
+    );
+    assert_eq!(model.info.default_parameters.temperature, Some(0.7));
+    assert_eq!(
+        model.info.additional_info.get("internal_owner"),
+        Some(&json!("team-a"))
+    );
+    assert_eq!(
+        model.info.allow_extra_params,
+        vec!["custom_param", "trace_id"]
+    );
+
+    // Provider settings unchanged
+    assert_eq!(
+        model.info.provider_settings.get("oagw_alias"),
+        Some(&json!("openai-prod"))
+    );
+
+    // Wire-level fields
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+    assert_eq!(model.approval_status, ApprovalStatus::Approved);
+}
+
+#[test]
+fn model_entity_to_v1_default_db_values_reconstruct_without_panic() {
+    // Simulate a row that was inserted via raw SQL bypassing the application
+    // layer — only the migration defaults are populated. The read path must
+    // still produce a valid `ModelInfoV1` without panicking (graceful
+    // degradation via `build_minimal_info`).
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        // DB DEFAULT values
+        display_name: String::new(), // DEFAULT ''
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 0, // DEFAULT 0
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false, // DEFAULT 0
+        capabilities_full: None,
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: None, // discriminator missing — trigger fallback
+        vendor: Some("OpenAI".to_owned()),
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: None, // also missing — triggers fallback
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false,
+        cap_function_calling: false,
+        cap_streaming: false,
+        cap_reasoning_effort: false,
+    };
+
+    let model = model_entity_to_v1(&entity);
+
+    // `build_minimal_info` should kick in because `gts_type` is None.
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+    assert_eq!(model.info.display_name, "model-openai::gpt-4o");
+    assert_eq!(model.info.vendor.as_deref(), Some("OpenAI"));
+}
+
+#[test]
+fn model_entity_to_v1_handles_null_jsonb_sub_objects() {
+    // Verify each of the 5 JSONB sub-object columns can be NULL without
+    // breaking the read path (defaulting to empty / null shapes).
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        // ALL JSONB sub-objects NULL
+        capabilities_full: None,
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
+        vendor: Some("OpenAI".to_owned()),
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: Some("completion".to_owned()),
+        approval_status: "approved".to_owned(),
+        cap_vision: true,
+        cap_function_calling: true,
+        cap_streaming: true,
+        cap_reasoning_effort: false,
+    };
+
+    let model = model_entity_to_v1(&entity);
+
+    assert_eq!(model.info.display_name, "GPT-4o");
+    assert_eq!(model.info.context_window.max_input_tokens, 8192);
+    // Defaults are reasonable — additional_info is empty HashMap,
+    // allow_extra_params is empty Vec, capabilities come from scalar bools.
+    assert!(model.info.capabilities.vision.enabled);
+    assert!(model.info.capabilities.function_calling);
+    assert!(model.info.capabilities.streaming);
+    assert!(!model.info.capabilities.reasoning.effort);
+    assert!(model.info.allow_extra_params.is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task 3 — build_capabilities merge logic
+// (scalar bools override JSONB content; JSONB-only fields preserved)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn build_capabilities_scalar_vision_overrides_jsonb() {
+    // JSONB says vision.enabled = true, scalar cap_vision = false → scalar wins.
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        capabilities_full: Some(json!({
+            "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
+        })),
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~".to_owned()),
+        vendor: None,
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false, // scalar overrides JSONB
+        cap_function_calling: false,
+        cap_streaming: false,
+        cap_reasoning_effort: false,
+    };
+    let model = model_entity_to_v1(&entity);
+    assert!(
+        !model.info.capabilities.vision.enabled,
+        "scalar cap_vision must override JSONB vision.enabled"
+    );
+    // But mime types come from JSONB
+    assert_eq!(
+        model.info.capabilities.vision.supported_mime_types,
+        vec!["image/png".to_owned()]
+    );
+}
+
+#[test]
+fn build_capabilities_scalar_function_calling_overrides_jsonb() {
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        capabilities_full: Some(json!({
+            "function_calling": true, // JSONB says true
+        })),
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~".to_owned()),
+        vendor: None,
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false,
+        cap_function_calling: false, // scalar overrides JSONB
+        cap_streaming: false,
+        cap_reasoning_effort: false,
+    };
+    let model = model_entity_to_v1(&entity);
+    assert!(
+        !model.info.capabilities.function_calling,
+        "scalar cap_function_calling must override JSONB"
+    );
+}
+
+#[test]
+fn build_capabilities_scalar_streaming_overrides_jsonb() {
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        capabilities_full: Some(json!({
+            "streaming": true, // JSONB says true
+        })),
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~".to_owned()),
+        vendor: None,
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false,
+        cap_function_calling: false,
+        cap_streaming: false, // scalar overrides JSONB
+        cap_reasoning_effort: false,
+    };
+    let model = model_entity_to_v1(&entity);
+    assert!(
+        !model.info.capabilities.streaming,
+        "scalar cap_streaming must override JSONB"
+    );
+}
+
+#[test]
+fn build_capabilities_scalar_reasoning_effort_overrides_jsonb() {
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        capabilities_full: Some(json!({
+            "reasoning": { "effort": true, "toggle": true, "resume": false, "budget": true }
+        })),
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~".to_owned()),
+        vendor: None,
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false,
+        cap_function_calling: false,
+        cap_streaming: false,
+        cap_reasoning_effort: false, // scalar overrides JSONB (true → false)
+    };
+    let model = model_entity_to_v1(&entity);
+    assert!(
+        !model.info.capabilities.reasoning.effort,
+        "scalar cap_reasoning_effort must override JSONB"
+    );
+    // But toggle/resume/budget come from JSONB (not scalar columns)
+    assert!(
+        model.info.capabilities.reasoning.toggle,
+        "reasoning.toggle must come from JSONB"
+    );
+    assert!(
+        model.info.capabilities.reasoning.budget,
+        "reasoning.budget must come from JSONB"
+    );
+}
+
+#[test]
+fn build_capabilities_preserves_jsonb_only_fields() {
+    // Verify the non-promoted JSONB capability fields survive the merge.
+    let now = Utc::now();
+    let entity = entity::model::Model {
+        id: test_model_id(),
+        provider_id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        canonical_id: "openai::gpt-4o".to_owned(),
+        lifecycle_status: "production".to_owned(),
+        deprecated_at: None,
+        provider_settings: None,
+        created_at: now,
+        updated_at: now,
+        display_name: "GPT-4o".to_owned(),
+        description: None,
+        size_bytes: None,
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: None,
+        sort_order: None,
+        icon: None,
+        multiplier_display: None,
+        perf_response_latency_ms: None,
+        perf_tokens_per_second: None,
+        ctx_max_input_tokens: 8192,
+        ctx_max_output_tokens: None,
+        ctx_output_vector_size: None,
+        allow_parameter_override: false,
+        capabilities_full: Some(json!({
+            "response_schema": true,
+            "file_input": { "enabled": true, "supported_mime_types": ["application/pdf"] },
+            "image_generation": { "enabled": false, "supported_mime_types": [] },
+            "audio_input": { "enabled": true, "supported_mime_types": ["audio/mp3"] },
+            "audio_output": { "enabled": false, "supported_mime_types": [] },
+            "code_interpreter": true,
+            "web_search": { "enabled": true, "allowed_domains": false, "excluded_domains": true }
+        })),
+        default_parameters: None,
+        additional_info: None,
+        disabled_capabilities_full: None,
+        allow_extra_params: None,
+        gts_type: Some("gts.cf.genai.model.info.v1~".to_owned()),
+        vendor: None,
+        family: None,
+        managed: false,
+        architecture: None,
+        format: None,
+        provider_model_id: Some("gpt-4o".to_owned()),
+        supported_api: None,
+        approval_status: "pending".to_owned(),
+        cap_vision: false,
+        cap_function_calling: false,
+        cap_streaming: false,
+        cap_reasoning_effort: false,
+    };
+    let model = model_entity_to_v1(&entity);
+
+    assert!(model.info.capabilities.response_schema);
+    assert!(model.info.capabilities.file_input.enabled);
+    assert_eq!(
+        model.info.capabilities.file_input.supported_mime_types,
+        vec!["application/pdf".to_owned()]
+    );
+    assert!(model.info.capabilities.audio_input.enabled);
+    assert_eq!(
+        model.info.capabilities.audio_input.supported_mime_types,
+        vec!["audio/mp3".to_owned()]
+    );
+    assert!(model.info.capabilities.code_interpreter);
+    assert!(model.info.capabilities.web_search.enabled);
+    assert!(!model.info.capabilities.web_search.allowed_domains);
+    assert!(model.info.capabilities.web_search.excluded_domains);
 }

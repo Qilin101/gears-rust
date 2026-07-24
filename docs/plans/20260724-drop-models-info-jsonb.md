@@ -154,13 +154,13 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/mapper.rs`
 
-- [ ] rewrite `model_entity_to_v1` (currently lines 153-173): instead of `serde_json::from_value(e.info)`, build a JSON value from the new columns + `provider_settings` JSONB + the four new JSONB sub-objects, then `serde_json::from_value::<ModelV1>(value)` (same JSON-value-then-roundtrip pattern as `build_minimal_info`, line 468)
-- [ ] ensure the four scalar booleans override whatever is in `capabilities_full.vision.enabled` etc. — columns are authoritative
-- [ ] add new helper `build_capabilities(e: &entity::model::Model) -> ModelCapabilities` that merges the 4 scalar bools with `e.capabilities_full` JSONB
-- [ ] write tests for `model_entity_to_v1`: round-trip with all 21 columns populated
-- [ ] write tests for `build_capabilities`: scalar bools win over JSONB content (3 cases — 4 bools each), JSONB-only fields preserved
-- [ ] write tests for graceful-degradation when DB defaults are in place (`display_name = ''`, `ctx_max_input_tokens = 0`) — `ModelInfoV1` reconstructs without panic
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 4
+- [x] rewrite `model_entity_to_v1` (currently lines 153-173): instead of `serde_json::from_value(e.info)`, build a JSON value from the new columns + `provider_settings` JSONB + the four new JSONB sub-objects, then `serde_json::from_value::<ModelV1>(value)` (same JSON-value-then-roundtrip pattern as `build_minimal_info`, line 468)
+- [x] ensure the four scalar booleans override whatever is in `capabilities_full.vision.enabled` etc. — columns are authoritative
+- [x] add new helper `build_capabilities(e: &entity::model::Model) -> ModelCapabilities` that merges the 4 scalar bools with `e.capabilities_full` JSONB
+- [x] write tests for `model_entity_to_v1`: round-trip with all 21 columns populated
+- [x] write tests for `build_capabilities`: scalar bools win over JSONB content (3 cases — 4 bools each), JSONB-only fields preserved
+- [x] write tests for graceful-degradation when DB defaults are in place (`display_name = ''`, `ctx_max_input_tokens = 0`) — `ModelInfoV1` reconstructs without panic
+- [x] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 4
 
 ### Task 4: Rewrite write paths in `mapper.rs`
 
