@@ -1289,3 +1289,585 @@ fn build_capabilities_preserves_jsonb_only_fields() {
     assert!(!model.info.capabilities.web_search.allowed_domains);
     assert!(model.info.capabilities.web_search.excluded_domains);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task 4 — write-path tests for `model_create_active_model`
+// Verifies every promoted column (17 scalar + 5 JSONB sub-objects) is set
+// correctly from a fully-populated `ModelInfoV1`.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build a fully-populated `CreateModelRequestV1` for write-path tests.
+fn make_create_request(gts_leaf: &str) -> CreateModelRequestV1 {
+    let info = make_info(gts_leaf, &openai_settings());
+    CreateModelRequestV1 {
+        provider_slug: "openai".into(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: Some(ApprovalStatus::Approved),
+        info,
+    }
+}
+
+#[test]
+fn model_create_active_model_sets_all_17_scalar_columns() {
+    // Build a request with every scalar field populated, then assert that the
+    // corresponding ActiveModel column values match the input.
+    let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    // Patch in distinct values for every promoted scalar column so the
+    // assertions can confirm each one was projected.
+    let v = serde_json::to_value(&info).unwrap();
+    let mut v = v.as_object().cloned().unwrap();
+    v.insert(
+        "description".to_owned(),
+        json!("A fully-populated test model"),
+    );
+    v.insert("size_bytes".to_owned(), json!(1_073_741_824_u64)); // 1 GiB
+    v.insert("region".to_owned(), json!("eu-west-1"));
+    v.insert("hosted_by".to_owned(), json!("Azure"));
+    v.insert("reasoning_level".to_owned(), json!("medium"));
+    v.insert("version".to_owned(), json!("2.5.0"));
+    v.insert("sort_order".to_owned(), json!(42));
+    v.insert("icon".to_owned(), json!("https://example.com/icon.png"));
+    v.insert("multiplier_display".to_owned(), json!("2.5x"));
+    v.insert(
+        "performance".to_owned(),
+        json!({
+            "response_latency_ms": 250,
+            "tokens_per_second": 200,
+        }),
+    );
+    v.insert(
+        "context_window".to_owned(),
+        json!({
+            "max_input_tokens": 200_000_u64,
+            "max_output_tokens": 32_768_u64,
+            "output_vector_size": 1536,
+        }),
+    );
+    v.insert("allow_parameter_override".to_owned(), json!(false));
+    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+
+    let req = CreateModelRequestV1 {
+        provider_slug: "openai".into(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: Some(ApprovalStatus::Approved),
+        info,
+    };
+
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    // 17 promoted scalar columns — assert each one matches the input.
+    assert_eq!(am.display_name.unwrap(), "GPT-4o");
+    assert_eq!(
+        am.description.unwrap(),
+        Some("A fully-populated test model".to_owned())
+    );
+    assert_eq!(am.size_bytes.unwrap(), Some(1_073_741_824_i64));
+    assert_eq!(am.region.unwrap(), Some("eu-west-1".to_owned()));
+    assert_eq!(am.hosted_by.unwrap(), Some("Azure".to_owned()));
+    assert!(am.last_release_at.unwrap().is_none());
+    assert_eq!(am.reasoning_level.unwrap(), Some("medium".to_owned()));
+    assert_eq!(am.version.unwrap(), Some("2.5.0".to_owned()));
+    assert_eq!(am.sort_order.unwrap(), Some(42));
+    assert_eq!(
+        am.icon.unwrap(),
+        Some("https://example.com/icon.png".to_owned())
+    );
+    assert_eq!(am.multiplier_display.unwrap(), Some("2.5x".to_owned()));
+    assert_eq!(am.perf_response_latency_ms.unwrap(), Some(250));
+    assert_eq!(am.perf_tokens_per_second.unwrap(), Some(200));
+    assert_eq!(am.ctx_max_input_tokens.unwrap(), 200_000);
+    assert_eq!(am.ctx_max_output_tokens.unwrap(), Some(32_768));
+    assert_eq!(am.ctx_output_vector_size.unwrap(), Some(1536));
+    assert!(!am.allow_parameter_override.unwrap());
+}
+
+#[test]
+fn model_create_active_model_extracts_provider_settings() {
+    let settings = openai_settings();
+    let req = make_create_request("cf.genai._.openai.v1~");
+
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    let ps = am
+        .provider_settings
+        .unwrap()
+        .expect("provider_settings set");
+    assert_eq!(ps.get("oagw_alias"), Some(&json!("openai-prod")));
+    assert_eq!(ps.get("temperature"), Some(&json!(0.7)));
+    // Verify it matches the input settings shape.
+    assert_eq!(ps.get("endpoint_kind"), settings.get("endpoint_kind"));
+}
+
+#[test]
+fn model_create_active_model_handles_null_provider_settings() {
+    // When `provider_settings` is `null` in the input, the column is stored as None.
+    let info = make_info("cf.genai._.openai.v1~", &serde_json::Value::Null);
+    let req = CreateModelRequestV1 {
+        provider_slug: "openai".into(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: None,
+        info,
+    };
+
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Pending,
+    );
+
+    assert!(am.provider_settings.unwrap().is_none());
+}
+
+#[test]
+fn model_create_active_model_capabilities_strips_4_promoted_booleans() {
+    // The 4 promoted booleans (vision.enabled, reasoning.effort, function_calling,
+    // streaming) must be extracted from `capabilities_full` and stored as scalar
+    // columns. The remaining capability content rides in the JSONB sub-object.
+    let req = make_create_request("cf.genai._.openai.v1~");
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    // Scalar columns get the promoted booleans.
+    assert!(am.cap_vision.unwrap());
+    assert!(am.cap_function_calling.unwrap());
+    assert!(am.cap_streaming.unwrap());
+    assert!(am.cap_reasoning_effort.unwrap());
+
+    // JSONB `capabilities_full` must NOT contain the 4 promoted booleans
+    // (they are authoritative in the columns).
+    let cap_full = am
+        .capabilities_full
+        .unwrap()
+        .expect("capabilities_full set");
+    let cap_obj = cap_full
+        .as_object()
+        .expect("capabilities_full is an object");
+
+    // `function_calling` and `streaming` are removed at top level.
+    assert!(
+        !cap_obj.contains_key("function_calling"),
+        "function_calling must be stripped from capabilities_full JSONB"
+    );
+    assert!(
+        !cap_obj.contains_key("streaming"),
+        "streaming must be stripped from capabilities_full JSONB"
+    );
+
+    // `vision.enabled` and `reasoning.effort` are removed from their nested objects.
+    let vision = cap_obj
+        .get("vision")
+        .and_then(|v| v.as_object())
+        .expect("vision present");
+    assert!(
+        !vision.contains_key("enabled"),
+        "vision.enabled must be stripped from capabilities_full JSONB"
+    );
+    // vision.supported_mime_types preserved (it's not promoted).
+    assert!(vision.contains_key("supported_mime_types"));
+
+    let reasoning = cap_obj
+        .get("reasoning")
+        .and_then(|v| v.as_object())
+        .expect("reasoning present");
+    assert!(
+        !reasoning.contains_key("effort"),
+        "reasoning.effort must be stripped from capabilities_full JSONB"
+    );
+    // reasoning.toggle/resume/budget preserved.
+    assert!(reasoning.contains_key("toggle"));
+    assert!(reasoning.contains_key("resume"));
+    assert!(reasoning.contains_key("budget"));
+
+    // Non-promoted capability fields are preserved in JSONB.
+    assert!(cap_obj.contains_key("response_schema"));
+    assert!(cap_obj.contains_key("file_input"));
+    assert!(cap_obj.contains_key("image_generation"));
+    assert!(cap_obj.contains_key("audio_input"));
+    assert!(cap_obj.contains_key("audio_output"));
+    assert!(cap_obj.contains_key("code_interpreter"));
+    assert!(cap_obj.contains_key("web_search"));
+}
+
+#[test]
+fn model_create_active_model_stores_disabled_capabilities_fully() {
+    // `disabled_capabilities_full` is NOT promoted — the entire DisabledCapabilities
+    // structure rides in this single JSONB column.
+    let req = make_create_request("cf.genai._.openai.v1~");
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    let disabled_full = am
+        .disabled_capabilities_full
+        .unwrap()
+        .expect("disabled_capabilities_full set");
+    let obj = disabled_full.as_object().expect("object");
+    assert!(obj.contains_key("vision"));
+    assert!(obj.contains_key("reasoning"));
+    assert!(obj.contains_key("function_calling"));
+    assert!(obj.contains_key("response_schema"));
+    assert!(obj.contains_key("streaming"));
+    assert!(obj.contains_key("file_input"));
+    assert!(obj.contains_key("audio_input"));
+    assert!(obj.contains_key("audio_output"));
+    assert!(obj.contains_key("code_interpreter"));
+    assert!(obj.contains_key("web_search"));
+}
+
+#[test]
+fn model_create_active_model_additional_info_round_trip() {
+    // `additional_info` is a HashMap<String, Value> that rides in its own JSONB
+    // sub-object column. Verify it survives the write path intact.
+    let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let v = serde_json::to_value(&info).unwrap();
+    let mut v = v.as_object().cloned().unwrap();
+    v.insert(
+        "additional_info".to_owned(),
+        json!({
+            "internal_owner": "team-a",
+            "billing_code": "AI-12345",
+            "experiment_flag": true,
+            "priority": 7,
+        }),
+    );
+    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+
+    let req = CreateModelRequestV1 {
+        provider_slug: "openai".into(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: None,
+        info,
+    };
+
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Pending,
+    );
+
+    let ai = am.additional_info.unwrap().expect("additional_info set");
+    assert_eq!(ai.get("internal_owner"), Some(&json!("team-a")));
+    assert_eq!(ai.get("billing_code"), Some(&json!("AI-12345")));
+    assert_eq!(ai.get("experiment_flag"), Some(&json!(true)));
+    assert_eq!(ai.get("priority"), Some(&json!(7)));
+}
+
+#[test]
+fn model_create_active_model_default_parameters_round_trip() {
+    // DefaultInferenceParametersV1 fields use `skip_serializing_if =
+    // Option::is_none`, so `serde_json::to_value(...)` only emits the populated
+    // fields. Verify that the JSONB sub-object column carries those populated
+    // values intact.
+    let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let v = serde_json::to_value(&info).unwrap();
+    let mut v = v.as_object().cloned().unwrap();
+    v.insert(
+        "default_parameters".to_owned(),
+        json!({
+            "temperature": 0.5,
+            "top_p": 0.9,
+            "max_output_tokens": 2048,
+        }),
+    );
+    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+
+    let req = CreateModelRequestV1 {
+        provider_slug: "openai".into(),
+        lifecycle_status: LifecycleStatus::Production,
+        approval_status: None,
+        info,
+    };
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Pending,
+    );
+
+    let dp = am
+        .default_parameters
+        .unwrap()
+        .expect("default_parameters set");
+    let obj = dp.as_object().expect("object");
+    // Populated fields survive the round-trip.
+    assert_eq!(obj.get("temperature"), Some(&json!(0.5)));
+    assert_eq!(obj.get("top_p"), Some(&json!(0.9)));
+    assert_eq!(obj.get("max_output_tokens"), Some(&json!(2048)));
+}
+
+#[test]
+fn model_create_active_model_allow_extra_params_round_trip() {
+    let req = make_create_request("cf.genai._.openai.v1~");
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    let aep = am
+        .allow_extra_params
+        .unwrap()
+        .expect("allow_extra_params set");
+    let arr = aep.as_array().expect("array");
+    assert_eq!(arr, &vec![json!("custom_param")]);
+}
+
+#[test]
+fn model_create_active_model_sets_canonical_id_format() {
+    let req = make_create_request("cf.genai._.openai.v1~");
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    // canonical_id = {provider_slug}::{provider_model_id}
+    assert_eq!(am.canonical_id.unwrap(), "openai::gpt-4o");
+}
+
+#[test]
+fn model_create_active_model_sets_supported_api_csv() {
+    // `supported_api` is serialized as a comma-separated string for the
+    // denormalized column. Verify it is sorted (deterministic) and lowercase.
+    let req = make_create_request("cf.genai._.openai.v1~");
+    let am = model_create_active_model(
+        test_tenant_id(),
+        test_provider_id(),
+        &req,
+        ApprovalStatus::Approved,
+    );
+
+    let sa = am.supported_api.unwrap().expect("supported_api set");
+    assert_eq!(sa, "completion");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task 4 — write-path tests for `model_update_active_model`
+// Verifies PATCH semantics: a single field change re-projects all 21 columns.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[allow(clippy::cognitive_complexity)]
+fn model_update_patches_single_field_reprojects_all_columns() {
+    // Start from a fully-populated entity, PATCH a single scalar field
+    // (description), and confirm all 21 promoted columns are re-projected
+    // (preserved where unchanged, updated where patched).
+    let info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let info_json = serde_json::to_value(&info).expect("serialize");
+
+    let entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        Some(info_json),
+    );
+
+    let req = UpdateModelRequestV1 {
+        description: Some(Some("Updated description".to_owned())),
+        ..UpdateModelRequestV1::default()
+    };
+
+    let am = model_update_active_model(&entity, &req);
+
+    // Patched field — description was None, now Some("Updated description").
+    assert_eq!(
+        am.description.unwrap(),
+        Some("Updated description".to_owned())
+    );
+
+    // All other 16 promoted scalar columns preserved (re-projected from
+    // the reconstructed ModelInfoV1).
+    assert_eq!(am.display_name.unwrap(), "GPT-4o");
+    assert!(am.size_bytes.unwrap().is_none());
+    assert_eq!(am.region.unwrap(), Some("us-east-1".to_owned()));
+    assert_eq!(am.hosted_by.unwrap(), Some("OpenAI".to_owned()));
+    assert_eq!(am.reasoning_level.unwrap(), Some("high".to_owned()));
+    assert_eq!(am.version.unwrap(), Some("1.0".to_owned()));
+    assert_eq!(am.sort_order.unwrap(), Some(10));
+    assert!(am.icon.unwrap().is_none());
+    assert_eq!(am.multiplier_display.unwrap(), Some("1x".to_owned()));
+    assert_eq!(am.perf_response_latency_ms.unwrap(), Some(500));
+    assert_eq!(am.perf_tokens_per_second.unwrap(), Some(100));
+    assert_eq!(am.ctx_max_input_tokens.unwrap(), 128_000);
+    assert_eq!(am.ctx_max_output_tokens.unwrap(), Some(16_384));
+    assert!(am.ctx_output_vector_size.unwrap().is_none());
+    assert!(am.allow_parameter_override.unwrap());
+
+    // 5 JSONB sub-object columns preserved.
+    assert!(am.capabilities_full.unwrap().is_some());
+    assert!(am.default_parameters.unwrap().is_some());
+    assert!(am.additional_info.unwrap().is_some());
+    assert!(am.disabled_capabilities_full.unwrap().is_some());
+    assert!(am.allow_extra_params.unwrap().is_some());
+
+    // 4 OData scalar capability booleans re-projected.
+    assert!(am.cap_vision.unwrap());
+    assert!(am.cap_function_calling.unwrap());
+    assert!(am.cap_streaming.unwrap());
+    assert!(am.cap_reasoning_effort.unwrap());
+}
+
+#[test]
+fn model_update_patches_capability_reprojects_columns_and_jsonb() {
+    // PATCH on `capabilities` (e.g. vision.enabled flips false→true) must
+    // re-project BOTH the scalar capability columns AND `capabilities_full`
+    // JSONB (which must still strip the 4 promoted booleans).
+    let info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let info_json = serde_json::to_value(&info).expect("serialize");
+
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        Some(info_json),
+    );
+    // Force entity to start with vision=false so the patch has visible effect.
+    entity.cap_vision = false;
+    entity.cap_function_calling = false;
+    entity.cap_streaming = false;
+    entity.cap_reasoning_effort = false;
+
+    // Build a PATCH that flips all 4 capability bools.
+    let req = UpdateModelRequestV1 {
+        capabilities: Some(
+            serde_json::from_value(json!({
+                "vision": { "enabled": true, "supported_mime_types": ["image/jpeg"] },
+                "reasoning": { "effort": true, "toggle": false, "resume": false, "budget": false },
+                "function_calling": true,
+                "response_schema": true,
+                "streaming": true,
+                "file_input": { "enabled": false, "supported_mime_types": [] },
+                "image_generation": { "enabled": false, "supported_mime_types": [] },
+                "audio_input": { "enabled": false, "supported_mime_types": [] },
+                "audio_output": { "enabled": false, "supported_mime_types": [] },
+                "code_interpreter": false,
+                "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+            }))
+            .unwrap(),
+        ),
+        ..UpdateModelRequestV1::default()
+    };
+
+    let am = model_update_active_model(&entity, &req);
+
+    // Scalar booleans flipped.
+    assert!(am.cap_vision.unwrap());
+    assert!(am.cap_function_calling.unwrap());
+    assert!(am.cap_streaming.unwrap());
+    assert!(am.cap_reasoning_effort.unwrap());
+
+    // JSONB `capabilities_full` re-projected with 4 promoted booleans stripped.
+    let cap_full = am
+        .capabilities_full
+        .unwrap()
+        .expect("capabilities_full set");
+    let cap_obj = cap_full.as_object().expect("object");
+    assert!(!cap_obj.contains_key("function_calling"));
+    assert!(!cap_obj.contains_key("streaming"));
+    let vision = cap_obj
+        .get("vision")
+        .and_then(|v| v.as_object())
+        .expect("vision present");
+    assert!(!vision.contains_key("enabled"));
+    let reasoning = cap_obj
+        .get("reasoning")
+        .and_then(|v| v.as_object())
+        .expect("reasoning present");
+    assert!(!reasoning.contains_key("effort"));
+}
+
+#[test]
+fn model_update_patches_provider_settings_reprojects_column() {
+    let info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let info_json = serde_json::to_value(&info).expect("serialize");
+
+    let entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        Some(info_json),
+    );
+
+    // PATCH provider_settings to a new value.
+    let new_settings = json!({
+        "oagw_alias": "openai-staging",
+        "endpoint_kind": "responses",
+    });
+    let req = UpdateModelRequestV1 {
+        provider_settings: Some(serde_json::from_value(new_settings).unwrap()),
+        ..UpdateModelRequestV1::default()
+    };
+
+    let am = model_update_active_model(&entity, &req);
+
+    let ps = am
+        .provider_settings
+        .unwrap()
+        .expect("provider_settings set");
+    assert_eq!(ps.get("oagw_alias"), Some(&json!("openai-staging")));
+    assert_eq!(ps.get("endpoint_kind"), Some(&json!("responses")));
+}
+
+#[test]
+fn model_update_no_patches_leaves_columns_unchanged() {
+    // When the request has no patches AND no lifecycle change, no columns
+    // should be touched (the ActiveModel is built from the existing entity
+    // and only `updated_at` is NOT bumped).
+    let info = make_info("cf.genai._.openai.v1~", &openai_settings());
+    let info_json = serde_json::to_value(&info).expect("serialize");
+
+    let entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+        Some(info_json),
+    );
+
+    let req = UpdateModelRequestV1::default();
+    let am = model_update_active_model(&entity, &req);
+
+    // All scalar columns match the input.
+    assert_eq!(am.display_name.unwrap(), "GPT-4o");
+    assert_eq!(
+        am.description.unwrap(),
+        Some("OpenAI's flagship model".to_owned())
+    );
+    assert_eq!(am.region.unwrap(), Some("us-east-1".to_owned()));
+    assert_eq!(am.ctx_max_input_tokens.unwrap(), 128_000);
+    assert!(am.allow_parameter_override.unwrap());
+
+    // Denormalized columns preserved.
+    assert_eq!(am.vendor.unwrap(), Some("OpenAI".to_owned()));
+    assert_eq!(am.family.unwrap(), Some("gpt-4".to_owned()));
+    assert!(!am.managed.unwrap());
+    assert_eq!(am.provider_model_id.unwrap(), Some("gpt-4o".to_owned()));
+    assert!(am.cap_vision.unwrap());
+    assert!(am.cap_function_calling.unwrap());
+    assert!(am.cap_streaming.unwrap());
+    assert!(am.cap_reasoning_effort.unwrap());
+}

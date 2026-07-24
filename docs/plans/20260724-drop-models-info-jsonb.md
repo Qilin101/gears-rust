@@ -167,16 +167,16 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/mapper.rs`
 
-- [ ] rewrite `model_create_active_model` (lines 181-230): drop `info: Set(...)`; add `Set(...)` for every new column from `req.info.*`
-- [ ] in `model_create_active_model`, add JSONB `Set(...)` for `capabilities_full` (built from `req.info.capabilities` minus the 4 promoted booleans), `default_parameters`, `additional_info`, `disabled_capabilities_full`
-- [ ] in `model_create_active_model`, extract `provider_settings` (unchanged behavior)
-- [ ] rewrite `model_update_active_model` (lines 246-314): identical structure — every PATCH that touches an info field re-projects all new columns
-- [ ] verify `apply_info_patches` (lines 320-376) remains **unchanged** — it operates on in-memory `ModelInfoV1`, independent of storage
-- [ ] write tests for `model_create_active_model`: every new column is set correctly from a fully-populated `ModelInfoV1` (assert column values match input)
-- [ ] write tests for `model_create_active_model`: capability sub-object built correctly (4 booleans extracted, rest preserved in JSONB)
-- [ ] write tests for `model_create_active_model`: `additional_info` map round-trip
-- [ ] write tests for `model_update_active_model`: PATCH on a single field re-projects all 21 columns correctly
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 5
+- [x] rewrite `model_create_active_model` (lines 181-230): drop `info: Set(...)`; add `Set(...)` for every new column from `req.info.*`
+- [x] in `model_create_active_model`, add JSONB `Set(...)` for `capabilities_full` (built from `req.info.capabilities` minus the 4 promoted booleans), `default_parameters`, `additional_info`, `disabled_capabilities_full`
+- [x] in `model_create_active_model`, extract `provider_settings` (unchanged behavior)
+- [x] rewrite `model_update_active_model` (lines 246-314): identical structure — every PATCH that touches an info field re-projects all new columns
+- [x] verify `apply_info_patches` (lines 320-376) remains **unchanged** — it operates on in-memory `ModelInfoV1`, independent of storage
+- [x] write tests for `model_create_active_model`: every new column is set correctly from a fully-populated `ModelInfoV1` (assert column values match input)
+- [x] write tests for `model_create_active_model`: capability sub-object built correctly (4 booleans extracted, rest preserved in JSONB)
+- [x] write tests for `model_create_active_model`: `additional_info` map round-trip
+- [x] write tests for `model_update_active_model`: PATCH on a single field re-projects all 21 columns correctly
+- [x] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 5
 
 ### Task 5: Simplify and test `build_minimal_info` fallback
 

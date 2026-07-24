@@ -624,19 +624,12 @@ pub fn model_update_active_model(
     // patches, and re-project every column back. We use the same
     // `model_entity_to_v1` round-trip used by the read path so the patch
     // logic is symmetric.
-    let mut info: Option<ModelInfoV1> = None;
     let read_back = model_entity_to_v1(existing);
     let mut fresh = read_back.info;
     let info_changed = apply_info_patches(&mut fresh, req);
-    if info_changed {
-        info = Some(fresh.clone());
-    }
-    let _ = info; // suppress unused warning — kept for symmetry with the read path
 
     if info_changed {
-        let info_inner = info
-            .as_ref()
-            .expect("info is Some after apply_info_patches");
+        let info_inner = &fresh;
 
         // 17 promoted scalar columns
         active.display_name = Set(info_inner.display_name.clone());
@@ -688,9 +681,10 @@ pub fn model_update_active_model(
         active.allow_parameter_override = Set(info_inner.allow_parameter_override);
 
         // 5 JSONB sub-object columns
-        #[allow(clippy::expect_used)]
-        let cap_full = serde_json::to_value(&info_inner.capabilities)
-            .expect("ModelCapabilities re-serialization cannot fail");
+        // `capabilities_full` strips the 4 promoted booleans so the columns
+        // remain authoritative (consistent with `build_capabilities_full_for_create`
+        // used on the create path).
+        let cap_full = build_capabilities_full_for_create(&info_inner.capabilities);
         #[allow(clippy::expect_used)]
         let disabled_full = serde_json::to_value(&info_inner.disabled_capabilities)
             .expect("DisabledCapabilities re-serialization cannot fail");
