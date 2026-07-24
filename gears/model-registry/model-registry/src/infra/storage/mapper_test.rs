@@ -633,10 +633,7 @@ fn build_minimal_info_projects_all_promoted_scalar_columns() {
 
     let model = model_entity_to_v1(&entity);
 
-    assert_eq!(
-        model.info.description.as_deref(),
-        Some("Some description")
-    );
+    assert_eq!(model.info.description.as_deref(), Some("Some description"));
     assert_eq!(model.info.region.as_deref(), Some("eu-west-1"));
     assert_eq!(model.info.hosted_by.as_deref(), Some("Azure"));
     assert_eq!(model.info.reasoning_level.as_deref(), Some("medium"));

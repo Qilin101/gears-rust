@@ -87,9 +87,7 @@ impl ModelRegistryError {
 
     #[must_use]
     pub fn provider_not_found_by_slug(slug: impl Into<String>) -> Self {
-        Self::ProviderNotFoundBySlug {
-            slug: slug.into(),
-        }
+        Self::ProviderNotFoundBySlug { slug: slug.into() }
     }
 
     #[must_use]

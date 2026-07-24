@@ -32,11 +32,15 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => "VARCHAR(64)",
         };
 
-        // INTEGER type — used for all INT columns. `size_bytes` fits in INTEGER
-        // (2^31 - 1 bytes is the upper bound; larger sizes overflow but the plan
-        // calls for INTEGER on SQLite, BIGINT-equivalent on PG, which we map to
-        // INTEGER here for portability).
-        let int = "INTEGER";
+        // INT type — used for all integer columns. SQLite INTEGER is 8-byte and
+        // accepts i64 cleanly. PostgreSQL `INTEGER` is a 32-bit signed type and
+        // overflows for any `size_bytes` ≥ 2 GiB (which is the smallest modern LLM
+        // weight file), so we use BIGINT there. MySQL `INTEGER` maps to INT (32-bit)
+        // by default — we use BIGINT there too for the same reason.
+        let int = match backend {
+            sea_orm::DatabaseBackend::Sqlite => "INTEGER",
+            sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => "BIGINT",
+        };
 
         let sql = format!(
             r"

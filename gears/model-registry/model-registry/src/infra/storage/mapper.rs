@@ -102,9 +102,7 @@ pub fn provider_create_active_model(
         managed: Set(req.managed()),
         metadata: Set(req.metadata().cloned()),
         discovery_enabled: Set(req.discovery_enabled()),
-        discovery_interval_seconds: Set(req
-            .discovery_interval_seconds()
-            .map(|v| i32::try_from(v).unwrap_or(i32::MAX))),
+        discovery_interval_seconds: Set(req.discovery_interval_seconds().map(i64::from)),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -137,8 +135,7 @@ pub fn provider_update_active_model(
         active.discovery_enabled = Set(discovery_enabled);
     }
     if let Some(interval) = req.discovery_interval_seconds {
-        active.discovery_interval_seconds =
-            Set(interval.map(|v| i32::try_from(v).unwrap_or(i32::MAX)));
+        active.discovery_interval_seconds = Set(interval.map(i64::from));
     }
 
     // Only bump `updated_at` when at least one field was actually set.
@@ -507,44 +504,14 @@ pub fn model_create_active_model(
         last_release_at: Set(req.info.last_release_at),
         reasoning_level: Set(req.info.reasoning_level.clone()),
         version: Set(req.info.version.clone()),
-        sort_order: Set(req.info.sort_order),
+        sort_order: Set(req.info.sort_order.map(i64::from)),
         icon: Set(req.info.icon.clone()),
         multiplier_display: Set(req.info.multiplier_display.clone()),
-        perf_response_latency_ms: Set(req
-            .info
-            .performance
-            .response_latency_ms
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten()),
-        perf_tokens_per_second: Set(req
-            .info
-            .performance
-            .tokens_per_second
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten()),
-        ctx_max_input_tokens: Set(
-            i32::try_from(req.info.context_window.max_input_tokens).unwrap_or(i32::MAX)
-        ),
-        ctx_max_output_tokens: Set(req
-            .info
-            .context_window
-            .max_output_tokens
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten()),
-        ctx_output_vector_size: Set(req
-            .info
-            .context_window
-            .output_vector_size
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten()),
+        perf_response_latency_ms: Set(req.info.performance.response_latency_ms.map(i64::from)),
+        perf_tokens_per_second: Set(req.info.performance.tokens_per_second.map(i64::from)),
+        ctx_max_input_tokens: Set(i64::from(req.info.context_window.max_input_tokens)),
+        ctx_max_output_tokens: Set(req.info.context_window.max_output_tokens.map(i64::from)),
+        ctx_output_vector_size: Set(req.info.context_window.output_vector_size.map(i64::from)),
         allow_parameter_override: Set(req.info.allow_parameter_override),
         // 5 JSONB sub-object columns
         capabilities_full: Set(Some(cap_full)),
@@ -650,39 +617,18 @@ pub fn model_update_active_model(
         active.last_release_at = Set(info_inner.last_release_at);
         active.reasoning_level = Set(info_inner.reasoning_level.clone());
         active.version = Set(info_inner.version.clone());
-        active.sort_order = Set(info_inner.sort_order);
+        active.sort_order = Set(info_inner.sort_order.map(i64::from));
         active.icon = Set(info_inner.icon.clone());
         active.multiplier_display = Set(info_inner.multiplier_display.clone());
-        active.perf_response_latency_ms = Set(info_inner
-            .performance
-            .response_latency_ms
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten());
-        active.perf_tokens_per_second = Set(info_inner
-            .performance
-            .tokens_per_second
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten());
-        active.ctx_max_input_tokens =
-            Set(i32::try_from(info_inner.context_window.max_input_tokens).unwrap_or(i32::MAX));
-        active.ctx_max_output_tokens = Set(info_inner
-            .context_window
-            .max_output_tokens
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten());
-        active.ctx_output_vector_size = Set(info_inner
-            .context_window
-            .output_vector_size
-            .map(i32::try_from)
-            .transpose()
-            .ok()
-            .flatten());
+        active.perf_response_latency_ms =
+            Set(info_inner.performance.response_latency_ms.map(i64::from));
+        active.perf_tokens_per_second =
+            Set(info_inner.performance.tokens_per_second.map(i64::from));
+        active.ctx_max_input_tokens = Set(i64::from(info_inner.context_window.max_input_tokens));
+        active.ctx_max_output_tokens =
+            Set(info_inner.context_window.max_output_tokens.map(i64::from));
+        active.ctx_output_vector_size =
+            Set(info_inner.context_window.output_vector_size.map(i64::from));
         active.allow_parameter_override = Set(info_inner.allow_parameter_override);
 
         // 5 JSONB sub-object columns

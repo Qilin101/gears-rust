@@ -1056,7 +1056,149 @@ async fn create_and_read_round_trip_full_model_info() {
 
     // ── Allow-override bool round-trips ────────────────────────────────────
     assert_eq!(
-        fetched.info.allow_parameter_override, info_in.allow_parameter_override,
+        fetched.info.allow_parameter_override,
+        info_in.allow_parameter_override,
+    );
+}
+
+/// Verify that non-empty `additional_info` and `allow_extra_params` (the
+/// forward-compat JSONB sub-objects) survive the full `SeaORM` `create` -> `DB` -> `read`
+/// pipeline. The default fixture uses empty values; this test seeds non-empty
+/// payloads to guard against regressions where empty-default handling would
+/// accidentally coerce non-empty values to empty.
+#[tokio::test]
+async fn additional_info_and_allow_extra_params_round_trip_non_empty() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    let mut req = make_create_model_req("openai", "gpt-4o");
+    req.info.additional_info = serde_json::from_value(serde_json::json!({
+        "team": "alpha",
+        "trace_id": true,
+        "experiment_id": 42,
+    }))
+    .expect("additional_info from JSON");
+    req.info.allow_extra_params = vec!["trace_id".to_owned(), "session_id".to_owned()];
+
+    service
+        .create_model(&ctx, &req)
+        .await
+        .expect("create model with non-empty sub-objects");
+
+    let fetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model");
+
+    // `additional_info` JSONB sub-object round-trip preserves all 3 keys
+    // (string, bool, integer values).
+    assert_eq!(
+        fetched.info.additional_info.get("team"),
+        Some(&serde_json::json!("alpha")),
+        "additional_info[string] round-trips"
+    );
+    assert_eq!(
+        fetched.info.additional_info.get("trace_id"),
+        Some(&serde_json::json!(true)),
+        "additional_info[bool] round-trips"
+    );
+    assert_eq!(
+        fetched.info.additional_info.get("experiment_id"),
+        Some(&serde_json::json!(42)),
+        "additional_info[int] round-trips"
+    );
+    assert_eq!(
+        fetched.info.additional_info.len(),
+        3,
+        "additional_info key count must be preserved"
+    );
+
+    // `allow_extra_params` JSONB sub-object round-trip preserves the order.
+    assert_eq!(
+        fetched.info.allow_extra_params,
+        vec!["trace_id".to_owned(), "session_id".to_owned()],
+        "allow_extra_params list must round-trip with original order"
+    );
+}
+
+/// Regression test: `size_bytes` was originally an `INTEGER` column on
+/// `PostgreSQL` (max 2,147,483,647 ≈ 2 GiB). Any real model — even a 7B in fp16
+/// (≈14 GB) — overflows that. The column is now `BIGINT`, so a realistic
+/// model size must round-trip without truncation or overflow.
+#[tokio::test]
+async fn size_bytes_over_2gib_round_trips() {
+    // 70B-parameter model in fp16 ≈ 140 GB.
+    const LARGE_MODEL_BYTES: u64 = 140 * 1024 * 1024 * 1024;
+
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    let mut req = make_create_model_req("openai", "gpt-4o");
+    req.info.size_bytes = Some(LARGE_MODEL_BYTES);
+
+    service
+        .create_model(&ctx, &req)
+        .await
+        .expect("create model with 140 GB size_bytes");
+
+    let fetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model");
+
+    assert_eq!(
+        fetched.info.size_bytes,
+        Some(LARGE_MODEL_BYTES),
+        "size_bytes > i32::MAX must round-trip exactly through BIGINT column"
+    );
+}
+
+/// Regression test: `context_window.max_input_tokens` was originally cast via
+/// `i32::try_from(...).unwrap_or(i32::MAX)`, silently clamping any value
+/// ≥ 2,147,483,648 to `i32::MAX`. The mapper now uses `i64::try_from(...).ok()`
+/// so values up to `i64::MAX` survive the round-trip.
+#[tokio::test]
+async fn context_window_max_input_tokens_over_2gib_round_trips() {
+    // 4B tokens > i32::MAX.
+    const LARGE_CTX: u32 = 4_000_000_000;
+
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+
+    let mut req = make_create_model_req("openai", "gpt-4o");
+    req.info.context_window.max_input_tokens = LARGE_CTX;
+
+    service
+        .create_model(&ctx, &req)
+        .await
+        .expect("create model with 4B-token context window");
+
+    let fetched = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get model");
+
+    assert_eq!(
+        fetched.info.context_window.max_input_tokens, LARGE_CTX,
+        "max_input_tokens > i32::MAX must round-trip exactly through i64 column"
     );
 }
 
@@ -1101,10 +1243,7 @@ async fn patch_reprojects_all_promoted_columns() {
 
     assert_eq!(patched.info.display_name, "GPT-4o (Updated)");
     assert_eq!(patched.info.context_window.max_input_tokens, 200_000);
-    assert_eq!(
-        patched.info.context_window.max_output_tokens,
-        Some(32_768),
-    );
+    assert_eq!(patched.info.context_window.max_output_tokens, Some(32_768),);
 
     // Read back from DB (bypass cache) to confirm the columns were written.
     let refetched = service
@@ -1119,10 +1258,7 @@ async fn patch_reprojects_all_promoted_columns() {
     );
 
     // Unrelated fields preserved through the re-projection.
-    assert_eq!(
-        refetched.info.vendor.as_deref(),
-        Some("TestVendor"),
-    );
+    assert_eq!(refetched.info.vendor.as_deref(), Some("TestVendor"),);
     assert_eq!(refetched.info.family.as_deref(), Some("test-family"));
     assert!(
         refetched.info.capabilities.function_calling,
@@ -1159,12 +1295,9 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
     // PATCH: flip function_calling off (preserving the rest of the
     // capabilities). `ModelCapabilities` is `#[non_exhaustive]` so we
     // round-trip through JSON.
-    let original_caps = serde_json::to_value(
-        &make_create_model_req("openai", "gpt-4o")
-            .info
-            .capabilities,
-    )
-    .expect("serialize caps");
+    let original_caps =
+        serde_json::to_value(&make_create_model_req("openai", "gpt-4o").info.capabilities)
+            .expect("serialize caps");
     let mut caps_value = original_caps;
     if let Some(obj) = caps_value.as_object_mut() {
         obj.insert("function_calling".into(), serde_json::Value::Bool(false));
@@ -1195,6 +1328,14 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
         patched.info.capabilities.vision.enabled,
         "vision.enabled must be preserved when only function_calling is patched"
     );
+    // JSONB-only sub-fields inside `capabilities_full` (e.g. mime types)
+    // must survive the PATCH round-trip — this is what `capabilities_full`
+    // stores and the read path must re-hydrate intact.
+    assert_eq!(
+        patched.info.capabilities.vision.supported_mime_types,
+        vec!["image/jpeg".to_owned()],
+        "vision.supported_mime_types must survive PATCH round-trip via capabilities_full"
+    );
 
     // Re-read confirms the change is durable.
     let refetched = service
@@ -1208,5 +1349,10 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
     assert!(
         refetched.info.capabilities.vision.enabled,
         "vision.enabled must remain on after re-read (JSONB content preserved)"
+    );
+    assert_eq!(
+        refetched.info.capabilities.vision.supported_mime_types,
+        vec!["image/jpeg".to_owned()],
+        "vision.supported_mime_types must survive re-read via capabilities_full"
     );
 }

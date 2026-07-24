@@ -28,7 +28,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<serde_json::Value>,
     pub discovery_enabled: bool,
-    pub discovery_interval_seconds: Option<i32>,
+    pub discovery_interval_seconds: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

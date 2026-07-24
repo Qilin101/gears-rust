@@ -464,8 +464,9 @@ impl ModelRepository for SeaOrmRepository {
         let model_id = existing.id;
         let mut am: entity::model::ActiveModel = existing.into();
         am.lifecycle_status = Set("deprecated".to_owned());
-        am.deprecated_at = Set(Some(chrono::Utc::now()));
-        am.updated_at = Set(chrono::Utc::now());
+        let now = chrono::Utc::now();
+        am.deprecated_at = Set(Some(now));
+        am.updated_at = Set(now);
 
         let _updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
             .await

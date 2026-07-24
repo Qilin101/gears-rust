@@ -68,21 +68,21 @@ pub struct Model {
     /// `info.version`.
     pub version: Option<String>,
     /// `info.sort_order` (display order in model picker).
-    pub sort_order: Option<i32>,
+    pub sort_order: Option<i64>,
     /// `info.icon` (URL to model icon).
     pub icon: Option<String>,
     /// `info.multiplier_display` (cost multiplier label).
     pub multiplier_display: Option<String>,
     /// `info.performance.response_latency_ms`.
-    pub perf_response_latency_ms: Option<i32>,
+    pub perf_response_latency_ms: Option<i64>,
     /// `info.performance.tokens_per_second`.
-    pub perf_tokens_per_second: Option<i32>,
+    pub perf_tokens_per_second: Option<i64>,
     /// `info.context_window.max_input_tokens`. NOT NULL DEFAULT 0.
-    pub ctx_max_input_tokens: i32,
+    pub ctx_max_input_tokens: i64,
     /// `info.context_window.max_output_tokens`.
-    pub ctx_max_output_tokens: Option<i32>,
+    pub ctx_max_output_tokens: Option<i64>,
     /// `info.context_window.output_vector_size` (for embedding models).
-    pub ctx_output_vector_size: Option<i32>,
+    pub ctx_output_vector_size: Option<i64>,
     /// `info.allow_parameter_override`. NOT NULL DEFAULT 0.
     pub allow_parameter_override: bool,
 
@@ -297,7 +297,10 @@ mod tests {
         let entity = make_full_model_entity();
 
         assert_eq!(entity.display_name, "GPT-4o");
-        assert_eq!(entity.description.as_deref(), Some("OpenAI's flagship model"));
+        assert_eq!(
+            entity.description.as_deref(),
+            Some("OpenAI's flagship model")
+        );
         assert!(entity.size_bytes.is_none());
         assert_eq!(entity.region.as_deref(), Some("us-east-1"));
         assert_eq!(entity.hosted_by.as_deref(), Some("OpenAI"));
