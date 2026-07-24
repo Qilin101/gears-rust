@@ -256,11 +256,10 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `docs/plans/20260724-drop-models-info-jsonb.md`
 
-- [ ] update `gears/model-registry/docs/DESIGN.md` — cross-check that the new storage layout is fully documented (lines 1024-1058)
-- [ ] verify `CLAUDE.md` patterns are still accurate — the "OData Filtering Requires Real Columns" pattern is now even more strictly followed (no JSONB `info` at all)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `gears/model-registry/docs/DESIGN.md` — cross-check that the new storage layout is fully documented (lines 1024-1058)
+- [x] verify `CLAUDE.md` patterns are still accurate — the "OData Filtering Requires Real Columns" pattern is now even more strictly followed (no JSONB `info` at all)
+- [x] move this plan to `docs/plans/completed/`
 
-## Key gotchas
 
 1. **NOT NULL DEFAULTs on SQLite** — `display_name`, `ctx_max_input_tokens`, `allow_parameter_override` must have DEFAULTs at CREATE time (SQLite cannot ALTER ADD NOT NULL). Use `DEFAULT ''`, `DEFAULT 0`, `DEFAULT 0` respectively. Application layer can override.
 2. **`#[non_exhaustive]` SDK types** — read path uses `serde_json::json!{...}` then `serde_json::from_value::<ModelV1>(value)` (same pattern as `build_minimal_info`).
