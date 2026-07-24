@@ -1031,23 +1031,72 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | deprecated_at | TIMESTAMPTZ | | Soft-delete timestamp |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp |
-| info | JSONB | NOT NULL | Serialized `ModelInfoV1` common envelope — **`gts_type`** (the GTS schema chain that discriminates `provider_settings`), `display_name`, `description`, `family`, `vendor`, the infrastructure fields **`managed`** (`bool`, per-model — distinct from the per-provider `providers.managed` column) / **`architecture`** / **`size_bytes`** / **`format`**, `region`, `hosted_by`, `last_release_at`, `reasoning_level`, `version`, UI hints (`sort_order`, `icon`, `multiplier_display`), `performance`, `additional_info`, the promoted `supported_api` and `provider_model_id`, the structured `capabilities` / `disabled_capabilities` / `context_window` sub-objects, the user-facing **`default_parameters`** (`DefaultInferenceParametersV1`, mirroring the inference-knob subset of `gts.cf.llmgw.core.create_response_body.v1~`), and the flat per-model override fields **`allow_parameter_override`** (`bool`) and **`allow_extra_params`** (array of strings) |
-| provider_settings | JSONB | NOT NULL | Polymorphic provider settings JSON whose shape is identified by the row's `info.gts_type`. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives as flat fields (`allow_parameter_override`, `allow_extra_params`) on `info`. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
-| gts_type | VARCHAR(255) | | Denormalized from `info.gts_type` for OData filtering |
-| vendor | VARCHAR(255) | | Denormalized from `info.vendor` for OData filtering |
-| family | VARCHAR(255) | | Denormalized from `info.family` for OData filtering |
-| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized per-model managed flag from `info.managed` |
-| architecture | VARCHAR(255) | | Denormalized from `info.architecture` for OData filtering |
-| format | VARCHAR(255) | | Denormalized from `info.format` for OData filtering |
-| provider_model_id | VARCHAR(255) | | Denormalized from `info.provider_model_id` for OData filtering |
-| supported_api | VARCHAR(50) | | Denormalized from `info.supported_api` for OData filtering |
-| approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | Denormalized approval status mirrored from `model_approvals` (see §3.6 `model_approvals` table). P1 writes status directly into `model_approvals` (admin surface); the denormalized column is updated in the same write so reads and OData filtering never need a join |
-| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.vision.enabled` for OData filtering |
-| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.function_calling` for OData filtering |
-| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.streaming` for OData filtering |
-| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | Denormalized from `info.capabilities.reasoning.effort` for OData filtering |
 
-The `info` JSONB column is the full source of truth. The denormalized columns listed above are rewritten on every create/update to stay in sync, and exist solely to serve OData filtering — the toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
+#### 17 promoted scalar columns (from `ModelInfoV1`)
+
+The `info` JSONB column has been **dropped** (2026-07-24). Every `ModelInfoV1` field that promotes cleanly is now a typed column on this table:
+
+| Column | Type | Constraints | Source field |
+|--------|------|-------------|--------------|
+| display_name | TEXT | NOT NULL, DEFAULT `''` | `info.display_name` |
+| description | TEXT | NULL | `info.description` |
+| size_bytes | BIGINT | NULL | `info.size_bytes` |
+| region | VARCHAR(64) | NULL | `info.region` |
+| hosted_by | VARCHAR(64) | NULL | `info.hosted_by` |
+| last_release_at | TIMESTAMPTZ | NULL | `info.last_release_at` |
+| reasoning_level | VARCHAR(32) | NULL | `info.reasoning_level` |
+| version | VARCHAR(64) | NULL | `info.version` |
+| sort_order | INTEGER | NULL | `info.sort_order` |
+| icon | TEXT | NULL | `info.icon` |
+| multiplier_display | VARCHAR(32) | NULL | `info.multiplier_display` |
+| perf_response_latency_ms | INTEGER | NULL | `info.performance.response_latency_ms` |
+| perf_tokens_per_second | INTEGER | NULL | `info.performance.tokens_per_second` |
+| ctx_max_input_tokens | INTEGER | NOT NULL, DEFAULT `0` | `info.context_window.max_input_tokens` |
+| ctx_max_output_tokens | INTEGER | NULL | `info.context_window.max_output_tokens` |
+| ctx_output_vector_size | INTEGER | NULL | `info.context_window.output_vector_size` |
+| allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT `0` | `info.allow_parameter_override` |
+
+The `NOT NULL DEFAULT`s keep `SQLite` cheap to write (it cannot `ALTER ADD NOT NULL`); the application layer always populates real values on create/update. Type abbreviations (`TEXT` / `INTEGER` / `BIGINT`) are the SQLite rendering of the portable types shown in `migrations/initial_001.rs` (PostgreSQL gets `BIGINT` for `size_bytes`; SQLite maps everything to `TEXT`/`INTEGER` for portability).
+
+#### 5 JSONB sub-object columns (the rest of `ModelInfoV1`)
+
+Sub-objects that don't promote cleanly live as small JSONB columns. Same backend-dispatched type (`jsonb_nullable` in the migration) as `provider_settings`:
+
+| Column | Holds | Rationale |
+|---|---|---|
+| `capabilities_full` | `ModelCapabilities` minus the 4 OData booleans stored as scalar columns below (`cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`) | The remaining capability fields (vision mime types, reasoning toggle/resume/budget, response_schema, file_input, image_generation, audio_input/output, code_interpreter, web_search) are too granular to promote individually |
+| `default_parameters` | `DefaultInferenceParametersV1` (~13 mostly-Optional fields) | Sub-object, not worth promoting |
+| `additional_info` | `HashMap<String, serde_json::Value>` | Forward-compat escape hatch |
+| `disabled_capabilities_full` | `DisabledCapabilities` | Symmetric with `capabilities_full` |
+| `allow_extra_params` | `Vec<String>` | Caller-supplied parameter names permitted alongside the request |
+
+#### Polymorphic `provider_settings`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| provider_settings | JSONB | NOT NULL | Polymorphic provider settings JSON whose shape is identified by the row's scalar `gts_type` discriminator. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives as flat scalar fields (`allow_parameter_override`, `allow_extra_params`) above. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
+
+#### 13 denormalized columns for OData filtering
+
+The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, `vision`, `function_calling`, `streaming`, `reasoning_effort`) maps to the existing columns below (2 come from the identity/lifecycle block above; the rest are denormalized scalar shadows):
+
+| Column | Type | Constraints | Source |
+|--------|------|-------------|--------|
+| gts_type | VARCHAR(255) | NULL | `info.gts_type` (scalar discriminator for `provider_settings`) |
+| vendor | VARCHAR(255) | NULL | `info.vendor` |
+| family | VARCHAR(255) | NULL | `info.family` |
+| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Per-model managed flag from `info.managed` (distinct from per-provider `providers.managed`) |
+| architecture | VARCHAR(255) | NULL | `info.architecture` |
+| format | VARCHAR(255) | NULL | `info.format` |
+| provider_model_id | VARCHAR(255) | NULL | `info.provider_model_id` |
+| supported_api | VARCHAR(50) | NULL | `info.supported_api` |
+| approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | Mirrored from `model_approvals` (see §3.6). P1 writes status directly into `model_approvals`; the denormalized column updates in the same write so reads and OData filtering never need a join |
+| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.vision.enabled` |
+| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.function_calling` |
+| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.streaming` |
+| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `info.capabilities.reasoning.effort` |
+
+Scalar columns are the source of truth; the four additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`. On the read path the mapper rebuilds the in-memory `ModelInfoV1` JSON by stitching the 17 scalar columns + 5 JSONB sub-objects + `provider_settings` via `serde_json::json!{...}` then `serde_json::from_value::<ModelV1>(value)` (same JSON-value-then-roundtrip pattern as the defensive `build_minimal_info` fallback). The 4 OData-filterable capability booleans come from scalar columns on read; they override anything in `capabilities_full` JSONB (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
 
 **Indexes**: (tenant_id), (tenant_id, canonical_id) UNIQUE, (provider_id), (lifecycle_status)
 
@@ -1055,7 +1104,7 @@ The `info` JSONB column is the full source of truth. The denormalized columns li
 - `(gts_type)`, `(vendor)`, `(family)`, `(architecture)`, `(format)`, `(provider_model_id)`, `(supported_api)`, `(approval_status)`
 - capability flags: `(cap_vision)`, `(cap_function_calling)`, `(cap_streaming)`, `(cap_reasoning_effort)`
 
-`provider_settings`: no per-provider index in v1 — the per-provider shapes vary, so per-provider filter paths are deferred (see §3.3 OData).
+`provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`: no per-provider / per-shape index in v1 — the shapes vary, so per-shape filter paths are deferred (see §3.3 OData).
 
 #### Table: model_approvals
 

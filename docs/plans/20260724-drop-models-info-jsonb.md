@@ -229,9 +229,9 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/docs/DESIGN.md`
 
-- [ ] replace the `info` row in lines 1024-1058 with the new 21 columns
-- [ ] rewrite line 1050 to state: "Scalar columns are the source of truth; the four additional JSONB columns hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`"
-- [ ] run `make gts-docs` — must pass (DESIGN references validate)
+- [x] replace the `info` row in lines 1024-1058 with the new 21 columns
+- [x] rewrite line 1050 to state: "Scalar columns are the source of truth; the four additional JSONB columns hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`"
+- [x] run `make gts-docs` — must pass (DESIGN references validate)
 
 ### Task 10: Verify acceptance criteria
 
