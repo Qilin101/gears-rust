@@ -13,6 +13,7 @@ date: 2026-05-06
 - [Considered Options](#considered-options)
 - [Decision Outcome](#decision-outcome)
   - [Consequences](#consequences)
+    - [Consequences (added 2026-07-24)](#consequences-added-2026-07-24)
   - [Confirmation](#confirmation)
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
   - [GTS-typed envelope with raw JSON default carrier](#gts-typed-envelope-with-raw-json-default-carrier)
@@ -35,7 +36,7 @@ The model registry stores and transmits provider-specific settings (routing alia
 * `cpt-cf-model-registry-fr-get-tenant-model` — typed read of a single model's settings
 * `cpt-cf-model-registry-fr-provider-management` — provider CRUD with provider-specific routing/pricing fields
 * `cpt-cf-model-registry-component-sdk` — SDK crate is the public contract; persistence and REST DTOs depend on it
-* `cpt-cf-model-registry-dbtable-models` — one polymorphic JSONB column is the storage target
+* `cpt-cf-model-registry-dbtable-models` — one polymorphic JSONB column (`models.provider_settings`) is the storage target for provider-specific settings; five additional fixed-shape JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) store non-polymorphic `ModelInfoV1` sub-objects, all keyed by the top-level `gts_type` scalar column on the same row (added 2026-07-24 — see "Consequences (added 2026-07-24)")
 * Forward compatibility — operators register a brand-new provider before the SDK ships typed settings for it
 * Project standard — GTS (`gts.<vendor>.<org>.<package>.<type>.<version>~`) is the global type-identifier scheme already enforced repo-wide and validated by `make dylint` + `make gts-docs`
 
@@ -54,16 +55,33 @@ Concretely:
 * `ModelInfoV1<P: gts::GtsSchema = serde_json::Value>` is declared as the GTS base envelope (`gts.cf.genai.model.info.v1~`).
 * Each shipped per-provider settings type (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`) is decorated with `#[struct_to_gts_schema(base = ModelInfoV1, …)]` and chains off that base via schema ids of the form `gts.cf.genai.model.info.v1~cf.genai._.<provider>.v1~`.
 * `serde_json::Value` is the default `P` on the SDK's public API (`Model` / `ModelInfoV1` with no type parameter). It implements `gts::GtsSchema` upstream in the `gts` crate, so there is no hand-written newtype carrier in this SDK.
-* `info.gts_type: gts::GtsSchemaId` is the canonical discriminator. Consumers narrow with `Model::try_into_typed::<OpenAiSettingsV1>()`, which delegates to `gts::try_narrow` — checking `info.gts_type == <Target>::TYPE_ID` and deserializing the payload — returning `Result<Model<Q>, gts::NarrowError>`.
+* `gts_type: gts::GtsTypeId` (top-level field of `ModelInfoV1`) is the canonical discriminator — `info.gts_type` is no longer a thing; `gts_type` lives at the envelope root and is mirrored 1:1 as the `models.gts_type` scalar column. Consumers narrow with `Model::try_into_typed::<OpenAiSettingsV1>()`, which delegates to `gts::try_narrow` — checking `gts_type == <Target>::TYPE_ID` and deserializing the payload — returning `Result<Model<Q>, gts::NarrowError>`.
 
 ### Consequences
 
 * The SDK layer participates in serde — `#[struct_to_gts_schema]` emits `serde::Serialize` / `serde::Deserialize` / `schemars::JsonSchema` impls on the typed settings and their inner sub-structs. This is an explicit exception to the project rule "no serde on contract types"; GTS by design needs serde for runtime schema reflection.
 * The default `Model` (`P = serde_json::Value`) is the public shape returned by `ModelRegistryClientV1`; the previous `Model<AnyProviderSettings>` tagged-enum carrier and its `ProviderKind` discriminant are removed.
-* Persistence is one polymorphic JSONB column (`models.provider_settings`) whose shape is identified by the row's `info.gts_type`. On-disk tag and runtime resolution key are identical (`<TypedSettings>::TYPE_ID`), so there is no impedance mismatch between the typed Rust view and the JSONB shape.
+* Persistence is one polymorphic JSONB column (`models.provider_settings`) whose shape is identified by the row's `gts_type` (top-level scalar column on `models`, mirroring the top-level `ModelInfoV1::gts_type` field — **not** nested under `info`). On-disk tag and runtime resolution key are identical (`<TypedSettings>::TYPE_ID`), so there is no impedance mismatch between the typed Rust view and the JSONB shape.
 * Adding a new provider is a kit-level operation: register the new GTS leaf (`gts.cf.genai.model.info.v1~cf.genai._.<vendor>.v1~`); models targeting the new provider keep flowing through the SDK as raw JSON (`serde_json::Value`) until a typed leaf ships.
-* OData filtering migrates from the flat enum-discriminated `info.provider_settings.kind` to exact / prefix match on `info.gts_type` (e.g. `info.gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). Per-provider parameter and cost fields remain non-filterable in v1 because the JSONB shape varies per provider.
+* OData filtering migrates from the flat enum-discriminated `info.provider_settings.kind` to exact / prefix match on `gts_type` (e.g. `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). Per-provider parameter and cost fields remain non-filterable in v1 because the JSONB shape varies per provider.
 * Typed-narrowing errors are surfaced from the `gts` crate: `try_into_typed` returns `gts::NarrowError { SchemaId { expected, actual }, Deserialize(serde_json::Error) }`, distinguishing schema-id mismatches from JSON-shape mismatches (replacing the earlier provider-local `ProviderKindMismatch` / `ProviderSchemaMismatch` errors).
+
+### Consequences (added 2026-07-24)
+
+The single polymorphic JSONB column above is no longer the only JSONB column on `models`. As of the schema decomposition in `docs/plans/20260724-drop-models-info-jsonb.md` (Tasks 1-7), the table carries **six JSONB columns** total. Only one is polymorphic; the other five are fixed-shape sub-objects of `ModelInfoV1`:
+
+| Column | Shape | Discriminator / role |
+|---|---|---|
+| `provider_settings` | Polymorphic (provider-dependent) | `gts_type` (top-level scalar) — **the original polymorphic JSONB from this ADR** |
+| `capabilities_full` | Fixed (`ModelCapabilities` minus the 4 OData-promoted booleans) | None — content matches `ModelCapabilities`; columns are authoritative for the 4 promoted booleans |
+| `default_parameters` | Fixed (`DefaultInferenceParametersV1`) | None — sub-object promoted as-is |
+| `additional_info` | Fixed (`HashMap<String, serde_json::Value>`) | None — forward-compat escape hatch |
+| `disabled_capabilities_full` | Fixed (`DisabledCapabilities`) | None — symmetric with `capabilities_full` |
+| `allow_extra_params` | Fixed (`Vec<String>` of caller-supplied parameter names) | None — flat array per the plan's `allow_extra_params` user decision |
+
+Of these six columns, only `provider_settings` carries a polymorphic payload. The other five hold sub-objects whose shape is fully described by `ModelInfoV1`; they are not keyed by `gts_type`, not extensible per provider, and not interpretable as anything other than the named `ModelInfoV1` field. They exist because the corresponding `ModelInfoV1` sub-objects (nested capabilities, parameter defaults, free-form maps, etc.) are too granular or too nested to promote to scalar columns without exploding the schema.
+
+The original `info` JSONB column (the "full source of truth") has been dropped. The `models` table now stores every `ModelInfoV1` field as either a typed scalar column (17 promoted columns), one of the five fixed-shape JSONB sub-object columns listed above, or the polymorphic `provider_settings`. The on-disk tag (`gts_type`) and runtime resolution key (`<TypedSettings>::TYPE_ID`) remain identical, so the GTS-typed-envelope decision is unaffected — the discriminator still identifies the polymorphic column's shape; the fixed-shape sub-object columns are simply additional storage for non-polymorphic `ModelInfoV1` content.
 
 ### Confirmation
 
@@ -76,7 +94,7 @@ Concretely:
 
 ### GTS-typed envelope with raw JSON default carrier
 
-`ModelInfoV1<P: gts::GtsSchema = serde_json::Value>` with `#[struct_to_gts_schema]` leaves per provider; discrimination by `info.gts_type`.
+`ModelInfoV1<P: gts::GtsSchema = serde_json::Value>` with `#[struct_to_gts_schema]` leaves per provider; discrimination by the top-level `gts_type` field of the envelope.
 
 * Good, because GTS schema id is the single source of truth — no parallel Rust enum to keep in sync with the on-disk tag.
 * Good, because new providers are wired in without an SDK release: unknown `gts_type` values keep flowing as raw JSON (`serde_json::Value`), and the routing layer can still dispatch on the schema id.
@@ -147,4 +165,4 @@ This decision directly addresses:
 * `cpt-cf-model-registry-fr-provider-management` — provider-specific routing / parameters / cost stored in the typed per-provider settings leaves
 * `cpt-cf-model-registry-fr-model-pricing` — token pricing lives in each provider's nested cost sub-struct, validated through its GTS leaf schema
 * `cpt-cf-model-registry-component-sdk` — public SDK contract is the default `Model` (`P = serde_json::Value`) with typed-narrowing helpers
-* `cpt-cf-model-registry-dbtable-models` — one polymorphic JSONB column tagged by `info.gts_type`
+* `cpt-cf-model-registry-dbtable-models` — one polymorphic JSONB column (`provider_settings`) tagged by the top-level `gts_type` scalar column, plus five fixed-shape JSONB sub-object columns for non-polymorphic `ModelInfoV1` content (see "Consequences (added 2026-07-24)")

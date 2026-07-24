@@ -219,10 +219,10 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/docs/ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md`
 
-- [ ] update line 63 (Consequences): reword — there are now five polymorphic/JSONB columns (`provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`), tagged by scalar `gts_type`
-- [ ] add a "Consequences (added 2026-07-24)" bullet summarizing the schema decomposition
-- [ ] run `make gts-docs` — must pass (ADR references validate)
-- [ ] write tests verifying ADR description matches actual schema (if test infra exists for docs; otherwise skip)
+- [x] update line 63 (Consequences): reword — there are now five polymorphic/JSONB columns (`provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`), tagged by scalar `gts_type`
+- [x] add a "Consequences (added 2026-07-24)" bullet summarizing the schema decomposition
+- [x] run `make gts-docs` — must pass (ADR references validate)
+- [x] write tests verifying ADR description matches actual schema (if test infra exists for docs; otherwise skip)
 
 ### Task 9: Update DESIGN.md
 
