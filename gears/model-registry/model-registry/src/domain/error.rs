@@ -1,5 +1,6 @@
 use authz_resolver_sdk::pep::EnforcerError;
 use toolkit_db::DbError;
+use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 /// Domain-level errors for the Model Registry gear.
@@ -9,6 +10,7 @@ use uuid::Uuid;
 /// repository and service layers use. The SDK error type is only constructed
 /// at the `LocalClient` boundary.
 #[derive(Debug, thiserror::Error)]
+#[domain_model]
 pub enum DomainError {
     /// Model not found by canonical ID.
     #[error("model not found: {canonical_id}")]

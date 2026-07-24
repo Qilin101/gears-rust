@@ -16,6 +16,7 @@ use std::hash::Hash;
 use tenant_resolver_sdk::{
     BarrierMode, GetAncestorsOptions, TenantId, TenantRef, TenantResolverClient,
 };
+use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -31,6 +32,7 @@ use crate::config::ModelRegistryConfig;
 /// Used to select the cache TTL for a cached entry (own entries have a longer
 /// TTL because they change less frequently from the requestor's perspective).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[domain_model]
 pub enum Ownership {
     /// Resource is directly owned by the requesting tenant.
     Own,
@@ -59,6 +61,7 @@ impl Ownership {
 /// Resolved ancestor chain for a tenant, providing helper methods to
 /// classify ownership and compute additive visibility with child-shadowing.
 #[derive(Debug, Clone)]
+#[domain_model]
 pub struct InheritanceContext {
     /// Ancestor tenant chain from direct parent to root.
     pub ancestors: Vec<TenantRef>,
@@ -252,6 +255,7 @@ mod tests {
 
     // ── Mock TenantResolverClient ─────────────────────────────────────────
 
+    #[domain_model]
     struct MockTenantResolver {
         ancestors: Vec<TenantRef>,
     }
@@ -611,6 +615,7 @@ mod tests {
     // ── Tests: Error path (resolver failure) ───────────────────────────────
 
     /// A resolver that always fails.
+    #[domain_model]
     struct FailingResolver;
 
     #[async_trait]

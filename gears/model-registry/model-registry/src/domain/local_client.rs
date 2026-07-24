@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -24,6 +25,7 @@ use crate::{
 /// Wraps an `Arc<Service>` and delegates every trait method to the
 /// corresponding service method, mapping [`DomainError`] → [`ModelRegistryError`]
 /// via the existing `From` impl.
+#[domain_model]
 pub struct LocalClient<R, M, C> {
     service: Arc<Service<R, M, C>>,
 }
@@ -183,6 +185,7 @@ mod tests {
     // Mock repos
     // ═════════════════════════════════════════════════════════════════════════
 
+    #[domain_model]
     struct MockProviderRepo;
 
     #[async_trait]
@@ -239,6 +242,7 @@ mod tests {
         }
     }
 
+    #[domain_model]
     struct MockModelRepo;
 
     #[async_trait]
@@ -316,6 +320,7 @@ mod tests {
     // Mock TenantResolverClient — returns no ancestors
     // ═════════════════════════════════════════════════════════════════════════
 
+    #[domain_model]
     struct MockNoAncestors;
 
     #[async_trait]
@@ -390,6 +395,7 @@ mod tests {
     // Mock AuthZResolverClient — permissive
     // ═════════════════════════════════════════════════════════════════════════
 
+    #[domain_model]
     struct MockPermissiveAuthZ;
 
     #[async_trait]

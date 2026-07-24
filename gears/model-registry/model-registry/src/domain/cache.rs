@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ pub trait CacheService: Send + Sync {
 // InMemoryCache
 // ---------------------------------------------------------------------------
 
+#[domain_model]
 struct CacheEntry {
     data: Vec<u8>,
     expires_at: Instant,
@@ -74,6 +76,7 @@ struct CacheEntry {
 /// `set` panics if serialization fails (should never happen with the types
 /// we store — plain SDK structs with serde derives).
 #[derive(Clone, Default)]
+#[domain_model]
 pub struct InMemoryCache {
     data: Arc<RwLock<HashMap<String, CacheEntry>>>,
 }
@@ -140,6 +143,7 @@ mod tests {
 
     /// Simple value type for cache tests.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[domain_model]
     struct TestValue {
         name: String,
         count: u32,

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use authz_resolver_sdk::pep::{PolicyEnforcer, ResourceType};
 use tenant_resolver_sdk::TenantResolverClient;
 use toolkit_db::DBProvider;
+use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
@@ -75,6 +76,7 @@ pub(crate) mod actions {
 /// - `R`: repository implementing [`ProviderRepository`]
 /// - `M`: repository implementing [`ModelRepository`]
 /// - `C`: cache backend implementing [`CacheService`]
+#[domain_model]
 pub struct Service<R, M, C> {
     db: Arc<DBProvider<toolkit_db::DbError>>,
     provider_repo: Arc<R>,
@@ -820,6 +822,7 @@ mod tests {
     // Mock AuthZResolverClient — always returns permissive responses
     // ═════════════════════════════════════════════════════════════════════════
 
+    #[domain_model]
     struct MockAuthZ;
 
     #[async_trait]
@@ -863,6 +866,7 @@ mod tests {
     // ═════════════════════════════════════════════════════════════════════════
 
     /// Returns no ancestors (single-tenant scenario).
+    #[domain_model]
     struct NoAncestorsResolver;
 
     #[async_trait]
@@ -926,6 +930,7 @@ mod tests {
     }
 
     /// Returns a fixed ancestor chain: child → parent → grandparent.
+    #[domain_model]
     struct TwoAncestorsResolver;
 
     fn parent_id() -> Uuid {
