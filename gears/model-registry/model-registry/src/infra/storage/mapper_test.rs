@@ -143,11 +143,12 @@ fn make_model_entity(
     canonical_id: &str,
     _info: Option<serde_json::Value>,
 ) -> entity::model::Model {
-    // The previous fixture took `info: Option<serde_json::Value>` for legacy
-    // JSONB tests. The post-2026-07-24 schema has no `info` column — instead,
-    // the 17 scalar columns + 5 JSONB sub-object columns carry the same
-    // payload. Task 6 will fully rewrite this fixture; for now we populate
-    // representative scalar fields so the lib compiles.
+    // Post-2026-07-24 fixture: the `info` column has been dropped, so the
+    // legacy `info: Option<serde_json::Value>` argument is now ignored. The
+    // fixture populates all 21 promoted columns (17 scalar + 5 JSONB
+    // sub-objects) plus the 15 denormalized OData-filterable columns so any
+    // test that builds an entity through this helper gets a fully-shaped
+    // `models` row.
     let _ = canonical_id;
     entity::model::Model {
         id,

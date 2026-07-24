@@ -194,13 +194,13 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 - Modify: `gears/model-registry/model-registry/src/infra/storage/mapper_test.rs`
 - Modify: `gears/model-registry/model-registry/src/infra/storage/odata_mapper.rs`
 
-- [ ] rewrite `make_model_entity` fixture (mapper_test.rs line 139) to populate all 21 new fields
-- [ ] repurpose `model_entity_to_v1_fallback_when_info_null` (line 381): with `display_name` and `ctx_max_input_tokens` now required scalar columns (with DB defaults), this test no longer tests the JSONB-missing case — rename to test "entity with default fields reconstructs without panic"
-- [ ] repurpose `model_entity_to_v1_handles_malformed_jsonb` (line 522): rename to test "missing `provider_settings` JSONB returns null on the wire"
-- [ ] update `model_create_denormalized_match_info` (line 404): drop the `am.info` assertion (line 436) — `info` column no longer exists
-- [ ] update `model_extract_cursor_value_round_trip` in `odata_mapper.rs` (line 428): update the `model::Model` literal with all required fields
-- [ ] write tests confirming all fixture rewires still pass (re-run mapper_test and odata_mapper_test)
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 7
+- [x] rewrite `make_model_entity` fixture (mapper_test.rs line 139) to populate all 21 new fields
+- [x] repurpose `model_entity_to_v1_fallback_when_info_null` (line 381): with `display_name` and `ctx_max_input_tokens` now required scalar columns (with DB defaults), this test no longer tests the JSONB-missing case — rename to test "entity with default fields reconstructs without panic"
+- [x] repurpose `model_entity_to_v1_handles_malformed_jsonb` (line 522): rename to test "missing `provider_settings` JSONB returns null on the wire"
+- [x] update `model_create_denormalized_match_info` (line 404): drop the `am.info` assertion (line 436) — `info` column no longer exists
+- [x] update `model_extract_cursor_value_round_trip` in `odata_mapper.rs` (line 428): update the `model::Model` literal with all required fields
+- [x] write tests confirming all fixture rewires still pass (re-run mapper_test and odata_mapper_test)
+- [x] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 7
 
 ### Task 7: Integration test verification
 
