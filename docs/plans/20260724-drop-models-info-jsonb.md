@@ -142,12 +142,12 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/entity/model.rs`
 
-- [ ] remove `pub info: Option<serde_json::Value>` (lines 35-36)
-- [ ] add the 17 scalar fields (typed per the column design table above; match SeaORM `ColumnType` annotations)
-- [ ] add the 4 JSONB fields (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) using `#[sea_orm(column_type = "JsonBinary", nullable)]` mirroring the existing `provider_settings` (line 39)
-- [ ] rewrite the doc comment block (lines 8-17) — `info` is gone; scalar columns are now the source of truth, with the four JSONB sub-object columns for fields that don't promote cleanly, plus the polymorphic `provider_settings` keyed by `gts_type`
-- [ ] write tests asserting entity deserializes a SQLite row with the new column layout (round-trip entity construction)
-- [ ] run `cargo build -p cf-gears-model-registry` and `cargo test -p cf-gears-model-registry --lib` — must pass before task 3
+- [x] remove `pub info: Option<serde_json::Value>` (lines 35-36)
+- [x] add the 17 scalar fields (typed per the column design table above; match SeaORM `ColumnType` annotations)
+- [x] add the 4 JSONB fields (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) using `#[sea_orm(column_type = "JsonBinary", nullable)]` mirroring the existing `provider_settings` (line 39)
+- [x] rewrite the doc comment block (lines 8-17) — `info` is gone; scalar columns are now the source of truth, with the four JSONB sub-object columns for fields that don't promote cleanly, plus the polymorphic `provider_settings` keyed by `gts_type`
+- [x] write tests asserting entity deserializes a SQLite row with the new column layout (round-trip entity construction)
+- [x] run `cargo build -p cf-gears-model-registry` and `cargo test -p cf-gears-model-registry --lib` — must pass before task 3
 
 ### Task 3: Rewrite read path in `mapper.rs`
 
