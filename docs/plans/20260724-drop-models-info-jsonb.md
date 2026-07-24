@@ -127,15 +127,15 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/migrations/initial_001.rs`
 
-- [ ] replace the `models` CREATE TABLE (lines 46-73) — drop the `info` column (line 53)
-- [ ] keep all existing 22 columns (identity, lifecycle, the 13 already-promoted columns, `provider_settings`, timestamps)
-- [ ] add the 17 new scalar columns with `NOT NULL DEFAULT` where required (`display_name DEFAULT ''`, `ctx_max_input_tokens DEFAULT 0`, `allow_parameter_override DEFAULT 0`)
-- [ ] add the 4 new JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) using the existing `jsonb_nullable` type variable
-- [ ] verify the existing 11 indexes (lines 85-96) remain unchanged
-- [ ] update `initial_migration_up_down_roundtrip` test (lines 124-153) — verify migration up/down works with the new column list; the `INSERT INTO providers` doesn't touch `models`, so it should still pass
-- [ ] write tests asserting the new schema: `info` column is absent, the 21 new columns exist with correct types/nullability
-- [ ] write tests asserting migration up/down roundtrip succeeds (migrations module test fixture)
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 2
+- [x] replace the `models` CREATE TABLE (lines 46-73) — drop the `info` column (line 53)
+- [x] keep all existing 22 columns (identity, lifecycle, the 13 already-promoted columns, `provider_settings`, timestamps)
+- [x] add the 17 new scalar columns with `NOT NULL DEFAULT` where required (`display_name DEFAULT ''`, `ctx_max_input_tokens DEFAULT 0`, `allow_parameter_override DEFAULT 0`)
+- [x] add the 4 new JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) using the existing `jsonb_nullable` type variable
+- [x] verify the existing 11 indexes (lines 85-96) remain unchanged
+- [x] update `initial_migration_up_down_roundtrip` test (lines 124-153) — verify migration up/down works with the new column list; the `INSERT INTO providers` doesn't touch `models`, so it should still pass
+- [x] write tests asserting the new schema: `info` column is absent, the 21 new columns exist with correct types/nullability
+- [x] write tests asserting migration up/down roundtrip succeeds (migrations module test fixture)
+- [x] run `cargo test -p cf-gears-model-registry --lib` — must pass before task 2
 
 ### Task 2: Update `entity/model.rs`
 
