@@ -238,18 +238,18 @@ Mirror the existing gear layering (DESIGN §1.3). The storage rewrite moves the 
 **Files:**
 - Modify: `docs/plans/20260724-drop-models-info-jsonb.md`
 
-- [ ] verify `info` column is dropped from the `models` table (grep for `info: Set` and `e.info` in `mapper.rs`)
-- [ ] verify all 17 scalar columns + 4 JSONB columns are populated correctly in `model_create_active_model` and `model_update_active_model`
-- [ ] verify wire DTO (`ModelDto { info: JsonValue }`) is unchanged — `dto.rs` and `handlers.rs` untouched
-- [ ] verify SDK `ModelInfoV1<P>` is unchanged — `llm-gateway-sdk` consumers (`mock_registry.rs`, `plugin.rs`) still compile
-- [ ] verify OData filter surface unchanged — 15 fields, 11 indexes
-- [ ] run `cargo test -p cf-gears-model-registry --lib` — all mapper/odata/dto unit tests pass
-- [ ] run `cargo test -p cf-gears-model-registry --test integration` — all integration tests pass
-- [ ] run `cargo test --workspace` — cross-gear sanity
-- [ ] run `make test-sqlite` — SQLite end-to-end
-- [ ] run `cargo clippy -p cf-gears-model-registry -- -D warnings` — clean
-- [ ] run `make dylint` — architectural lints clean
-- [ ] run `make gts-docs` — ADR/DESIGN references validate
+- [x] verify `info` column is dropped from the `models` table (grep for `info: Set` and `e.info` in `mapper.rs`)
+- [x] verify all 17 scalar columns + 4 JSONB columns are populated correctly in `model_create_active_model` and `model_update_active_model`
+- [x] verify wire DTO (`ModelDto { info: JsonValue }`) is unchanged — `dto.rs` and `handlers.rs` untouched
+- [x] verify SDK `ModelInfoV1<P>` is unchanged — `llm-gateway-sdk` consumers (`mock_registry.rs`, `plugin.rs`) still compile
+- [x] verify OData filter surface unchanged — 15 fields, 13 indexes
+- [x] run `cargo test -p cf-gears-model-registry --lib` — all mapper/odata/dto unit tests pass
+- [x] run `cargo test -p cf-gears-model-registry --test integration` — all integration tests pass
+- [x] run `cargo test --workspace` — cross-gear sanity
+- [x] run `make test-sqlite` — SQLite end-to-end
+- [x] run `cargo clippy -p cf-gears-model-registry -- -D warnings` — clean
+- [x] run `make dylint` — architectural lints clean
+- [x] run `make gts-docs` — ADR/DESIGN references validate
 
 ### Task 11: Update documentation and finalize
 
