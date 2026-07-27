@@ -796,12 +796,19 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use authz_resolver_sdk::pep::PolicyEnforcer;
     use authz_resolver_sdk::{
         AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
+    };
+    use model_registry_sdk::models::{
+        ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, DisabledMediaCapability,
+        DisabledReasoningCapability, DisabledWebSearchCapability, MediaCapability,
+        ModelCapabilities, ModelPerformance, ReasoningCapability, SupportedApi,
+        WebSearchCapability,
     };
     use sea_orm_migration::MigratorTrait;
     use tenant_resolver_sdk::{
@@ -1050,80 +1057,160 @@ mod tests {
         let gts_leaf = "cf.genai._.openai.v1~";
         let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
 
-        let info_value = serde_json::json!({
-            "gts_type": gts_type,
-            "display_name": format!("Test {provider_model_id}"),
-            "description": null,
-            "family": "test-family",
-            "vendor": "TestVendor",
-            "managed": false,
-            "architecture": "transformer",
-            "size_bytes": null,
-            "format": "api-only",
-            "region": null,
-            "hosted_by": null,
-            "last_release_at": null,
-            "reasoning_level": null,
-            "version": null,
-            "sort_order": null,
-            "icon": null,
-            "multiplier_display": null,
-            "performance": {
-                "response_latency_ms": null,
-                "tokens_per_second": null
+        let info = model_registry_sdk::ModelInfoV1 {
+            gts_type: gts::GtsTypeId::new(&gts_type),
+            display_name: format!("Test {provider_model_id}"),
+            description: None,
+            family: Some("test-family".to_owned()),
+            vendor: Some("TestVendor".to_owned()),
+            managed: false,
+            architecture: Some("transformer".to_owned()),
+            size_bytes: None,
+            format: Some("api-only".to_owned()),
+            region: None,
+            hosted_by: None,
+            last_release_at: None,
+            reasoning_level: None,
+            version: None,
+            sort_order: None,
+            icon: None,
+            multiplier_display: None,
+            performance: ModelPerformance {
+                response_latency_ms: None,
+                tokens_per_second: None,
             },
-            "additional_info": {},
-            "supported_api": ["completion"],
-            "provider_model_id": provider_model_id,
-            "capabilities": {
-                "vision": { "enabled": true, "supported_mime_types": ["image/jpeg"] },
-                "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                "function_calling": true,
-                "response_schema": false,
-                "streaming": true,
-                "file_input": { "enabled": false, "supported_mime_types": [] },
-                "image_generation": { "enabled": false, "supported_mime_types": [] },
-                "audio_input": { "enabled": false, "supported_mime_types": [] },
-                "audio_output": { "enabled": false, "supported_mime_types": [] },
-                "code_interpreter": false,
-                "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+            additional_info: HashMap::new(),
+            supported_api: HashSet::from([SupportedApi::Completion]),
+            provider_model_id: provider_model_id.to_owned(),
+            capabilities: ModelCapabilities {
+                vision: MediaCapability {
+                    enabled: true,
+                    supported_mime_types: vec!["image/jpeg".to_owned()],
+                },
+                reasoning: ReasoningCapability {
+                    effort: false,
+                    toggle: false,
+                    resume: false,
+                    budget: false,
+                },
+                function_calling: true,
+                response_schema: false,
+                streaming: true,
+                file_input: MediaCapability::default(),
+                image_generation: MediaCapability::default(),
+                audio_input: MediaCapability::default(),
+                audio_output: MediaCapability::default(),
+                code_interpreter: false,
+                web_search: WebSearchCapability {
+                    enabled: false,
+                    allowed_domains: false,
+                    excluded_domains: false,
+                },
             },
-            "disabled_capabilities": {
-                "vision": { "disabled": false, "disabled_mime_types": [] },
-                "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                "function_calling": false,
-                "response_schema": false,
-                "streaming": false,
-                "file_input": { "disabled": false, "disabled_mime_types": [] },
-                "image_generation": { "disabled": false, "disabled_mime_types": [] },
-                "audio_input": { "disabled": false, "disabled_mime_types": [] },
-                "audio_output": { "disabled": false, "disabled_mime_types": [] },
-                "code_interpreter": false,
-                "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+            disabled_capabilities: DisabledCapabilities {
+                vision: DisabledMediaCapability::default(),
+                reasoning: DisabledReasoningCapability::default(),
+                function_calling: false,
+                response_schema: false,
+                streaming: false,
+                file_input: DisabledMediaCapability::default(),
+                image_generation: DisabledMediaCapability::default(),
+                audio_input: DisabledMediaCapability::default(),
+                audio_output: DisabledMediaCapability::default(),
+                code_interpreter: false,
+                web_search: DisabledWebSearchCapability::default(),
             },
-            "context_window": {
-                "max_input_tokens": 8192,
-                "max_output_tokens": 4096
+            context_window: ContextWindow {
+                max_input_tokens: 8192,
+                max_output_tokens: Some(4096),
+                output_vector_size: None,
             },
-            "default_parameters": {
-                "temperature": null, "top_p": null, "max_output_tokens": null,
-                "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
-                "top_logprobs": null, "truncation": null, "service_tier": null,
-                "parallel_tool_calls": null, "text": null, "reasoning": null,
-                "tool_choice": null, "store": null
-            },
-            "allow_parameter_override": false,
-            "allow_extra_params": [],
-            "provider_settings": {}
-        });
-
-        let info = serde_json::from_value(info_value).expect("ModelInfoV1 from test JSON");
+            default_parameters: DefaultInferenceParametersV1::default(),
+            allow_parameter_override: false,
+            allow_extra_params: Vec::new(),
+            provider_settings: serde_json::Value::Object(serde_json::Map::new()),
+        };
 
         crate::CreateModelRequestV1 {
             provider_slug: provider_slug.to_owned(),
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: None,
             info,
+        }
+    }
+
+    /// Helper: build a fully-deprecated `ModelInfoV1` for cache tests.
+    /// Constructs directly via struct literal — no JSON round-trip.
+    fn make_deprecated_info(provider_model_id: &str) -> model_registry_sdk::ModelInfoV1 {
+        model_registry_sdk::ModelInfoV1 {
+            gts_type: gts::GtsTypeId::new("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~"),
+            display_name: "deprecated".to_owned(),
+            description: None,
+            family: None,
+            vendor: None,
+            managed: false,
+            architecture: None,
+            size_bytes: None,
+            format: None,
+            region: None,
+            hosted_by: None,
+            last_release_at: None,
+            reasoning_level: None,
+            version: None,
+            sort_order: None,
+            icon: None,
+            multiplier_display: None,
+            performance: ModelPerformance {
+                response_latency_ms: None,
+                tokens_per_second: None,
+            },
+            additional_info: HashMap::new(),
+            supported_api: HashSet::from([SupportedApi::Completion]),
+            provider_model_id: provider_model_id.to_owned(),
+            capabilities: ModelCapabilities {
+                vision: MediaCapability::default(),
+                reasoning: ReasoningCapability {
+                    effort: false,
+                    toggle: false,
+                    resume: false,
+                    budget: false,
+                },
+                function_calling: false,
+                response_schema: false,
+                streaming: false,
+                file_input: MediaCapability::default(),
+                image_generation: MediaCapability::default(),
+                audio_input: MediaCapability::default(),
+                audio_output: MediaCapability::default(),
+                code_interpreter: false,
+                web_search: WebSearchCapability {
+                    enabled: false,
+                    allowed_domains: false,
+                    excluded_domains: false,
+                },
+            },
+            disabled_capabilities: DisabledCapabilities {
+                vision: DisabledMediaCapability::default(),
+                reasoning: DisabledReasoningCapability::default(),
+                function_calling: false,
+                response_schema: false,
+                streaming: false,
+                file_input: DisabledMediaCapability::default(),
+                image_generation: DisabledMediaCapability::default(),
+                audio_input: DisabledMediaCapability::default(),
+                audio_output: DisabledMediaCapability::default(),
+                code_interpreter: false,
+                web_search: DisabledWebSearchCapability::default(),
+            },
+            context_window: ContextWindow {
+                max_input_tokens: 0,
+                max_output_tokens: None,
+                output_vector_size: None,
+            },
+            default_parameters: DefaultInferenceParametersV1::default(),
+            allow_parameter_override: false,
+            allow_extra_params: Vec::new(),
+            provider_settings: serde_json::Value::Null,
         }
     }
 
@@ -1418,61 +1505,16 @@ mod tests {
         let tenant_id = test_tenant();
         let cache = InMemoryCache::new();
 
-        // Build a deprecated ModelV1 via JSON string deserialization to avoid
-        // serde_json::json! macro recursion limit with deeply nested info.
-        let deprecated_model: crate::ModelV1 = serde_json::from_str(r#"{
-            "id": "00000000-0000-0000-0000-000000000099",
-            "canonical_id": "openai::gpt-4o-old",
-            "lifecycle_status": "deprecated",
-            "approval_status": "pending",
-            "info": {
-                "gts_type": "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~",
-                "display_name": "deprecated",
-                "description": null,
-                "family": null, "vendor": null, "managed": false,
-                "architecture": null, "size_bytes": null, "format": null,
-                "region": null, "hosted_by": null, "last_release_at": null,
-                "reasoning_level": null, "version": null, "sort_order": null,
-                "icon": null, "multiplier_display": null,
-                "performance": { "response_latency_ms": null, "tokens_per_second": null },
-                "additional_info": {},
-                "supported_api": ["completion"],
-                "provider_model_id": "gpt-4o-old",
-                "capabilities": {
-                    "vision": { "enabled": false, "supported_mime_types": [] },
-                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                    "function_calling": false, "response_schema": false, "streaming": false,
-                    "file_input": { "enabled": false, "supported_mime_types": [] },
-                    "image_generation": { "enabled": false, "supported_mime_types": [] },
-                    "audio_input": { "enabled": false, "supported_mime_types": [] },
-                    "audio_output": { "enabled": false, "supported_mime_types": [] },
-                    "code_interpreter": false,
-                    "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
-                },
-                "disabled_capabilities": {
-                    "vision": { "disabled": false, "disabled_mime_types": [] },
-                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                    "function_calling": false, "response_schema": false, "streaming": false,
-                    "file_input": { "disabled": false, "disabled_mime_types": [] },
-                    "image_generation": { "disabled": false, "disabled_mime_types": [] },
-                    "audio_input": { "disabled": false, "disabled_mime_types": [] },
-                    "audio_output": { "disabled": false, "disabled_mime_types": [] },
-                    "code_interpreter": false,
-                    "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
-                },
-                "context_window": { "max_input_tokens": 0, "max_output_tokens": null, "output_vector_size": null },
-                "default_parameters": {
-                    "temperature": null, "top_p": null, "max_output_tokens": null,
-                    "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
-                    "top_logprobs": null, "truncation": null, "service_tier": null,
-                    "parallel_tool_calls": null, "text": null, "reasoning": null,
-                    "tool_choice": null, "store": null
-                },
-                "allow_parameter_override": false,
-                "allow_extra_params": [],
-                "provider_settings": null
-            }
-        }"#).expect("ModelV1 from JSON string");
+        // Build a deprecated ModelV1 directly via struct literal. The SDK
+        // entity/info structs are not `#[non_exhaustive]`, so no JSON
+        // round-trip is needed.
+        let deprecated_model: crate::ModelV1 = crate::ModelV1 {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            canonical_id: "openai::gpt-4o-old".to_owned(),
+            lifecycle_status: crate::LifecycleStatus::Deprecated,
+            approval_status: crate::ApprovalStatus::Pending,
+            info: make_deprecated_info("openai::gpt-4o-old"),
+        };
 
         let key = cache_key(&tenant_id, "model", "openai::gpt-4o-old");
         cache.set(&key, &deprecated_model, 1800).await;
@@ -2074,58 +2116,15 @@ mod tests {
 
         // Pre-populate cache with a stale entry.
         let cache = InMemoryCache::new();
-        let stale_model: crate::ModelV1 = serde_json::from_str(r#"{
-            "id": "00000000-0000-0000-0000-000000000099",
-            "canonical_id": "openai::gpt-4o",
-            "lifecycle_status": "production",
-            "approval_status": "pending",
-            "info": {
-                "gts_type": "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~",
-                "display_name": "stale",
-                "description": null, "family": null, "vendor": null, "managed": false,
-                "architecture": null, "size_bytes": null, "format": null,
-                "region": null, "hosted_by": null, "last_release_at": null,
-                "reasoning_level": null, "version": null, "sort_order": null,
-                "icon": null, "multiplier_display": null,
-                "performance": { "response_latency_ms": null, "tokens_per_second": null },
-                "additional_info": {},
-                "supported_api": ["completion"],
-                "provider_model_id": "gpt-4o-old",
-                "capabilities": {
-                    "vision": { "enabled": false, "supported_mime_types": [] },
-                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                    "function_calling": false, "response_schema": false, "streaming": false,
-                    "file_input": { "enabled": false, "supported_mime_types": [] },
-                    "image_generation": { "enabled": false, "supported_mime_types": [] },
-                    "audio_input": { "enabled": false, "supported_mime_types": [] },
-                    "audio_output": { "enabled": false, "supported_mime_types": [] },
-                    "code_interpreter": false,
-                    "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
-                },
-                "disabled_capabilities": {
-                    "vision": { "disabled": false, "disabled_mime_types": [] },
-                    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-                    "function_calling": false, "response_schema": false, "streaming": false,
-                    "file_input": { "disabled": false, "disabled_mime_types": [] },
-                    "image_generation": { "disabled": false, "disabled_mime_types": [] },
-                    "audio_input": { "disabled": false, "disabled_mime_types": [] },
-                    "audio_output": { "disabled": false, "disabled_mime_types": [] },
-                    "code_interpreter": false,
-                    "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
-                },
-                "context_window": { "max_input_tokens": 0, "max_output_tokens": null, "output_vector_size": null },
-                "default_parameters": {
-                    "temperature": null, "top_p": null, "max_output_tokens": null,
-                    "max_tool_calls": null, "presence_penalty": null, "frequency_penalty": null,
-                    "top_logprobs": null, "truncation": null, "service_tier": null,
-                    "parallel_tool_calls": null, "text": null, "reasoning": null,
-                    "tool_choice": null, "store": null
-                },
-                "allow_parameter_override": false,
-                "allow_extra_params": [],
-                "provider_settings": null
-            }
-        }"#).expect("ModelV1 from JSON");
+        let mut stale_info = make_deprecated_info("gpt-4o-old");
+        stale_info.display_name = "stale".to_owned();
+        let stale_model: crate::ModelV1 = crate::ModelV1 {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            canonical_id: "openai::gpt-4o".to_owned(),
+            lifecycle_status: crate::LifecycleStatus::Production,
+            approval_status: crate::ApprovalStatus::Pending,
+            info: stale_info,
+        };
         let stale_key = cache_key(&tenant_id, "model", "stale-key");
         cache.set(&stale_key, &stale_model, 1800).await;
 

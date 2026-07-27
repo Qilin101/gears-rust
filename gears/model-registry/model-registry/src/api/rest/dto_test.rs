@@ -419,9 +419,7 @@ mod provider_from_v1 {
             id: Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
             slug: "openai".into(),
             name: "OpenAI".into(),
-            gts_type: gts::GtsTypeId::new(
-                "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~",
-            ),
+            gts_type: gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"),
             status,
             managed: true,
             metadata: Some(json!({"region": "us-east-1"})),
@@ -605,10 +603,7 @@ mod model_from_v1 {
         assert_eq!(dto.approval_status, "approved");
         // info is re-serialized as JSON
         assert!(dto.info.is_object());
-        assert_eq!(
-            dto.info["provider_settings"]["oagw_alias"],
-            "openai-prod"
-        );
+        assert_eq!(dto.info["provider_settings"]["oagw_alias"], "openai-prod");
     }
 
     #[test]
@@ -653,15 +648,9 @@ mod model_from_v1 {
 
         // The info field should carry the full ModelInfoV1 JSON, including
         // the typed provider_settings payload.
-        assert_eq!(
-            dto.info["display_name"],
-            "GPT-4o"
-        );
+        assert_eq!(dto.info["display_name"], "GPT-4o");
         assert_eq!(dto.info["provider_model_id"], "gpt-4o");
-        assert_eq!(
-            dto.info["supported_api"],
-            json!(["completion"])
-        );
+        assert_eq!(dto.info["supported_api"], json!(["completion"]));
         assert_eq!(
             dto.info["provider_settings"]["endpoint_kind"],
             "chat_completions"

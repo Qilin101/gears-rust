@@ -1,8 +1,14 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use gts::GtsSchema;
 use model_registry_sdk::models::{
-    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus, ModelInfoV1,
-    ModelV1, OpenAiSettingsV1, ProviderStatus, UpdateModelRequestV1, UpdateProviderRequestV1,
+    ApprovalStatus, ContextWindow, CreateModelRequestV1, CreateProviderRequestV1,
+    DefaultInferenceParametersV1, DisabledCapabilities, DisabledMediaCapability,
+    DisabledReasoningCapability, DisabledWebSearchCapability, LifecycleStatus, MediaCapability,
+    ModelCapabilities, ModelInfoV1, ModelPerformance, ModelV1, OpenAiSettingsV1, ProviderStatus,
+    ReasoningCapability, SupportedApi, UpdateModelRequestV1, UpdateProviderRequestV1,
+    WebSearchCapability,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -15,8 +21,9 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
-// Test helpers — construct domain types via JSON roundtrip
-// (all SDK types are #[non_exhaustive] and cannot use struct literal syntax)
+// Test helpers — construct domain types via struct literals.
+// (SDK entity/info structs are not #[non_exhaustive], so direct construction
+// is supported and avoids the JSON serialize→deserialize round-trip.)
 // ---------------------------------------------------------------------------
 
 fn test_tenant_id() -> Uuid {
@@ -31,78 +38,82 @@ fn test_model_id() -> Uuid {
     Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap()
 }
 
-/// Build a `ModelInfoV1` from a JSON template.
+/// Build a `ModelInfoV1` via direct struct literal construction.
 fn make_info(gts_leaf: &str, provider_settings: &serde_json::Value) -> ModelInfoV1 {
     let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
-    let value = json!({
-        "gts_type": gts_type,
-        "display_name": "GPT-4o",
-        "description": "OpenAI's flagship model",
-        "family": "gpt-4",
-        "vendor": "OpenAI",
-        "managed": false,
-        "architecture": "transformer",
-        "format": "api-only",
-        "version": "1.0",
-        "sort_order": 10,
-        "performance": {
-            "response_latency_ms": 500,
-            "tokens_per_second": 100
+    ModelInfoV1 {
+        gts_type: gts::GtsTypeId::new(&gts_type),
+        display_name: "GPT-4o".to_owned(),
+        description: Some("OpenAI's flagship model".to_owned()),
+        family: Some("gpt-4".to_owned()),
+        vendor: Some("OpenAI".to_owned()),
+        managed: false,
+        architecture: Some("transformer".to_owned()),
+        size_bytes: None,
+        format: Some("api-only".to_owned()),
+        region: None,
+        hosted_by: None,
+        last_release_at: None,
+        reasoning_level: None,
+        version: Some("1.0".to_owned()),
+        sort_order: Some(10),
+        icon: None,
+        multiplier_display: None,
+        performance: ModelPerformance {
+            response_latency_ms: Some(500),
+            tokens_per_second: Some(100),
         },
-        "additional_info": {},
-        "supported_api": ["completion"],
-        "provider_model_id": "gpt-4o",
-        "capabilities": {
-            "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
-            "reasoning": { "effort": true, "toggle": false, "resume": false, "budget": false },
-            "function_calling": true,
-            "response_schema": true,
-            "streaming": true,
-            "file_input": { "enabled": false, "supported_mime_types": [] },
-            "image_generation": { "enabled": false, "supported_mime_types": [] },
-            "audio_input": { "enabled": false, "supported_mime_types": [] },
-            "audio_output": { "enabled": false, "supported_mime_types": [] },
-            "code_interpreter": false,
-            "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
+        additional_info: HashMap::new(),
+        supported_api: HashSet::from([SupportedApi::Completion]),
+        provider_model_id: "gpt-4o".to_owned(),
+        capabilities: ModelCapabilities {
+            vision: MediaCapability {
+                enabled: true,
+                supported_mime_types: vec!["image/png".to_owned()],
+            },
+            reasoning: ReasoningCapability {
+                effort: true,
+                toggle: false,
+                resume: false,
+                budget: false,
+            },
+            function_calling: true,
+            response_schema: true,
+            streaming: true,
+            file_input: MediaCapability::default(),
+            image_generation: MediaCapability::default(),
+            audio_input: MediaCapability::default(),
+            audio_output: MediaCapability::default(),
+            code_interpreter: false,
+            web_search: WebSearchCapability {
+                enabled: false,
+                allowed_domains: false,
+                excluded_domains: false,
+            },
         },
-        "disabled_capabilities": {
-            "vision": { "disabled": false, "disabled_mime_types": [] },
-            "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-            "function_calling": false,
-            "response_schema": false,
-            "streaming": false,
-            "file_input": { "disabled": false, "disabled_mime_types": [] },
-            "image_generation": { "disabled": false, "disabled_mime_types": [] },
-            "audio_input": { "disabled": false, "disabled_mime_types": [] },
-            "audio_output": { "disabled": false, "disabled_mime_types": [] },
-            "code_interpreter": false,
-            "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
+        disabled_capabilities: DisabledCapabilities {
+            vision: DisabledMediaCapability::default(),
+            reasoning: DisabledReasoningCapability::default(),
+            function_calling: false,
+            response_schema: false,
+            streaming: false,
+            file_input: DisabledMediaCapability::default(),
+            image_generation: DisabledMediaCapability::default(),
+            audio_input: DisabledMediaCapability::default(),
+            audio_output: DisabledMediaCapability::default(),
+            code_interpreter: false,
+            web_search: DisabledWebSearchCapability::default(),
         },
-        "context_window": {
-            "max_input_tokens": 128_000,
-            "max_output_tokens": 16_384
+        context_window: ContextWindow {
+            max_input_tokens: 128_000,
+            max_output_tokens: Some(16_384),
+            output_vector_size: None,
         },
-        "default_parameters": {
-            "temperature": null,
-            "top_p": null,
-            "max_output_tokens": null,
-            "max_tool_calls": null,
-            "presence_penalty": null,
-            "frequency_penalty": null,
-            "top_logprobs": null,
-            "truncation": null,
-            "service_tier": null,
-            "parallel_tool_calls": null,
-            "text": null,
-            "reasoning": null,
-            "tool_choice": null,
-            "store": null
-        },
-        "allow_parameter_override": true,
-        "allow_extra_params": ["custom_param"],
-        "provider_settings": provider_settings
-    });
-    serde_json::from_value(value).expect("ModelInfoV1 from test JSON")
+        default_parameters: DefaultInferenceParametersV1::default(),
+        allow_parameter_override: true,
+        allow_extra_params: vec!["custom_param".to_owned()],
+        provider_settings: provider_settings.clone(),
+    }
 }
 
 fn openai_settings() -> serde_json::Value {
@@ -371,13 +382,10 @@ fn model_entity_to_v1_anthropic() {
         "max_tokens": 8192,
     });
     let mut info = make_info("cf.genai._.anthropic.v1~", &anthropic_settings);
-    // Patch fields via JSON roundtrip
-    if let Ok(mut v) = serde_json::to_value(&info) {
-        v["vendor"] = json!("Anthropic");
-        v["family"] = json!("claude");
-        v["provider_model_id"] = json!("claude-sonnet-4-20250514");
-        info = serde_json::from_value(v).unwrap();
-    }
+    // Patch fields via direct struct field assignment.
+    info.vendor = Some("Anthropic".to_owned());
+    info.family = Some("claude".to_owned());
+    info.provider_model_id = "claude-sonnet-4-20250514".to_owned();
 
     let info_json = serde_json::to_value(&info).expect("serialize");
 
@@ -412,11 +420,9 @@ fn model_entity_to_v1_anthropic() {
 fn model_entity_to_v1_unknown_provider() {
     let raw_settings = json!({"custom_endpoint": "https://custom.example.com"});
     let mut info = make_info("cf.genai._.custom.v1~", &raw_settings);
-    if let Ok(mut v) = serde_json::to_value(&info) {
-        v["vendor"] = json!("Custom");
-        v["provider_model_id"] = json!("custom-model");
-        info = serde_json::from_value(v).unwrap();
-    }
+    // Patch fields via direct struct field assignment.
+    info.vendor = Some("Custom".to_owned());
+    info.provider_model_id = "custom-model".to_owned();
 
     let info_json = serde_json::to_value(&info).expect("serialize");
     let mut entity = make_model_entity(
@@ -1528,37 +1534,25 @@ fn model_create_active_model_sets_all_17_scalar_columns() {
     let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
     // Patch in distinct values for every promoted scalar column so the
     // assertions can confirm each one was projected.
-    let v = serde_json::to_value(&info).unwrap();
-    let mut v = v.as_object().cloned().unwrap();
-    v.insert(
-        "description".to_owned(),
-        json!("A fully-populated test model"),
-    );
-    v.insert("size_bytes".to_owned(), json!(1_073_741_824_u64)); // 1 GiB
-    v.insert("region".to_owned(), json!("eu-west-1"));
-    v.insert("hosted_by".to_owned(), json!("Azure"));
-    v.insert("reasoning_level".to_owned(), json!("medium"));
-    v.insert("version".to_owned(), json!("2.5.0"));
-    v.insert("sort_order".to_owned(), json!(42));
-    v.insert("icon".to_owned(), json!("https://example.com/icon.png"));
-    v.insert("multiplier_display".to_owned(), json!("2.5x"));
-    v.insert(
-        "performance".to_owned(),
-        json!({
-            "response_latency_ms": 250,
-            "tokens_per_second": 200,
-        }),
-    );
-    v.insert(
-        "context_window".to_owned(),
-        json!({
-            "max_input_tokens": 200_000_u64,
-            "max_output_tokens": 32_768_u64,
-            "output_vector_size": 1536,
-        }),
-    );
-    v.insert("allow_parameter_override".to_owned(), json!(false));
-    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+    info.description = Some("A fully-populated test model".to_owned());
+    info.size_bytes = Some(1_073_741_824); // 1 GiB
+    info.region = Some("eu-west-1".to_owned());
+    info.hosted_by = Some("Azure".to_owned());
+    info.reasoning_level = Some("medium".to_owned());
+    info.version = Some("2.5.0".to_owned());
+    info.sort_order = Some(42);
+    info.icon = Some("https://example.com/icon.png".to_owned());
+    info.multiplier_display = Some("2.5x".to_owned());
+    info.performance = ModelPerformance {
+        response_latency_ms: Some(250),
+        tokens_per_second: Some(200),
+    };
+    info.context_window = ContextWindow {
+        max_input_tokens: 200_000,
+        max_output_tokens: Some(32_768),
+        output_vector_size: Some(1536),
+    };
+    info.allow_parameter_override = false;
 
     let req = CreateModelRequestV1 {
         provider_slug: "openai".into(),
@@ -1751,18 +1745,18 @@ fn model_create_active_model_additional_info_round_trip() {
     // `additional_info` is a HashMap<String, Value> that rides in its own JSONB
     // sub-object column. Verify it survives the write path intact.
     let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
-    let v = serde_json::to_value(&info).unwrap();
-    let mut v = v.as_object().cloned().unwrap();
-    v.insert(
-        "additional_info".to_owned(),
-        json!({
-            "internal_owner": "team-a",
-            "billing_code": "AI-12345",
-            "experiment_flag": true,
-            "priority": 7,
-        }),
-    );
-    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+    info.additional_info = HashMap::from([
+        (
+            "internal_owner".to_owned(),
+            serde_json::Value::String("team-a".to_owned()),
+        ),
+        (
+            "billing_code".to_owned(),
+            serde_json::Value::String("AI-12345".to_owned()),
+        ),
+        ("experiment_flag".to_owned(), serde_json::Value::Bool(true)),
+        ("priority".to_owned(), serde_json::Value::Number(7.into())),
+    ]);
 
     let req = CreateModelRequestV1 {
         provider_slug: "openai".into(),
@@ -1792,17 +1786,13 @@ fn model_create_active_model_default_parameters_round_trip() {
     // fields. Verify that the JSONB sub-object column carries those populated
     // values intact.
     let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
-    let v = serde_json::to_value(&info).unwrap();
-    let mut v = v.as_object().cloned().unwrap();
-    v.insert(
-        "default_parameters".to_owned(),
-        json!({
-            "temperature": 0.5,
-            "top_p": 0.9,
-            "max_output_tokens": 2048,
-        }),
-    );
-    info = serde_json::from_value(serde_json::Value::Object(v)).unwrap();
+    // Patch in distinct values for the populated default_parameters fields.
+    info.default_parameters = DefaultInferenceParametersV1 {
+        temperature: Some(0.5),
+        top_p: Some(0.9),
+        max_output_tokens: Some(2048),
+        ..DefaultInferenceParametersV1::default()
+    };
 
     let req = CreateModelRequestV1 {
         provider_slug: "openai".into(),

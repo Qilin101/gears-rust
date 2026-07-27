@@ -155,14 +155,14 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 - Modify: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] migrate `mapper_test.rs:105` from `serde_json::from_value` to direct `ModelInfoV1 { ... }` literal (or builder)
-- [ ] migrate `sea_orm_repo.rs:1355` `make_create_model_req` helper to construct `ModelInfoV1` directly
-- [ ] migrate `service.rs:1113, 1414, 2070` test helpers to direct construction
-- [ ] migrate `integration.rs:361` `make_create_model_req` to direct construction
-- [ ] update stale comment at `mapper_test.rs:17-20` ("all SDK types are #[non_exhaustive]") to reflect that the attribute is gone
-- [ ] update stale comment at `sea_orm_repo.rs:1282-1283` similarly
-- [ ] run full gear tests: `cargo test -p cf-gears-model-registry` — must pass
-- [ ] run integration tests: `cargo test -p cf-gears-model-registry --test integration` — must pass
+- [x] migrate `mapper_test.rs:105` from `serde_json::from_value` to direct `ModelInfoV1 { ... }` literal (or builder)
+- [x] migrate `sea_orm_repo.rs:1355` `make_create_model_req` helper to construct `ModelInfoV1` directly
+- [x] migrate `service.rs:1113, 1414, 2070` test helpers to direct construction
+- [x] migrate `integration.rs:361` `make_create_model_req` to direct construction
+- [x] update stale comment at `mapper_test.rs:17-20` ("all SDK types are #[non_exhaustive]") to reflect that the attribute is gone
+- [x] update stale comment at `sea_orm_repo.rs:1282-1283` similarly
+- [x] run full gear tests: `cargo test -p cf-gears-model-registry` — must pass
+- [x] run integration tests: `cargo test -p cf-gears-model-registry --test integration` — must pass
 
 ### Task 5: Verify SDK consumer crates still compile and pass
 
