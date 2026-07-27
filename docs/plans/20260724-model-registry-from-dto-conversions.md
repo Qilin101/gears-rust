@@ -169,9 +169,9 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 **Files:**
 - (no file changes — verification only)
 
-- [ ] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` — must succeed
-- [ ] run `cargo test -p cf-gears-llm-gateway-sdk` — must pass
-- [ ] run `cargo test -p cf-gears-llm-gateway-demo` — must pass
+- [x] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` — must succeed
+- [x] run `cargo test -p cf-gears-llm-gateway-sdk` — must pass
+- [x] run `cargo test -p cf-gears-llm-gateway-demo` — must pass
 
 ### Task 6: Workspace-wide verification
 
