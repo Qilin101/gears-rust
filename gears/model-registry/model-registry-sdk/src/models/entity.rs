@@ -45,7 +45,7 @@ impl ModelV1<serde_json::Value> {
     ///
     /// let model: ModelV1 = client.get_tenant_model(&ctx, "openai::gpt-4o").await?;
     /// let typed: ModelV1<OpenAiSettingsV1> = model.try_into_typed()?;
-    /// // now `typed.info.provider_settings.parameters.temperature` is typed
+    /// // now `typed.info.provider_settings.temperature` is typed
     /// ```
     ///
     /// # Errors

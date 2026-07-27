@@ -154,9 +154,11 @@ fn make_model_entity(
     canonical_id: &str,
     _info: Option<serde_json::Value>,
 ) -> entity::model::Model {
-    // Post-2026-07-24 fixture: the `info` column has been dropped, so the
-    // legacy `info: Option<serde_json::Value>` argument is now ignored. The
-    // fixture populates all 21 promoted columns (17 scalar + 5 JSONB
+    // The `_info` argument is retained for API compatibility with existing
+    // callers but is intentionally ignored: the `info` column was dropped in
+    // 2026-07-24, so per-test customizations must be applied to the returned
+    // entity via direct field assignment (e.g. `entity.vendor = Some(...)`).
+    // The fixture populates all 21 promoted columns (17 scalar + 5 JSONB
     // sub-objects) plus the 15 denormalized OData-filterable columns so any
     // test that builds an entity through this helper gets a fully-shaped
     // `models` row.

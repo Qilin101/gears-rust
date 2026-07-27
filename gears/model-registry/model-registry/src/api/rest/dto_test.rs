@@ -601,8 +601,8 @@ mod model_from_v1 {
         assert_eq!(dto.canonical_id, "openai::gpt-4o");
         assert_eq!(dto.lifecycle_status, "production");
         assert_eq!(dto.approval_status, "approved");
-        // info is re-serialized as JSON
-        assert!(dto.info.is_object());
+        // info is re-serialized as JSON — verify the polymorphic payload
+        // survives the SDK → DTO boundary intact.
         assert_eq!(dto.info["provider_settings"]["oagw_alias"], "openai-prod");
     }
 
