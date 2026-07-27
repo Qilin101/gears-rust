@@ -47,7 +47,6 @@ use crate::models::{
     properties = "gts_type,display_name,family,vendor,managed,architecture,format,supported_api,provider_model_id,capabilities,context_window,default_parameters"
 )]
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct ModelInfoV1<P: gts::GtsSchema = serde_json::Value> {
     // ── GTS schema identity ───────────────────────────────────────────
     /// Full GTS schema chain identifying this model's settings shape — e.g.

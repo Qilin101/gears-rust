@@ -109,14 +109,14 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 - Modify: `gears/model-registry/model-registry-sdk/src/models/info.rs`
 - Modify: `gears/model-registry/model-registry-sdk/src/models/common.rs`
 
-- [ ] remove `#[non_exhaustive]` from `ModelV1<P>` at entity.rs:23
-- [ ] remove `#[non_exhaustive]` from `ProviderV1` at entity.rs:79
-- [ ] remove `#[non_exhaustive]` from `ModelInfoV1<P>` at info.rs:50
-- [ ] remove `#[non_exhaustive]` from `ModelCapabilities` at common.rs:206
-- [ ] remove `#[non_exhaustive]` from `DisabledCapabilities` at common.rs:305
-- [ ] run `cargo build -p cf-gears-model-registry-sdk` — must compile (no external consumers construct these types via struct literal yet)
-- [ ] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` — verify consumers still compile
-- [ ] run SDK inline tests: `cargo test -p cf-gears-model-registry-sdk` — must pass
+- [x] remove `#[non_exhaustive]` from `ModelV1<P>` at entity.rs:23
+- [x] remove `#[non_exhaustive]` from `ProviderV1` at entity.rs:79
+- [x] remove `#[non_exhaustive]` from `ModelInfoV1<P>` at info.rs:50
+- [x] remove `#[non_exhaustive]` from `ModelCapabilities` at common.rs:206
+- [x] remove `#[non_exhaustive]` from `DisabledCapabilities` at common.rs:305
+- [x] run `cargo build -p cf-gears-model-registry-sdk` — must compile (no external consumers construct these types via struct literal yet)
+- [x] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` — verify consumers still compile
+- [x] run SDK inline tests: `cargo test -p cf-gears-model-registry-sdk` — must pass
 
 ### Task 2: Add `From` impls in `dto.rs`
 

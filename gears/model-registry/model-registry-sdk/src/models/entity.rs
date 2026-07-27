@@ -20,7 +20,6 @@ use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus
 /// provider settings ride as opaque JSON until the consumer narrows via
 /// [`ModelV1::try_into_typed`], which reads `info.gts_type` for dispatch.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub id: Uuid,
     /// Format: `{provider_slug}::{provider_model_id}`.
@@ -76,7 +75,6 @@ impl ModelV1<serde_json::Value> {
 
 /// A configured AI provider instance for a tenant.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ProviderV1 {
     pub id: Uuid,
     /// Human-readable identifier (immutable after creation).

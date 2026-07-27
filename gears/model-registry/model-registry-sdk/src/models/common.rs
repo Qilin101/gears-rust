@@ -203,7 +203,6 @@ pub struct MediaCapability {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-#[non_exhaustive]
 pub struct ModelCapabilities {
     /// Supports image/vision input.
     pub vision: MediaCapability,
@@ -302,7 +301,6 @@ pub struct DisabledWebSearchCapability {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-#[non_exhaustive]
 pub struct DisabledCapabilities {
     /// Image / vision input is disabled.
     pub vision: DisabledMediaCapability,
