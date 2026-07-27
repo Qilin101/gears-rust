@@ -135,17 +135,17 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/api/rest/handlers.rs`
 
-- [ ] replace lines 37-41 in `get_provider` with `Ok(Json(ProviderDto::from(provider)))`
-- [ ] replace lines 53-62 in `list_providers` with `.map(ProviderDto::from).collect::<Vec<_>>()`
-- [ ] replace lines 102-106 in `create_provider` with `let dto: ProviderDto = provider.into();`
-- [ ] replace lines 140-144 in `update_provider` with `let dto: ProviderDto = provider.into();`
-- [ ] replace lines 169-173 in `get_model` with `Ok(Json(ModelDto::from(model)))`
-- [ ] replace lines 185-194 in `list_models` with `.map(ModelDto::from).collect::<Vec<_>>()`
-- [ ] replace lines 259-263 in `create_model` with `let dto: ModelDto = model.into();`
-- [ ] replace lines 397-401 in `update_model` with `let dto: ModelDto = model.into();`
-- [ ] verify no remaining `serde_json::from_value(to_value(...))` patterns in `handlers.rs` (`grep -n "from_value.*to_value\|to_value.*from_value"`)
-- [ ] run `cargo build -p cf-gears-model-registry` — must compile
-- [ ] run full gear tests: `cargo test -p cf-gears-model-registry` — must pass
+- [x] replace lines 37-41 in `get_provider` with `Ok(Json(ProviderDto::from(provider)))`
+- [x] replace lines 53-62 in `list_providers` with `.map(ProviderDto::from).collect::<Vec<_>>()`
+- [x] replace lines 102-106 in `create_provider` with `let dto: ProviderDto = provider.into();`
+- [x] replace lines 140-144 in `update_provider` with `let dto: ProviderDto = provider.into();`
+- [x] replace lines 169-173 in `get_model` with `Ok(Json(ModelDto::from(model)))`
+- [x] replace lines 185-194 in `list_models` with `.map(ModelDto::from).collect::<Vec<_>>()`
+- [x] replace lines 259-263 in `create_model` with `let dto: ModelDto = model.into();`
+- [x] replace lines 397-401 in `update_model` with `let dto: ModelDto = model.into();`
+- [x] verify no remaining `serde_json::from_value(to_value(...))` patterns in `handlers.rs` (`grep -n "from_value.*to_value\|to_value.*from_value"`)
+- [x] run `cargo build -p cf-gears-model-registry` — must compile
+- [x] run full gear tests: `cargo test -p cf-gears-model-registry` — must pass
 
 ### Task 4: Migrate test helpers from JSON round-trip to struct literals
 

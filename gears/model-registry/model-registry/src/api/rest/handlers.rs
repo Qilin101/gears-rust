@@ -34,12 +34,7 @@ pub async fn get_provider(
     Path(id): Path<Uuid>,
 ) -> ApiResult<JsonBody<ProviderDto>> {
     let provider = svc.get_provider(&ctx, id).await?;
-    let dto: ProviderDto =
-        serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
-            CanonicalError::internal(format!("provider serialization: {e}")).create()
-        })?)
-        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
-    Ok(Json(dto))
+    Ok(Json(ProviderDto::from(provider)))
 }
 
 /// `GET /model-registry/v1/providers`
@@ -50,16 +45,7 @@ pub async fn list_providers(
 ) -> ApiResult<JsonBody<ProviderListDto>> {
     let page = svc.list_providers(&ctx, query).await?;
 
-    let items: Vec<ProviderDto> = page
-        .items
-        .into_iter()
-        .map(|p| {
-            serde_json::from_value(serde_json::to_value(p).map_err(|e| {
-                CanonicalError::internal(format!("provider serialization: {e}")).create()
-            })?)
-            .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())
-        })
-        .collect::<Result<Vec<_>, CanonicalError>>()?;
+    let items: Vec<ProviderDto> = page.items.into_iter().map(ProviderDto::from).collect();
 
     Ok(Json(ProviderListDto {
         items,
@@ -99,11 +85,7 @@ pub async fn create_provider(
     };
 
     let provider = svc.create_provider(&ctx, &req.build()).await?;
-    let dto: ProviderDto =
-        serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
-            CanonicalError::internal(format!("provider serialization: {e}")).create()
-        })?)
-        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
+    let dto: ProviderDto = provider.into();
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
@@ -137,11 +119,7 @@ pub async fn update_provider(
     };
 
     let provider = svc.update_provider(&ctx, id, &sdk_req).await?;
-    let dto: ProviderDto =
-        serde_json::from_value(serde_json::to_value(provider).map_err(|e| {
-            CanonicalError::internal(format!("provider serialization: {e}")).create()
-        })?)
-        .map_err(|e| CanonicalError::internal(format!("provider DTO conversion: {e}")).create())?;
+    let dto: ProviderDto = provider.into();
     Ok(Json(dto))
 }
 
@@ -166,12 +144,7 @@ pub async fn get_model(
     Path(canonical_id): Path<String>,
 ) -> ApiResult<JsonBody<ModelDto>> {
     let model = svc.get_tenant_model(&ctx, &canonical_id).await?;
-    let dto: ModelDto = serde_json::from_value(
-        serde_json::to_value(model)
-            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
-    )
-    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
-    Ok(Json(dto))
+    Ok(Json(ModelDto::from(model)))
 }
 
 /// `GET /model-registry/v1/models`
@@ -182,16 +155,7 @@ pub async fn list_models(
 ) -> ApiResult<JsonBody<ModelListDto>> {
     let page = svc.list_tenant_models(&ctx, query).await?;
 
-    let items: Vec<ModelDto> = page
-        .items
-        .into_iter()
-        .map(|m| {
-            serde_json::from_value(serde_json::to_value(m).map_err(|e| {
-                CanonicalError::internal(format!("model serialization: {e}")).create()
-            })?)
-            .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())
-        })
-        .collect::<Result<Vec<_>, CanonicalError>>()?;
+    let items: Vec<ModelDto> = page.items.into_iter().map(ModelDto::from).collect();
 
     Ok(Json(ModelListDto {
         items,
@@ -256,11 +220,7 @@ pub async fn create_model(
     };
 
     let model = svc.create_model(&ctx, &req).await?;
-    let dto: ModelDto = serde_json::from_value(
-        serde_json::to_value(model)
-            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
-    )
-    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
+    let dto: ModelDto = model.into();
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
@@ -394,11 +354,7 @@ pub async fn update_model(
     };
 
     let model = svc.update_model(&ctx, &canonical_id, &sdk_req).await?;
-    let dto: ModelDto = serde_json::from_value(
-        serde_json::to_value(model)
-            .map_err(|e| CanonicalError::internal(format!("model serialization: {e}")).create())?,
-    )
-    .map_err(|e| CanonicalError::internal(format!("model DTO conversion: {e}")).create())?;
+    let dto: ModelDto = model.into();
     Ok(Json(dto))
 }
 
