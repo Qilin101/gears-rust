@@ -198,8 +198,8 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 
 ### Task 8: Update documentation
 
-- [ ] if a new pattern emerged (a documented rationale for why this gear's structs are NOT non_exhaustive despite other gears potentially using the attribute), update `docs/toolkit_unified_system/04_rest_operation_builder.md` — otherwise no doc changes needed
-- [ ] move this plan to `docs/plans/completed/` with `mkdir -p docs/plans/completed && git mv docs/plans/20260724-model-registry-from-dto-conversions.md docs/plans/completed/`
+- [x] no new pattern emerged — `docs/toolkit_unified_system/04_rest_operation_builder.md:182-197` already documents `UserDto::from(user)` as the canonical idiom, and the change brings model-registry into alignment with that. The enums stay `#[non_exhaustive]`, so no rationale update is needed.
+- [x] moved this plan to `docs/plans/completed/` with `mkdir -p docs/plans/completed && git mv docs/plans/20260724-model-registry-from-dto-conversions.md docs/plans/completed/`
 
 ## Post-Completion
 
