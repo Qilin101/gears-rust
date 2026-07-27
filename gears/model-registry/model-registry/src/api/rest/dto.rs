@@ -6,19 +6,18 @@
 //!
 //! ## Construction from SDK types
 //!
-//! SDK types (`ProviderV1`, `ModelV1`) are `#[non_exhaustive]` — they cannot
-//! be constructed with struct literals outside the SDK crate. For DTO
-//! conversions we use `serde_json` roundtripping:
-//!
-//! ```rust,ignore
-//! let dto: ProviderDto = serde_json::from_value(serde_json::to_value(provider)?)?;
-//! ```
-//!
-//! This is safe because the DTO fields are a strict subset of the SDK fields,
-//! and both sides derive `serde::Serialize` + `serde::Deserialize`.
+//! SDK types (`ProviderV1`, `ModelV1`) are converted to their DTO counterparts
+//! via `impl From<…> for …Dto` (see [`From<ProviderV1> for ProviderDto`] and
+//! [`From<ModelV1> for ModelDto`]). Handlers call `.into()` (or
+//! `Type::from(value)`) on the SDK return value to obtain the DTO — no
+//! `serde_json` round-tripping is involved.
 
+use model_registry_sdk::models::{
+    ApprovalStatus, LifecycleStatus, ModelInfoV1, ModelV1, ProviderStatus, ProviderV1,
+};
 use serde_json::Value as JsonValue;
 use toolkit_macros::api_dto;
+use tracing;
 use uuid::Uuid;
 
 /// Serde deserialization helper for `Option<Option<T>>` PATCH fields.
@@ -130,6 +129,81 @@ pub struct ProviderListDto {
     pub page_info: PageInfoDto,
 }
 
+/// Map a [`ProviderStatus`] to its lowercase wire string.
+///
+/// Kept local to the DTO layer (mirrors the mapper in `infra/storage/`) so
+/// the conversion is local and obvious. The wildcard branch covers the
+/// `#[non_exhaustive]` enum — unknown variants fall back to `"active"`.
+#[must_use]
+fn provider_status_to_str(status: ProviderStatus) -> String {
+    match status {
+        ProviderStatus::Active => "active".to_owned(),
+        ProviderStatus::Disabled => "disabled".to_owned(),
+        _ => {
+            tracing::error!(
+                ?status,
+                "unknown ProviderStatus variant, defaulting to active"
+            );
+            "active".to_owned()
+        }
+    }
+}
+
+/// Map a [`LifecycleStatus`] to its lowercase wire string.
+#[must_use]
+fn lifecycle_status_to_str(status: LifecycleStatus) -> String {
+    match status {
+        LifecycleStatus::Production => "production".to_owned(),
+        LifecycleStatus::Preview => "preview".to_owned(),
+        LifecycleStatus::Experimental => "experimental".to_owned(),
+        LifecycleStatus::Deprecated => "deprecated".to_owned(),
+        LifecycleStatus::Sunset => "sunset".to_owned(),
+        _ => {
+            tracing::error!(
+                ?status,
+                "unknown LifecycleStatus variant, defaulting to production"
+            );
+            "production".to_owned()
+        }
+    }
+}
+
+/// Map an [`ApprovalStatus`] to its lowercase wire string.
+#[must_use]
+fn approval_status_to_str(status: ApprovalStatus) -> String {
+    match status {
+        ApprovalStatus::Pending => "pending".to_owned(),
+        ApprovalStatus::Approved => "approved".to_owned(),
+        ApprovalStatus::Rejected => "rejected".to_owned(),
+        ApprovalStatus::Revoked => "revoked".to_owned(),
+        _ => {
+            tracing::error!(
+                ?status,
+                "unknown ApprovalStatus variant, defaulting to pending"
+            );
+            "pending".to_owned()
+        }
+    }
+}
+
+impl From<ProviderV1> for ProviderDto {
+    fn from(source: ProviderV1) -> Self {
+        Self {
+            id: source.id,
+            slug: source.slug,
+            name: source.name,
+            gts_type: source.gts_type.to_string(),
+            status: provider_status_to_str(source.status),
+            managed: source.managed,
+            metadata: source.metadata,
+            discovery_enabled: source.discovery_enabled,
+            discovery_interval_seconds: source.discovery_interval_seconds,
+            created_at: source.created_at.to_rfc3339(),
+            updated_at: source.updated_at.to_rfc3339(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Model DTOs
 // ---------------------------------------------------------------------------
@@ -143,6 +217,36 @@ pub struct ModelDto {
     pub lifecycle_status: String,
     pub approval_status: String,
     pub info: JsonValue,
+}
+
+/// Re-serialize `ModelInfoV1<P>` into the `JsonValue` shape carried by
+/// `ModelDto::info`.
+///
+/// `ModelInfoV1` already derives `Serialize`, so this is a pure passthrough —
+/// the only failure mode is a serialization bug (programming error). Falling
+/// back to `JsonValue::Null` keeps the `From` impl total without surfacing
+/// an error path that cannot actually occur at runtime.
+#[must_use]
+pub fn model_info_to_json<P>(info: &ModelInfoV1<P>) -> JsonValue
+where
+    P: gts::GtsSchema + gts::GtsSerialize,
+{
+    serde_json::to_value(info).unwrap_or(JsonValue::Null)
+}
+
+impl<P> From<ModelV1<P>> for ModelDto
+where
+    P: gts::GtsSchema + gts::GtsSerialize,
+{
+    fn from(source: ModelV1<P>) -> Self {
+        Self {
+            id: source.id,
+            canonical_id: source.canonical_id,
+            lifecycle_status: lifecycle_status_to_str(source.lifecycle_status),
+            approval_status: approval_status_to_str(source.approval_status),
+            info: model_info_to_json(&source.info),
+        }
+    }
 }
 
 /// Request body for `POST /model-registry/v1/models`.

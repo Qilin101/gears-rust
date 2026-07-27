@@ -123,12 +123,12 @@ Recommended approach: keep the mapping local to the `From` impl using `match`, m
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/api/rest/dto.rs`
 
-- [ ] add `impl From<ProviderV1> for ProviderDto` near the `ProviderDto` definition — maps `status: ProviderStatus` → `"active"|"disabled"` (with `_ =>` wildcard since the enum is `#[non_exhaustive]`), `created_at`/`updated_at` `DateTime<Utc>` → `String` via `.to_rfc3339()`, `metadata` passthrough
-- [ ] add `impl From<ModelV1> for ModelDto` — maps `lifecycle_status: LifecycleStatus` and `approval_status: ApprovalStatus` to strings with `match`+wildcard, `info: ModelInfoV1<P>` → `info: JsonValue` via `serde_json::to_value(&source.info).unwrap_or(JsonValue::Null)`
-- [ ] update doc comment at dto.rs:7-18 to describe the new `From`-based pattern and remove the round-trip explanation
-- [ ] write unit tests for `From<ProviderV1> for ProviderDto`: covers happy path + status string mapping (each `ProviderStatus` variant)
-- [ ] write unit tests for `From<ModelV1> for ModelDto`: covers happy path + lifecycle/approval string mapping (each variant) + info serialization
-- [ ] run `cargo test -p cf-gears-model-registry --lib api::rest::dto` — must pass
+- [x] add `impl From<ProviderV1> for ProviderDto` near the `ProviderDto` definition — maps `status: ProviderStatus` → `"active"|"disabled"` (with `_ =>` wildcard since the enum is `#[non_exhaustive]`), `created_at`/`updated_at` `DateTime<Utc>` → `String` via `.to_rfc3339()`, `metadata` passthrough
+- [x] add `impl From<ModelV1> for ModelDto` — maps `lifecycle_status: LifecycleStatus` and `approval_status: ApprovalStatus` to strings with `match`+wildcard, `info: ModelInfoV1<P>` → `info: JsonValue` via `serde_json::to_value(&source.info).unwrap_or(JsonValue::Null)`
+- [x] update doc comment at dto.rs:7-18 to describe the new `From`-based pattern and remove the round-trip explanation
+- [x] write unit tests for `From<ProviderV1> for ProviderDto`: covers happy path + status string mapping (each `ProviderStatus` variant)
+- [x] write unit tests for `From<ModelV1> for ModelDto`: covers happy path + lifecycle/approval string mapping (each variant) + info serialization
+- [x] run `cargo test -p cf-gears-model-registry --lib api::rest::dto` — must pass
 
 ### Task 3: Replace round-trip sites in `handlers.rs`
 

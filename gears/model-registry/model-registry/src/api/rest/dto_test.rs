@@ -401,3 +401,283 @@ fn page_info_omits_absent_cursors() {
     assert!(json.get("prev_cursor").is_none());
     assert_eq!(json["limit"], 10);
 }
+
+// ---------------------------------------------------------------------------
+// From<ProviderV1> for ProviderDto
+// ---------------------------------------------------------------------------
+
+mod provider_from_v1 {
+    use chrono::{TimeZone, Utc};
+    use model_registry_sdk::models::{ProviderStatus, ProviderV1};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::super::dto::ProviderDto;
+
+    fn sample_v1(status: ProviderStatus) -> ProviderV1 {
+        ProviderV1 {
+            id: Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
+            slug: "openai".into(),
+            name: "OpenAI".into(),
+            gts_type: gts::GtsTypeId::new(
+                "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~",
+            ),
+            status,
+            managed: true,
+            metadata: Some(json!({"region": "us-east-1"})),
+            discovery_enabled: true,
+            discovery_interval_seconds: Some(3600),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 6, 15, 12, 30, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn maps_all_fields_when_active() {
+        let v1 = sample_v1(ProviderStatus::Active);
+        let dto: ProviderDto = v1.clone().into();
+
+        assert_eq!(dto.id, v1.id);
+        assert_eq!(dto.slug, "openai");
+        assert_eq!(dto.name, "OpenAI");
+        assert_eq!(
+            dto.gts_type,
+            "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"
+        );
+        assert_eq!(dto.status, "active");
+        assert!(dto.managed);
+        assert_eq!(dto.metadata.as_ref(), Some(&json!({"region": "us-east-1"})));
+        assert!(dto.discovery_enabled);
+        assert_eq!(dto.discovery_interval_seconds, Some(3600));
+        assert_eq!(dto.created_at, "2026-01-01T00:00:00+00:00");
+        assert_eq!(dto.updated_at, "2026-06-15T12:30:00+00:00");
+    }
+
+    #[test]
+    fn disabled_status_maps_to_disabled_string() {
+        let v1 = sample_v1(ProviderStatus::Disabled);
+        let dto: ProviderDto = v1.into();
+        assert_eq!(dto.status, "disabled");
+    }
+
+    #[test]
+    fn omitted_optional_fields_pass_through_as_none() {
+        let mut v1 = sample_v1(ProviderStatus::Active);
+        v1.metadata = None;
+        v1.discovery_interval_seconds = None;
+        let dto: ProviderDto = v1.into();
+        assert!(dto.metadata.is_none());
+        assert!(dto.discovery_interval_seconds.is_none());
+    }
+
+    #[test]
+    fn serialized_wire_format_matches_dto_direct_construction() {
+        // Round-trip the From impl against a hand-built ProviderDto and confirm
+        // both serialize to identical JSON. This is the wire-format invariant
+        // we depend on after dropping the serde_json round-trip in handlers.
+        let v1 = sample_v1(ProviderStatus::Active);
+        let from_impl: ProviderDto = v1.clone().into();
+
+        let manual = ProviderDto {
+            id: v1.id,
+            slug: v1.slug.clone(),
+            name: v1.name.clone(),
+            gts_type: v1.gts_type.to_string(),
+            status: "active".into(),
+            managed: v1.managed,
+            metadata: v1.metadata.clone(),
+            discovery_enabled: v1.discovery_enabled,
+            discovery_interval_seconds: v1.discovery_interval_seconds,
+            created_at: v1.created_at.to_rfc3339(),
+            updated_at: v1.updated_at.to_rfc3339(),
+        };
+
+        let from_json = serde_json::to_value(&from_impl).expect("serialize from_impl");
+        let manual_json = serde_json::to_value(&manual).expect("serialize manual");
+        assert_eq!(from_json, manual_json);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// From<ModelV1> for ModelDto
+// ---------------------------------------------------------------------------
+
+mod model_from_v1 {
+    use std::collections::{HashMap, HashSet};
+
+    use gts::GtsSchema;
+    use model_registry_sdk::models::{
+        ApprovalStatus, ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities,
+        LifecycleStatus, MediaCapability, ModelCapabilities, ModelPerformance, ModelV1,
+        OpenAiSettingsV1, ReasoningCapability, SupportedApi, WebSearchCapability,
+    };
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::super::dto::ModelDto;
+
+    fn empty_capabilities() -> ModelCapabilities {
+        ModelCapabilities {
+            vision: MediaCapability::default(),
+            reasoning: ReasoningCapability {
+                effort: false,
+                toggle: false,
+                resume: false,
+                budget: false,
+            },
+            function_calling: false,
+            response_schema: false,
+            streaming: false,
+            file_input: MediaCapability::default(),
+            image_generation: MediaCapability::default(),
+            audio_input: MediaCapability::default(),
+            audio_output: MediaCapability::default(),
+            code_interpreter: false,
+            web_search: WebSearchCapability {
+                enabled: false,
+                allowed_domains: false,
+                excluded_domains: false,
+            },
+        }
+    }
+
+    fn sample_v1(
+        lifecycle: LifecycleStatus,
+        approval: ApprovalStatus,
+        info_payload: serde_json::Value,
+    ) -> ModelV1 {
+        ModelV1 {
+            id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
+            canonical_id: "openai::gpt-4o".into(),
+            lifecycle_status: lifecycle,
+            approval_status: approval,
+            info: model_registry_sdk::models::ModelInfoV1 {
+                gts_type: gts::GtsTypeId::new(OpenAiSettingsV1::TYPE_ID),
+                display_name: "GPT-4o".into(),
+                description: None,
+                family: None,
+                vendor: None,
+                managed: false,
+                architecture: None,
+                size_bytes: None,
+                format: None,
+                region: None,
+                hosted_by: None,
+                last_release_at: None,
+                reasoning_level: None,
+                version: None,
+                sort_order: None,
+                icon: None,
+                multiplier_display: None,
+                performance: ModelPerformance {
+                    response_latency_ms: None,
+                    tokens_per_second: None,
+                },
+                additional_info: HashMap::new(),
+                supported_api: HashSet::from([SupportedApi::Completion]),
+                provider_model_id: "gpt-4o".into(),
+                capabilities: empty_capabilities(),
+                disabled_capabilities: DisabledCapabilities::none(),
+                context_window: ContextWindow {
+                    max_input_tokens: 8192,
+                    max_output_tokens: Some(4096),
+                    output_vector_size: None,
+                },
+                default_parameters: DefaultInferenceParametersV1::default(),
+                allow_parameter_override: false,
+                allow_extra_params: Vec::new(),
+                provider_settings: info_payload,
+            },
+        }
+    }
+
+    #[test]
+    fn maps_identity_and_status_strings() {
+        let v1 = sample_v1(
+            LifecycleStatus::Production,
+            ApprovalStatus::Approved,
+            json!({"oagw_alias": "openai-prod"}),
+        );
+        let dto: ModelDto = v1.into();
+
+        assert_eq!(dto.canonical_id, "openai::gpt-4o");
+        assert_eq!(dto.lifecycle_status, "production");
+        assert_eq!(dto.approval_status, "approved");
+        // info is re-serialized as JSON
+        assert!(dto.info.is_object());
+        assert_eq!(
+            dto.info["provider_settings"]["oagw_alias"],
+            "openai-prod"
+        );
+    }
+
+    #[test]
+    fn each_lifecycle_variant_maps_to_correct_string() {
+        let cases = [
+            (LifecycleStatus::Production, "production"),
+            (LifecycleStatus::Preview, "preview"),
+            (LifecycleStatus::Experimental, "experimental"),
+            (LifecycleStatus::Deprecated, "deprecated"),
+            (LifecycleStatus::Sunset, "sunset"),
+        ];
+        for (variant, expected) in cases {
+            let v1 = sample_v1(variant, ApprovalStatus::Approved, json!({}));
+            let dto: ModelDto = v1.into();
+            assert_eq!(dto.lifecycle_status, expected, "variant {variant:?}");
+        }
+    }
+
+    #[test]
+    fn each_approval_variant_maps_to_correct_string() {
+        let cases = [
+            (ApprovalStatus::Pending, "pending"),
+            (ApprovalStatus::Approved, "approved"),
+            (ApprovalStatus::Rejected, "rejected"),
+            (ApprovalStatus::Revoked, "revoked"),
+        ];
+        for (variant, expected) in cases {
+            let v1 = sample_v1(LifecycleStatus::Production, variant, json!({}));
+            let dto: ModelDto = v1.into();
+            assert_eq!(dto.approval_status, expected, "variant {variant:?}");
+        }
+    }
+
+    #[test]
+    fn info_payload_round_trips_through_serde_json() {
+        let v1 = sample_v1(
+            LifecycleStatus::Production,
+            ApprovalStatus::Approved,
+            json!({"oagw_alias": "openai-prod", "endpoint_kind": "chat_completions"}),
+        );
+        let dto: ModelDto = v1.into();
+
+        // The info field should carry the full ModelInfoV1 JSON, including
+        // the typed provider_settings payload.
+        assert_eq!(
+            dto.info["display_name"],
+            "GPT-4o"
+        );
+        assert_eq!(dto.info["provider_model_id"], "gpt-4o");
+        assert_eq!(
+            dto.info["supported_api"],
+            json!(["completion"])
+        );
+        assert_eq!(
+            dto.info["provider_settings"]["endpoint_kind"],
+            "chat_completions"
+        );
+    }
+
+    #[test]
+    fn timestamp_field_defaults_when_unset() {
+        // Sanity check: if a model has no last_release_at, it serializes as null
+        // (modeled as `Option<DateTime<Utc>>`).
+        let v1 = sample_v1(
+            LifecycleStatus::Production,
+            ApprovalStatus::Approved,
+            json!({}),
+        );
+        let dto: ModelDto = v1.into();
+        assert!(dto.info["last_release_at"].is_null());
+    }
+}
