@@ -1,7 +1,8 @@
 //! End-to-end integration tests for the Model Registry gear.
 //!
-//! These tests construct a full service stack (real `SeaOrmRepository` over
-//! in-memory `SQLite`, real `InMemoryCache`, real `PolicyEnforcer` backed by a
+//! These tests construct a full service stack (real `ProviderRepositoryImpl` /
+//! `ModelRepositoryImpl` over in-memory `SQLite`, real `InMemoryCache`, real
+//! `PolicyEnforcer` backed by a
 //! mock `AuthZResolverClient`, and configurable mock `TenantResolverClient`)
 //! and drive the complete provider→model→approval→soft-delete lifecycle.
 //!
@@ -35,7 +36,8 @@ use model_registry::domain::error::DomainError;
 use model_registry::domain::repo::{ModelRepository, ProviderRepository};
 use model_registry::domain::service::Service;
 use model_registry::infra::storage::migrations::Migrator;
-use model_registry::infra::storage::sea_orm_repo::SeaOrmRepository;
+use model_registry::infra::storage::model_repo::ModelRepositoryImpl;
+use model_registry::infra::storage::provider_repo::ProviderRepositoryImpl;
 use model_registry::{
     ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus, ModelV1,
     UpdateModelRequestV1, UpdateProviderRequestV1,
@@ -384,12 +386,12 @@ fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> Create
 fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
-) -> Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache> {
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
     let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
     Service::new(
         Arc::new(db),
-        Arc::new(SeaOrmRepository::new()),
-        Arc::new(SeaOrmRepository::new()),
+        Arc::new(ProviderRepositoryImpl::new()),
+        Arc::new(ModelRepositoryImpl::new()),
         Arc::new(InMemoryCache::new()),
         Arc::new(tenant_resolver),
         enforcer,
@@ -400,7 +402,7 @@ fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
 /// Create a provider in the given tenant via the repository directly (bypassing
 /// the service/authz layer for test setup purposes).
 async fn create_provider_direct(
-    repo: &SeaOrmRepository,
+    repo: &ProviderRepositoryImpl,
     conn: &impl DBRunner,
     tenant_id: Uuid,
     slug: &str,
@@ -420,7 +422,7 @@ async fn create_provider_direct(
 
 /// Create a model in the given tenant via the repository directly.
 async fn create_model_direct(
-    repo: &SeaOrmRepository,
+    repo: &ModelRepositoryImpl,
     conn: &impl DBRunner,
     tenant_id: Uuid,
     provider_slug: &str,
@@ -640,13 +642,14 @@ async fn tenant_isolation() {
 async fn child_inherits_provider_and_model_from_parent() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let repo = SeaOrmRepository::new();
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
 
     // Create provider and model in the parent tenant (via direct repo calls
     // to isolate from service-layer cache interactions).
     let (provider_id, provider_slug) =
-        create_provider_direct(&repo, &conn, parent_tenant(), "openai").await;
-    create_model_direct(&repo, &conn, parent_tenant(), &provider_slug, "gpt-4o").await;
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, parent_tenant(), &provider_slug, "gpt-4o").await;
 
     // Child tenant uses the service with the ancestor-chain resolver.
     let service = build_service(db, OneAncestorResolver);
@@ -710,17 +713,18 @@ async fn child_inherits_provider_and_model_from_parent() {
 async fn child_shadows_parent_by_same_canonical_id() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let repo = SeaOrmRepository::new();
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
 
     // Create provider and model in the parent tenant.
     let (_parent_provider_id, parent_slug) =
-        create_provider_direct(&repo, &conn, parent_tenant(), "openai").await;
-    create_model_direct(&repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
 
     // Create the SAME provider slug AND model canonical_id in the child tenant.
     let (_child_provider_id, child_slug) =
-        create_provider_direct(&repo, &conn, child_tenant(), "openai").await;
-    create_model_direct(&repo, &conn, child_tenant(), &child_slug, "gpt-4o").await;
+        create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, child_tenant(), &child_slug, "gpt-4o").await;
 
     let service = build_service(db, OneAncestorResolver);
     let ctx = security_context(child_tenant());
@@ -751,13 +755,14 @@ async fn cache_first_get_returns_cached_model() {
     // mutations after the service is built (Arc<Db> behind the scenes).
     let db = setup_db().await;
     let db2 = db.clone();
-    let repo = SeaOrmRepository::new();
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
 
     // Create data directly via repo connection.
     {
         let conn = db2.conn().expect("db connection");
-        let (_pid, slug) = create_provider_direct(&repo, &conn, tenant_a(), "openai").await;
-        let _original = create_model_direct(&repo, &conn, tenant_a(), &slug, "gpt-4o").await;
+        let (_pid, slug) = create_provider_direct(&provider_repo, &conn, tenant_a(), "openai").await;
+        let _original = create_model_direct(&model_repo, &conn, tenant_a(), &slug, "gpt-4o").await;
     }
 
     // Build service (consumes original db, stored in Arc inside).
@@ -776,7 +781,7 @@ async fn cache_first_get_returns_cached_model() {
     // We use the cloned DBProvider to get a fresh connection.
     let conn2 = db2.conn().expect("db connection");
     ModelRepository::update(
-        &repo,
+        &model_repo,
         &conn2,
         &scope_for(tenant_a()),
         "openai::gpt-4o",

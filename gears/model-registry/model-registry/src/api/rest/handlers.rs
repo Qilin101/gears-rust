@@ -18,10 +18,11 @@ use super::dto::{
 use super::error::ModelRegistryResourceError;
 use crate::domain::cache::InMemoryCache;
 use crate::domain::service::Service;
-use crate::infra::storage::sea_orm_repo::SeaOrmRepository;
+use crate::infra::storage::model_repo::ModelRepositoryImpl;
+use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
 /// Concrete service type used by all handlers.
-type ConcreteService = Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache>;
+type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Provider handlers

@@ -1,6 +1,6 @@
 # Implement Model Registry Gear (P1)
 
-> **Merged plan.** This file consolidates three incremental plans into the final
+> **Merged plan.** This file consolidates four incremental plans into the final
 > shape of the work:
 > - `20260717-implement-model-registry-gear` — original P1 implementation
 > - `20260724-drop-models-info-jsonb` — dropped the `models.info` JSONB column and
@@ -8,6 +8,8 @@
 > - `20260724-model-registry-from-dto-conversions` — dropped `#[non_exhaustive]`
 >   from the SDK entity structs and replaced the handler serde round-trips with
 >   `From` impls
+> - `20260727-split-sea-orm-repo` — split `SeaOrmRepository` into per-trait
+>   `ProviderRepositoryImpl` / `ModelRepositoryImpl` (Task 22 below)
 >
 > Everything below describes the **final** design, not the intermediate states.
 
@@ -253,24 +255,28 @@ REST handlers convert SDK entities to DTOs with plain `From` impls — no serde 
 ### Task 8: SeaORM repository — providers CRUD (secure)
 
 **Files:**
-- Create: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
+- Create: `gears/model-registry/model-registry/src/infra/storage/provider_repo.rs`
 
-- [x] implement `ProviderRepository` for `SeaOrmRepository` using `SecureConn`/`AccessScope` (no raw `all/one/exec` — respect clippy disallowed-methods): get by id, list with OData, create (unique-slug conflict → `ProviderConflict`), update (PATCH; slug immutable), delete
+- [x] implement `ProviderRepository` for `ProviderRepositoryImpl` using `SecureConn`/`AccessScope` (no raw `all/one/exec` — respect clippy disallowed-methods): get by id, list with OData, create (unique-slug conflict → `ProviderConflict`), update (PATCH; slug immutable), delete
 - [x] enforce tenant scoping on every query via `AccessScope`
 - [x] write integration tests (SQLite) for provider create/get/list(OData)/update/delete + slug-conflict + tenant-isolation (cross-tenant not visible)
 - [x] run tests — must pass before next task
 
+> **Note (2026-07-27):** the original implementation in `sea_orm_repo.rs` was split per trait — see Task 22 for the follow-up refactor. `ProviderRepositoryImpl` now lives in its own file.
+
 ### Task 9: SeaORM repository — models CRUD, OData list, approvals
 
 **Files:**
-- Modify: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
+- Create: `gears/model-registry/model-registry/src/infra/storage/model_repo.rs`
 
-- [x] implement `ModelRepository` for `SeaOrmRepository`: get_by_canonical, list with OData (filtering entirely on `models` columns — no join), create (derive canonical_id; unique conflict), update (PATCH; immutable identity fields), soft-delete (set `lifecycle_status=deprecated`, `deprecated_at`)
+- [x] implement `ModelRepository` for `ModelRepositoryImpl`: get_by_canonical, list with OData (filtering entirely on `models` columns — no join), create (derive canonical_id; unique conflict), update (PATCH; immutable identity fields), soft-delete (set `lifecycle_status=deprecated`, `deprecated_at`)
 - [x] implement approval read/write (`get_approval`, `set_approval`, `delete_approval`) against `model_approvals` **and keep the denormalized `models.approval_status` column in sync** on every approval write (single transaction)
 - [x] resolve `approval_status` on model reads from the `models` column (default `Pending`); exclude deprecated from default list
 - [x] write integration tests (SQLite): model CRUD, OData `$filter` on `lifecycle_status`/promoted columns/`approval_status`, `$top`/`$skip`, soft-delete hiding, approval read/write/default, tenant isolation
 - [x] build test fixtures (`make_create_model_req`) with struct literals rather than JSON round-trips
 - [x] run tests — must pass before next task
+
+> **Note (2026-07-27):** the original implementation in `sea_orm_repo.rs` was split per trait — see Task 22 for the follow-up refactor. `ModelRepositoryImpl` now lives in its own file.
 
 ### Task 10: CacheService trait and InMemoryCache backend
 
@@ -415,6 +421,52 @@ REST handlers convert SDK entities to DTOs with plain `From` impls — no serde 
 - [x] update `CLAUDE.md` with the reusable patterns that emerged: "OData Filtering Requires Real Columns" (now strictly followed — no `info` JSONB at all) and "Integration Tests with SQLite + Mocked Clients"
 - [x] move this plan to `docs/plans/completed/`
 
+### Task 22: Split `SeaOrmRepository` into per-trait repository implementations (Parnas refactor)
+
+> **Added 2026-07-27.** Follow-up to Tasks 8 + 9. The previous implementation
+> co-located both repository traits on a single zero-state unit struct
+> (`SeaOrmRepository`) in one 2139-line file. This task gives each trait its
+> own dedicated, single-responsibility implementation type and file.
+
+**Files:**
+- Create: `gears/model-registry/model-registry/src/infra/storage/provider_repo.rs`
+- Create: `gears/model-registry/model-registry/src/infra/storage/model_repo.rs`
+- Create: `gears/model-registry/model-registry/src/infra/storage/error_mapping.rs`
+- Delete: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
+- Modify: `gears/model-registry/model-registry/src/infra/storage/mod.rs`
+- Modify: `gears/model-registry/model-registry/src/gear.rs`
+- Modify: `gears/model-registry/model-registry/src/api/rest/handlers.rs`
+- Modify: `gears/model-registry/model-registry/src/api/rest/routes.rs`
+- Modify: `gears/model-registry/model-registry/src/domain/service.rs` (test module only)
+- Modify: `gears/model-registry/model-registry/tests/integration.rs`
+
+- [x] create `ProviderRepositoryImpl` (zero-state unit struct) in `provider_repo.rs` implementing `ProviderRepository`. Copy the impl block from the old `sea_orm_repo.rs` unchanged.
+- [x] create `ModelRepositoryImpl` (zero-state unit struct) in `model_repo.rs` implementing `ModelRepository`. Copy the impl block unchanged. Move the file-private helpers `filter_references_lifecycle_status`, `approval_status_to_string`, `approval_status_from_string` into this file.
+- [x] create `error_mapping.rs` with `pub(super) fn is_fk_violation(&DbErr) -> bool` and `pub(super) fn map_scope_error(ScopeError) -> DomainError`. Both helpers are used by every method in both impls, so they need a single home — `pub(super)` keeps them scoped to `infra::storage`. Do **not** expose them outside the storage layer.
+- [x] split the inline `mod tests` block (originally `sea_orm_repo.rs:628-2139`, 1500+ lines covering both traits) between `provider_repo::tests` (owns `setup_provider`, `test_tenant`, `other_tenant`, `scope_for`, `make_create_req`, `make_full_create_req`) and `model_repo::tests` (owns a duplicated copy of the four DB-setup helpers, plus `create_test_provider`, `make_create_model_req`, `create_test_model`). Add a one-line comment at the top of `model_repo::tests` flagging the intentional duplication.
+- [x] update `infra/storage/mod.rs`: replace `pub mod sea_orm_repo;` with `pub mod error_mapping;`, `pub mod model_repo;`, `pub mod provider_repo;`.
+- [x] delete `sea_orm_repo.rs`.
+- [x] update `gear.rs`: replace the single `use … SeaOrmRepository;` with two imports; change `type ConcreteService = Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache>;` to `Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>`; update the two `Arc::new(SeaOrmRepository::new())` calls in `init`.
+- [x] update `api/rest/handlers.rs` and `api/rest/routes.rs` with the same import + type-alias change (preserve `type` vs `pub type` visibility).
+- [x] update `tests/integration.rs`: replace the import; change `build_service` return type to `Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>`; update `create_provider_direct` (`repo: &ProviderRepositoryImpl`) and `create_model_direct` (`repo: &ModelRepositoryImpl`); in the three tests that bind a single `repo` local and call both helpers, split into two locals (`provider_repo` / `model_repo`) — `child_inherits_provider_and_model_from_parent`, `child_shadows_parent_by_same_canonical_id`, `cache_first_get_returns_cached_model`.
+- [x] update `src/domain/service.rs::tests`: replace the single import; update `create_test_provider` (`repo: &ProviderRepositoryImpl`) and `create_test_model` (`repo: &ModelRepositoryImpl`); update `build_service_with_cache` and `build_service` return types; replace the two `Arc::new(SeaOrmRepository)` constructions; bulk-replace `let repo = SeaOrmRepository;` with the dual-local form `let provider_repo = ProviderRepositoryImpl; let model_repo = ModelRepositoryImpl;`, then go through and update each `create_test_provider(&repo, …)` / `create_test_model(&repo, …)` callsite to use the appropriate local. Delete the `model_repo` binding in the 4 tests that only call `create_test_provider` (`test_create_model_success`, `test_create_model_with_initial_approval`, `test_create_model_with_inherited_provider`, `test_create_model_cache_invalidation`).
+- [x] decide and document the cross-entity delete guard — **keep it inside `ProviderRepositoryImpl::delete`** (it reads `model::Entity` to enforce the FK pre-check + TOCTOU fallback). Both cross-entity reads stay inside `infra::storage`, so no layer violation. No changes to the `ModelRepository` trait or `Service::delete_provider`.
+- [x] run `cargo build -p cf-gears-model-registry` — clean
+- [x] run `cargo build --tests -p cf-gears-model-registry` — clean
+- [x] run `cargo test -p cf-gears-model-registry --lib` — 244 passed
+- [x] run `cargo test -p cf-gears-model-registry --test integration` — 13 passed
+- [x] run `cargo clippy -p cf-gears-model-registry --all-targets --all-features -- -D warnings` — clean
+- [x] run `cargo dylint --all -p cf-gears-model-registry` — clean
+- [x] `grep -rn "SeaOrmRepository" gears/model-registry/model-registry/` — zero hits
+
+**Design decisions (user-confirmed):**
+
+- **Struct names:** `ProviderRepositoryImpl` and `ModelRepositoryImpl`. The `Impl` suffix signals "concrete storage implementation of the trait" without baking the ORM name into the type. File names are `provider_repo.rs` and `model_repo.rs`.
+- **Scope:** Only `sea_orm_repo.rs` is split. `mapper.rs` and `odata_mapper.rs` remain mixed in this PR (each carries both provider and model mappers). Splitting them is a separate follow-up if desired.
+- **Cross-entity delete guard:** Stays inside `ProviderRepositoryImpl::delete`. The provider impl keeps importing `entity::model` for the FK pre-check + `is_fk_violation` TOCTOU fallback. No service signature changes.
+
+**Why this refactor (Parnas information hiding):** The two traits already exist separately in `domain/repo.rs`, and the `Service<R, M, C>` struct was already generic over them — the wiring in `gear.rs` even created two distinct `Arc<SeaOrmRepository>` instances. But the implementation type was shared, so changing how providers are persisted forced touching the same file as model persistence, and the cross-concern file had grown to 2139 lines. After the split: each trait owns one struct, one file, and one test module; cross-cutting helpers (`is_fk_violation`, `map_scope_error`) have a single home in `error_mapping.rs`; `mod.rs` re-exports both modules explicitly.
+
 ## Implementation Notes
 
 1. **NOT NULL DEFAULTs on SQLite** — `display_name`, `ctx_max_input_tokens`, `allow_parameter_override` need DEFAULTs at CREATE time (SQLite cannot `ALTER ADD NOT NULL`): `DEFAULT ''`, `DEFAULT 0`, `DEFAULT 0`. The application layer always overrides them.
@@ -424,6 +476,8 @@ REST handlers convert SDK entities to DTOs with plain `From` impls — no serde 
 5. **Enums stay `#[non_exhaustive]`** — all `match` expressions over SDK enums in `From` impls and mappers keep a `_ =>` wildcard arm.
 6. **Foreign-gear consumers** — only `llm-gateway-demo/src/mock_registry.rs` and `llm-gateway-sdk/src/models/plugin.rs` reference `ModelInfoV1` outside model-registry, and both treat it as an opaque aggregate.
 7. **No separate migration for the storage layout** — `initial_001.rs` carries the final schema directly; the gear was not merged/deployed when the `info` column was dropped.
+8. **DB-setup helper duplication across repo test modules** (added 2026-07-27, Task 22) — `setup_provider`, `test_tenant`, `other_tenant`, `scope_for` are duplicated between `provider_repo::tests` and `model_repo::tests` (~17 lines) so each test module is self-contained. If a third test module ever needs the same setup, extract them into a `pub(super) mod common;` then.
+9. **Cross-entity reads inside the storage layer** (added 2026-07-27, Task 22) — `ProviderRepositoryImpl::delete` queries `entity::model` for the FK pre-check; `ModelRepositoryImpl::create` queries `entity::provider` to validate the slug. Both stay inside `infra::storage`, so no domain/layer violation, but be aware when reading either file that the imports list entities from both tables.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*
@@ -439,3 +493,4 @@ REST handlers convert SDK entities to DTOs with plain `From` impls — no serde 
 - **P2**: model discovery via OAGW, Approval Service delegation (swap the P1 direct approval-write path), bulk approve, discovery trigger endpoint.
 - **P3**: provider health monitoring, aliases, tags/model_tags + `tag` OData filter, degraded-mode, tenant reparenting cache invalidation.
 - **P4**: user-group and user-level approval overrides.
+- **Storage layout follow-ups** (added 2026-07-27): `mapper.rs` and `odata_mapper.rs` are still mixed (each carries both provider and model mappers). The Task 22 split could be extended to disaggregate them into `provider_mapper.rs` / `model_mapper.rs` and `provider_odata_mapper.rs` / `model_odata_mapper.rs` if desired.

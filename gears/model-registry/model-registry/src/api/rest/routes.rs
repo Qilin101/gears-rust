@@ -11,10 +11,11 @@ use super::dto;
 use super::handlers;
 use crate::domain::cache::InMemoryCache;
 use crate::domain::service::Service;
-use crate::infra::storage::sea_orm_repo::SeaOrmRepository;
+use crate::infra::storage::model_repo::ModelRepositoryImpl;
+use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
 /// Concrete service type used by all routes.
-pub type ConcreteService = Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache>;
+pub type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>;
 
 /// License feature identifier for model-registry endpoints.
 struct License;

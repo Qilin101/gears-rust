@@ -825,7 +825,8 @@ mod tests {
     use super::*;
     use crate::domain::cache::InMemoryCache;
     use crate::infra::storage::migrations::Migrator;
-    use crate::infra::storage::sea_orm_repo::SeaOrmRepository;
+    use crate::infra::storage::model_repo::ModelRepositoryImpl;
+    use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
     // ═════════════════════════════════════════════════════════════════════════
     // Mock AuthZResolverClient — always returns permissive responses
@@ -1234,7 +1235,7 @@ mod tests {
 
     /// Create a test provider and return its ID and slug.
     async fn create_test_provider(
-        repo: &SeaOrmRepository,
+        repo: &ProviderRepositoryImpl,
         conn: &impl toolkit_db::secure::DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
@@ -1254,7 +1255,7 @@ mod tests {
 
     /// Create a test model owned by `tenant_id`, returning the model.
     async fn create_test_model(
-        repo: &SeaOrmRepository,
+        repo: &ModelRepositoryImpl,
         conn: &impl toolkit_db::secure::DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
@@ -1269,7 +1270,7 @@ mod tests {
 
     /// Build a full `Service` instance for testing.
     ///
-    /// Sets up real DB + `SeaOrmRepository` + `InMemoryCache` with mocks for
+    /// Sets up real DB + `ProviderRepositoryImpl` + `ModelRepositoryImpl` + `InMemoryCache` with mocks for
     /// tenant-resolver and authz-resolver.
     #[allow(clippy::type_complexity)]
     /// Build a full `Service` instance for testing, using the provided cache.
@@ -1281,12 +1282,12 @@ mod tests {
         tenant_resolver: R,
         config: ModelRegistryConfig,
         cache: InMemoryCache,
-    ) -> Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache> {
+    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
         Service {
             db: Arc::new(db),
-            provider_repo: Arc::new(SeaOrmRepository),
-            model_repo: Arc::new(SeaOrmRepository),
+            provider_repo: Arc::new(ProviderRepositoryImpl),
+            model_repo: Arc::new(ModelRepositoryImpl),
             cache: Arc::new(cache),
             tenant_resolver: Arc::new(tenant_resolver),
             policy_enforcer: enforcer,
@@ -1299,7 +1300,7 @@ mod tests {
         db: DBProvider<DbError>,
         tenant_resolver: R,
         config: ModelRegistryConfig,
-    ) -> Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache> {
+    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
         build_service_with_cache(db, tenant_resolver, config, InMemoryCache::new())
     }
 
@@ -1350,13 +1351,14 @@ mod tests {
         let conn = db.conn().expect("conn");
 
         // Create a model in the test tenant.
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         let model =
-            create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Pre-populate cache.
         let cache = InMemoryCache::new();
@@ -1392,13 +1394,14 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         let _model =
-            create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(
@@ -1464,15 +1467,16 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Soft-delete the model.
-        crate::domain::repo::ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
             .await
             .expect("soft delete");
 
@@ -1551,17 +1555,18 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create model with initial approved status
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Pending);
         let _model =
-            crate::domain::repo::ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            crate::domain::repo::ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
                 .await
                 .expect("create model with pending approval");
 
@@ -1589,16 +1594,17 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
         let _model =
-            crate::domain::repo::ModelRepository::create(&repo, &conn, &scope, tenant_id, &req)
+            crate::domain::repo::ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
                 .await
                 .expect("create model with approved status");
 
@@ -1629,16 +1635,17 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
         // Create provider and model in the parent tenant.
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &parent_scope,
             parent_tid,
@@ -1680,14 +1687,15 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &scope,
             tenant_id,
@@ -1723,14 +1731,15 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &scope,
             tenant_id,
@@ -1741,7 +1750,7 @@ mod tests {
 
         // Soft-delete gpt-4o-mini
         crate::domain::repo::ModelRepository::soft_delete(
-            &repo,
+            &model_repo,
             &conn,
             &scope,
             "openai::gpt-4o-mini",
@@ -1774,16 +1783,17 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
         // Create provider and model in parent tenant.
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &parent_scope,
             parent_tid,
@@ -1817,7 +1827,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
@@ -1826,13 +1837,13 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
 
         let (_child_provider_id, child_provider_slug) =
-            create_test_provider(&repo, &conn, &child_scope, child_tid, "openai").await;
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
         let (_parent_provider_id, parent_provider_slug) =
-            create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
         // Create model with same canonical_id in both tenants.
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &child_scope,
             child_tid,
@@ -1841,7 +1852,7 @@ mod tests {
         )
         .await;
         create_test_model(
-            &repo,
+            &model_repo,
             &conn,
             &parent_scope,
             parent_tid,
@@ -1876,16 +1887,17 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create 3 models
         for i in 0..3 {
             create_test_model(
-                &repo,
+                &model_repo,
                 &conn,
                 &scope,
                 tenant_id,
@@ -1923,14 +1935,15 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
         let scope_a = scope_for(tenant_a);
 
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope_a, tenant_a, "openai").await;
-        create_test_model(&repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope_a, tenant_a, "openai").await;
+        create_test_model(&model_repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
 
         // Tenant B should see no models (no ancestors relationship).
         let service_a = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
@@ -1960,14 +1973,15 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
         let scope_a = scope_for(tenant_a);
 
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope_a, tenant_a, "openai").await;
-        create_test_model(&repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope_a, tenant_a, "openai").await;
+        create_test_model(&model_repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -1996,11 +2010,11 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2025,11 +2039,11 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2053,14 +2067,14 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
         let parent_tid = parent_id();
         let child_tid = child_tenant();
 
         // Create provider in the parent tenant only.
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &parent_scope, parent_tid, "openai").await;
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
         let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2108,11 +2122,11 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Pre-populate cache with a stale entry.
         let cache = InMemoryCache::new();
@@ -2168,12 +2182,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2203,12 +2218,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2266,12 +2282,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2331,15 +2348,16 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         // Soft-delete (deprecate) the model manually via the repo.
-        crate::domain::repo::ModelRepository::soft_delete(&repo, &conn, &scope, "openai::gpt-4o")
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
             .await
             .expect("soft delete");
 
@@ -2373,12 +2391,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(
@@ -2440,12 +2459,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2498,12 +2518,13 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let repo = SeaOrmRepository;
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
-            create_test_provider(&repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(

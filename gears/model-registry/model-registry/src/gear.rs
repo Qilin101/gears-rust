@@ -18,10 +18,11 @@ use crate::config::ModelRegistryConfig;
 use crate::domain::cache::InMemoryCache;
 use crate::domain::local_client::LocalClient;
 use crate::domain::service::Service;
-use crate::infra::storage::sea_orm_repo::SeaOrmRepository;
+use crate::infra::storage::model_repo::ModelRepositoryImpl;
+use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
 /// Concrete service type used by the gear.
-type ConcreteService = Service<SeaOrmRepository, SeaOrmRepository, InMemoryCache>;
+type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>;
 
 #[toolkit::gear(
     name = "model-registry",
@@ -56,8 +57,8 @@ impl Gear for ModelRegistryGear {
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 
         // Repository is stateless — uses &impl DBRunner per-method
-        let provider_repo = Arc::new(SeaOrmRepository::new());
-        let model_repo = Arc::new(SeaOrmRepository::new());
+        let provider_repo = Arc::new(ProviderRepositoryImpl::new());
+        let model_repo = Arc::new(ModelRepositoryImpl::new());
 
         // In-memory cache (Redis is a feature-gated follow-up)
         let cache = Arc::new(InMemoryCache::new());
