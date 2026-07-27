@@ -1,8 +1,19 @@
 # Implement Model Registry Gear (P1)
 
+> **Merged plan.** This file consolidates three incremental plans into the final
+> shape of the work:
+> - `20260717-implement-model-registry-gear` — original P1 implementation
+> - `20260724-drop-models-info-jsonb` — dropped the `models.info` JSONB column and
+>   promoted every `ModelInfoV1` field to typed columns / small JSONB sub-objects
+> - `20260724-model-registry-from-dto-conversions` — dropped `#[non_exhaustive]`
+>   from the SDK entity structs and replaced the handler serde round-trips with
+>   `From` impls
+>
+> Everything below describes the **final** design, not the intermediate states.
+
 ## Overview
 
-Implement the `model-registry` gear **implementation crate** (`gears/model-registry/model-registry/`) against the already-complete `model-registry-sdk`. The SDK defines the `ModelRegistryClientV1` trait, all model/provider types (`ModelV1<P>`, `ProviderV1`, request DTOs, GTS-typed provider settings), and `ModelRegistryError`. Only the implementation is missing.
+Implement the `model-registry` gear **implementation crate** (`gears/model-registry/model-registry/`) against the already-complete `model-registry-sdk`. The SDK defines the `ModelRegistryClientV1` trait, all model/provider types (`ModelV1<P>`, `ProviderV1`, request DTOs, GTS-typed provider settings), and `ModelRegistryError`. Only the implementation is missing (plus one small SDK adjustment — Task 1).
 
 **Scope: P1 only** (per DESIGN §3.3): Models read (get/list), Models CRUD (create/update/delete with direct approval status writes), Providers CRUD. P2 (discovery, OAGW, Approval Service) and P3 (health, aliases, tags) are explicitly out of scope and absent from the SDK trait.
 
@@ -10,19 +21,73 @@ Implement the `model-registry` gear **implementation crate** (`gears/model-regis
 
 **Key design decisions** (confirmed with user + plan review):
 - **Approval in P1**: authoritative write path is a local `model_approvals` table, written directly by admins via `update_model` — this preserves the P2 seam (P2 swaps only the write path to the Approval Service). Because the toolkit OData layer cannot join (see next bullet), `approval_status` is **also denormalized onto the `models` table** as a filterable/fast-read shadow column kept in sync on every approval write. Reads resolve `approval_status` from the `models` column; the `model_approvals` table remains the seam of record.
-- **OData filtering uses real columns, not JSONB paths** (⚠️ resolved from plan review): `libs/toolkit-db/src/odata/sea_orm_filter.rs` maps each filter field to exactly one real SeaORM `Column` via `FieldToColumn::map_field` — there is **no JSONB-path filtering and no join support** (the `map_value` hook only does wire↔storage enum translation on a single column). Therefore every P1-filterable `info.*` field and `approval_status` is **denormalized into a real column** on `models`, populated from `info`/approval on write. `info`/`provider_settings` remain the full JSONB source of truth; the denormalized columns exist only to serve OData filtering and hot reads.
+- **OData filtering uses real columns, not JSONB paths**: `libs/toolkit-db/src/odata/sea_orm_filter.rs` maps each filter field to exactly one real SeaORM `Column` via `FieldToColumn::map_field` — there is **no JSONB-path filtering and no join support** (the `map_value` hook only does wire↔storage enum translation on a single column). Therefore every P1-filterable field is a real column on `models`.
+- **No `info` JSONB column at all**: taken to its logical end — `ModelInfoV1` is *not* stored as one JSONB blob. Every field that promotes cleanly is a typed scalar column (17 of them); the rest live in five small JSONB sub-object columns. The polymorphic `provider_settings` JSONB stays, discriminated by the top-level scalar `gts_type`. The public SDK `ModelInfoV1<P>` and the wire DTO `ModelDto { info: JsonValue }` are unaffected — only storage layout differs.
+- **SDK entity structs are not `#[non_exhaustive]`**: the 5 entity structs (`ModelV1`, `ProviderV1`, `ModelInfoV1`, `ModelCapabilities`, `DisabledCapabilities`) drop the attribute so the gear can write plain `impl From<SdkType> for Dto` (the idiom used by ~13 other REST gears) instead of `serde_json::from_value(serde_json::to_value(...))` round-trips in every handler. The 6 **enums** and `ModelRegistryError` keep `#[non_exhaustive]`.
 - **Cache**: define the `CacheService` trait and ship the `InMemoryCache` backend now. Redis is a feature-gated follow-up (not implemented this phase). Keeps `get_tenant_model` cache-first per DESIGN §2.1 without Redis infra.
 - **Testing**: Regular (implement, then tests within the same task).
 
 ## Context (from discovery)
 
-- **SDK (complete, do not modify unless a gap is found)**: `gears/model-registry/model-registry-sdk/src/` — `api.rs` (trait), `errors.rs`, `models/` (`entity.rs`, `info.rs`, `common.rs`, `default_parameters.rs`, `request.rs`, `providers/{openai,anthropic}.rs`).
+- **SDK**: `gears/model-registry/model-registry-sdk/src/` — `api.rs` (trait), `errors.rs`, `models/` (`entity.rs`, `info.rs`, `common.rs`, `default_parameters.rs`, `request.rs`, `providers/{openai,anthropic}.rs`). Only change: drop `#[non_exhaustive]` from the 5 entity structs (Task 1).
 - **Reference gear — wiring/CRUD**: `gears/simple-user-settings/simple-user-settings/src/` — `gear.rs` (`#[toolkit::gear(name, deps, capabilities=[rest,db])]`, `DatabaseCapability`, `RestApiCapability`), `config.rs`, `domain/{service,local_client,repo,error}.rs`, `infra/storage/{sea_orm_repo,entity,mapper,migrations}.rs`, `api/rest/{handlers,routes,dto,error}.rs`.
-- **Reference gear — OData/JSONB/SecureConn**: `gears/chat-engine/chat-engine/src/` — `infra/db/odata_mapper.rs`, `infra/db/repo/session_repo.rs`, `infra/db/entity/*.rs` (JSONB columns), OData `Page<T>` list handlers in `api/rest/handlers/sessions.rs`.
-- **Dependencies via ClientHub**: `tenant-resolver` (`TenantResolverClient` — `get_ancestors`, `is_ancestor` for additive inheritance + shadowing; SDK at `gears/system/tenant-resolver/tenant-resolver-sdk`, package `cf-gears-tenant-resolver-sdk`), `authz-resolver` (`AuthZResolverClient` + `PolicyEnforcer` as simple-user-settings uses; SDK at `gears/system/authz-resolver/authz-resolver-sdk`, package `cf-gears-authz-resolver-sdk`).
+- **Reference gear — OData/SecureConn**: `gears/chat-engine/chat-engine/src/` — `infra/db/odata_mapper.rs`, `infra/db/repo/session_repo.rs`, OData `Page<T>` list handlers in `api/rest/handlers/sessions.rs`.
+- **Reference for the DTO idiom**: `docs/toolkit_unified_system/04_rest_operation_builder.md:182-197` documents `UserDto::from(user)` as the canonical conversion; also `file-parser/mappers.rs`, `usage-collector/dto.rs`, `bss/ledger/dto.rs`.
+- **Dependencies via ClientHub**: `tenant-resolver` (`TenantResolverClient` — `get_ancestors`, `is_ancestor` for additive inheritance + shadowing; package `cf-gears-tenant-resolver-sdk`), `authz-resolver` (`AuthZResolverClient` + `PolicyEnforcer`; package `cf-gears-authz-resolver-sdk`).
 - **Toolkit primitives**: `toolkit::{Gear, GearCtx}`, `toolkit::gear` macro, `toolkit::contracts::{DatabaseCapability, RestApiCapability}`, `toolkit::api::{OperationBuilder, OpenApiRegistry}`, `toolkit_db::{DBProvider, DbError, secure::DBRunner}`, `toolkit_security::{SecurityContext, AccessScope}`, `toolkit_odata::{ODataQuery, Page}`, `toolkit_canonical_errors` (Problem/RFC-9457).
-- **DB schema (DESIGN §3.6, adjusted for the OData-column constraint)**: `providers` (id, tenant_id, slug, name, gts_type, status, managed, metadata JSONB, discovery_enabled, discovery_interval_seconds, timestamps; unique (tenant_id, slug)); `models` (id, provider_id FK, tenant_id, canonical_id, lifecycle_status, deprecated_at, timestamps, `info` JSONB, `provider_settings` JSONB; unique (tenant_id, canonical_id)) **plus denormalized filterable columns** promoted from `info` (`gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, and boolean capability flags `cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`) and a denormalized `approval_status` column; **new for P1**: `model_approvals` (tenant_id, model_id FK, approval_status, timestamps; PK (tenant_id, model_id)) as the write seam of record.
-- **Workspace wiring**: root `Cargo.toml` members list (line ~52+), `apps/cf-gears-example-server/Cargo.toml` deps + `src/registered_gears.rs`.
+- **External consumers**: `llm-gateway-sdk` (`src/models/plugin.rs`) and `llm-gateway-demo` (`src/mock_registry.rs`) use `ModelInfoV1` as an opaque aggregate. Neither the storage change nor the `#[non_exhaustive]` removal breaks them.
+- **Workspace wiring**: root `Cargo.toml` members list, `apps/cf-gears-example-server/Cargo.toml` deps + `src/registered_gears.rs`.
+
+## DB schema (DESIGN §3.6, as implemented)
+
+### `providers`
+`id`, `tenant_id`, `slug`, `name`, `gts_type`, `status`, `managed`, `metadata` JSONB, `discovery_enabled`, `discovery_interval_seconds`, `created_at`, `updated_at`. PK `(id)`, unique `(tenant_id, slug)`.
+
+### `models`
+**Identity / lifecycle**: `id`, `provider_id` (FK → `providers`, ON DELETE RESTRICT), `tenant_id`, `canonical_id`, `lifecycle_status`, `deprecated_at`, `created_at`, `updated_at`. PK `(id)`, unique `(tenant_id, canonical_id)`.
+
+**17 promoted scalar columns** (replacing the `info` JSONB — this is the source of truth):
+
+| Column | Type (PG / MySQL / SQLite) | Source field | Nullable |
+|---|---|---|---|
+| `display_name` | TEXT | `info.display_name` | NOT NULL DEFAULT `''` |
+| `description` | TEXT | `info.description` | NULL |
+| `size_bytes` | BIGINT / BIGINT / INTEGER | `info.size_bytes` | NULL |
+| `region` | VARCHAR(64) / VARCHAR(64) / TEXT | `info.region` | NULL |
+| `hosted_by` | VARCHAR(64) / VARCHAR(64) / TEXT | `info.hosted_by` | NULL |
+| `last_release_at` | TIMESTAMPTZ / DATETIME(6) / TEXT | `info.last_release_at` | NULL |
+| `reasoning_level` | VARCHAR(64) / VARCHAR(64) / TEXT | `info.reasoning_level` | NULL |
+| `version` | VARCHAR(64) / VARCHAR(64) / TEXT | `info.version` | NULL |
+| `sort_order` | BIGINT / BIGINT / INTEGER | `info.sort_order` | NULL |
+| `icon` | TEXT | `info.icon` | NULL |
+| `multiplier_display` | VARCHAR(64) / VARCHAR(64) / TEXT | `info.multiplier_display` | NULL |
+| `perf_response_latency_ms` | BIGINT / BIGINT / INTEGER | `info.performance.response_latency_ms` | NULL |
+| `perf_tokens_per_second` | BIGINT / BIGINT / INTEGER | `info.performance.tokens_per_second` | NULL |
+| `ctx_max_input_tokens` | BIGINT / BIGINT / INTEGER | `info.context_window.max_input_tokens` | NOT NULL DEFAULT `0` |
+| `ctx_max_output_tokens` | BIGINT / BIGINT / INTEGER | `info.context_window.max_output_tokens` | NULL |
+| `ctx_output_vector_size` | BIGINT / BIGINT / INTEGER | `info.context_window.output_vector_size` | NULL |
+| `allow_parameter_override` | BOOLEAN | `info.allow_parameter_override` | NOT NULL DEFAULT `0` |
+
+`INTEGER` is 32-bit on Postgres/MySQL and overflows for `size_bytes` ≥ 2 GiB (smaller than any modern weight file), so integer columns use `BIGINT` there; SQLite `INTEGER` is already 8-byte.
+
+**5 JSONB sub-object columns** (fields that don't promote cleanly), all nullable, backend-dispatched `JSONB` / `JSON` / `TEXT`:
+
+| Column | Holds |
+|---|---|
+| `capabilities_full` | `ModelCapabilities` minus the 4 promoted booleans (vision MIME types, reasoning toggle/resume/budget, response_schema, file_input, image_generation, audio_input, audio_output, code_interpreter, web_search) |
+| `default_parameters` | `DefaultInferenceParametersV1` |
+| `additional_info` | `HashMap<String, serde_json::Value>` forward-compat escape hatch |
+| `disabled_capabilities_full` | `DisabledCapabilities` (symmetric with `capabilities_full`) |
+| `allow_extra_params` | flat `Vec<String>` of caller-supplied parameter names permitted alongside the request |
+
+**`provider_settings`** JSONB (nullable) — the only remaining polymorphic blob, keyed by the top-level scalar `gts_type`.
+
+**13 OData/denormalized columns**: `gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, `approval_status` (NOT NULL DEFAULT `'pending'`), `cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`.
+
+**13 B-tree indexes** on `lifecycle_status`, `approval_status`, `gts_type`, `vendor`, `family`, `architecture`, `format`, `provider_model_id`, `supported_api`, and the 4 `cap_*` flags. **No Postgres GIN indexes** — they would break the SQLite dev/test path and are unnecessary now that every filterable field is a real column.
+
+### `model_approvals`
+`tenant_id`, `model_id` (FK → `models`, ON DELETE CASCADE), `approval_status`, `created_at`, `updated_at`. PK `(tenant_id, model_id)`. The write seam of record for P2.
 
 ## Development Approach
 
@@ -32,12 +97,13 @@ Implement the `model-registry` gear **implementation crate** (`gears/model-regis
 - **CRITICAL: all tests must pass before starting the next task**.
 - Build/lint gate per task: `cargo build -p cf-gears-model-registry` and `cargo clippy -p cf-gears-model-registry --all-targets --all-features -- -D warnings -D clippy::perf` must be clean (repo denies `unwrap`/`expect` in non-test code, forbids `unsafe`, requires `SecureConn`/`AccessScope`).
 - **CRITICAL: update this plan file when scope changes during implementation**.
-- maintain backward compatibility with the SDK (do not break `ModelRegistryClientV1`).
+- maintain backward compatibility with the SDK trait (`ModelRegistryClientV1`) and the REST wire format.
 
 ## Testing Strategy
 
-- **unit tests**: required for every task — mappers (round-trip JSONB), OData field mapping, cache behavior (TTL/isolation), service logic (inheritance, shadowing, approval resolve, cache-first), error mapping. Follow `#[cfg(test)] mod tests` and `*_test.rs` conventions already in the reference gears.
-- **integration tests**: SeaORM repository tests against SQLite (`toolkit-db` `sqlite` feature; mirror `cargo test -p modkit-db --features "sqlite,integration"` style used elsewhere). Cover providers CRUD, models CRUD, OData list with `$filter`/`$top`/`$skip`, approval read/write, tenant scoping.
+- **unit tests**: required for every task — mappers (column↔`ModelInfoV1` round-trip, capability merge, write-path projection), OData field mapping, cache behavior (TTL/isolation), service logic (inheritance, shadowing, approval resolve, cache-first), DTO `From` impls, error mapping. Follow `#[cfg(test)] mod tests` and `*_test.rs` conventions already in the reference gears.
+- **integration tests**: SeaORM repository tests against SQLite (`toolkit-db` `sqlite` feature). Cover providers CRUD, models CRUD, OData list with `$filter`/`$top`/`$skip`, approval read/write, tenant scoping, and the full storage round-trip (create → read → patch → delete).
+- **consumer regression**: `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` after the SDK change.
 - **e2e**: skipped — the repo's e2e framework (`make e2e-local`) is not currently working. Integration tests cover the REST endpoints end-to-end against SQLite.
 - treat integration tests with the same rigor as unit tests (must pass before next task).
 
@@ -52,16 +118,22 @@ Implement the `model-registry` gear **implementation crate** (`gears/model-regis
 
 Mirror the established DDD-light gear layout. Layering (DESIGN §1.3): REST handlers → `ModelRegistryService` (application) → `CacheService` + repository traits (domain) → SeaORM repo + entities + `InMemoryCache` (infra). `LocalClient` bridges the service to the `ModelRegistryClientV1` SDK trait and is registered in `ClientHub`.
 
-Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherited 5 min). Provider/model visibility resolves additively over the tenant ancestor chain (from `tenant-resolver`), with child-tenant shadowing by slug. Approval status is resolved on read from `model_approvals` and written directly by `update_model` in P1. Provider-specific settings ride as GTS-typed JSONB (`info` + `provider_settings`), discriminated by `info.gts_type`.
+Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherited 5 min). Provider/model visibility resolves additively over the tenant ancestor chain (from `tenant-resolver`), with child-tenant shadowing by slug. Approval status is resolved on read from the denormalized `models.approval_status` column and written directly to `model_approvals` (plus the shadow column) by `update_model` in P1.
+
+Storage keeps no `info` blob: the mapper reconstructs the in-memory `ModelInfoV1` on read by stitching the 17 scalar columns, the 5 JSONB sub-objects, and `provider_settings` into a `serde_json::json!{…}` value, then `serde_json::from_value`. The write path re-projects every column from `req.info.*`.
+
+REST handlers convert SDK entities to DTOs with plain `From` impls — no serde round-trips.
 
 ## Technical Details
 
 - **New crate**: package `cf-gears-model-registry`, lib name `model_registry`, path `gears/model-registry/model-registry/`.
 - **Canonical ID**: `{provider_slug}::{provider_model_id}`, derived on `create_model`; immutable.
-- **JSONB storage + denormalized columns**: `models.info` = serialized `ModelInfoV1<serde_json::Value>` common envelope (source of truth); `models.provider_settings` = flat per-provider JSON (raw `serde_json::Value`). The OData-filterable subset is **promoted to real columns** (see schema above) and rewritten from `info`/approval on every create/update. Regular B-tree indexes on the promoted columns (no Postgres GIN — keeps SQLite dev/test path working).
-- **OData filterable fields** (DESIGN §3.3), each mapped to a **real column** via `FieldToColumn::map_field`: `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, capability flags (`vision`, `function_calling`, `streaming`, `reasoning.effort`), `vendor`, `family`, `managed`, `architecture`, `format`. Use the `map_value` hook for enum-string↔storage translation where a column is stored as smallint/enum. `provider_settings` and `default_parameters` are NOT filterable in v1; non-allowlisted fields are rejected as validation errors.
-- **`get_tenant_model` semantics** (⚠️ pinned from plan review vs SDK `api.rs`): returns the model with `approval_status` **populated** — it does **not** fail-closed on `pending`/`rejected`/`revoked`. The caller (LLM Gateway) decides. `ModelNotApproved` is reserved for a future explicit access-gate path, not the default read. `ModelDeprecated` is returned only when a soft-deleted model is fetched directly by canonical_id (deprecated models are still hidden from default `list_tenant_models`).
+- **Read path** (`mapper.rs`): `model_entity_to_v1` → `build_model_info_v1` assembles the JSON value from columns + JSONB sub-objects and deserializes into `ModelInfoV1`. Helpers: `build_capabilities` (merges the 4 scalar booleans with `capabilities_full` — **columns are authoritative**), `merge_disabled_capabilities`, `merge_default_parameters`, `supported_api_denorm_to_json_array`. `build_minimal_info` is retained as a defensive graceful-degradation fallback for rows sitting on DB defaults (`display_name = ''`, `ctx_max_input_tokens = 0`).
+- **Write path** (`mapper.rs`): `model_create_active_model` / `model_update_active_model` `Set(...)` every scalar column plus the 5 JSONB sub-objects (`build_capabilities_full_for_create` strips the 4 promoted booleans). Any PATCH touching an `info.*` field re-projects all columns — verbose SQL, but correct; optimization is out of scope. `apply_info_patches` operates on the in-memory `ModelInfoV1` and is storage-independent. Create/update enforce immutability of `canonical_id` / `provider_slug` / `info.provider_model_id` / `info.gts_type`.
+- **OData filterable fields** (15, DESIGN §3.3), each mapped to a real column via `FieldToColumn::map_field`: `canonical_id`, `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, and the capability flags `vision`, `function_calling`, `streaming`, `reasoning.effort`. The `map_value` hook does enum-string↔storage translation. `provider_settings`, `default_parameters`, `capabilities_full` and per-MIME array fields are NOT filterable; non-allowlisted fields are rejected as validation errors.
+- **`get_tenant_model` semantics** (pinned against SDK `api.rs`): returns the model with `approval_status` **populated** — it does **not** fail-closed on `pending`/`rejected`/`revoked`. The caller (LLM Gateway) decides. `ModelNotApproved` is reserved for a future explicit access-gate path, not the default read. `ModelDeprecated` is returned only when a soft-deleted model is fetched directly by canonical_id (deprecated models are still hidden from default `list_tenant_models`).
 - **REST surface (P1)**: `GET/POST /model-registry/v1/models`, `GET/PATCH/DELETE /model-registry/v1/models/{canonical_id}`, `GET/POST /model-registry/v1/providers`, `GET/PATCH/DELETE /model-registry/v1/providers/{id}`.
+- **DTO conversion**: `impl From<ProviderV1> for ProviderDto` and `impl<P> From<ModelV1<P>> for ModelDto` in `api/rest/dto.rs`. Enum→`String` mapping is done inline with `match` + `_ =>` wildcard (the enums stay `#[non_exhaustive]`); duplicating four match expressions is cheaper than a shared module. `ModelDto.info: JsonValue` comes from `serde_json::to_value(&source.info).unwrap_or(JsonValue::Null)` — `From` cannot return `Result`, and `ModelInfoV1` is fully-owned data with no re-serialization failure mode.
 - **Error mapping**: `ModelRegistryError` → `DomainError` → RFC-9457 `Problem`, covering **all 11 SDK variants**: `ModelNotFound`/`ProviderNotFound`→404, `ModelDeprecated`→404 (Gone semantics acceptable via 404), `ModelNotApproved`→403, `Forbidden`→403, `Unauthenticated`→401, `ProviderConflict`→409, `ProviderDisabled`→409, `InvalidTransition`→409, `Validation`→422, `Internal`→500.
 
 ## What Goes Where
@@ -71,7 +143,21 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 
 ## Implementation Steps
 
-### Task 1: Scaffold implementation crate and wire into workspace + example server
+### Task 1: SDK preparation — drop `#[non_exhaustive]` from entity structs
+
+**Files:**
+- Modify: `gears/model-registry/model-registry-sdk/src/models/entity.rs`
+- Modify: `gears/model-registry/model-registry-sdk/src/models/info.rs`
+- Modify: `gears/model-registry/model-registry-sdk/src/models/common.rs`
+
+- [x] remove `#[non_exhaustive]` from `ModelV1<P>` and `ProviderV1` (`entity.rs`)
+- [x] remove `#[non_exhaustive]` from `ModelInfoV1<P>` (`info.rs`)
+- [x] remove `#[non_exhaustive]` from `ModelCapabilities` and `DisabledCapabilities` (`common.rs`)
+- [x] leave `#[non_exhaustive]` on the 6 enums in `common.rs` and on `ModelRegistryError` in `errors.rs`
+- [x] run `cargo build -p cf-gears-model-registry-sdk` and `cargo test -p cf-gears-model-registry-sdk` — must pass
+- [x] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` — consumers still compile
+
+### Task 2: Scaffold implementation crate and wire into workspace + example server
 
 **Files:**
 - Create: `gears/model-registry/model-registry/Cargo.toml`
@@ -88,7 +174,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write a unit test asserting `Gear::MODULE_NAME`/default construction (mirror simple-user-settings `gear.rs` tests)
 - [x] run `cargo build -p cf-gears-model-registry` and workspace `cargo build` — must compile before next task
 
-### Task 2: Config module
+### Task 3: Config module
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/config.rs`
@@ -98,7 +184,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write tests for defaults and partial-YAML deserialization
 - [x] run tests — must pass before next task
 
-### Task 3: Domain errors and repository traits
+### Task 4: Domain errors and repository traits
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/mod.rs`
@@ -111,7 +197,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write tests for the `DomainError` → `ModelRegistryError` mappings (each variant)
 - [x] run tests — must pass before next task
 
-### Task 4: SeaORM entities and migrations (providers, models, model_approvals)
+### Task 5: SeaORM entities and migrations (providers, models, model_approvals)
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/mod.rs`
@@ -123,38 +209,48 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - Create: `gears/model-registry/model-registry/src/infra/storage/migrations/mod.rs`
 - Create: `gears/model-registry/model-registry/src/infra/storage/migrations/initial_001.rs`
 
-- [x] define SeaORM `Entity`/`Model`/`ActiveModel` for `providers`, `models` (with `info` + `provider_settings` JSONB columns **plus the denormalized filterable columns**: `gts_type`, `vendor`, `family`, `managed`, `architecture`, `format`, `provider_model_id`, `supported_api`, `approval_status`, and boolean capability flags `cap_vision`/`cap_function_calling`/`cap_streaming`/`cap_reasoning_effort`), `model_approvals` (mirror chat-engine JSONB entities)
-- [x] write `initial_001` migration creating the three tables with columns/indexes per DESIGN §3.6 as adjusted (unique `(tenant_id, slug)`, unique `(tenant_id, canonical_id)`, FK `models.provider_id`→providers, FK+cascade `model_approvals.model_id`→models, `lifecycle_status` index, B-tree indexes on the denormalized filterable columns); use portable column types (JSONB on Postgres / JSON on SQLite via toolkit-db conventions); **no Postgres GIN indexes** (they break the SQLite dev/test path and are unnecessary now that filterable fields are real columns)
+- [x] define SeaORM `Entity`/`Model`/`ActiveModel` for `providers`, `models`, `model_approvals` per the schema section above — **no `info` field**; the `models` entity carries identity/lifecycle fields, the 17 promoted scalars, the 13 OData/denormalized columns, and the 6 JSONB columns (`provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) annotated `#[sea_orm(column_type = "JsonBinary", nullable)]`
+- [x] document in the `entity/model.rs` doc block that the scalar columns are the source of truth, the five JSONB sub-objects hold fields that don't promote cleanly, and `provider_settings` is the only polymorphic blob (keyed by `gts_type`)
+- [x] write `initial_001` migration creating the three tables via backend-dispatched raw SQL (`uuid`/`bool_`/`tstz`/`jsonb_nullable`/`varch`/`int` type variables per backend), with unique `(tenant_id, slug)`, unique `(tenant_id, canonical_id)`, FK `models.provider_id`→providers (RESTRICT), FK `model_approvals.model_id`→models (CASCADE), and the 13 B-tree indexes; `NOT NULL DEFAULT`s on `display_name`, `ctx_max_input_tokens`, `allow_parameter_override` (SQLite cannot `ALTER ADD NOT NULL`); **no Postgres GIN indexes**
 - [x] wire `Migrator` (`MigratorTrait`) listing `initial_001` in `migrations/mod.rs`
-- [x] write a migration up/down test that applies against an in-memory SQLite DB
+- [x] write a migration up/down roundtrip test against an in-memory SQLite DB (tables absent → up → present → down → absent)
+- [x] write tests asserting the schema: no `info` column, and the promoted scalar + JSONB sub-object columns exist with correct types/nullability
 - [x] run tests — must pass before next task
 
-### Task 5: Entity ↔ domain/SDK mappers (JSONB round-trip)
+### Task 6: Entity ↔ domain/SDK mappers
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/storage/mapper.rs`
 - Create: `gears/model-registry/model-registry/src/infra/storage/mapper_test.rs`
 
 - [x] implement mapping `provider::Model` ↔ `ProviderV1` (incl. `gts_type` string↔`GtsTypeId`, `status` enum, optional `metadata` JSONB)
-- [x] implement mapping `model::Model` (+ resolved `ApprovalStatus`) ↔ `ModelV1<serde_json::Value>` — deserialize `info` JSONB into `ModelInfoV1`, attach `provider_settings` raw JSON, derive `canonical_id`
-- [x] implement request → `ActiveModel` builders for create/update (PATCH semantics: only set provided fields; enforce immutability of `canonical_id`/`provider_slug`/`info.provider_model_id`/`info.gts_type`) **and project the denormalized filterable columns from `info`** (gts_type, vendor, family, managed, architecture, format, provider_model_id, supported_api, capability flags) so they stay in sync with the JSONB source of truth
-- [x] write a test asserting the denormalized columns match the `info` JSONB after a create and after a PATCH that changes a promoted field
-- [x] write round-trip tests (domain→entity→domain) for provider and model incl. OpenAI + Anthropic provider_settings and unknown-provider raw JSON
-- [x] write tests for immutability rejection and malformed-JSONB error paths
+- [x] implement `model_entity_to_v1` + `build_model_info_v1`: build a `serde_json` value from the scalar columns, the 5 JSONB sub-objects and `provider_settings`, then `serde_json::from_value::<ModelInfoV1>` — the `json!{…}`-then-roundtrip pattern
+- [x] implement `build_capabilities` merging the 4 scalar booleans with `capabilities_full` JSONB — **columns are authoritative** over JSONB content
+- [x] implement `merge_disabled_capabilities` / `merge_default_parameters` (+ their `default_*_value` helpers) and `supported_api_denorm_to_json_array`
+- [x] keep `build_minimal_info` as the defensive fallback for rows on DB defaults (`display_name = ''`, `ctx_max_input_tokens = 0`)
+- [x] implement `model_create_active_model` / `model_update_active_model`: `Set(...)` every scalar column from `req.info.*`, the 5 JSONB sub-objects (`build_capabilities_full_for_create` strips the 4 promoted booleans), the 13 denormalized OData columns, and `provider_settings`; PATCH semantics set only provided fields, and any PATCH touching `info.*` re-projects all columns
+- [x] enforce immutability of `canonical_id` / `provider_slug` / `info.provider_model_id` / `info.gts_type`
+- [x] keep `apply_info_patches` storage-independent (operates on in-memory `ModelInfoV1`)
+- [x] write round-trip tests (domain→entity→domain) for provider and model with all columns populated, incl. OpenAI + Anthropic provider_settings and unknown-provider raw JSON
+- [x] write tests for `build_capabilities`: scalar bools win over JSONB content (each of the 4), JSONB-only fields preserved
+- [x] write tests for `model_create_active_model`: every column set correctly from a fully-populated `ModelInfoV1`; capability sub-object split (4 booleans out, rest in JSONB); `additional_info` map round-trip
+- [x] write tests for `model_update_active_model`: PATCH on a single field re-projects all columns; denormalized OData columns stay in sync
+- [x] write tests for immutability rejection, missing `provider_settings` (null on the wire), and the DB-default graceful-degradation path
+- [x] construct SDK fixtures with plain struct literals (no `serde_json::from_value` workaround — `#[non_exhaustive]` is gone as of Task 1)
 - [x] run tests — must pass before next task
 
-### Task 6: OData field mapping for models and providers
+### Task 7: OData field mapping for models and providers
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/storage/odata_mapper.rs`
 
-- [x] implement `FieldToColumn` for a model filter-field enum, mapping each allowed field to a **real `models` column** (the denormalized columns from Task 4): `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, and capability-flag columns; use `map_value` for any enum-string↔storage translation; reject non-allowlisted fields (incl. `provider_settings.*`, `default_parameters.*`, per-MIME array fields) with a validation error
+- [x] implement `FieldToColumn` for a model filter-field enum, mapping each of the 15 allowed fields to a real `models` column; use `map_value` for enum-string↔storage translation; reject non-allowlisted fields (incl. `provider_settings.*`, `default_parameters.*`, per-MIME array fields) with a validation error
 - [x] implement `FieldToColumn` for a provider filter-field enum (`slug`, `name`, `status`, `gts_type`, `managed`, `discovery_enabled`)
-- [x] apply `$top`/`$skip`/`$orderby`/`$select` via `toolkit_odata`/`toolkit-db` `paginate_odata` helpers (mirror chat-engine `odata_mapper.rs`) — mappers implement `ODataFieldMapping` for use with `paginate_odata`
-- [x] write tests for allowed field translation (each field → column), rejected fields, `map_value` enum translation, and pagination bounds (default/max page size from config)
+- [x] apply `$top`/`$skip`/`$orderby`/`$select` via `toolkit_odata`/`toolkit-db` `paginate_odata` helpers (mirror chat-engine `odata_mapper.rs`) — mappers implement `ODataFieldMapping`
+- [x] write tests for allowed field translation (each field → column), rejected fields, `map_value` enum translation, cursor value extraction, and pagination bounds (default/max page size from config)
 - [x] run tests — must pass before next task
 
-### Task 7: SeaORM repository — providers CRUD (secure)
+### Task 8: SeaORM repository — providers CRUD (secure)
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
@@ -164,7 +260,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write integration tests (SQLite) for provider create/get/list(OData)/update/delete + slug-conflict + tenant-isolation (cross-tenant not visible)
 - [x] run tests — must pass before next task
 
-### Task 8: SeaORM repository — models CRUD, OData list, approvals
+### Task 9: SeaORM repository — models CRUD, OData list, approvals
 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/sea_orm_repo.rs`
@@ -172,10 +268,11 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] implement `ModelRepository` for `SeaOrmRepository`: get_by_canonical, list with OData (filtering entirely on `models` columns — no join), create (derive canonical_id; unique conflict), update (PATCH; immutable identity fields), soft-delete (set `lifecycle_status=deprecated`, `deprecated_at`)
 - [x] implement approval read/write (`get_approval`, `set_approval`, `delete_approval`) against `model_approvals` **and keep the denormalized `models.approval_status` column in sync** on every approval write (single transaction)
 - [x] resolve `approval_status` on model reads from the `models` column (default `Pending`); exclude deprecated from default list
-- [x] write integration tests (SQLite): model CRUD, OData `$filter` on `lifecycle_status`/`info.*`/`approval_status`, `$top`/`$skip`, soft-delete hiding, approval read/write/default, tenant isolation
+- [x] write integration tests (SQLite): model CRUD, OData `$filter` on `lifecycle_status`/promoted columns/`approval_status`, `$top`/`$skip`, soft-delete hiding, approval read/write/default, tenant isolation
+- [x] build test fixtures (`make_create_model_req`) with struct literals rather than JSON round-trips
 - [x] run tests — must pass before next task
 
-### Task 9: CacheService trait and InMemoryCache backend
+### Task 10: CacheService trait and InMemoryCache backend
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/cache.rs`
@@ -185,7 +282,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write tests: set/get hit, TTL expiry (own vs inherited), delete, `invalidate_tenant` clears only that tenant's keys, cross-tenant isolation
 - [x] run tests — must pass before next task
 
-### Task 10: Tenant inheritance resolver helper
+### Task 11: Tenant inheritance resolver helper
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/inheritance.rs`
@@ -196,7 +293,7 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write tests with a mocked `TenantResolverClient`: additive union, child shadows parent by slug, child cannot expand beyond parent, single-tenant (no ancestors) case
 - [x] run tests — must pass before next task
 
-### Task 11: ModelRegistryService — providers operations
+### Task 12: ModelRegistryService — providers operations
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/service.rs`
@@ -204,20 +301,20 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] define `Service<R, M, C>` (generic over ProviderRepository, ModelRepository, CacheService) holding db provider, provider_repo, model_repo, cache, tenant-resolver client, `PolicyEnforcer`, `ModelRegistryConfig`
 - [x] add a helper deriving `AccessScope` from `SecurityContext` (mirror simple-user-settings service) used by every repo call
 - [x] implement provider ops (get/list/create/update/delete) with authz (`PolicyEnforcer`), tenant scoping, inheritance resolution for reads, cache read-through/invalidation on writes, and validation (slug format)
-- [x] write unit tests — slug validation (format, length) — DB-bound integration tests deferred to integration test suite
+- [x] write unit tests — slug validation (format, length); DB-bound coverage deferred to the integration suite
 - [x] run tests — must pass before next task
 
-### Task 12: ModelRegistryService — models read (cache-first, inheritance, approval resolve)
+### Task 13: ModelRegistryService — models read (cache-first, inheritance, approval resolve)
 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 
 - [x] implement `get_tenant_model` (cache-first with DB fallback, `approval_status` **populated on the returned model — NOT fail-closed on pending/rejected/revoked**, TTL by ownership) and `list_tenant_models` (OData + inheritance union + pagination). Return `ModelDeprecated` only when a soft-deleted model is fetched directly; `ModelNotFound` when absent
-- [x] populate cache on miss; select TTL from ownership (own vs inherited) via the Task 10 helper
+- [x] populate cache on miss; select TTL from ownership (own vs inherited) via the Task 11 helper
 - [x] write unit tests: cache hit path, miss→DB→populate, not-found→`ModelNotFound`, deprecated-on-direct-get→`ModelDeprecated`, **pending/rejected model returned with populated `approval_status` (no error)**, inherited model visible with shorter TTL, list filtering + pagination
-- [x] run tests — 157 pass, clippy clean
+- [x] run tests — must pass before next task
 
-### Task 13: ModelRegistryService — models CRUD and approval writes
+### Task 14: ModelRegistryService — models CRUD and approval writes
 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
@@ -225,9 +322,10 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] implement `create_model` (provider-exists check incl. inherited providers, canonical_id derivation, default approval `Pending`, optional initial `approval_status`), `update_model` (PATCH non-status fields directly + `approval_status` transition written directly to `model_approvals` in P1), `delete_model` (soft-delete)
 - [x] invalidate affected cache entries on every write; validate state transitions (`InvalidTransition` where illegal)
 - [x] write unit tests: create with/without initial approval, update fields, approve/reject/revoke via `approval_status`, invalid transition rejected, soft-delete, cache invalidation, provider-not-found on create
+- [x] build test fixtures with struct literals
 - [x] run tests — must pass before next task
 
-### Task 14: LocalClient implementing ModelRegistryClientV1
+### Task 15: LocalClient implementing ModelRegistryClientV1
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/domain/local_client.rs`
@@ -236,31 +334,39 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write unit tests (mocked service) verifying each trait method delegates and maps errors correctly
 - [x] run tests — must pass before next task
 
-### Task 15: REST DTOs and error mapping
+### Task 16: REST DTOs (`From` impls) and error mapping
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/api/mod.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/mod.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/dto.rs`
+- Create: `gears/model-registry/model-registry/src/api/rest/dto_test.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/error.rs`
+- Create: `gears/model-registry/model-registry/src/api/rest/error_test.rs`
 
-- [x] define REST DTOs (serde + `utoipa::ToSchema`, DTOs only in `api/rest/`): provider create/update/response, model create/update/response, list responses (`Page<...>`); map to/from SDK request types and `ModelV1`/`ProviderV1`
-- [x] implement `ModelRegistryError` → RFC-9457 `Problem` mapping for **all 11 variants** per Technical Details (`ModelNotFound`/`ProviderNotFound`/`ModelDeprecated`→404, `ModelNotApproved`/`Forbidden`→403, `ProviderConflict`/`ProviderDisabled`/`InvalidTransition`→409, `Validation`→422, `Internal`→500) in `error.rs`
+- [x] define REST DTOs (serde + `utoipa::ToSchema`, DTOs only in `api/rest/`): provider create/update/response, model create/update/response, list responses (`Page<...>`)
+- [x] add `impl From<ProviderV1> for ProviderDto` — `status: ProviderStatus` → `"active"|"disabled"` via `match` + `_ =>` wildcard (enums stay `#[non_exhaustive]`), `created_at`/`updated_at` → `String` via `.to_rfc3339()`, `metadata` passthrough
+- [x] add `impl<P> From<ModelV1<P>> for ModelDto` — `lifecycle_status`/`approval_status` → strings via `match` + wildcard, `info: ModelInfoV1<P>` → `JsonValue` via `serde_json::to_value(&source.info).unwrap_or(JsonValue::Null)`
+- [x] write the `dto.rs` doc comment describing the `From`-based pattern (no serde round-trip)
+- [x] implement `ModelRegistryError` → RFC-9457 `Problem` mapping for **all 11 variants** per Technical Details in `error.rs`
+- [x] write unit tests for both `From` impls: happy path + every status-string variant + info serialization
 - [x] write tests: DTO (de)serialization; error→Problem status/type mapping asserting **every one of the 11 variants**
 - [x] run tests — must pass before next task
 
-### Task 16: REST handlers and routes (providers + models)
+### Task 17: REST handlers and routes (providers + models)
 
 **Files:**
 - Create: `gears/model-registry/model-registry/src/api/rest/handlers.rs`
 - Create: `gears/model-registry/model-registry/src/api/rest/routes.rs`
 
 - [x] implement handlers for all 10 P1 endpoints (extract `SecurityContext`, parse `ODataQuery` for list endpoints, call service, map errors to `Problem`)
+- [x] convert every SDK entity to its DTO with `Type::from(...)` / `.into()` / `.map(Dto::from).collect()` — **no `serde_json::from_value(serde_json::to_value(...))` round-trips** in `get_provider`, `list_providers`, `create_provider`, `update_provider`, `get_model`, `list_models`, `create_model`, `update_model`
 - [x] register routes with `OperationBuilder` (`.authenticated()`, `.json_request`/`.json_response_with_schema`, `.error_4xx/5xx`, license feature) under `/model-registry/v1/...`, attach service via `Extension`, mirror simple-user-settings `routes.rs`
 - [x] write handler tests (success + error) using an in-memory service/repo, incl. OData query parsing and 404/403/409/422 paths
+- [x] verify no round-trip patterns remain: `grep -n "from_value.*to_value\|to_value.*from_value" handlers.rs`
 - [x] run tests — must pass before next task
 
-### Task 17: Gear wiring — init, DatabaseCapability, RestApiCapability, ClientHub registration
+### Task 18: Gear wiring — init, DatabaseCapability, RestApiCapability, ClientHub registration
 
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/gear.rs`
@@ -270,37 +376,62 @@ Reads are cache-first with DB fallback and TTL by ownership (own 30 min, inherit
 - [x] write gear tests (default construction, migrations non-empty) mirroring simple-user-settings
 - [x] run `cargo build`/`clippy` for the crate — must pass before next task
 
-### Task 18: End-to-end gear integration tests
+### Task 19: End-to-end gear integration tests
 
 **Files:**
 - Create: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [x] write an integration test booting the gear (or service+repo+cache) against SQLite: provider create → model create → get_tenant_model (cache-first) → list with OData filter → update approval → soft-delete; assert tenant isolation and inheritance across a parent/child tenant pair
+- [x] write an integration test booting the gear (service+repo+cache) against SQLite: provider create → model create → get_tenant_model (cache-first) → list with OData filter → update approval → soft-delete; assert tenant isolation and inheritance across a parent/child tenant pair
+- [x] add integration test: create model with full `ModelInfoV1` → the row has all promoted scalar + JSONB sub-object columns populated and no `info` column
+- [x] add integration test: read back → reconstructed `ModelInfoV1` matches input (all fields, including nested)
+- [x] add integration test: PATCH a single field → columns update correctly, response reflects the change
+- [x] add integration test: capability merge — the 4 OData booleans come from columns, the rest from `capabilities_full` JSONB
+- [x] build fixtures (`make_create_model_req`) with struct literals
 - [x] run `cargo test -p cf-gears-model-registry --features sqlite -- --nocapture` — must pass before next task
 
-### Task 19: Verify acceptance criteria
+### Task 20: Verify acceptance criteria
 
-- [x] verify all P1 requirements implemented (10 endpoints in routes.rs, cache-first read in get_tenant_model, inheritance+shadowing in inheritance.rs, approval resolve/write in service.rs tenant isolation via AccessScope + SecureConn, OData filtering in odata_mapper.rs)
-- [x] verify edge cases: unknown-provider raw JSON round-trip (`mapper_test.rs:346`), immutable-field rejection (`mapper_test.rs`), deprecated hidden from default list (`integration.rs:523`), `get_tenant_model` returns pending/rejected models with populated status (`service.rs:1404`), denormalized filterable columns stay in sync after PATCH (`mapper_test.rs:465`), non-allowlisted OData field rejected (`odata_mapper.rs:405`)
-- [x] run full workspace suite: `cargo test --workspace` — ⚠️ Blocked: workspace OOM on `cf-gears-example-server` binary linking (OOM killer) — skipped, infrastructure limitation
+- [x] verify all P1 requirements implemented (10 endpoints in `routes.rs`, cache-first read in `get_tenant_model`, inheritance+shadowing in `inheritance.rs`, approval resolve/write in `service.rs`, tenant isolation via `AccessScope` + `SecureConn`, OData filtering in `odata_mapper.rs`)
+- [x] verify edge cases: unknown-provider raw JSON round-trip, immutable-field rejection, deprecated hidden from default list, `get_tenant_model` returns pending/rejected models with populated status, denormalized filterable columns stay in sync after PATCH, non-allowlisted OData field rejected, DB-default graceful degradation
+- [x] verify storage invariants: no `info` column and no `info: Set`/`e.info` references in `mapper.rs`; all 17 scalar + 5 JSONB sub-object columns projected in both `model_create_active_model` and `model_update_active_model`; OData surface is 15 fields over 13 indexes
+- [x] verify wire compatibility: `ModelDto { info: JsonValue }` unchanged; SDK `ModelInfoV1<P>` unchanged
+- [x] verify the 5 SDK structs no longer carry `#[non_exhaustive]` while the 6 enums and `ModelRegistryError` still do
+- [x] run `cargo build -p cf-gears-llm-gateway-sdk -p cf-gears-llm-gateway-demo` and their test suites — must pass
+- [x] run `cargo test -p cf-gears-model-registry` (lib + integration) — pass
+- [x] run `make test-sqlite` — SQLite end-to-end pass
+- [x] run `cargo test --workspace` — 8547 tests pass. ⚠️ `cf-gears-nodes-registry::test_get_node_sysinfo_succeeds_for_existing_node` fails pre-existing (the `sysinfo` crate cannot detect CPU model in this LinuxKit container); confirmed against an unmodified tree, unrelated to this work
 - [x] run `cargo fmt --all -- --check` — clean
-- [x] run `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::perf` — clean (2m 15s, no errors)
-- [x] run `make dylint` — ⚠️ Blocked: nightly toolchain `nightly-2026-04-16-aarch64-unknown-linux-gnu` compilation failure (infrastructure issue, not code) — skipped, infrastructure limitation
-- [x] run `make gts-docs` — clean (685 files passed)
+- [x] run `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::perf` — clean
+- [x] run `make dylint` — clean. ⚠️ Only warning is pre-existing DE1201 on `cf-gears-cluster`, unrelated
+- [x] run `make gts-docs` — clean (ADR/DESIGN references validate)
 
-### Task 20: Update documentation and finalize
+### Task 21: Update documentation and finalize
 
 - [x] update `README.md` with the implemented P1 REST surface and build/run notes
-- [x] check off the implemented `p1` functional drivers in DESIGN §1.2; note the two P1 implementation deviations from the DESIGN
-- [x] update `CLAUDE.local.md`/CLAUDE.md only if a new reusable pattern emerged — patterns (OData real-columns, SQLite integration tests) already added in CLAUDE.md; no further changes needed
+- [x] check off the implemented `p1` functional drivers in `gears/model-registry/docs/DESIGN.md` §1.2; note the P1 implementation deviations from the DESIGN
+- [x] update `gears/model-registry/docs/DESIGN.md` §3.6 storage layout: no `info` row; document the 17 scalar columns, the 5 JSONB sub-objects, and `provider_settings`; state that scalar columns are the source of truth and `provider_settings` is the only polymorphic JSONB column, identified by `gts_type`
+- [x] update `gears/model-registry/docs/ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md` Consequences: five JSONB columns now exist (`provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, plus `allow_extra_params`), tagged by the scalar `gts_type`; add a "Consequences (added 2026-07-24)" bullet summarizing the schema decomposition
+- [x] confirm no doc change is needed for the DTO idiom — `docs/toolkit_unified_system/04_rest_operation_builder.md:182-197` already documents `UserDto::from(user)`, and this gear now matches it
+- [x] update `CLAUDE.md` with the reusable patterns that emerged: "OData Filtering Requires Real Columns" (now strictly followed — no `info` JSONB at all) and "Integration Tests with SQLite + Mocked Clients"
 - [x] move this plan to `docs/plans/completed/`
+
+## Implementation Notes
+
+1. **NOT NULL DEFAULTs on SQLite** — `display_name`, `ctx_max_input_tokens`, `allow_parameter_override` need DEFAULTs at CREATE time (SQLite cannot `ALTER ADD NOT NULL`): `DEFAULT ''`, `DEFAULT 0`, `DEFAULT 0`. The application layer always overrides them.
+2. **Integer width** — `INTEGER` is 32-bit on Postgres/MySQL and overflows `size_bytes` ≥ 2 GiB, so integer columns are `BIGINT` there and `INTEGER` on SQLite (8-byte).
+3. **Capability merge** — the read path takes the 4 promoted booleans from columns and the rest from `capabilities_full`; **columns win**.
+4. **Update path is verbose** — every PATCH touching `info.*` re-projects all columns. Correct but noisier SQL; optimization is out of scope.
+5. **Enums stay `#[non_exhaustive]`** — all `match` expressions over SDK enums in `From` impls and mappers keep a `_ =>` wildcard arm.
+6. **Foreign-gear consumers** — only `llm-gateway-demo/src/mock_registry.rs` and `llm-gateway-sdk/src/models/plugin.rs` reference `ModelInfoV1` outside model-registry, and both treat it as an opaque aggregate.
+7. **No separate migration for the storage layout** — `initial_001.rs` carries the final schema directly; the gear was not merged/deployed when the `info` column was dropped.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*
 
 **Manual verification**:
-- Run the example server (`make example` / quickstart) with the gear enabled and exercise the REST endpoints manually (create provider → create model → get/list/approve/delete).
-- Performance: DESIGN NFR `get_tenant_model` < 10ms P99 — benchmark under load once Redis backend lands.
+- Run the example server (`make example` / quickstart) with the gear enabled and exercise the REST endpoints manually: `POST /model-registry/v1/providers` → `POST /model-registry/v1/models` with a full info payload → inspect the row (`SELECT * FROM models WHERE id = …;`, confirm no `info` column and the promoted columns populated) → `GET /model-registry/v1/models/{canonical_id}` (response carries the full reconstructed `info` JSON) → `PATCH` a single field → approve → delete.
+- Spot-check `make openapi` — `ProviderDto` and `ModelDto` response shapes must be unchanged by the `From`-impl refactor.
+- Performance: DESIGN NFR `get_tenant_model` < 10ms P99 — benchmark under load once the Redis backend lands.
 
 **External system updates / follow-ups (out of P1 scope)**:
 - **LLM Gateway integration**: consume `ModelRegistryClientV1` via ClientHub to resolve model routing.
