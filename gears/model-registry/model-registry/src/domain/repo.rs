@@ -19,9 +19,9 @@ use super::error::DomainError;
 #[async_trait]
 pub trait ProviderRepository: Send + Sync {
     /// Find a provider by ID within the given access scope.
-    async fn find_by_id<C: DBRunner>(
+    async fn find_by_id(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<ProviderV1, DomainError>;
@@ -31,17 +31,17 @@ pub trait ProviderRepository: Send + Sync {
     /// Used by the service layer to resolve provider identity when creating
     /// models. Returns [`DomainError::ProviderNotFound`] when the slug does
     /// not exist within the scope.
-    async fn find_by_slug<C: DBRunner>(
+    async fn find_by_slug(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         slug: &str,
     ) -> Result<ProviderV1, DomainError>;
 
     /// List providers matching the `OData` query within the given access scope.
-    async fn list<C: DBRunner>(
+    async fn list(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError>;
@@ -50,9 +50,9 @@ pub trait ProviderRepository: Send + Sync {
     ///
     /// Returns [`DomainError::ProviderConflict`] when a provider with the same
     /// slug already exists within the tenant.
-    async fn create<C: DBRunner>(
+    async fn create(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
         req: &CreateProviderRequestV1,
@@ -61,18 +61,18 @@ pub trait ProviderRepository: Send + Sync {
     /// Update a provider (PATCH semantics).
     ///
     /// Only non-`None` fields in `req` are applied. Slug is immutable.
-    async fn update<C: DBRunner>(
+    async fn update(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
         req: &UpdateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError>;
 
     /// Delete a provider by ID.
-    async fn delete<C: DBRunner>(
+    async fn delete(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<(), DomainError>;
@@ -86,9 +86,9 @@ pub trait ProviderRepository: Send + Sync {
 #[async_trait]
 pub trait ModelRepository: Send + Sync {
     /// Find a model by canonical ID within the given access scope.
-    async fn find_by_canonical<C: DBRunner>(
+    async fn find_by_canonical(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
     ) -> Result<ModelV1, DomainError>;
@@ -98,9 +98,9 @@ pub trait ModelRepository: Send + Sync {
     /// Filtering operates entirely on `models` columns (including denormalized
     /// fields). Deprecated models are excluded by default unless the filter
     /// explicitly includes them.
-    async fn list<C: DBRunner>(
+    async fn list(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<ModelV1>, DomainError>;
@@ -110,9 +110,9 @@ pub trait ModelRepository: Send + Sync {
     /// Derives `canonical_id` from `req.provider_slug` + `req.info.provider_model_id`.
     /// Returns [`DomainError::ModelNotFound`] when the provider is not found
     /// (pre-check should be done by the service layer).
-    async fn create<C: DBRunner>(
+    async fn create(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
         req: &CreateModelRequestV1,
@@ -123,26 +123,26 @@ pub trait ModelRepository: Send + Sync {
     /// Only non-`None` fields in `req` are applied. Identity fields
     /// (`canonical_id`, `provider_slug`, `info.provider_model_id`,
     /// `info.gts_type`) are immutable.
-    async fn update<C: DBRunner>(
+    async fn update(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
         req: &UpdateModelRequestV1,
     ) -> Result<ModelV1, DomainError>;
 
     /// Soft-delete a model by setting `lifecycle_status` to `Deprecated`.
-    async fn soft_delete<C: DBRunner>(
+    async fn soft_delete(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
     ) -> Result<(), DomainError>;
 
     /// Get the approval status for a model.
-    async fn get_approval<C: DBRunner>(
+    async fn get_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
     ) -> Result<ApprovalStatus, DomainError>;
@@ -151,18 +151,18 @@ pub trait ModelRepository: Send + Sync {
     ///
     /// This also keeps the denormalized `models.approval_status` column in sync
     /// within the same transaction.
-    async fn set_approval<C: DBRunner>(
+    async fn set_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
         status: ApprovalStatus,
     ) -> Result<(), DomainError>;
 
     /// Delete the approval record for a model (resets to default).
-    async fn delete_approval<C: DBRunner>(
+    async fn delete_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
     ) -> Result<(), DomainError>;

@@ -42,9 +42,9 @@ impl ProviderRepositoryImpl {
 
 #[async_trait]
 impl ProviderRepository for ProviderRepositoryImpl {
-    async fn find_by_id<C: DBRunner>(
+    async fn find_by_id(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<ProviderV1, DomainError> {
@@ -61,9 +61,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(mapper::provider_entity_to_v1(&entity))
     }
 
-    async fn find_by_slug<C: DBRunner>(
+    async fn find_by_slug(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         slug: &str,
     ) -> Result<ProviderV1, DomainError> {
@@ -79,9 +79,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(mapper::provider_entity_to_v1(&entity))
     }
 
-    async fn list<C: DBRunner>(
+    async fn list(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError> {
@@ -93,7 +93,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             provider::Entity,
             ProviderV1,
             _,
-            C,
+            _,
         >(
             base,
             conn,
@@ -111,9 +111,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(page)
     }
 
-    async fn create<C: DBRunner>(
+    async fn create(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
         req: &CreateProviderRequestV1,
@@ -140,9 +140,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(mapper::provider_entity_to_v1(&entity))
     }
 
-    async fn update<C: DBRunner>(
+    async fn update(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
         req: &UpdateProviderRequestV1,
@@ -170,9 +170,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(mapper::provider_entity_to_v1(&updated))
     }
 
-    async fn delete<C: DBRunner>(
+    async fn delete(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<(), DomainError> {

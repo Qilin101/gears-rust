@@ -190,51 +190,51 @@ mod tests {
 
     #[async_trait]
     impl ProviderRepository for MockProviderRepo {
-        async fn find_by_id<C: toolkit_db::secure::DBRunner>(
+        async fn find_by_id(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
         ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::provider_not_found(Uuid::nil()))
         }
-        async fn find_by_slug<C: toolkit_db::secure::DBRunner>(
+        async fn find_by_slug(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
         ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::provider_not_found(Uuid::nil()))
         }
-        async fn list<C: toolkit_db::secure::DBRunner>(
+        async fn list(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &ODataQuery,
         ) -> Result<toolkit_odata::Page<ProviderV1>, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn create<C: toolkit_db::secure::DBRunner>(
+        async fn create(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
             _: &CreateProviderRequestV1,
         ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn update<C: toolkit_db::secure::DBRunner>(
+        async fn update(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
             _: &UpdateProviderRequestV1,
         ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn delete<C: toolkit_db::secure::DBRunner>(
+        async fn delete(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
         ) -> Result<(), DomainError> {
@@ -247,68 +247,68 @@ mod tests {
 
     #[async_trait]
     impl ModelRepository for MockModelRepo {
-        async fn find_by_canonical<C: toolkit_db::secure::DBRunner>(
+        async fn find_by_canonical(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
         ) -> Result<ModelV1, DomainError> {
             Err(DomainError::model_not_found("nonexistent"))
         }
-        async fn list<C: toolkit_db::secure::DBRunner>(
+        async fn list(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &ODataQuery,
         ) -> Result<toolkit_odata::Page<ModelV1>, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn create<C: toolkit_db::secure::DBRunner>(
+        async fn create(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
             _: &CreateModelRequestV1,
         ) -> Result<ModelV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn update<C: toolkit_db::secure::DBRunner>(
+        async fn update(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
             _: &UpdateModelRequestV1,
         ) -> Result<ModelV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn soft_delete<C: toolkit_db::secure::DBRunner>(
+        async fn soft_delete(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
         ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn get_approval<C: toolkit_db::secure::DBRunner>(
+        async fn get_approval(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
         ) -> Result<ApprovalStatus, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn set_approval<C: toolkit_db::secure::DBRunner>(
+        async fn set_approval(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
             _: ApprovalStatus,
         ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }
-        async fn delete_approval<C: toolkit_db::secure::DBRunner>(
+        async fn delete_approval(
             &self,
-            _: &C,
+            _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
         ) -> Result<(), DomainError> {

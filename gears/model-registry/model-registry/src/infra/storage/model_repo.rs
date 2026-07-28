@@ -78,9 +78,9 @@ fn approval_status_from_string(s: &str) -> ApprovalStatus {
 
 #[async_trait]
 impl ModelRepository for ModelRepositoryImpl {
-    async fn find_by_canonical<C: DBRunner>(
+    async fn find_by_canonical(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
     ) -> Result<ModelV1, DomainError> {
@@ -96,9 +96,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(mapper::model_entity_to_v1(&entity))
     }
 
-    async fn list<C: DBRunner>(
+    async fn list(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<ModelV1>, DomainError> {
@@ -116,7 +116,7 @@ impl ModelRepository for ModelRepositoryImpl {
         }
 
         let page =
-            paginate_odata::<ModelFilterField, ModelODataMapper, model::Entity, ModelV1, _, C>(
+            paginate_odata::<ModelFilterField, ModelODataMapper, model::Entity, ModelV1, _, _>(
                 base,
                 conn,
                 query,
@@ -133,9 +133,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(page)
     }
 
-    async fn create<C: DBRunner>(
+    async fn create(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
         req: &CreateModelRequestV1,
@@ -182,9 +182,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(mapper::model_entity_to_v1(&entity))
     }
 
-    async fn update<C: DBRunner>(
+    async fn update(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
         req: &UpdateModelRequestV1,
@@ -212,9 +212,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(mapper::model_entity_to_v1(&updated))
     }
 
-    async fn soft_delete<C: DBRunner>(
+    async fn soft_delete(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
     ) -> Result<(), DomainError> {
@@ -242,9 +242,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(())
     }
 
-    async fn get_approval<C: DBRunner>(
+    async fn get_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
     ) -> Result<ApprovalStatus, DomainError> {
@@ -261,9 +261,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(approval_status_from_string(&entity.approval_status))
     }
 
-    async fn set_approval<C: DBRunner>(
+    async fn set_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
         status: ApprovalStatus,
@@ -321,9 +321,9 @@ impl ModelRepository for ModelRepositoryImpl {
         Ok(())
     }
 
-    async fn delete_approval<C: DBRunner>(
+    async fn delete_approval(
         &self,
-        conn: &C,
+        conn: &impl DBRunner,
         scope: &AccessScope,
         model_id: Uuid,
     ) -> Result<(), DomainError> {
