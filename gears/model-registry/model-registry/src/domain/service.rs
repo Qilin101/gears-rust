@@ -1357,8 +1357,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model =
-            create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        let model = create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         // Pre-populate cache.
         let cache = InMemoryCache::new();
@@ -1400,8 +1407,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let _model =
-            create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        let _model = create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(
@@ -1473,12 +1487,25 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         // Soft-delete the model.
-        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
-            .await
-            .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(
+            &model_repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o",
+        )
+        .await
+        .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -1565,10 +1592,15 @@ mod tests {
         // Create model with initial approved status
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Pending);
-        let _model =
-            crate::domain::repo::ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
-                .await
-                .expect("create model with pending approval");
+        let _model = crate::domain::repo::ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &req,
+        )
+        .await
+        .expect("create model with pending approval");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -1603,10 +1635,15 @@ mod tests {
 
         let mut req = make_create_model_req(&provider_slug, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        let _model =
-            crate::domain::repo::ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
-                .await
-                .expect("create model with approved status");
+        let _model = crate::domain::repo::ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &req,
+        )
+        .await
+        .expect("create model with approved status");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -1693,7 +1730,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
         create_test_model(
             &model_repo,
             &conn,
@@ -1737,7 +1782,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
         create_test_model(
             &model_repo,
             &conn,
@@ -1943,7 +1996,15 @@ mod tests {
 
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope_a, tenant_a, "openai").await;
-        create_test_model(&model_repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope_a,
+            tenant_a,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         // Tenant B should see no models (no ancestors relationship).
         let service_a = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
@@ -1981,7 +2042,15 @@ mod tests {
 
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope_a, tenant_a, "openai").await;
-        create_test_model(&model_repo, &conn, &scope_a, tenant_a, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope_a,
+            tenant_a,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2188,7 +2257,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2224,7 +2301,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2288,7 +2373,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2354,12 +2447,25 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         // Soft-delete (deprecate) the model manually via the repo.
-        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
-            .await
-            .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(
+            &model_repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o",
+        )
+        .await
+        .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2397,7 +2503,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(
@@ -2465,7 +2579,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2524,7 +2646,15 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(&model_repo, &conn, &scope, tenant_id, &provider_slug, "gpt-4o").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
         let cache = InMemoryCache::new();
         let service = build_service_with_cache(

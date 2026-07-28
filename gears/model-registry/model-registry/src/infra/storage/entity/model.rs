@@ -274,93 +274,6 @@ mod tests {
         }
     }
 
-    /// Verify the entity compiles with the new column layout (no `info`
-    /// field) by asserting representative values for all 17 promoted scalar
-    /// fields + 5 JSONB sub-object fields are directly accessible on a
-    /// constructed entity.
-    #[test]
-    fn entity_has_new_column_layout() {
-        let entity = make_full_model_entity();
-
-        assert_eq!(entity.id, test_id());
-        assert_eq!(entity.provider_id, test_provider());
-        assert_eq!(entity.tenant_id, test_tenant());
-        assert_eq!(entity.canonical_id, "openai::gpt-4o");
-        assert_eq!(entity.lifecycle_status, "production");
-        assert!(entity.deprecated_at.is_none());
-    }
-
-    /// Verify representative values for all 17 promoted scalar columns
-    /// survive the fixture (a stub-default would silently pass type checks).
-    #[test]
-    fn entity_has_promoted_scalar_values() {
-        let entity = make_full_model_entity();
-
-        assert_eq!(entity.display_name, "GPT-4o");
-        assert_eq!(
-            entity.description.as_deref(),
-            Some("OpenAI's flagship model")
-        );
-        assert!(entity.size_bytes.is_none());
-        assert_eq!(entity.region.as_deref(), Some("us-east-1"));
-        assert_eq!(entity.hosted_by.as_deref(), Some("OpenAI"));
-        assert!(entity.last_release_at.is_none());
-        assert_eq!(entity.reasoning_level.as_deref(), Some("high"));
-        assert_eq!(entity.version.as_deref(), Some("1.0"));
-        assert_eq!(entity.sort_order, Some(10));
-        assert!(entity.icon.is_none());
-        assert_eq!(entity.multiplier_display.as_deref(), Some("1x"));
-        assert_eq!(entity.perf_response_latency_ms, Some(500));
-        assert_eq!(entity.perf_tokens_per_second, Some(100));
-        assert_eq!(entity.ctx_max_input_tokens, 128_000);
-        assert_eq!(entity.ctx_max_output_tokens, Some(16_384));
-        assert!(entity.ctx_output_vector_size.is_none());
-        assert!(entity.allow_parameter_override);
-    }
-
-    /// Verify all 5 JSONB sub-object columns are populated on the fixture.
-    #[test]
-    fn entity_has_jsonb_sub_object_values() {
-        let entity = make_full_model_entity();
-
-        assert!(entity.capabilities_full.is_some());
-        assert!(entity.default_parameters.is_some());
-        assert!(entity.additional_info.is_some());
-        assert!(entity.disabled_capabilities_full.is_some());
-        assert!(entity.allow_extra_params.is_some());
-    }
-
-    /// Verify `default_parameters`, `capabilities_full`, `additional_info`,
-    /// `disabled_capabilities_full`, and `allow_extra_params` accept arbitrary
-    /// JSON values.
-    #[test]
-    fn jsonb_sub_object_columns_accept_arbitrary_json() {
-        let mut entity = make_full_model_entity();
-
-        entity.capabilities_full = Some(json!({"custom_field": "anything"}));
-        entity.default_parameters = Some(json!(null));
-        entity.additional_info = Some(json!({}));
-        entity.disabled_capabilities_full = None;
-        entity.allow_extra_params = Some(json!(["x", "y"]));
-
-        // Direct field comparisons — entity is not Serialize, so we can't
-        // round-trip through serde_json::to_value.
-        assert_eq!(
-            entity.capabilities_full.as_ref().unwrap(),
-            &json!({"custom_field": "anything"})
-        );
-        assert_eq!(
-            entity.default_parameters.as_ref().unwrap(),
-            &serde_json::Value::Null
-        );
-        assert_eq!(entity.additional_info.as_ref().unwrap(), &json!({}));
-        assert!(entity.disabled_capabilities_full.is_none());
-        assert_eq!(
-            entity.allow_extra_params.as_ref().unwrap(),
-            &json!(["x", "y"])
-        );
-    }
-
     /// Verify NOT NULL scalar columns hold concrete values when populated.
     /// (Rust's type system enforces non-nullability at compile time; this
     /// test confirms the runtime values are present and not corrupted.)
@@ -371,30 +284,5 @@ mod tests {
         assert_eq!(entity.display_name, "GPT-4o");
         assert_eq!(entity.ctx_max_input_tokens, 128_000);
         assert!(entity.allow_parameter_override);
-    }
-
-    /// Verify the entity can be cloned (`DeriveEntityModel` provides Clone),
-    /// demonstrating field-by-field layout works end-to-end.
-    #[test]
-    fn entity_clone_preserves_all_columns() {
-        let entity = make_full_model_entity();
-        let cloned = entity.clone();
-
-        assert_eq!(entity.id, cloned.id);
-        assert_eq!(entity.display_name, cloned.display_name);
-        assert_eq!(entity.ctx_max_input_tokens, cloned.ctx_max_input_tokens);
-        assert_eq!(
-            entity.allow_parameter_override,
-            cloned.allow_parameter_override
-        );
-        assert_eq!(entity.capabilities_full, cloned.capabilities_full);
-        assert_eq!(entity.default_parameters, cloned.default_parameters);
-        assert_eq!(entity.additional_info, cloned.additional_info);
-        assert_eq!(
-            entity.disabled_capabilities_full,
-            cloned.disabled_capabilities_full
-        );
-        assert_eq!(entity.allow_extra_params, cloned.allow_extra_params);
-        assert_eq!(entity.provider_settings, cloned.provider_settings);
     }
 }

@@ -649,7 +649,14 @@ async fn child_inherits_provider_and_model_from_parent() {
     // to isolate from service-layer cache interactions).
     let (provider_id, provider_slug) =
         create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
-    create_model_direct(&model_repo, &conn, parent_tenant(), &provider_slug, "gpt-4o").await;
+    create_model_direct(
+        &model_repo,
+        &conn,
+        parent_tenant(),
+        &provider_slug,
+        "gpt-4o",
+    )
+    .await;
 
     // Child tenant uses the service with the ancestor-chain resolver.
     let service = build_service(db, OneAncestorResolver);
@@ -761,7 +768,8 @@ async fn cache_first_get_returns_cached_model() {
     // Create data directly via repo connection.
     {
         let conn = db2.conn().expect("db connection");
-        let (_pid, slug) = create_provider_direct(&provider_repo, &conn, tenant_a(), "openai").await;
+        let (_pid, slug) =
+            create_provider_direct(&provider_repo, &conn, tenant_a(), "openai").await;
         let _original = create_model_direct(&model_repo, &conn, tenant_a(), &slug, "gpt-4o").await;
     }
 

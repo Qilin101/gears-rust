@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
-    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, secure_update_with_scope,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, secure_update_with_scope,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
@@ -133,23 +133,9 @@ impl ProviderRepository for ProviderRepositoryImpl {
 
         let am = mapper::provider_create_active_model(tenant_id, req);
 
-        let _ = provider::Entity::insert(am.clone())
-            .secure()
-            .scope_with_model(scope, &am)
-            .map_err(map_scope_error)?
-            .exec(conn)
+        let entity = toolkit_db::secure::secure_insert::<provider::Entity>(am, scope, conn)
             .await
             .map_err(map_scope_error)?;
-
-        // Re-fetch to get the DB-persisted state
-        let entity = provider::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(provider::Column::Slug.eq(req.slug())))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or_else(|| DomainError::internal("created provider not found after insert"))?;
 
         Ok(mapper::provider_entity_to_v1(&entity))
     }

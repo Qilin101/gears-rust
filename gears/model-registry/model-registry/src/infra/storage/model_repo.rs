@@ -16,9 +16,7 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repo::ModelRepository;
-use crate::{
-    ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1,
-};
+use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1};
 
 use super::entity::{self, model, provider};
 use super::error_mapping::map_scope_error;
@@ -177,23 +175,9 @@ impl ModelRepository for ModelRepositoryImpl {
         let am =
             mapper::model_create_active_model(tenant_id, provider_entity.id, req, initial_approval);
 
-        let _ = model::Entity::insert(am.clone())
-            .secure()
-            .scope_with_model(scope, &am)
-            .map_err(map_scope_error)?
-            .exec(conn)
+        let entity = toolkit_db::secure::secure_insert::<model::Entity>(am, scope, conn)
             .await
             .map_err(map_scope_error)?;
-
-        // Re-fetch to get the DB-persisted state via canonical_id.
-        let entity = model::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(model::Column::CanonicalId.eq(&canonical_id)))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or_else(|| DomainError::internal("created model not found after insert"))?;
 
         Ok(mapper::model_entity_to_v1(&entity))
     }
@@ -646,9 +630,10 @@ mod tests {
             .await
             .expect("create model");
 
-        let found = ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "openai::gpt-4o")
-            .await
-            .expect("find_by_canonical");
+        let found =
+            ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "openai::gpt-4o")
+                .await
+                .expect("find_by_canonical");
         assert_eq!(found.id, created.id);
         assert_eq!(found.canonical_id, "openai::gpt-4o");
     }
@@ -661,9 +646,10 @@ mod tests {
         let model_repo = ModelRepositoryImpl;
         let scope = scope_for(test_tenant());
 
-        let err = ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "nonexistent::model")
-            .await
-            .expect_err("should return not found");
+        let err =
+            ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "nonexistent::model")
+                .await
+                .expect_err("should return not found");
 
         assert!(
             matches!(&err, DomainError::ModelNotFound { .. }),
@@ -681,9 +667,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope_for(tenant_a), tenant_a, "openai")
-                .await;
+        let (_provider_id, provider_slug) = create_test_provider(
+            &provider_repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            "openai",
+        )
+        .await;
         let req = make_create_model_req(&provider_slug, "gpt-4o");
         let _created =
             ModelRepository::create(&model_repo, &conn, &scope_for(tenant_a), tenant_a, &req)
@@ -921,9 +912,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope_for(tenant_a), tenant_a, "openai")
-                .await;
+        let (_provider_id, provider_slug) = create_test_provider(
+            &provider_repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            "openai",
+        )
+        .await;
         ModelRepository::create(
             &model_repo,
             &conn,
@@ -934,10 +930,14 @@ mod tests {
         .await
         .expect("create model");
 
-        let page =
-            ModelRepository::list(&model_repo, &conn, &scope_for(tenant_b), &ODataQuery::default())
-                .await
-                .expect("list should succeed");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope_for(tenant_b),
+            &ODataQuery::default(),
+        )
+        .await
+        .expect("list should succeed");
         assert!(page.items.is_empty(), "tenant B should see no models");
     }
 
@@ -1164,9 +1164,14 @@ mod tests {
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope_for(tenant_a), tenant_a, "openai")
-                .await;
+        let (_provider_id, provider_slug) = create_test_provider(
+            &provider_repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            "openai",
+        )
+        .await;
         let model = ModelRepository::create(
             &model_repo,
             &conn,
