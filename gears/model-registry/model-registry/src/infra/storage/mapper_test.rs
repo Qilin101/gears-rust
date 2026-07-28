@@ -848,7 +848,7 @@ fn model_entity_to_v1_handles_malformed_jsonb() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn model_update_approval_status() {
+fn model_update_applies_approval_status() {
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let info_json = serde_json::to_value(&info).expect("serialize");
 
@@ -867,10 +867,9 @@ fn model_update_approval_status() {
 
     let am = model_update_active_model(&entity, &req);
 
-    // model_update_active_model does NOT set approval_status — that is
-    // handled exclusively by set_approval in the service layer. Verify
-    // the mapper preserves the existing value unchanged.
-    assert_eq!(am.approval_status.unwrap(), "approved");
+    // approval_status is patched in place by the mapper — assert the new value
+    // is applied.
+    assert_eq!(am.approval_status.unwrap(), "rejected");
 }
 
 #[test]

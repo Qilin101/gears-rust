@@ -130,16 +130,6 @@ CREATE TABLE IF NOT EXISTS models (
     FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT
 );
 
-CREATE TABLE IF NOT EXISTS model_approvals (
-    tenant_id                   {uuid} NOT NULL,
-    model_id                    {uuid} NOT NULL,
-    approval_status             VARCHAR(50) NOT NULL,
-    created_at                  {tstz} NOT NULL,
-    updated_at                  {tstz} NOT NULL,
-    PRIMARY KEY (tenant_id, model_id),
-    FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
-);
-
 CREATE INDEX IF NOT EXISTS idx_models_lifecycle_status ON models (lifecycle_status);
 CREATE INDEX IF NOT EXISTS idx_models_approval_status  ON models (approval_status);
 CREATE INDEX IF NOT EXISTS idx_models_gts_type         ON models (gts_type);
@@ -163,7 +153,6 @@ CREATE INDEX IF NOT EXISTS idx_models_cap_reasoning    ON models (cap_reasoning_
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let conn = manager.get_connection();
         let sql = r"
-DROP TABLE IF EXISTS model_approvals;
 DROP TABLE IF EXISTS models;
 DROP TABLE IF EXISTS providers;
 ";
@@ -189,7 +178,6 @@ mod tests {
         // Verify tables don't exist yet
         assert!(!manager.has_table("providers").await.unwrap());
         assert!(!manager.has_table("models").await.unwrap());
-        assert!(!manager.has_table("model_approvals").await.unwrap());
 
         // Run migration up
         Migration::up(&Migration, &manager).await.unwrap();
@@ -197,7 +185,6 @@ mod tests {
         // Verify tables exist
         assert!(manager.has_table("providers").await.unwrap());
         assert!(manager.has_table("models").await.unwrap());
-        assert!(manager.has_table("model_approvals").await.unwrap());
 
         // Validate schema by inserting a raw SQL row into providers
         conn.execute_unprepared(
@@ -206,7 +193,6 @@ mod tests {
 
         // Run migration down and verify tables are dropped
         Migration::down(&Migration, &manager).await.unwrap();
-        assert!(!manager.has_table("model_approvals").await.unwrap());
         assert!(!manager.has_table("models").await.unwrap());
         assert!(!manager.has_table("providers").await.unwrap());
     }

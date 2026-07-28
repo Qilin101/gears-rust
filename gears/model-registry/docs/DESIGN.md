@@ -57,7 +57,7 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 - [x] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL strategy
 - [x] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup with DB fallback, approval status check
 - [x] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — OData pagination with capability/provider filtering
-- [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models + direct `model_approvals` status writes (no Approval Service in P1); same REST surface continues to accept admin calls in P2 but routes through Approval Service
+- [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models with `approval_status` patched via `update_model`; the same REST surface continues to accept admin calls in P2 but routes them through the Approval Service.
 - [x] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support
 - [ ] `p1` — `cpt-cf-model-registry-fr-model-pricing` — AICredits cost data per tier (sync/batch/cached)
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-discovery` — OAGW integration, provider plugin abstraction
@@ -234,7 +234,6 @@ The constraint families below are explicitly **not applicable** to Model Registr
 |--------|-------------|----------|
 | Provider | Configured AI provider instance for a tenant | P1 |
 | Model | AI model in the catalog with capabilities and cost | P1 |
-| ModelApproval | Tenant approval status for a model (P1: admin-managed; P2 onward: via Approval Service) | P1 |
 | AutoApprovalRule | Rules for automatic model approval | P3 |
 | ProviderHealth | Provider discovery health status | P3 |
 | Alias | Human-friendly name mapping to canonical ID | P3 |
@@ -243,7 +242,6 @@ The constraint families below are explicitly **not applicable** to Model Registr
 **Relationships**:
 - Model → Provider: Many-to-one (model belongs to provider via provider_id)
 - Provider → Tenant: Many-to-one (provider owned by tenant)
-- ModelApproval → Model: Many-to-one (approval for specific model in tenant context)
 - Alias → Model: Many-to-one (alias points to canonical model ID)
 - Tag → Tenant: Many-to-one (tag owned by tenant; inherits down the hierarchy)
 - Model ↔ Tag: Many-to-many, tenant-scoped (resolved via the `model_tags` join table; a model carries multiple tags, a tag applies to multiple models). Tags are **not** part of the `ModelInfoV1` JSONB envelope — they are relational, tenant-scoped, and managed on their own surface, so they never travel as provider-supplied metadata.
@@ -495,7 +493,7 @@ The trade-off comparison against the rejected alternatives — a tagged enum (`A
 - **Provider slug immutability**: once a provider is created, its `slug` cannot change — changing it would invalidate every `canonical_id = {provider_slug}::{provider_model_id}` referencing it. Enforced at the application layer in the service.
 - **Canonical model ID format**: `{provider_slug}::{provider_model_id}` is the only canonical form; aliases resolve to canonical IDs but never to other aliases.
 - **`info.gts_type` discriminator immutability**: once a model is created, `gts_type` cannot change without a model replacement — it determines the on-disk shape of `provider_settings` and the typed view consumers narrow to.
-- **Approval status denormalized on `models`**: `ModelV1::approval_status` is read from the `models.approval_status` column, which mirrors the `model_approvals` row of record. P1 writes status directly to `model_approvals` (admin surface) and updates the denormalized column in the same transaction; P2 swaps the write path to route through Approval Service while the denormalized column continues to serve reads and OData filtering. The discovery write path never writes approval state.
+- **Approval status denormalized on `models`**: `ModelV1::approval_status` is read from and written to the `models.approval_status` column. P1 updates flow through `Service::update_model` → `ModelRepository::update` → mapper; the mapper projects the new status from `UpdateModelRequestV1::approval_status` when present. P2 swaps the write path to the Approval Service while the denormalized column continues to serve reads and OData filtering. The discovery write path never writes approval state.
 - **Tenant-scoped uniqueness**: `(tenant_id, slug)` is unique per provider, `(tenant_id, canonical_id)` is unique per model, `(tenant_id, name)` is unique per alias, `(tenant_id, lower(name))` is unique per tag (case-insensitive), and `(tenant_id, model_id, tag_id)` is unique per tag assignment.
 - **Tag managed independently of models**: a tag's lifecycle (create/update/delete) is decoupled from the catalog; deleting a tag cascades only to its `model_tags` rows within the owning tenant scope and never mutates `models`.
 - **Cache-key tenant prefix**: every cache key is prefixed with `mr:{tenant_id}:` — no tenantless keys exist.
@@ -1090,7 +1088,7 @@ The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval
 | format | VARCHAR(255) | NULL | `format` |
 | provider_model_id | VARCHAR(255) | NULL | `provider_model_id` |
 | supported_api | VARCHAR(50) | NULL | `supported_api` |
-| approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | Mirrored from `model_approvals` (see §3.6). P1 writes status directly into `model_approvals`; the denormalized column updates in the same write so reads and OData filtering never need a join |
+| approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | `approval_status` field on `ModelV1`. Source of truth for both reads and writes; P1 updates flow through `update_model`, P2 swaps the write path to the Approval Service while the column continues to serve reads and OData filtering |
 | cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.vision.enabled` |
 | cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.function_calling` |
 | cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.streaming` |
@@ -1105,22 +1103,6 @@ Scalar columns are the source of truth; the four additional JSONB columns (`capa
 - capability flags: `(cap_vision)`, `(cap_function_calling)`, `(cap_streaming)`, `(cap_reasoning_effort)`
 
 `provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`: no per-provider / per-shape index in v1 — the shapes vary, so per-shape filter paths are deferred (see §3.3 OData).
-
-#### Table: model_approvals
-
-**ID**: `cpt-cf-model-registry-dbtable-model-approvals`
-
-Record of approval status per `(tenant_id, model_id)`. Authoritative write target for approval status in P1 (admin surface). The denormalized `models.approval_status` column is kept in sync on every write so OData filtering and hot reads operate without a join. In P2 the write path swaps to Approval Service; the row of record moves to the external service and `model_approvals` remains a local read seam mirrored on incoming `approval.status_changed` events.
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| tenant_id | UUID | PK, NOT NULL | Owner tenant |
-| model_id | UUID | PK, FK, NOT NULL | Foreign key to `models.id` (cascade on delete) |
-| approval_status | VARCHAR(50) | NOT NULL | `pending` / `approved` / `rejected` / `revoked` |
-| created_at | TIMESTAMPTZ | NOT NULL | First write timestamp |
-| updated_at | TIMESTAMPTZ | NOT NULL | Last write timestamp |
-
-**Indexes**: PK `(tenant_id, model_id)`, FK on `model_id`
 
 #### Table: provider_health (P3)
 
@@ -1313,7 +1295,6 @@ Outbound calls (discovery and provider health probes, both routed through OAGW) 
 
 Known module-level debt is tracked here for visibility; phase-by-phase remediation lives in `DECOMPOSITION.md` once it is generated:
 
-- **P1 admin-direct approval writes**: `cpt-cf-model-registry-fr-manual-model-management` writes `model_approvals.status` directly in P1; replaced by `approval-service` integration in P2 (`cpt-cf-model-registry-fr-model-approval`). Cleanup: route the write path through Approval Service and treat `model_approvals` as a mirror of the upstream state once Approval Service ships.
 - **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-provider OData mappings and the matching promoted columns / indexes.
 - **Inherited-cache TTL trade-off**: child tenants pick up parent provider/approval changes via the 5-minute inherited-data TTL rather than explicit invalidation; tightens to event-driven invalidation only when an O(tenant-tree) walk becomes acceptable.
 - **Distributed-lock stability**: the per-provider discovery lock relies on a healthy lock service; degraded lock service serializes calls through the lock-lease window. The lock service is platform-owned; this module does not run its own scheduler.

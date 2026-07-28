@@ -6,10 +6,7 @@
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
-use toolkit_db::secure::{
-    DBRunner, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
-    secure_update_with_scope,
-};
+use toolkit_db::secure::{DBRunner, SecureEntityExt, secure_update_with_scope};
 use toolkit_odata::{ODataQuery, Page, SortDir, normalize_filter_for_hash};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -52,28 +49,6 @@ fn filter_references_lifecycle_status(query: &ODataQuery) -> bool {
         let normalized = normalize_filter_for_hash(expr);
         normalized.contains("id(lifecycle_status)")
     })
-}
-
-/// Convert an [`ApprovalStatus`] to its lowercase storage string.
-#[must_use]
-fn approval_status_to_string(status: ApprovalStatus) -> String {
-    match status {
-        ApprovalStatus::Approved => "approved".to_owned(),
-        ApprovalStatus::Rejected => "rejected".to_owned(),
-        ApprovalStatus::Revoked => "revoked".to_owned(),
-        _ => "pending".to_owned(),
-    }
-}
-
-/// Parse a lowercase string back to [`ApprovalStatus`].
-#[must_use]
-fn approval_status_from_string(s: &str) -> ApprovalStatus {
-    match s {
-        "approved" => ApprovalStatus::Approved,
-        "rejected" => ApprovalStatus::Rejected,
-        "revoked" => ApprovalStatus::Revoked,
-        _ => ApprovalStatus::Pending,
-    }
 }
 
 #[async_trait]
@@ -236,125 +211,6 @@ impl ModelRepository for ModelRepositoryImpl {
         am.updated_at = Set(now);
 
         let _updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
-            .await
-            .map_err(map_scope_error)?;
-
-        Ok(())
-    }
-
-    async fn get_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
-    ) -> Result<ApprovalStatus, DomainError> {
-        // Read approval status from the denormalized models column.
-        let entity = model::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
-
-        Ok(approval_status_from_string(&entity.approval_status))
-    }
-
-    async fn set_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
-        status: ApprovalStatus,
-    ) -> Result<(), DomainError> {
-        let status_str = approval_status_to_string(status);
-        let now = chrono::Utc::now();
-
-        // Fetch model within scope (validates caller can access this model).
-        let entity = model::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
-
-        // Upsert model_approvals FIRST (the P1 seam of record). If this fails,
-        // the denormalized column is unchanged — no desync.
-        let approval_am = entity::model_approval::ActiveModel {
-            tenant_id: Set(entity.tenant_id),
-            model_id: Set(model_id),
-            approval_status: Set(status_str.clone()),
-            created_at: Set(now),
-            updated_at: Set(now),
-        };
-
-        let on_conflict = SecureOnConflict::columns([
-            entity::model_approval::Column::TenantId,
-            entity::model_approval::Column::ModelId,
-        ])
-        .update_columns([
-            entity::model_approval::Column::ApprovalStatus,
-            entity::model_approval::Column::UpdatedAt,
-        ])
-        .map_err(|e| DomainError::internal(format!("upsert conflict config: {e}")))?;
-
-        let _ = entity::model_approval::Entity::insert(approval_am.clone())
-            .secure()
-            .scope_with_model(scope, &approval_am)
-            .map_err(map_scope_error)?
-            .on_conflict(on_conflict)
-            .exec(conn)
-            .await
-            .map_err(map_scope_error)?;
-
-        // Update denormalized models.approval_status using secure_update_with_scope.
-        let mut model_am: entity::model::ActiveModel = entity.into();
-        model_am.approval_status = Set(status_str);
-        model_am.updated_at = Set(now);
-        let _updated = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
-            .await
-            .map_err(map_scope_error)?;
-
-        Ok(())
-    }
-
-    async fn delete_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
-    ) -> Result<(), DomainError> {
-        // Fetch model within scope.
-        let entity = model::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(model::Column::Id.eq(model_id)))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or(DomainError::model_not_found(model_id.to_string()))?;
-
-        // Delete the model_approval record FIRST (the authoritative record).
-        let _ = entity::model_approval::Entity::delete_many()
-            .secure()
-            .scope_with(scope)
-            .filter(
-                Condition::all()
-                    .add(entity::model_approval::Column::ModelId.eq(model_id))
-                    .add(entity::model_approval::Column::TenantId.eq(entity.tenant_id)),
-            )
-            .exec(conn)
-            .await
-            .map_err(map_scope_error)?;
-
-        // Then reset the denormalized column to default (Pending).
-        let mut model_am: entity::model::ActiveModel = entity.into();
-        model_am.approval_status = Set("pending".to_owned());
-        model_am.updated_at = Set(chrono::Utc::now());
-        let _ = secure_update_with_scope::<model::Entity>(model_am, scope, model_id, conn)
             .await
             .map_err(map_scope_error)?;
 
@@ -977,223 +833,6 @@ mod tests {
     }
 
     // =======================================================================
-    // Approval operations
-    // =======================================================================
-
-    #[tokio::test]
-    async fn approval_get_default_is_pending() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
-
-        let status = ModelRepository::get_approval(&model_repo, &conn, &scope, model.id)
-            .await
-            .expect("get approval");
-        assert_eq!(status, crate::ApprovalStatus::Pending);
-    }
-
-    #[tokio::test]
-    async fn approval_set_updates_status_and_denormalized_column() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
-
-        // Approve
-        ModelRepository::set_approval(
-            &model_repo,
-            &conn,
-            &scope,
-            model.id,
-            crate::ApprovalStatus::Approved,
-        )
-        .await
-        .expect("set approval");
-
-        // Verify via get_approval.
-        let status = ModelRepository::get_approval(&model_repo, &conn, &scope, model.id)
-            .await
-            .expect("get approval");
-        assert_eq!(status, crate::ApprovalStatus::Approved);
-
-        // Verify denormalized column on model read.
-        let found =
-            ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "openai::gpt-4o")
-                .await
-                .expect("find model");
-        assert_eq!(found.approval_status, crate::ApprovalStatus::Approved);
-    }
-
-    #[tokio::test]
-    async fn approval_set_reject_then_revoke() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
-
-        ModelRepository::set_approval(
-            &model_repo,
-            &conn,
-            &scope,
-            model.id,
-            crate::ApprovalStatus::Rejected,
-        )
-        .await
-        .expect("reject");
-        assert_eq!(
-            ModelRepository::get_approval(&model_repo, &conn, &scope, model.id)
-                .await
-                .expect("get approval"),
-            crate::ApprovalStatus::Rejected
-        );
-
-        ModelRepository::set_approval(
-            &model_repo,
-            &conn,
-            &scope,
-            model.id,
-            crate::ApprovalStatus::Revoked,
-        )
-        .await
-        .expect("revoke");
-        assert_eq!(
-            ModelRepository::get_approval(&model_repo, &conn, &scope, model.id)
-                .await
-                .expect("get approval"),
-            crate::ApprovalStatus::Revoked
-        );
-    }
-
-    #[tokio::test]
-    async fn approval_delete_resets_to_pending() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
-
-        ModelRepository::set_approval(
-            &model_repo,
-            &conn,
-            &scope,
-            model.id,
-            crate::ApprovalStatus::Approved,
-        )
-        .await
-        .expect("approve");
-
-        ModelRepository::delete_approval(&model_repo, &conn, &scope, model.id)
-            .await
-            .expect("delete approval");
-
-        assert_eq!(
-            ModelRepository::get_approval(&model_repo, &conn, &scope, model.id)
-                .await
-                .expect("get approval"),
-            crate::ApprovalStatus::Pending
-        );
-    }
-
-    #[tokio::test]
-    async fn approval_cross_tenant_isolation() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
-        let tenant_a = test_tenant();
-        let tenant_b = other_tenant();
-
-        let (_provider_id, provider_slug) = create_test_provider(
-            &provider_repo,
-            &conn,
-            &scope_for(tenant_a),
-            tenant_a,
-            "openai",
-        )
-        .await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope_for(tenant_a),
-            tenant_a,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
-
-        // Tenant b cannot find the model, so approval ops won't succeed on it
-        // (the model doesn't exist in tenant_b's scope).
-        let err = ModelRepository::get_approval(&model_repo, &conn, &scope_for(tenant_b), model.id)
-            .await
-            .expect_err("should fail for other tenant");
-        assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound for cross-tenant approval, got {err:?}"
-        );
-    }
-
-    // =======================================================================
     // Model list OData filtering
     // =======================================================================
 
@@ -1209,27 +848,15 @@ mod tests {
 
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create model");
 
-        ModelRepository::set_approval(
-            &model_repo,
-            &conn,
-            &scope,
-            model.id,
-            crate::ApprovalStatus::Approved,
-        )
-        .await
-        .expect("approve");
+        // Create model with approved status directly on create.
+        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        req.approval_status = Some(crate::ApprovalStatus::Approved);
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+            .await
+            .expect("create approved model");
 
-        // Create another model with pending status.
+        // Create another model with pending status (default).
         ModelRepository::create(
             &model_repo,
             &conn,

@@ -33,9 +33,8 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// Get a model by canonical ID within the caller's tenant context.
     ///
-    /// Returns the model with its approval status resolved from
-    /// `ModelApproval` (P1: written directly by admins; P2 onward: routed
-    /// through Approval Service). Uses cache-first lookup with DB fallback.
+    /// Returns the model with its approval status. Uses cache-first lookup
+    /// with DB fallback.
     async fn get_tenant_model(
         &self,
         ctx: &SecurityContext,
@@ -69,9 +68,9 @@ pub trait ModelRegistryClientV1: Send + Sync {
     // (`approve` / `reject` / `revoke`) flow through `update_model` with
     // `UpdateModelRequestV1::approval_status` — no dedicated action endpoints.
     //
-    // Same SDK methods continue to work in P2; only the implementation of
-    // status writes shifts from a direct DB update to an Approval Service
-    // workflow call (DESIGN §1.2 driver `fr-model-approval`).
+    // The same SDK methods continue to work in P2; only the implementation
+    // shifts so approval status writes route through the Approval Service
+    // (DESIGN §1.2 driver `fr-model-approval`).
 
     /// Manually register a new model in the catalog.
     ///
@@ -79,10 +78,8 @@ pub trait ModelRegistryClientV1: Send + Sync {
     /// or inherited from an ancestor tenant). The `canonical_id` is derived
     /// from `req.provider_slug` + `req.info.provider_model_id`.
     ///
-    /// In P1 the optional `req.approval_status` is written directly to
-    /// `ModelApproval`; defaults to [`crate::models::ApprovalStatus::Pending`]
-    /// when `None`. In P2 the same field initiates the Approval Service
-    /// workflow.
+    /// The optional `req.approval_status` is written to `models.approval_status`;
+    /// defaults to [`crate::models::ApprovalStatus::Pending`] when `None`.
     async fn create_model(
         &self,
         ctx: &SecurityContext,
@@ -95,11 +92,7 @@ pub trait ModelRegistryClientV1: Send + Sync {
     /// `info.gts_type` are immutable — to change them, soft-delete and
     /// recreate.
     ///
-    /// The `req.approval_status` field is the unified entry point for
-    /// approve / reject / revoke transitions:
-    /// - **P1**: writes directly to `ModelApproval`.
-    /// - **P2 onward**: routes through the Approval Service workflow while
-    ///   non-status field updates remain direct.
+    /// Setting `req.approval_status` updates `models.approval_status`.
     async fn update_model(
         &self,
         ctx: &SecurityContext,

@@ -5,8 +5,8 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, ModelV1, ProviderV1,
-    UpdateModelRequestV1, UpdateProviderRequestV1,
+    CreateModelRequestV1, CreateProviderRequestV1, ModelV1, ProviderV1, UpdateModelRequestV1,
+    UpdateProviderRequestV1,
 };
 
 use super::error::DomainError;
@@ -78,11 +78,11 @@ pub trait ProviderRepository: Send + Sync {
     ) -> Result<(), DomainError>;
 }
 
-/// Repository trait for model and approval persistence.
+/// Repository trait for model persistence.
 ///
 /// Every method accepts a [`DBRunner`] connection and an [`AccessScope`] for
-/// tenant-scoped access. Approval operations are co-located here because they
-/// share the same transaction boundary as model writes.
+/// tenant-scoped access. Approval status is patched via the same `update`
+/// flow as other model fields.
 #[async_trait]
 pub trait ModelRepository: Send + Sync {
     /// Find a model by canonical ID within the given access scope.
@@ -122,7 +122,8 @@ pub trait ModelRepository: Send + Sync {
     ///
     /// Only non-`None` fields in `req` are applied. Identity fields
     /// (`canonical_id`, `provider_slug`, `info.provider_model_id`,
-    /// `info.gts_type`) are immutable.
+    /// `info.gts_type`) are immutable. Approval status is patched in place
+    /// alongside other fields when `req.approval_status` is `Some(...)`.
     async fn update(
         &self,
         conn: &impl DBRunner,
@@ -137,33 +138,5 @@ pub trait ModelRepository: Send + Sync {
         conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
-    ) -> Result<(), DomainError>;
-
-    /// Get the approval status for a model.
-    async fn get_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
-    ) -> Result<ApprovalStatus, DomainError>;
-
-    /// Set (insert or update) the approval status for a model.
-    ///
-    /// This also keeps the denormalized `models.approval_status` column in sync
-    /// within the same transaction.
-    async fn set_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
-        status: ApprovalStatus,
-    ) -> Result<(), DomainError>;
-
-    /// Delete the approval record for a model (resets to default).
-    async fn delete_approval(
-        &self,
-        conn: &impl DBRunner,
-        scope: &AccessScope,
-        model_id: Uuid,
     ) -> Result<(), DomainError>;
 }

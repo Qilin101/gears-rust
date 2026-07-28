@@ -285,29 +285,6 @@ Represents an AI model in the catalog.
 - Hardware compatibility checks (format, architecture)
 - Dynamic model loading/unloading (managed)
 
-#### ModelApproval
-
-Tracks tenant approval status for a model. Integrates with generic **Approval Service** for workflow management.
-
-**Phase note**:
-- **P1 (Manual Model Management)**: ModelApproval is managed directly by Model Registry — tenant admin sets status (`approved`/`rejected`/`revoked`) via API. No external workflow engine, no auto-approval rules.
-- **P2 onward (Approval Service Integration)**: Model Registry delegates the workflow to a generic Approval Service. The state machine below applies in both phases; only the actor triggering transitions differs (admin in P1, workflow engine + admin in P2).
-
-In P2, Model Registry:
-- Registers model as approvable resource with Approval Service
-- Queries approval status from Approval Service
-- Reacts to approval status changes via events
-
-**Fields** (stored in Approval Service, referenced by Model Registry):
-- `resource_type`: `model`
-- `resource_id`: model_canonical_id
-- `tenant_id`: tenant context
-- `status`: pending/approved/rejected/revoked
-- `decided_at`, `decided_by`: approval decision metadata
-- `auto_approval_rule_id`: reference to rule that triggered auto-approval (null for manual)
-
-**State Machine** (managed by Approval Service):
-
 ```mermaid
 stateDiagram-v2
     [*] --> pending: Model discovered
@@ -505,9 +482,9 @@ The system must allow admins to manually create, update, and remove model catalo
 - **Soft-delete model** — admin marks model as `deprecated`; record retained, hidden from default `list_tenant_models`.
 
 **Approval status (P1)**:
-- ModelApproval entries are managed directly by the tenant admin via Model Registry API — no Approval Service in P1.
+- Approval status is managed directly by the tenant admin via the Model Registry API — no Approval Service in P1.
 - Admin can set status to `approved`, `rejected`, or `revoked`. Default for newly created models is `pending` (admin must explicitly approve), unless created with `status=approved` in a single call (admin convenience).
-- State transitions follow the ModelApproval state machine and are enforced by Model Registry domain logic; no workflow engine in P1.
+- State transitions follow the approval state machine and are enforced by Model Registry domain logic; no workflow engine in P1.
 - Approval granularity in P1: tenant-level — approval grants access to all users in tenant.
 
 **Authorization**:
@@ -560,7 +537,7 @@ Model Registry returns **provider cost only**. Caller (LLM Gateway) fetches tena
 
 ### P2 — Discovery & Approval Service Integration
 
-P2 layers automated discovery and an external Approval Service workflow on top of the manual P1 catalog. The ModelApproval entity from P1 is reused; only the actor that drives transitions changes.
+P2 layers automated discovery and an external Approval Service workflow on top of the manual P1 catalog. Approval status continues to live on `models.approval_status`; the actor that drives transitions changes.
 
 #### Model Discovery
 
@@ -601,7 +578,7 @@ The system must integrate with the generic Approval Service for tenant-level mod
 
 Approval granularity (P2): Tenant-level — approval grants access to all users in tenant. (Same as P1; finer granularity arrives in P4.)
 
-**Migration from P1**: Existing manually-managed `ModelApproval` rows are registered as approvable resources with the Approval Service on rollout. P1 admin-direct status updates are replaced by Approval Service workflow calls; the Model Registry API surface continues to accept admin approve/reject calls but routes them through the Approval Service.
+**Migration from P1**: Existing `models.approval_status` values are registered as approvable resources with the Approval Service on rollout. P1 admin-direct status updates are replaced by Approval Service workflow calls; the Model Registry API surface continues to accept admin approve/reject calls but routes them through the Approval Service.
 
 **Actors**: `cpt-cf-model-registry-actor-tenant-admin`
 
@@ -1435,7 +1412,7 @@ Key interfaces:
 1. Admin submits a create / update / soft-delete request with model fields (`provider_slug`, `provider_model_id`, capabilities, limits, provider cost, lifecycle status)
 2. Registry validates input (canonical ID format derived from `provider_slug::provider_model_id`, capability schema, GTS lifecycle type, immutability of `canonical_id`)
 3. Registry persists model entry
-4. For create: admin sets initial `ModelApproval` status — defaults to `pending`; admin may pass `status=approved` to approve in the same call
+4. For create: admin sets initial approval status — defaults to `pending`; admin may pass `status=approved` to approve in the same call
 5. For update of an existing model: admin may directly set status to `approved`, `rejected`, or `revoked` (P1 has no workflow engine)
 6. For soft-delete: admin marks model as `deprecated`; record retained, hidden from default `list_tenant_models`
 
@@ -1444,7 +1421,7 @@ Key interfaces:
 **Acceptance criteria**:
 - Manual creation does NOT call out to an Approval Service in P1
 - `canonical_id` is immutable after creation; rename requires delete + recreate
-- Status transitions follow the `ModelApproval` state machine
+- Status transitions follow the approval state machine
 - Soft-delete sets status to `deprecated` without purging the record; resurrection allowed by re-creating with same `canonical_id` only if previous record purged
 - Tenant admin can manage models for own providers only; platform admin can manage any
 - In P2, the same admin endpoints route through the Approval Service; the API surface remains backward-compatible

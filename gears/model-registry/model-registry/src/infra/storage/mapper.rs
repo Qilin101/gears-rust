@@ -568,9 +568,8 @@ fn build_capabilities_full_for_create(
 /// layout, applies only the `Some(...)` patches from the request, and
 /// re-projects every promoted column.
 ///
-/// NOTE: `approval_status` is intentionally NOT handled here — it is written
-/// exclusively by the service layer's `set_approval` call, which atomically
-/// updates both `model_approvals` and the denormalized column.
+/// `approval_status` is patched in place alongside the other fields when
+/// `req.approval_status` is `Some(...)`.
 ///
 /// Immutable fields (`canonical_id`, `provider_slug`, `info.provider_model_id`,
 /// `info.gts_type`) are silently ignored if present in the request.
@@ -588,9 +587,10 @@ pub fn model_update_active_model(
         active.lifecycle_status = Set(lifecycle_status_str(*lifecycle));
     }
 
-    // — Approval status (handled exclusively by set_approval in the service
-    //   layer, which writes to both model_approvals and the denormalized
-    //   column atomically via on_conflict upsert). —
+    // — Approval status —
+    if let Some(approval) = req.approval_status {
+        active.approval_status = Set(approval_status_str(approval));
+    }
 
     // Reconstruct ModelInfoV1 from the existing promoted columns, apply
     // patches, and re-project every column back. We use the same
@@ -680,7 +680,7 @@ pub fn model_update_active_model(
     }
 
     // Only bump `updated_at` when at least one field was actually set.
-    let changed = req.lifecycle_status.is_some() || info_changed;
+    let changed = req.lifecycle_status.is_some() || req.approval_status.is_some() || info_changed;
     if changed {
         active.updated_at = Set(chrono::Utc::now());
     }

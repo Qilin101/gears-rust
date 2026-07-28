@@ -176,8 +176,8 @@ mod tests {
     use crate::domain::error::DomainError;
     use crate::domain::repo::{ModelRepository, ProviderRepository};
     use crate::{
-        ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryError, ModelV1,
-        ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
+        CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryError, ModelV1, ProviderV1,
+        UpdateModelRequestV1, UpdateProviderRequestV1,
     };
     use toolkit_db::ConnectOpts;
 
@@ -286,31 +286,6 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
-        ) -> Result<(), DomainError> {
-            Err(DomainError::internal("not implemented"))
-        }
-        async fn get_approval(
-            &self,
-            _: &impl toolkit_db::secure::DBRunner,
-            _: &toolkit_security::AccessScope,
-            _: Uuid,
-        ) -> Result<ApprovalStatus, DomainError> {
-            Err(DomainError::internal("not implemented"))
-        }
-        async fn set_approval(
-            &self,
-            _: &impl toolkit_db::secure::DBRunner,
-            _: &toolkit_security::AccessScope,
-            _: Uuid,
-            _: ApprovalStatus,
-        ) -> Result<(), DomainError> {
-            Err(DomainError::internal("not implemented"))
-        }
-        async fn delete_approval(
-            &self,
-            _: &impl toolkit_db::secure::DBRunner,
-            _: &toolkit_security::AccessScope,
-            _: Uuid,
         ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }

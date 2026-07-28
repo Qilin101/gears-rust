@@ -131,8 +131,8 @@ pub struct Model {
     pub supported_api: Option<String>,
 
     // -- Denormalized approval status --
-    /// Denormalized approval status from `model_approvals`. Defaults to
-    /// "pending". Kept in sync on every approval write.
+    /// Approval status (source of truth). Defaults to "pending". Set via
+    /// the regular model update flow.
     pub approval_status: String,
 
     // -- Denormalized capability flags --
@@ -156,19 +156,11 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Provider,
-    #[sea_orm(has_many = "super::model_approval::Entity")]
-    ModelApproval,
 }
 
 impl Related<super::provider::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Provider.def()
-    }
-}
-
-impl Related<super::model_approval::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ModelApproval.def()
     }
 }
 

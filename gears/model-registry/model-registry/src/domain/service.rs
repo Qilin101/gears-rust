@@ -650,10 +650,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
     /// Update a model (PATCH semantics) including approval status.
     ///
-    /// Applies non-status field patches directly via the repository, and writes
-    /// `approval_status` transitions to `model_approvals` (P1 direct-write
-    /// path). Validates lifecycle state transitions. Invalidates cache on
-    /// success.
+    /// Applies non-status field patches and `approval_status` transitions in a
+    /// single repository call. Validates lifecycle state transitions.
+    /// Invalidates cache on success.
     pub async fn update_model(
         &self,
         ctx: &SecurityContext,
@@ -668,7 +667,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let tenant_id = ctx.subject_tenant_id();
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        // 2. Fetch existing model to validate state transitions and get model_id
+        // 2. Fetch existing model to validate state transitions.
         let existing = self
             .model_repo
             .find_by_canonical(&conn, &scope, canonical_id)
@@ -692,29 +691,12 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             ));
         }
 
-        // 4. Update model fields first (PATCH semantics via mapper), then
-        //    write approval_status to model_approvals if requested. Ordering is
-        //    deliberate: both operations are idempotent, so if `set_approval`
-        //    fails after `update` succeeds, the caller can safely retry.
-        //
-        //    A full DB transaction wrapping both writes would be ideal but is
-        //    deferred because the toolkit's `DBProvider::transaction` error type
-        //    (`DbError`) does not compose with `DomainError`.
-        //
-        //    Note: model_update_active_model does NOT set approval_status (that
-        //    is handled exclusively by set_approval below), so we must patch the
-        //    returned model to reflect the new value after set_approval succeeds.
-        let mut model = self
+        // 4. Update via repo (mapper projects approval_status alongside other
+        //    fields).
+        let model = self
             .model_repo
             .update(&conn, &scope, canonical_id, req)
             .await?;
-
-        if let Some(approval_status) = req.approval_status {
-            self.model_repo
-                .set_approval(&conn, &scope, existing.id, approval_status)
-                .await?;
-            model.approval_status = approval_status;
-        }
 
         // 5. Invalidate cache
         self.cache.invalidate_tenant(tenant_id).await;
