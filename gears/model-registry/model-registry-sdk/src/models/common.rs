@@ -5,9 +5,9 @@
 //!
 //! These types live on `ModelInfo<P>` directly (not on the per-provider
 //! settings) because their shape is meaningful for every provider. The
-//! per-model override policy is no longer a struct in this module — its
-//! two fields (`allow_parameter_override`, `allow_extra_params`) are now
-//! flat fields on [`crate::models::ModelInfoV1`].
+//! per-model override policy is expressed as flat fields
+//! (`allow_parameter_override`, `allow_extra_params`) on
+//! [`crate::models::ModelInfoV1`].
 
 // ---------------------------------------------------------------------------
 // Enums

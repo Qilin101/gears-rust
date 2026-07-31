@@ -20,9 +20,8 @@ use super::entity::{model, provider};
 
 /// `OData` filter / order field enum for `GET /model-registry/v1/models`.
 ///
-/// Every field maps to a real `models` column (including the denormalized
-/// filterable columns promoted from `info` JSONB and capability flags, plus
-/// the denormalized `approval_status`).
+/// Every field maps to a real `models` column (including the capability flags
+/// and `approval_status`).
 ///
 /// Non-allowlisted fields (`provider_settings.*`, `default_parameters.*`,
 /// `info.additional_info.*`, per-MIME array fields) are rejected at the

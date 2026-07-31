@@ -822,7 +822,7 @@ async fn cache_first_get_returns_cached_model() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn odata_filters_work_on_denormalized_columns() {
+async fn odata_filters_work_on_filterable_columns() {
     let db = setup_db().await;
     let service = build_service(db, NoAncestorsResolver);
     let tenant_id = tenant_a();
@@ -847,7 +847,7 @@ async fn odata_filters_work_on_denormalized_columns() {
 
     // Create a second provider with different slug for second model.
     // (The model's provider settings reference the provider slug;
-    //  the `gts_type` in the info drives the denormalized column.)
+    //  the `gts_type` in the info drives the `gts_type` column.)
     let mut model2_req = make_create_model_req("openai", "gpt-4o-mini");
     model2_req.info = {
         let mut info_val = serde_json::to_value(&model2_req.info).expect("serialize info");
@@ -1001,17 +1001,16 @@ async fn provider_crud_through_service() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 8. Storage rewrite (2026-07-24): verify the new column layout round-trips
-//    through the full create → read → patch → re-read pipeline.
+// 8. Storage layout: verify the column layout round-trips through the full
+//    create → read → patch → re-read pipeline.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Verify the create path produces a model whose every field round-trips
-/// through the read path. The `info` column no longer exists; every
-/// `ModelInfoV1` field is reconstructed from the promoted scalar columns +
-/// the JSONB sub-objects (`capabilities_full`, `default_parameters`,
-/// `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) +
-/// the polymorphic `provider_settings`. The test covers the full
-/// create → read round-trip end-to-end through the service layer.
+/// through the read path. Every `ModelInfoV1` field is reconstructed from the
+/// promoted scalar columns + the JSONB sub-objects (`capabilities_full`,
+/// `default_parameters`, `additional_info`, `disabled_capabilities_full`,
+/// `allow_extra_params`) + the polymorphic `provider_settings`. The test covers
+/// the full create → read round-trip end-to-end through the service layer.
 #[tokio::test]
 async fn create_and_read_round_trip_full_model_info() {
     let db = setup_db().await;
@@ -1121,7 +1120,7 @@ async fn additional_info_and_allow_extra_params_round_trip_non_empty() {
         .await
         .expect("get model");
 
-    // `additional_info` JSONB sub-object round-trip preserves all 3 keys
+    // `additional_info` JSONB sub-object round-trip preserves every key
     // (string, bool, integer values).
     assert_eq!(
         fetched.info.additional_info.get("team"),
@@ -1230,7 +1229,7 @@ async fn context_window_max_input_tokens_over_2gib_round_trips() {
 /// Verify PATCH on a single `info.*` field re-projects every promoted column
 /// correctly: the changed field is updated on read; unrelated columns are
 /// preserved. This exercises `model_update_active_model`, which re-projects
-/// all 17 scalar + 5 JSONB columns on every PATCH that touches `info.*`.
+/// every scalar and JSONB column on every PATCH that touches `info.*`.
 #[tokio::test]
 async fn patch_reprojects_all_promoted_columns() {
     let db = setup_db().await;

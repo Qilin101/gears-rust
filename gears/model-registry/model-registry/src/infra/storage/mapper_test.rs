@@ -154,14 +154,12 @@ fn make_model_entity(
     canonical_id: &str,
     _info: Option<serde_json::Value>,
 ) -> entity::model::Model {
-    // The `_info` argument is retained for API compatibility with existing
-    // callers but is intentionally ignored: the `info` column was dropped in
-    // 2026-07-24, so per-test customizations must be applied to the returned
+    // The `_info` argument is intentionally ignored: there is no `info`
+    // column, so per-test customizations must be applied to the returned
     // entity via direct field assignment (e.g. `entity.vendor = Some(...)`).
-    // The fixture populates all 21 promoted columns (17 scalar + 5 JSONB
-    // sub-objects) plus the 15 denormalized OData-filterable columns so any
-    // test that builds an entity through this helper gets a fully-shaped
-    // `models` row.
+    // The fixture populates the promoted scalar columns, the JSONB
+    // sub-objects, and the OData-filterable columns so any test that builds an
+    // entity through this helper gets a fully-shaped `models` row.
     let _ = canonical_id;
     entity::model::Model {
         id,
@@ -173,7 +171,7 @@ fn make_model_entity(
         provider_settings: Some(openai_settings()),
         created_at: Utc::now(),
         updated_at: Utc::now(),
-        // 17 promoted scalar columns
+        // Promoted scalar columns
         display_name: "GPT-4o".to_owned(),
         description: Some("OpenAI's flagship model".to_owned()),
         size_bytes: None,
@@ -191,7 +189,7 @@ fn make_model_entity(
         ctx_max_output_tokens: Some(16_384),
         ctx_output_vector_size: None,
         allow_parameter_override: true,
-        // 5 JSONB sub-object columns
+        // JSONB sub-object columns
         capabilities_full: Some(json!({
             "vision": { "supported_mime_types": ["image/png"] },
             "reasoning": { "toggle": false, "resume": false, "budget": false },
@@ -226,7 +224,7 @@ fn make_model_entity(
             "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
         })),
         allow_extra_params: Some(json!(["custom_param"])),
-        // Denormalized columns
+        // OData-filterable columns
         gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
         vendor: Some("OpenAI".to_owned()),
         family: Some("gpt-4".to_owned()),
@@ -391,7 +389,7 @@ fn model_entity_to_v1_anthropic() {
 
     let info_json = serde_json::to_value(&info).expect("serialize");
 
-    // Post-2026-07-24: scalar columns are authoritative. Override the entity's
+    // Scalar columns are authoritative. Override the entity's
     // vendor/family/provider_model_id/gts_type scalars so they match the
     // anthropic info payload.
     let mut entity = make_model_entity(
@@ -454,12 +452,10 @@ fn model_entity_to_v1_unknown_provider() {
 
 #[test]
 fn model_entity_to_v1_fallback_when_info_null() {
-    // Repurposed post-2026-07-24: `info` column is gone. With `display_name`
-    // and `ctx_max_input_tokens` now required scalar columns (with DB
-    // defaults), the read path reconstructs a full `ModelInfoV1` from the
-    // promoted columns — no fallback needed. This test now confirms that
-    // even with default placeholder values, the entity reconstructs without
-    // panic.
+    // `display_name` and `ctx_max_input_tokens` are required scalar columns
+    // (with DB defaults), so the read path reconstructs a full `ModelInfoV1`
+    // from the promoted columns — no fallback needed. Confirms that even with
+    // default placeholder values the entity reconstructs without panic.
     let mut entity = make_model_entity(
         test_model_id(),
         test_provider_id(),
@@ -482,11 +478,11 @@ fn model_entity_to_v1_fallback_when_info_null() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Task 5 — `build_minimal_info` fallback path
+// `build_minimal_info` fallback path
 // Triggered when required discriminator columns (`gts_type`, `provider_model_id`)
 // are missing or corrupt. Verifies graceful degradation with DB defaults in
 // place: `display_name` and `ctx_max_input_tokens` always populated (DB-level
-// NOT NULL DEFAULTs); only the denormalized filterable columns are nullable.
+// NOT NULL DEFAULTs); only the filterable columns are nullable.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -587,9 +583,9 @@ fn build_minimal_info_preserves_zero_ctx_max_input_tokens() {
 
 #[test]
 fn build_minimal_info_preserves_scalar_capability_columns() {
-    // The 4 scalar capability booleans live in dedicated columns and are NOT
+    // The scalar capability booleans live in dedicated columns and are NOT
     // computed from JSONB — they must be projected as-is even in the fallback
-    // path. Verify all 4 booleans are reconstructed correctly.
+    // path.
     let mut entity = make_model_entity(
         test_model_id(),
         test_provider_id(),
@@ -597,7 +593,7 @@ fn build_minimal_info_preserves_scalar_capability_columns() {
         "openai::gpt-4o",
         None,
     );
-    // Flip all 4 booleans to distinct values so each is independently verifiable.
+    // Flip the booleans to distinct values so each is independently verifiable.
     entity.cap_vision = false;
     entity.cap_function_calling = true;
     entity.cap_streaming = false;
@@ -695,11 +691,11 @@ fn build_minimal_info_does_not_trigger_when_required_fields_present() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Denormalized columns after create
+// OData-filterable columns after create
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn model_create_denormalized_match_info() {
+fn model_create_projects_filterable_columns() {
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let req = CreateModelRequestV1 {
         provider_slug: "openai".into(),
@@ -731,8 +727,7 @@ fn model_create_denormalized_match_info() {
     assert!(am.cap_function_calling.unwrap());
     assert!(am.cap_streaming.unwrap());
     assert!(am.cap_reasoning_effort.unwrap());
-    // Post-2026-07-24: `info` column is gone; the promoted columns carry the
-    // same data instead. Spot-check one of the new JSONB sub-object columns.
+    // Spot-check one of the JSONB sub-object columns.
     assert!(am.capabilities_full.unwrap().is_some());
 }
 
@@ -758,11 +753,11 @@ fn model_create_default_pending_approval() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Denormalized columns re-projected after PATCH
+// OData-filterable columns re-projected after PATCH
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn model_update_reprojects_denormalized() {
+fn model_update_reprojects_filterable_columns() {
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let info_json = serde_json::to_value(&info).expect("serialize");
 
@@ -820,10 +815,8 @@ fn model_update_no_changes_preserves_columns() {
 
 #[test]
 fn model_entity_to_v1_handles_malformed_jsonb() {
-    // Post-2026-07-24: `info` column is gone. Repurposed: when the
-    // polymorphic `provider_settings` JSONB is missing, the read path
-    // returns null on the wire. (The previous "malformed JSONB" test no
-    // longer applies because there is no `info` JSONB column to corrupt.)
+    // When the polymorphic `provider_settings` JSONB is missing, the read path
+    // returns null on the wire.
     let mut entity = make_model_entity(
         test_model_id(),
         test_provider_id(),
@@ -920,13 +913,12 @@ fn model_entity_to_v1_preserves_provider_settings() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Task 3 — read-path round-trip with all 21 promoted columns populated
-// (17 scalar + 5 JSONB sub-object columns)
+// Read-path round-trip with every promoted column populated
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 #[allow(clippy::cognitive_complexity)]
-fn model_entity_to_v1_round_trips_all_21_columns() {
+fn model_entity_to_v1_round_trips_all_promoted_columns() {
     // Build an entity with every promoted column populated, then read it back
     // and verify every field lands on the SDK `ModelInfoV1` correctly.
     let now = Utc::now();
@@ -940,7 +932,7 @@ fn model_entity_to_v1_round_trips_all_21_columns() {
         provider_settings: Some(json!({"oagw_alias": "openai-prod", "temperature": 0.7})),
         created_at: now,
         updated_at: now,
-        // 17 promoted scalar columns
+        // Promoted scalar columns
         display_name: "GPT-4o".to_owned(),
         description: Some("OpenAI's flagship model".to_owned()),
         size_bytes: Some(0),
@@ -958,7 +950,7 @@ fn model_entity_to_v1_round_trips_all_21_columns() {
         ctx_max_output_tokens: Some(16_384),
         ctx_output_vector_size: None,
         allow_parameter_override: true,
-        // 5 JSONB sub-object columns
+        // JSONB sub-object columns
         capabilities_full: Some(json!({
             "vision": { "supported_mime_types": ["image/png", "image/jpeg"] },
             "reasoning": { "toggle": false, "resume": false, "budget": false },
@@ -982,7 +974,7 @@ fn model_entity_to_v1_round_trips_all_21_columns() {
             "streaming": false
         })),
         allow_extra_params: Some(json!(["custom_param", "trace_id"])),
-        // Denormalized columns
+        // OData-filterable columns
         gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
         vendor: Some("OpenAI".to_owned()),
         family: Some("gpt-4".to_owned()),
@@ -1118,7 +1110,7 @@ fn model_entity_to_v1_default_db_values_reconstruct_without_panic() {
 
 #[test]
 fn model_entity_to_v1_handles_null_jsonb_sub_objects() {
-    // Verify each of the 5 JSONB sub-object columns can be NULL without
+    // Verify each JSONB sub-object column can be NULL without
     // breaking the read path (defaulting to empty / null shapes).
     let now = Utc::now();
     let entity = entity::model::Model {
@@ -1183,7 +1175,7 @@ fn model_entity_to_v1_handles_null_jsonb_sub_objects() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Task 3 — build_capabilities merge logic
+// build_capabilities merge logic
 // (scalar bools override JSONB content; JSONB-only fields preserved)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1512,8 +1504,8 @@ fn build_capabilities_preserves_jsonb_only_fields() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Task 4 — write-path tests for `model_create_active_model`
-// Verifies every promoted column (17 scalar + 5 JSONB sub-objects) is set
+// Write-path tests for `model_create_active_model`
+// Verifies every promoted column (scalar and JSONB sub-object) is set
 // correctly from a fully-populated `ModelInfoV1`.
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1529,7 +1521,7 @@ fn make_create_request(gts_leaf: &str) -> CreateModelRequestV1 {
 }
 
 #[test]
-fn model_create_active_model_sets_all_17_scalar_columns() {
+fn model_create_active_model_sets_all_scalar_columns() {
     // Build a request with every scalar field populated, then assert that the
     // corresponding ActiveModel column values match the input.
     let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
@@ -1569,7 +1561,7 @@ fn model_create_active_model_sets_all_17_scalar_columns() {
         ApprovalStatus::Approved,
     );
 
-    // 17 promoted scalar columns — assert each one matches the input.
+    // Promoted scalar columns — assert each one matches the input.
     assert_eq!(am.display_name.unwrap(), "GPT-4o");
     assert_eq!(
         am.description.unwrap(),
@@ -1639,8 +1631,8 @@ fn model_create_active_model_handles_null_provider_settings() {
 }
 
 #[test]
-fn model_create_active_model_capabilities_strips_4_promoted_booleans() {
-    // The 4 promoted booleans (vision.enabled, reasoning.effort, function_calling,
+fn model_create_active_model_capabilities_strips_promoted_booleans() {
+    // The promoted booleans (vision.enabled, reasoning.effort, function_calling,
     // streaming) must be extracted from `capabilities_full` and stored as scalar
     // columns. The remaining capability content rides in the JSONB sub-object.
     let req = make_create_request("cf.genai._.openai.v1~");
@@ -1657,7 +1649,7 @@ fn model_create_active_model_capabilities_strips_4_promoted_booleans() {
     assert!(am.cap_streaming.unwrap());
     assert!(am.cap_reasoning_effort.unwrap());
 
-    // JSONB `capabilities_full` must NOT contain the 4 promoted booleans
+    // JSONB `capabilities_full` must NOT contain the promoted booleans
     // (they are authoritative in the columns).
     let cap_full = am
         .capabilities_full
@@ -1853,8 +1845,8 @@ fn model_create_active_model_sets_canonical_id_format() {
 
 #[test]
 fn model_create_active_model_sets_supported_api_csv() {
-    // `supported_api` is serialized as a comma-separated string for the
-    // denormalized column. Verify it is sorted (deterministic) and lowercase.
+    // `supported_api` is serialized as a comma-separated string. Verify it is
+    // sorted (deterministic) and lowercase.
     let req = make_create_request("cf.genai._.openai.v1~");
     let am = model_create_active_model(
         test_tenant_id(),
@@ -1868,15 +1860,15 @@ fn model_create_active_model_sets_supported_api_csv() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Task 4 — write-path tests for `model_update_active_model`
-// Verifies PATCH semantics: a single field change re-projects all 21 columns.
+// Write-path tests for `model_update_active_model`
+// Verifies PATCH semantics: a single field change re-projects every column.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 #[allow(clippy::cognitive_complexity)]
 fn model_update_patches_single_field_reprojects_all_columns() {
     // Start from a fully-populated entity, PATCH a single scalar field
-    // (description), and confirm all 21 promoted columns are re-projected
+    // (description), and confirm every promoted column is re-projected
     // (preserved where unchanged, updated where patched).
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let info_json = serde_json::to_value(&info).expect("serialize");
@@ -1902,7 +1894,7 @@ fn model_update_patches_single_field_reprojects_all_columns() {
         Some("Updated description".to_owned())
     );
 
-    // All other 16 promoted scalar columns preserved (re-projected from
+    // All other promoted scalar columns preserved (re-projected from
     // the reconstructed ModelInfoV1).
     assert_eq!(am.display_name.unwrap(), "GPT-4o");
     assert!(am.size_bytes.unwrap().is_none());
@@ -1920,14 +1912,14 @@ fn model_update_patches_single_field_reprojects_all_columns() {
     assert!(am.ctx_output_vector_size.unwrap().is_none());
     assert!(am.allow_parameter_override.unwrap());
 
-    // 5 JSONB sub-object columns preserved.
+    // JSONB sub-object columns preserved.
     assert!(am.capabilities_full.unwrap().is_some());
     assert!(am.default_parameters.unwrap().is_some());
     assert!(am.additional_info.unwrap().is_some());
     assert!(am.disabled_capabilities_full.unwrap().is_some());
     assert!(am.allow_extra_params.unwrap().is_some());
 
-    // 4 OData scalar capability booleans re-projected.
+    // OData scalar capability booleans re-projected.
     assert!(am.cap_vision.unwrap());
     assert!(am.cap_function_calling.unwrap());
     assert!(am.cap_streaming.unwrap());
@@ -1938,7 +1930,7 @@ fn model_update_patches_single_field_reprojects_all_columns() {
 fn model_update_patches_capability_reprojects_columns_and_jsonb() {
     // PATCH on `capabilities` (e.g. vision.enabled flips false→true) must
     // re-project BOTH the scalar capability columns AND `capabilities_full`
-    // JSONB (which must still strip the 4 promoted booleans).
+    // JSONB (which must still strip the promoted booleans).
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let info_json = serde_json::to_value(&info).expect("serialize");
 
@@ -1955,7 +1947,7 @@ fn model_update_patches_capability_reprojects_columns_and_jsonb() {
     entity.cap_streaming = false;
     entity.cap_reasoning_effort = false;
 
-    // Build a PATCH that flips all 4 capability bools.
+    // Build a PATCH that flips the capability bools.
     let req = UpdateModelRequestV1 {
         capabilities: Some(
             serde_json::from_value(json!({
@@ -1984,7 +1976,7 @@ fn model_update_patches_capability_reprojects_columns_and_jsonb() {
     assert!(am.cap_streaming.unwrap());
     assert!(am.cap_reasoning_effort.unwrap());
 
-    // JSONB `capabilities_full` re-projected with 4 promoted booleans stripped.
+    // JSONB `capabilities_full` re-projected with the promoted booleans stripped.
     let cap_full = am
         .capabilities_full
         .unwrap()
@@ -2066,7 +2058,7 @@ fn model_update_no_patches_leaves_columns_unchanged() {
     assert_eq!(am.ctx_max_input_tokens.unwrap(), 128_000);
     assert!(am.allow_parameter_override.unwrap());
 
-    // Denormalized columns preserved.
+    // OData-filterable columns preserved.
     assert_eq!(am.vendor.unwrap(), Some("OpenAI".to_owned()));
     assert_eq!(am.family.unwrap(), Some("gpt-4".to_owned()));
     assert!(!am.managed.unwrap());

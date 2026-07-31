@@ -68,12 +68,11 @@ CREATE TABLE IF NOT EXISTS models (
     canonical_id                VARCHAR(255) NOT NULL,
     lifecycle_status            VARCHAR(50) NOT NULL,
     deprecated_at               {tstz_nullable},
-    -- The `info` JSONB column has been dropped (2026-07-24). The 17 scalar columns
-    -- below + 5 JSONB sub-object columns + `provider_settings` are the new source of truth.
+    -- Polymorphic provider settings payload, discriminated by `gts_type`.
     provider_settings           {jsonb_nullable},
 
     -- ════════════════════════════════════════════════════════════════════════
-    -- 17 promoted scalar columns from `ModelInfoV1` (replacing `info`)
+    -- Promoted scalar columns from `ModelInfoV1`
     -- ════════════════════════════════════════════════════════════════════════
     display_name                TEXT NOT NULL DEFAULT '',
     description                 TEXT,
@@ -94,10 +93,10 @@ CREATE TABLE IF NOT EXISTS models (
     allow_parameter_override    {bool_} NOT NULL DEFAULT 0,
 
     -- ════════════════════════════════════════════════════════════════════════
-    -- 5 JSONB sub-object columns (replacing the rest of `info`)
+    -- JSONB sub-object columns (the rest of `ModelInfoV1`)
     -- ════════════════════════════════════════════════════════════════════════
     -- Capability fields NOT promoted to scalar columns (everything in `ModelCapabilities`
-    -- minus the 4 OData booleans stored as scalar columns above).
+    -- minus the OData booleans stored as scalar columns below).
     capabilities_full           {jsonb_nullable},
     -- `DefaultInferenceParametersV1` sub-object.
     default_parameters          {jsonb_nullable},
@@ -106,8 +105,7 @@ CREATE TABLE IF NOT EXISTS models (
     -- Symmetric with `capabilities_full` for the `disabled_capabilities` map.
     disabled_capabilities_full  {jsonb_nullable},
     -- `allow_extra_params`: flat `Vec<String>` of caller-supplied parameter
-    -- names permitted alongside the request (added 2026-07-24 to satisfy the
-    -- `allow_extra_params` user decision in the plan).
+    -- names permitted alongside the request.
     allow_extra_params          {jsonb_nullable},
 
     created_at                  {tstz} NOT NULL,
@@ -197,7 +195,8 @@ mod tests {
         assert!(!manager.has_table("providers").await.unwrap());
     }
 
-    /// Verify the `info` column has been dropped from the `models` table.
+    /// Verify the `models` table has no `info` column — every `ModelInfoV1`
+    /// field lives in a typed column or a JSONB sub-object.
     #[tokio::test]
     async fn models_info_column_absent() {
         let conn = sea_orm::Database::connect("sqlite::memory:")
@@ -226,9 +225,10 @@ mod tests {
         );
     }
 
-    /// Verify the 17 new scalar columns + 5 JSONB sub-object columns exist on `models`.
+    /// Verify the promoted scalar columns and JSONB sub-object columns exist on
+    /// `models`.
     #[tokio::test]
-    async fn models_new_columns_present() {
+    async fn models_promoted_columns_present() {
         let conn = sea_orm::Database::connect("sqlite::memory:")
             .await
             .expect("in-memory SQLite connection");
@@ -298,7 +298,7 @@ mod tests {
             );
         }
 
-        // 5 JSONB sub-object columns (TEXT on SQLite, nullable).
+        // JSONB sub-object columns (TEXT on SQLite, nullable).
         for col_name in [
             "capabilities_full",
             "default_parameters",

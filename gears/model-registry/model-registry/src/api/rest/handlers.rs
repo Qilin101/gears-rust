@@ -1,6 +1,6 @@
 //! REST handlers for the Model Registry gear.
 //!
-//! Each handler corresponds to one of the 10 P1 endpoints defined by
+//! Each handler corresponds to an endpoint defined by
 //! `ModelRegistryClientV1`. Handlers extract axum request parts, delegate to
 //! the service layer, and map to the `ApiResult` / `CanonicalError` pattern.
 

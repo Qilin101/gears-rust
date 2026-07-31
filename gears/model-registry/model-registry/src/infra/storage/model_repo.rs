@@ -906,7 +906,7 @@ mod tests {
         .await
         .expect("create model");
 
-        // Filter by gts_type (denormalized column).
+        // Filter by gts_type column.
         let gts_str = "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~";
         let parsed = toolkit_odata::parse_filter_string(&format!("gts_type eq '{gts_str}'"))
             .expect("parse filter");

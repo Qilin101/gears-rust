@@ -5,24 +5,22 @@
 //! [`ActiveModel`] builders for create/update operations that project the
 //! promoted columns from `ModelInfoV1`.
 //!
-//! # Storage layout (post-2026-07-24)
+//! # Storage layout
 //!
-//! `ModelInfoV1` is now stored as:
-//! - **17 scalar columns** — every field that promotes cleanly (one column per
+//! `ModelInfoV1` is stored as:
+//! - **Scalar columns** — every field that promotes cleanly (one column per
 //!   leaf field, including nested leaves such as `performance.response_latency_ms`).
-//! - **5 JSONB sub-object columns** — `capabilities_full` (everything in
-//!   `ModelCapabilities` minus the 4 `OData` booleans), `default_parameters`
-//!   (`DefaultInferenceParametersV1`), `additional_info` (the
-//!   `HashMap<String, Value>` escape hatch), `disabled_capabilities_full`
+//! - **JSONB sub-object columns** — `capabilities_full` (everything in
+//!   `ModelCapabilities` minus the promoted `OData` booleans),
+//!   `default_parameters` (`DefaultInferenceParametersV1`), `additional_info`
+//!   (the `HashMap<String, Value>` escape hatch), `disabled_capabilities_full`
 //!   (the `DisabledCapabilities` mirror), and `allow_extra_params` (a
 //!   `Vec<String>` of caller-supplied parameter names).
-//! - **`provider_settings`** — the polymorphic JSONB column (kept; discriminated
-//!   by `gts_type`).
+//! - **`provider_settings`** — the polymorphic JSONB column, discriminated by
+//!   `gts_type`.
 //!
-//! The previous `info` JSONB column has been dropped entirely; scalar columns
-//! are now the source of truth. The denormalized OData-filterable columns
-//! (15 fields including 4 capability bools) are projections of the corresponding
-//! `ModelInfoV1` fields maintained on every create/update.
+//! The OData-filterable columns are projections of the corresponding
+//! `ModelInfoV1` fields, maintained on every create/update.
 //!
 //! # Immutability enforcement
 //!
@@ -157,12 +155,11 @@ pub fn provider_update_active_model(
 
 /// Convert a `model::Model` entity to `ModelV1<serde_json::Value>`.
 ///
-/// Builds a JSON value from the new promoted scalar columns + the four JSONB
-/// sub-object columns + the polymorphic `provider_settings` JSONB, then
-/// deserializes via `serde_json::from_value::<ModelInfoV1>(value)`. Falls back
-/// to a minimal reconstruction from denormalized columns if any required field
-/// is missing (graceful degradation — should rarely trigger now that the
-/// migration enforces `NOT NULL DEFAULT`s on the required columns).
+/// Builds a JSON value from the promoted scalar columns + the JSONB sub-object
+/// columns + the polymorphic `provider_settings` JSONB, then deserializes via
+/// `serde_json::from_value::<ModelInfoV1>(value)`. Falls back to a minimal
+/// reconstruction if any required field is missing (graceful degradation —
+/// rarely triggers, since the required columns are `NOT NULL DEFAULT`).
 #[must_use]
 #[allow(clippy::expect_used)]
 pub fn model_entity_to_v1(e: &entity::model::Model) -> ModelV1 {
@@ -183,12 +180,12 @@ pub fn model_entity_to_v1(e: &entity::model::Model) -> ModelV1 {
     serde_json::from_value(value).expect("ModelV1 roundtrip")
 }
 
-/// Build a `ModelInfoV1` JSON value by stitching the 17 promoted scalar
-/// columns + 4 JSONB sub-object columns + the polymorphic `provider_settings`
-/// JSONB together, then deserialize via JSON roundtrip.
+/// Build a `ModelInfoV1` JSON value by stitching the promoted scalar columns +
+/// JSONB sub-object columns + the polymorphic `provider_settings` JSONB
+/// together, then deserialize via JSON roundtrip.
 ///
 /// Falls back to a minimal reconstruction when required columns are absent
-/// (legacy rows, partial inserts, or migration in-flight).
+/// (e.g. partial inserts that bypassed the application layer).
 #[must_use]
 fn build_model_info_v1(e: &entity::model::Model) -> ModelInfoV1 {
     // If `gts_type` (the discriminator) or `provider_model_id` are missing, we
@@ -223,7 +220,7 @@ fn build_model_info_v1(e: &entity::model::Model) -> ModelInfoV1 {
             "tokens_per_second": e.perf_tokens_per_second,
         },
         "additional_info": e.additional_info.clone().unwrap_or_else(|| json!({})),
-        "supported_api": supported_api_denorm_to_json_array(e.supported_api.as_deref()),
+        "supported_api": supported_api_csv_to_json_array(e.supported_api.as_deref()),
         "provider_model_id": e.provider_model_id.as_deref().unwrap_or(""),
         "capabilities": capabilities,
         "disabled_capabilities": merge_disabled_capabilities(e.disabled_capabilities_full.as_ref()),
@@ -250,12 +247,12 @@ fn build_model_info_v1(e: &entity::model::Model) -> ModelInfoV1 {
     })
 }
 
-/// Build a `ModelCapabilities` JSON value by merging the 4 promoted scalar
+/// Build a `ModelCapabilities` JSON value by merging the promoted scalar
 /// capability booleans (`cap_vision`, `cap_function_calling`, `cap_streaming`,
 /// `cap_reasoning_effort`) with the rest of the capability content from the
 /// `capabilities_full` JSONB sub-object column.
 ///
-/// **The 4 scalar columns are authoritative** — they override whatever may be
+/// **The scalar columns are authoritative** — they override whatever may be
 /// stored in `capabilities_full.vision.enabled` etc. The remaining fields
 /// (mime types, `response_schema`, `file_input`, `image_generation`, `audio_*`,
 /// `code_interpreter`, `web_search`, reasoning toggle/resume/budget) come from
@@ -443,8 +440,9 @@ fn merge_default_parameters(stored: Option<&serde_json::Value>) -> serde_json::V
 /// Build a `model::ActiveModel` from a create request.
 ///
 /// Projects every `ModelInfoV1` field into the corresponding promoted column
-/// (17 scalar + 5 JSONB sub-objects + the polymorphic `provider_settings`),
-/// derives `canonical_id` as `{provider_slug}::{info.provider_model_id}`.
+/// (scalar columns, JSONB sub-objects, and the polymorphic
+/// `provider_settings`), derives `canonical_id` as
+/// `{provider_slug}::{info.provider_model_id}`.
 #[allow(clippy::expect_used)]
 #[must_use]
 pub fn model_create_active_model(
@@ -489,7 +487,7 @@ pub fn model_create_active_model(
         }),
         created_at: Set(now),
         updated_at: Set(now),
-        // 17 promoted scalar columns
+        // Promoted scalar columns
         display_name: Set(req.info.display_name.clone()),
         description: Set(req.info.description.clone()),
         size_bytes: Set(req
@@ -513,13 +511,13 @@ pub fn model_create_active_model(
         ctx_max_output_tokens: Set(req.info.context_window.max_output_tokens.map(i64::from)),
         ctx_output_vector_size: Set(req.info.context_window.output_vector_size.map(i64::from)),
         allow_parameter_override: Set(req.info.allow_parameter_override),
-        // 5 JSONB sub-object columns
+        // JSONB sub-object columns
         capabilities_full: Set(Some(cap_full)),
         default_parameters: Set(Some(default_params)),
         additional_info: Set(Some(additional_info)),
         disabled_capabilities_full: Set(Some(disabled_full)),
         allow_extra_params: Set(Some(allow_extra_params)),
-        // Denormalized columns (15 existing OData filter surface)
+        // OData-filterable columns
         gts_type: Set(Some(req.info.gts_type.to_string())),
         vendor: Set(req.info.vendor.clone()),
         family: Set(req.info.family.clone()),
@@ -537,7 +535,7 @@ pub fn model_create_active_model(
 }
 
 /// Build the `capabilities_full` JSONB sub-object from a `ModelCapabilities`
-/// value — strips the 4 scalar-OData booleans so the columns remain the
+/// value — strips the scalar-`OData` booleans so the columns remain the
 /// authoritative source for `vision.enabled`, `function_calling`,
 /// `streaming`, and `reasoning.effort`.
 #[must_use]
@@ -545,7 +543,7 @@ pub fn model_create_active_model(
 fn build_capabilities_full_for_create(
     caps: &model_registry_sdk::models::ModelCapabilities,
 ) -> serde_json::Value {
-    // Serialize the full struct, then strip the 4 promoted fields so the
+    // Serialize the full struct, then strip the promoted fields so the
     // JSONB column matches the "rest of capabilities" contract.
     let mut value =
         serde_json::to_value(caps).expect("ModelCapabilities re-serialization cannot fail");
@@ -564,7 +562,7 @@ fn build_capabilities_full_for_create(
 
 /// Build a `model::ActiveModel` for a PATCH update.
 ///
-/// Reads the existing entity, reconstructs `ModelInfoV1` from the new column
+/// Reads the existing entity, reconstructs `ModelInfoV1` from the column
 /// layout, applies only the `Some(...)` patches from the request, and
 /// re-projects every promoted column.
 ///
@@ -603,7 +601,7 @@ pub fn model_update_active_model(
     if info_changed {
         let info_inner = &fresh;
 
-        // 17 promoted scalar columns
+        // Promoted scalar columns
         active.display_name = Set(info_inner.display_name.clone());
         active.description = Set(info_inner.description.clone());
         active.size_bytes = Set(info_inner
@@ -631,8 +629,8 @@ pub fn model_update_active_model(
             Set(info_inner.context_window.output_vector_size.map(i64::from));
         active.allow_parameter_override = Set(info_inner.allow_parameter_override);
 
-        // 5 JSONB sub-object columns
-        // `capabilities_full` strips the 4 promoted booleans so the columns
+        // JSONB sub-object columns
+        // `capabilities_full` strips the promoted booleans so the columns
         // remain authoritative (consistent with `build_capabilities_full_for_create`
         // used on the create path).
         let cap_full = build_capabilities_full_for_create(&info_inner.capabilities);
@@ -664,7 +662,7 @@ pub fn model_update_active_model(
             Some(ps_json)
         });
 
-        // Re-project denormalized columns
+        // Re-project OData-filterable columns
         active.gts_type = Set(Some(info_inner.gts_type.to_string()));
         active.vendor = Set(info_inner.vendor.clone());
         active.family = Set(info_inner.family.clone());
@@ -807,7 +805,7 @@ fn approval_status_str(status: ApprovalStatus) -> String {
 }
 
 /// Serialize a `HashSet<SupportedApi>` to a comma-separated string for the
-/// denormalized `supported_api` column.
+/// `supported_api` column.
 fn supported_api_set_to_str(apis: &std::collections::HashSet<SupportedApi>) -> Option<String> {
     if apis.is_empty() {
         return None;
@@ -831,9 +829,9 @@ fn supported_api_str(api: SupportedApi) -> String {
     }
 }
 
-/// Convert a denormalized comma-separated `supported_api` string to a JSON
-/// array of lowercase strings (the format `ModelInfoV1.supported_api` expects).
-fn supported_api_denorm_to_json_array(s: Option<&str>) -> Vec<String> {
+/// Convert the comma-separated `supported_api` column value to a JSON array of
+/// lowercase strings (the format `ModelInfoV1.supported_api` expects).
+fn supported_api_csv_to_json_array(s: Option<&str>) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     if let Some(s) = s {
         for part in s.split(',') {
@@ -846,21 +844,20 @@ fn supported_api_denorm_to_json_array(s: Option<&str>) -> Vec<String> {
     items
 }
 
-/// Build a minimal `ModelInfoV1` from the denormalized columns when the
-/// required discriminator fields (`gts_type`, `provider_model_id`) are
-/// missing or corrupt on the row.
+/// Build a minimal `ModelInfoV1` from the available columns when the required
+/// discriminator fields (`gts_type`, `provider_model_id`) are missing or
+/// corrupt on the row.
 ///
-/// This is the **graceful-degradation path** — with the post-2026-07-24
-/// schema, every `ModelInfoV1` field lives in either a scalar column or a
-/// small JSONB sub-object, so the regular read path in
-/// [`build_model_info_v1`] is authoritative. This fallback is only invoked
-/// when `gts_type` / `provider_model_id` are NULL (legacy rows, raw SQL
-/// inserts that bypassed the application layer, or in-flight migration).
+/// This is the **graceful-degradation path** — every `ModelInfoV1` field lives
+/// in either a scalar column or a small JSONB sub-object, so the regular read
+/// path in [`build_model_info_v1`] is authoritative. This fallback is only
+/// invoked when `gts_type` / `provider_model_id` are NULL (e.g. raw SQL inserts
+/// that bypassed the application layer).
 ///
 /// Required scalar columns (`display_name`, `ctx_max_input_tokens`,
 /// `allow_parameter_override`) have `NOT NULL DEFAULT`s at the DB level, so
-/// they are always populated. Only the denormalized filterable columns
-/// (`gts_type`, `provider_model_id`) remain nullable.
+/// they are always populated. Only the filterable columns (`gts_type`,
+/// `provider_model_id`) are nullable.
 #[must_use]
 fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
     // Since ModelInfoV1 and its inner types are #[non_exhaustive], construct via
@@ -898,7 +895,7 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
             "tokens_per_second": e.perf_tokens_per_second
         },
         "additional_info": e.additional_info.clone().unwrap_or_else(|| json!({})),
-        "supported_api": supported_api_denorm_to_json_array(e.supported_api.as_deref()),
+        "supported_api": supported_api_csv_to_json_array(e.supported_api.as_deref()),
         "provider_model_id": e.provider_model_id.as_deref().unwrap_or(""),
         "capabilities": {
             "vision": { "enabled": e.cap_vision, "supported_mime_types": [] },
@@ -946,7 +943,7 @@ fn build_minimal_info(e: &entity::model::Model) -> ModelInfoV1 {
         tracing::warn!(
             error = %err,
             canonical_id = %e.canonical_id,
-            "ModelInfoV1 roundtrip from denormalized columns failed, using minimal fallback"
+            "ModelInfoV1 roundtrip from entity columns failed, using minimal fallback"
         );
         // Bare-bones fallback: only the two identity fields. Construct via a
         // separate JSON value to give `serde_json::from_value` another chance

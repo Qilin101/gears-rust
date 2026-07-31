@@ -416,7 +416,7 @@ mod tests {
     /// add a quick check here for coverage completeness.
     #[test]
     fn test_domain_error_to_sdk_error_mapping() {
-        // All 10 variants (Database maps to Internal, so 11 total).
+        // Every variant (Database maps to Internal).
         let cases: Vec<(DomainError, &str)> = vec![
             (DomainError::model_not_found("m1"), "model not found: m1"),
             (

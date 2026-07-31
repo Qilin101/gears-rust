@@ -1,6 +1,6 @@
 //! REST route definitions for the Model Registry gear.
 //!
-//! Registers all 10 P1 endpoints using the `OperationBuilder` pattern.
+//! Registers the gear's endpoints using the `OperationBuilder` pattern.
 
 use std::sync::Arc;
 

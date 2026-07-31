@@ -8,11 +8,11 @@ use uuid::Uuid;
 /// Stores model catalog entries per tenant. The schema is the authoritative
 /// source of truth for `ModelInfoV1` (the public SDK type):
 ///
-/// - **17 scalar columns** hold the fields that promote cleanly to typed
+/// - **Scalar columns** hold the fields that promote cleanly to typed
 ///   columns (one column per `ModelInfoV1` field, or per nested-struct leaf).
-/// - **5 JSONB sub-object columns** hold the `ModelInfoV1` sub-objects that
+/// - **JSONB sub-object columns** hold the `ModelInfoV1` sub-objects that
 ///   don't promote cleanly: `capabilities_full` (everything in
-///   `ModelCapabilities` minus the 4 `OData` booleans),
+///   `ModelCapabilities` minus the promoted booleans),
 ///   `default_parameters` (`DefaultInferenceParametersV1`),
 ///   `additional_info` (`HashMap<String, serde_json::Value>`),
 ///   `disabled_capabilities_full` (`DisabledCapabilities`), and
@@ -20,12 +20,6 @@ use uuid::Uuid;
 /// - **`provider_settings`** is the polymorphic JSONB column storing the raw
 ///   provider-specific settings payload (the `P` in `ModelInfoV1<P>`), keyed
 ///   by the scalar `gts_type` discriminator.
-///
-/// Previously, `info` (a JSONB column holding the full serialized
-/// `ModelInfoV1`) was the source of truth and the scalar columns were
-/// denormalized shadows. As of 2026-07-24, `info` has been dropped and every
-/// `ModelInfoV1` field is stored in a typed column or a small JSONB
-/// sub-object.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Scopable)]
 #[sea_orm(table_name = "models")]
@@ -49,7 +43,7 @@ pub struct Model {
     pub updated_at: DateTime<Utc>,
 
     // ═══════════════════════════════════════════════════════════════════
-    // 17 promoted scalar columns from `ModelInfoV1`
+    // Promoted scalar columns from `ModelInfoV1`
     // ═══════════════════════════════════════════════════════════════════
     /// `info.display_name` — display name shown in UI. NOT NULL DEFAULT ''.
     pub display_name: String,
@@ -87,9 +81,9 @@ pub struct Model {
     pub allow_parameter_override: bool,
 
     // ═══════════════════════════════════════════════════════════════════
-    // 5 JSONB sub-object columns (the rest of `ModelInfoV1`)
+    // JSONB sub-object columns (the rest of `ModelInfoV1`)
     // ═══════════════════════════════════════════════════════════════════
-    /// `ModelCapabilities` minus the 4 `OData` booleans stored as scalar
+    /// `ModelCapabilities` minus the `OData` booleans stored as scalar
     /// columns below (`cap_vision`, `cap_function_calling`, `cap_streaming`,
     /// `cap_reasoning_effort`).
     #[sea_orm(column_type = "JsonBinary", nullable)]
@@ -104,13 +98,12 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub disabled_capabilities_full: Option<serde_json::Value>,
     /// `allow_extra_params: Vec<String>` of caller-supplied parameter names
-    /// permitted alongside the request (added 2026-07-24 per the plan's
-    /// `allow_extra_params` user decision).
+    /// permitted alongside the request.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub allow_extra_params: Option<serde_json::Value>,
 
     // ═══════════════════════════════════════════════════════════════════
-    // Denormalized filterable columns (15 existing OData filter surface)
+    // OData-filterable columns
     // ═══════════════════════════════════════════════════════════════════
     /// GTS schema chain identifier (e.g. `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`).
     pub gts_type: Option<String>,
@@ -127,15 +120,15 @@ pub struct Model {
     /// Provider's model identifier (e.g. "gpt-4o", "claude-sonnet-4-20250514").
     pub provider_model_id: Option<String>,
     /// Supported API kind (e.g. "completion", "embedding", "batch").
-    /// Stored as denormalized text from `info.supported_api`.
+    /// Stored as comma-separated text from `info.supported_api`.
     pub supported_api: Option<String>,
 
-    // -- Denormalized approval status --
-    /// Approval status (source of truth). Defaults to "pending". Set via
-    /// the regular model update flow.
+    // -- Approval status --
+    /// Approval status. Defaults to "pending". Set via the regular model
+    /// update flow.
     pub approval_status: String,
 
-    // -- Denormalized capability flags --
+    // -- Capability flags --
     /// Whether the model supports vision/image input.
     pub cap_vision: bool,
     /// Whether the model supports function/tool calling.
@@ -184,10 +177,9 @@ mod tests {
         Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
     }
 
-    /// Build a `Model` entity populated with all 21 new fields (17 scalar +
-    /// 4 JSONB sub-object columns) plus the existing 13 filterable columns.
-    /// Round-trips through JSON so the `#[non_exhaustive]` types in the SDK
-    /// aren't an issue.
+    /// Build a fully populated `Model` entity (scalar, JSONB sub-object, and
+    /// filterable columns). Round-trips through JSON so the
+    /// `#[non_exhaustive]` types in the SDK aren't an issue.
     #[allow(clippy::too_many_lines)]
     fn make_full_model_entity() -> Model {
         let now = Utc.with_ymd_and_hms(2026, 7, 24, 12, 0, 0).unwrap();
@@ -201,7 +193,7 @@ mod tests {
             provider_settings: Some(json!({"oagw_alias": "openai-prod"})),
             created_at: now,
             updated_at: now,
-            // 17 promoted scalar columns
+            // Promoted scalar columns
             display_name: "GPT-4o".to_owned(),
             description: Some("OpenAI's flagship model".to_owned()),
             size_bytes: None,
@@ -219,7 +211,7 @@ mod tests {
             ctx_max_output_tokens: Some(16_384),
             ctx_output_vector_size: None,
             allow_parameter_override: true,
-            // 4 JSONB sub-object columns
+            // JSONB sub-object columns
             capabilities_full: Some(json!({
                 "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
                 "reasoning": { "effort": true, "toggle": false, "resume": false, "budget": false },
@@ -249,7 +241,7 @@ mod tests {
                 "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
             })),
             allow_extra_params: Some(json!(["custom_param", "trace_id"])),
-            // 13 existing filterable columns
+            // Filterable columns
             gts_type: Some("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~".to_owned()),
             vendor: Some("OpenAI".to_owned()),
             family: Some("gpt-4".to_owned()),

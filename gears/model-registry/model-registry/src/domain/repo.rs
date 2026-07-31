@@ -95,9 +95,8 @@ pub trait ModelRepository: Send + Sync {
 
     /// List models matching the `OData` query within the given access scope.
     ///
-    /// Filtering operates entirely on `models` columns (including denormalized
-    /// fields). Deprecated models are excluded by default unless the filter
-    /// explicitly includes them.
+    /// Filtering operates entirely on `models` columns. Deprecated models are
+    /// excluded by default unless the filter explicitly includes them.
     async fn list(
         &self,
         conn: &impl DBRunner,
