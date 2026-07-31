@@ -14,12 +14,9 @@
 //! field does call `serde_json::to_value` once (see [`model_info_to_json`]) to
 //! re-serialize the SDK's `ModelInfoV1<P>` into the wire-shape `JsonValue`.
 
-use model_registry_sdk::models::{
-    ApprovalStatus, LifecycleStatus, ModelInfoV1, ModelV1, ProviderStatus, ProviderV1,
-};
+use model_registry_sdk::models::{ModelInfoV1, ModelV1, ProviderV1};
 use serde_json::Value as JsonValue;
 use toolkit_macros::api_dto;
-use tracing;
 use uuid::Uuid;
 
 /// Serde deserialization helper for `Option<Option<T>>` PATCH fields.
@@ -126,63 +123,6 @@ pub struct ProviderListDto {
     pub page_info: PageInfoDto,
 }
 
-/// Map a [`ProviderStatus`] to its lowercase wire string.
-///
-/// Kept local to the DTO layer (mirrors the mapper in `infra/storage/`) so
-/// the conversion is local and obvious. The wildcard branch covers the
-/// `#[non_exhaustive]` enum — unknown variants fall back to `"active"`.
-#[must_use]
-fn provider_status_to_str(status: ProviderStatus) -> String {
-    match status {
-        ProviderStatus::Active => "active".to_owned(),
-        ProviderStatus::Disabled => "disabled".to_owned(),
-        _ => {
-            tracing::error!(
-                ?status,
-                "unknown ProviderStatus variant, defaulting to active"
-            );
-            "active".to_owned()
-        }
-    }
-}
-
-/// Map a [`LifecycleStatus`] to its lowercase wire string.
-#[must_use]
-fn lifecycle_status_to_str(status: LifecycleStatus) -> String {
-    match status {
-        LifecycleStatus::Production => "production".to_owned(),
-        LifecycleStatus::Preview => "preview".to_owned(),
-        LifecycleStatus::Experimental => "experimental".to_owned(),
-        LifecycleStatus::Deprecated => "deprecated".to_owned(),
-        LifecycleStatus::Sunset => "sunset".to_owned(),
-        _ => {
-            tracing::error!(
-                ?status,
-                "unknown LifecycleStatus variant, defaulting to production"
-            );
-            "production".to_owned()
-        }
-    }
-}
-
-/// Map an [`ApprovalStatus`] to its lowercase wire string.
-#[must_use]
-fn approval_status_to_str(status: ApprovalStatus) -> String {
-    match status {
-        ApprovalStatus::Pending => "pending".to_owned(),
-        ApprovalStatus::Approved => "approved".to_owned(),
-        ApprovalStatus::Rejected => "rejected".to_owned(),
-        ApprovalStatus::Revoked => "revoked".to_owned(),
-        _ => {
-            tracing::error!(
-                ?status,
-                "unknown ApprovalStatus variant, defaulting to pending"
-            );
-            "pending".to_owned()
-        }
-    }
-}
-
 impl From<ProviderV1> for ProviderDto {
     fn from(source: ProviderV1) -> Self {
         Self {
@@ -190,7 +130,7 @@ impl From<ProviderV1> for ProviderDto {
             slug: source.slug,
             name: source.name,
             gts_type: source.gts_type.to_string(),
-            status: provider_status_to_str(source.status),
+            status: source.status.as_str().to_owned(),
             managed: source.managed,
             metadata: source.metadata,
             discovery_enabled: source.discovery_enabled,
@@ -240,8 +180,8 @@ where
         Self {
             id: source.id,
             canonical_id: source.canonical_id,
-            lifecycle_status: lifecycle_status_to_str(source.lifecycle_status),
-            approval_status: approval_status_to_str(source.approval_status),
+            lifecycle_status: source.lifecycle_status.as_str().to_owned(),
+            approval_status: source.approval_status.as_str().to_owned(),
             info: model_info_to_json(&source.info),
         }
     }

@@ -32,6 +32,16 @@ pub enum LifecycleStatus {
 }
 
 impl LifecycleStatus {
+    /// Every variant, in declaration order. Lets callers render the accepted
+    /// domain (e.g. in a validation error) without restating it.
+    pub const ALL: &[Self] = &[
+        Self::Production,
+        Self::Preview,
+        Self::Experimental,
+        Self::Deprecated,
+        Self::Sunset,
+    ];
+
     /// Lowercase wire/storage string — identical to the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -76,6 +86,9 @@ pub enum ApprovalStatus {
 }
 
 impl ApprovalStatus {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Pending, Self::Approved, Self::Rejected, Self::Revoked];
+
     /// Lowercase wire/storage string — identical to the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -115,6 +128,9 @@ pub enum ProviderStatus {
 }
 
 impl ProviderStatus {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Active, Self::Disabled];
+
     /// Lowercase wire/storage string — identical to the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -169,6 +185,9 @@ pub enum SupportedApi {
 }
 
 impl SupportedApi {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Completion, Self::Embedding, Self::Batch];
+
     /// Lowercase wire/storage string — identical to the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -506,18 +525,31 @@ pub struct ModelPerformance {
 mod tests {
     use super::*;
 
+    /// `ALL` is the domain the API layer renders in "expected one of …"
+    /// validation messages, so it must list exactly the variants the
+    /// wire-format cases below enumerate, in the same order.
+    fn assert_all_lists_every_variant<T: Copy + PartialEq + std::fmt::Debug>(
+        all: &[T],
+        cases: &[(T, &str)],
+    ) {
+        let from_cases: Vec<T> = cases.iter().map(|(v, _)| *v).collect();
+        assert_eq!(all, from_cases.as_slice(), "ALL drifted from the variants");
+    }
+
     #[test]
     fn lifecycle_status_wire_format_is_lowercase() {
         // Pinned to match DESIGN.md §3.1 — lifecycle_status is queryable via
         // OData on the catalog list endpoint and must match the JSONB-stored
         // string casing.
-        for (variant, expected) in [
+        let cases = [
             (LifecycleStatus::Production, "\"production\""),
             (LifecycleStatus::Preview, "\"preview\""),
             (LifecycleStatus::Experimental, "\"experimental\""),
             (LifecycleStatus::Deprecated, "\"deprecated\""),
             (LifecycleStatus::Sunset, "\"sunset\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(LifecycleStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: LifecycleStatus = serde_json::from_str(&s).unwrap();
@@ -532,12 +564,14 @@ mod tests {
 
     #[test]
     fn approval_status_wire_format_is_lowercase() {
-        for (variant, expected) in [
+        let cases = [
             (ApprovalStatus::Pending, "\"pending\""),
             (ApprovalStatus::Approved, "\"approved\""),
             (ApprovalStatus::Rejected, "\"rejected\""),
             (ApprovalStatus::Revoked, "\"revoked\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(ApprovalStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: ApprovalStatus = serde_json::from_str(&s).unwrap();
@@ -550,10 +584,12 @@ mod tests {
 
     #[test]
     fn provider_status_wire_format_is_lowercase() {
-        for (variant, expected) in [
+        let cases = [
             (ProviderStatus::Active, "\"active\""),
             (ProviderStatus::Disabled, "\"disabled\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(ProviderStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: ProviderStatus = serde_json::from_str(&s).unwrap();
@@ -568,11 +604,13 @@ mod tests {
     fn supported_api_wire_format_is_lowercase() {
         // Pinned to match DESIGN.md §3.1; OData filters on
         // `info.supported_api` (DESIGN.md §3.3) compare against these strings.
-        for (variant, expected) in [
+        let cases = [
             (SupportedApi::Completion, "\"completion\""),
             (SupportedApi::Embedding, "\"embedding\""),
             (SupportedApi::Batch, "\"batch\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(SupportedApi::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: SupportedApi = serde_json::from_str(&s).unwrap();

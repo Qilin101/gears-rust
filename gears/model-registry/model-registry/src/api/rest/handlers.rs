@@ -16,6 +16,7 @@ use super::dto::{
     ProviderListDto, UpdateModelRequestDto, UpdateProviderRequestDto,
 };
 use super::error::ModelRegistryResourceError;
+use super::parse;
 use crate::domain::cache::InMemoryCache;
 use crate::domain::service::Service;
 use crate::infra::storage::model_repo::ModelRepositoryImpl;
@@ -97,18 +98,11 @@ pub async fn update_provider(
     Path(id): Path<Uuid>,
     Json(dto): Json<UpdateProviderRequestDto>,
 ) -> ApiResult<JsonBody<ProviderDto>> {
-    // Parse status string to SDK enum
-    let status = match dto.status {
-        Some(s) => {
-            let st = serde_json::from_value(serde_json::Value::String(s)).map_err(|e| {
-                ModelRegistryResourceError::invalid_argument()
-                    .with_field_violation("status", e.to_string(), "INVALID_PROVIDER_STATUS")
-                    .create()
-            })?;
-            Some(st)
-        }
-        None => None,
-    };
+    let status = dto
+        .status
+        .as_deref()
+        .map(parse::provider_status)
+        .transpose()?;
 
     let sdk_req = crate::UpdateProviderRequestV1 {
         name: dto.name,
@@ -175,35 +169,12 @@ pub async fn create_model(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Json(dto): Json<CreateModelRequestDto>,
 ) -> ApiResult<(StatusCode, JsonBody<ModelDto>)> {
-    // Parse lifecycle status string to SDK enum
-    let lifecycle_status = serde_json::from_value(serde_json::Value::String(dto.lifecycle_status))
-        .map_err(|e| {
-            ModelRegistryResourceError::invalid_argument()
-                .with_field_violation(
-                    "lifecycle_status",
-                    e.to_string(),
-                    "INVALID_LIFECYCLE_STATUS",
-                )
-                .create()
-        })?;
-
-    // Parse approval status (optional)
-    let approval_status = match dto.approval_status {
-        Some(s) => {
-            let status: crate::ApprovalStatus =
-                serde_json::from_value(serde_json::Value::String(s)).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "approval_status",
-                            e.to_string(),
-                            "INVALID_APPROVAL_STATUS",
-                        )
-                        .create()
-                })?;
-            Some(status)
-        }
-        None => None,
-    };
+    let lifecycle_status = parse::lifecycle_status(&dto.lifecycle_status)?;
+    let approval_status = dto
+        .approval_status
+        .as_deref()
+        .map(parse::approval_status)
+        .transpose()?;
 
     // Parse info JSON into ModelInfoV1
     let info: model_registry_sdk::models::ModelInfoV1<serde_json::Value> =
@@ -232,41 +203,16 @@ pub async fn update_model(
     Path(canonical_id): Path<String>,
     Json(dto): Json<UpdateModelRequestDto>,
 ) -> ApiResult<JsonBody<ModelDto>> {
-    // Convert approval_status string to SDK type
-    let approval_status = match dto.approval_status {
-        Some(s) => {
-            let status: crate::ApprovalStatus =
-                serde_json::from_value(serde_json::Value::String(s)).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "approval_status",
-                            e.to_string(),
-                            "INVALID_APPROVAL_STATUS",
-                        )
-                        .create()
-                })?;
-            Some(status)
-        }
-        None => None,
-    };
-
-    // Convert lifecycle_status string to SDK type
-    let lifecycle_status = match dto.lifecycle_status {
-        Some(s) => {
-            let status: crate::LifecycleStatus =
-                serde_json::from_value(serde_json::Value::String(s)).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "lifecycle_status",
-                            e.to_string(),
-                            "INVALID_LIFECYCLE_STATUS",
-                        )
-                        .create()
-                })?;
-            Some(status)
-        }
-        None => None,
-    };
+    let approval_status = dto
+        .approval_status
+        .as_deref()
+        .map(parse::approval_status)
+        .transpose()?;
+    let lifecycle_status = dto
+        .lifecycle_status
+        .as_deref()
+        .map(parse::lifecycle_status)
+        .transpose()?;
 
     // Build SDK request from DTO fields
     let sdk_req = crate::UpdateModelRequestV1 {

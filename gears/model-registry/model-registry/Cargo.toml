@@ -34,6 +34,7 @@ toolkit-db = { workspace = true, features = ["sqlite"] }
 toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
+toolkit-odata-macros = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum"] }
 toolkit-macros = { workspace = true }
 

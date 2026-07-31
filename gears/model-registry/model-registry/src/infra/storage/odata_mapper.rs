@@ -1,15 +1,21 @@
 //! `OData` filter / order surface for the `model-registry` listing endpoints.
 //!
-//! Defines filter-field enums and mappers for both the `models` and
-//! `providers` listing endpoints. Each filter field maps to a **real
-//! database column** — the toolkit `OData` layer (`toolkit-db` / `sea_orm_filter`)
-//! does not support JSONB-path filtering or joins.
+//! The filterable wire surface is declared once per resource, as an annotated
+//! query struct; `#[derive(ODataFilterable)]` generates the `FilterField` enum
+//! (`<Struct>FilterField`) with its `FIELDS` / `name()` / `kind()` impl. Each
+//! filter field maps to a **real database column** — the toolkit `OData` layer
+//! (`toolkit-db` / `sea_orm_filter`) does not support JSONB-path filtering or
+//! joins — and that binding stays hand-written below, since no derive can
+//! infer it (`vision` → `Column::CapVision`).
 //!
-//! Non-allowlisted fields are rejected via [`FilterField::from_name`] (returns
-//! `None`), which the `OData` parser surfaces as an unknown-field validation
-//! error.
+//! Non-allowlisted fields are rejected via
+//! [`toolkit_odata::filter::FilterField::from_name`] (returns `None`), which
+//! the `OData` parser surfaces as an unknown-field validation error.
 
 use toolkit_db::odata::sea_orm_filter::{FieldToColumn, ODataFieldMapping};
+use toolkit_odata_macros::ODataFilterable;
+
+#[cfg(test)]
 use toolkit_odata::filter::{FieldKind, FilterField};
 
 use super::entity::{model, provider};
@@ -18,92 +24,53 @@ use super::entity::{model, provider};
 // Model filter fields
 // ===========================================================================
 
-/// `OData` filter / order field enum for `GET /model-registry/v1/models`.
+/// Filterable / orderable wire surface of `GET /model-registry/v1/models`.
 ///
 /// Every field maps to a real `models` column (including the capability flags
-/// and `approval_status`).
+/// and `approval_status`). Non-allowlisted fields (`provider_settings.*`,
+/// `default_parameters.*`, `info.additional_info.*`, per-MIME array fields)
+/// are absent here and therefore rejected at the parser level.
 ///
-/// Non-allowlisted fields (`provider_settings.*`, `default_parameters.*`,
-/// `info.additional_info.*`, per-MIME array fields) are rejected at the
-/// parser level — [`FilterField::from_name`] returns `None` for them.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ModelFilterField {
-    CanonicalId,
-    LifecycleStatus,
-    ApprovalStatus,
-    GtsType,
-    SupportedApi,
-    ProviderModelId,
-    Vendor,
-    Family,
-    Managed,
-    Architecture,
-    Format,
-    Vision,
-    FunctionCalling,
-    Streaming,
-    ReasoningEffort,
+/// The struct exists to carry the annotations — the generated
+/// [`ModelFilterField`] enum is what the repository uses.
+#[derive(ODataFilterable)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ModelQuery {
+    #[odata(filter(kind = "String"))]
+    pub canonical_id: String,
+    #[odata(filter(kind = "String"))]
+    pub lifecycle_status: String,
+    #[odata(filter(kind = "String"))]
+    pub approval_status: String,
+    #[odata(filter(kind = "String"))]
+    pub gts_type: String,
+    #[odata(filter(kind = "String"))]
+    pub supported_api: String,
+    #[odata(filter(kind = "String"))]
+    pub provider_model_id: String,
+    #[odata(filter(kind = "String"))]
+    pub vendor: String,
+    #[odata(filter(kind = "String"))]
+    pub family: String,
+    #[odata(filter(kind = "Bool"))]
+    pub managed: bool,
+    #[odata(filter(kind = "String"))]
+    pub architecture: String,
+    #[odata(filter(kind = "String"))]
+    pub format: String,
+    #[odata(filter(kind = "Bool"))]
+    pub vision: bool,
+    #[odata(filter(kind = "Bool"))]
+    pub function_calling: bool,
+    #[odata(filter(kind = "Bool"))]
+    pub streaming: bool,
+    #[odata(filter(kind = "Bool"))]
+    pub reasoning_effort: bool,
 }
 
-impl FilterField for ModelFilterField {
-    const FIELDS: &'static [Self] = &[
-        Self::CanonicalId,
-        Self::LifecycleStatus,
-        Self::ApprovalStatus,
-        Self::GtsType,
-        Self::SupportedApi,
-        Self::ProviderModelId,
-        Self::Vendor,
-        Self::Family,
-        Self::Managed,
-        Self::Architecture,
-        Self::Format,
-        Self::Vision,
-        Self::FunctionCalling,
-        Self::Streaming,
-        Self::ReasoningEffort,
-    ];
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::CanonicalId => "canonical_id",
-            Self::LifecycleStatus => "lifecycle_status",
-            Self::ApprovalStatus => "approval_status",
-            Self::GtsType => "gts_type",
-            Self::SupportedApi => "supported_api",
-            Self::ProviderModelId => "provider_model_id",
-            Self::Vendor => "vendor",
-            Self::Family => "family",
-            Self::Managed => "managed",
-            Self::Architecture => "architecture",
-            Self::Format => "format",
-            Self::Vision => "vision",
-            Self::FunctionCalling => "function_calling",
-            Self::Streaming => "streaming",
-            Self::ReasoningEffort => "reasoning_effort",
-        }
-    }
-
-    fn kind(&self) -> FieldKind {
-        match self {
-            Self::CanonicalId
-            | Self::LifecycleStatus
-            | Self::ApprovalStatus
-            | Self::GtsType
-            | Self::SupportedApi
-            | Self::ProviderModelId
-            | Self::Vendor
-            | Self::Family
-            | Self::Architecture
-            | Self::Format => FieldKind::String,
-            Self::Managed
-            | Self::Vision
-            | Self::FunctionCalling
-            | Self::Streaming
-            | Self::ReasoningEffort => FieldKind::Bool,
-        }
-    }
-}
+/// `OData` filter / order field enum for `GET /model-registry/v1/models`,
+/// generated from [`ModelQuery`].
+pub use ModelQueryFilterField as ModelFilterField;
 
 /// Maps [`ModelFilterField`] to `models` columns and extracts cursor values.
 pub struct ModelODataMapper;
@@ -183,47 +150,28 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
 // Provider filter fields
 // ===========================================================================
 
-/// `OData` filter / order field enum for `GET /model-registry/v1/providers`.
+/// Filterable / orderable wire surface of `GET /model-registry/v1/providers`.
 ///
 /// Every field maps to a real `providers` column.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ProviderFilterField {
-    Slug,
-    Name,
-    Status,
-    GtsType,
-    Managed,
-    DiscoveryEnabled,
+#[derive(ODataFilterable)]
+pub struct ProviderQuery {
+    #[odata(filter(kind = "String"))]
+    pub slug: String,
+    #[odata(filter(kind = "String"))]
+    pub name: String,
+    #[odata(filter(kind = "String"))]
+    pub status: String,
+    #[odata(filter(kind = "String"))]
+    pub gts_type: String,
+    #[odata(filter(kind = "Bool"))]
+    pub managed: bool,
+    #[odata(filter(kind = "Bool"))]
+    pub discovery_enabled: bool,
 }
 
-impl FilterField for ProviderFilterField {
-    const FIELDS: &'static [Self] = &[
-        Self::Slug,
-        Self::Name,
-        Self::Status,
-        Self::GtsType,
-        Self::Managed,
-        Self::DiscoveryEnabled,
-    ];
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Slug => "slug",
-            Self::Name => "name",
-            Self::Status => "status",
-            Self::GtsType => "gts_type",
-            Self::Managed => "managed",
-            Self::DiscoveryEnabled => "discovery_enabled",
-        }
-    }
-
-    fn kind(&self) -> FieldKind {
-        match self {
-            Self::Slug | Self::Name | Self::Status | Self::GtsType => FieldKind::String,
-            Self::Managed | Self::DiscoveryEnabled => FieldKind::Bool,
-        }
-    }
-}
+/// `OData` filter / order field enum for `GET /model-registry/v1/providers`,
+/// generated from [`ProviderQuery`].
+pub use ProviderQueryFilterField as ProviderFilterField;
 
 /// Maps [`ProviderFilterField`] to `providers` columns and extracts cursor values.
 pub struct ProviderODataMapper;

@@ -3,6 +3,7 @@
 pub mod dto;
 pub mod error;
 pub mod handlers;
+mod parse;
 pub mod routes;
 
 #[cfg(test)]
