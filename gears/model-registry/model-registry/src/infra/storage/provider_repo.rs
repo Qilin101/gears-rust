@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait};
-use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
+use toolkit_db::odata::sea_orm_filter::{LimitCfg, PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, secure_update_with_scope,
 };
@@ -58,7 +58,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found(id))?;
 
-        Ok(mapper::provider_entity_to_v1(&entity))
+        mapper::provider_entity_to_v1(&entity)
     }
 
     async fn find_by_slug(
@@ -76,7 +76,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found_by_slug(slug))?;
 
-        Ok(mapper::provider_entity_to_v1(&entity))
+        mapper::provider_entity_to_v1(&entity)
     }
 
     async fn list(
@@ -87,11 +87,15 @@ impl ProviderRepository for ProviderRepositoryImpl {
     ) -> Result<Page<ProviderV1>, DomainError> {
         let base = provider::Entity::find().secure().scope_with(scope);
 
-        let page = paginate_odata::<
+        // `paginate_odata_try` because `provider_entity_to_v1` is fallible — a
+        // row with an out-of-domain `status` surfaces as
+        // `DomainError::Internal` rather than panicking the worker.
+        let page = paginate_odata_try::<
             ProviderFilterField,
             ProviderODataMapper,
             provider::Entity,
             ProviderV1,
+            _,
             _,
             _,
         >(
@@ -106,7 +110,12 @@ impl ProviderRepository for ProviderRepositoryImpl {
             |m| mapper::provider_entity_to_v1(&m),
         )
         .await
-        .map_err(|e| DomainError::internal(format!("OData pagination failed: {e}")))?;
+        .map_err(|e| match e {
+            PaginateOdataTryError::OData(odata_err) => {
+                DomainError::internal(format!("OData pagination failed: {odata_err}"))
+            }
+            PaginateOdataTryError::MapError(domain_err) => domain_err,
+        })?;
 
         Ok(page)
     }
@@ -137,7 +146,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(mapper::provider_entity_to_v1(&entity))
+        mapper::provider_entity_to_v1(&entity)
     }
 
     async fn update(
@@ -167,7 +176,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(mapper::provider_entity_to_v1(&updated))
+        mapper::provider_entity_to_v1(&updated)
     }
 
     async fn delete(

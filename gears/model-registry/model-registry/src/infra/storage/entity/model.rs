@@ -11,9 +11,8 @@ use uuid::Uuid;
 /// - **Scalar columns** hold the fields that promote cleanly to typed
 ///   columns (one column per `ModelInfoV1` field, or per nested-struct leaf).
 /// - **JSONB sub-object columns** hold the `ModelInfoV1` sub-objects that
-///   don't promote cleanly: `capabilities_full` (everything in
-///   `ModelCapabilities` minus the promoted booleans),
-///   `default_parameters` (`DefaultInferenceParametersV1`),
+///   don't promote cleanly: `capabilities_full` (the complete
+///   `ModelCapabilities`), `default_parameters` (`DefaultInferenceParametersV1`),
 ///   `additional_info` (`HashMap<String, serde_json::Value>`),
 ///   `disabled_capabilities_full` (`DisabledCapabilities`), and
 ///   `allow_extra_params` (`Vec<String>` of caller-supplied parameter names).
@@ -83,9 +82,10 @@ pub struct Model {
     // ═══════════════════════════════════════════════════════════════════
     // JSONB sub-object columns (the rest of `ModelInfoV1`)
     // ═══════════════════════════════════════════════════════════════════
-    /// `ModelCapabilities` minus the `OData` booleans stored as scalar
-    /// columns below (`cap_vision`, `cap_function_calling`, `cap_streaming`,
-    /// `cap_reasoning_effort`).
+    /// The complete `ModelCapabilities`. The four `OData` booleans are
+    /// additionally shadowed into the scalar columns below (`cap_vision`,
+    /// `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`),
+    /// which are authoritative on read.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub capabilities_full: Option<serde_json::Value>,
     /// `DefaultInferenceParametersV1` sub-object.

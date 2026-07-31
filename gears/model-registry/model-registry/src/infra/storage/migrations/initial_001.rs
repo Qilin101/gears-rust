@@ -95,8 +95,8 @@ CREATE TABLE IF NOT EXISTS models (
     -- ════════════════════════════════════════════════════════════════════════
     -- JSONB sub-object columns (the rest of `ModelInfoV1`)
     -- ════════════════════════════════════════════════════════════════════════
-    -- Capability fields NOT promoted to scalar columns (everything in `ModelCapabilities`
-    -- minus the OData booleans stored as scalar columns below).
+    -- The complete `ModelCapabilities`; the 4 OData booleans below are
+    -- scalar shadows of it and are authoritative on read.
     capabilities_full           {jsonb_nullable},
     -- `DefaultInferenceParametersV1` sub-object.
     default_parameters          {jsonb_nullable},

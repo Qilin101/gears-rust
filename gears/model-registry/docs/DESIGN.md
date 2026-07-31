@@ -1062,7 +1062,7 @@ Sub-objects that don't promote cleanly live as small JSONB columns. Same backend
 
 | Column | Holds | Rationale |
 |---|---|---|
-| `capabilities_full` | `ModelCapabilities` minus the 4 OData booleans stored as scalar columns below (`cap_vision`, `cap_function_calling`, `cap_streaming`, `cap_reasoning_effort`) | The remaining capability fields (vision mime types, reasoning toggle/resume/budget, response_schema, file_input, image_generation, audio_input/output, code_interpreter, web_search) are too granular to promote individually |
+| `capabilities_full` | The complete `ModelCapabilities` (the 4 OData booleans below are scalar shadows of it) | The remaining capability fields (vision mime types, reasoning toggle/resume/budget, response_schema, file_input, image_generation, audio_input/output, code_interpreter, web_search) are too granular to promote individually |
 | `default_parameters` | `DefaultInferenceParametersV1` (~13 mostly-Optional fields) | Sub-object, not worth promoting |
 | `additional_info` | `HashMap<String, serde_json::Value>` | Forward-compat escape hatch |
 | `disabled_capabilities_full` | `DisabledCapabilities` | Symmetric with `capabilities_full` |
@@ -1094,7 +1094,7 @@ The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval
 | cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.streaming` |
 | cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.reasoning.effort` |
 
-Scalar columns are the source of truth; the four additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`. On the read path the mapper rebuilds the in-memory `ModelInfoV1` JSON by stitching the 17 scalar columns + 5 JSONB sub-objects + `provider_settings` via `serde_json::json!{...}` then `serde_json::from_value::<ModelV1>(value)` (same JSON-value-then-roundtrip pattern as the defensive `build_minimal_info` fallback). The 4 OData-filterable capability booleans come from scalar columns on read; they override anything in `capabilities_full` JSONB (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
+Scalar columns are the source of truth; the four additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`. On the read path the mapper builds `ModelV1` / `ModelInfoV1` directly via struct literals from the 17 scalar columns + 5 JSONB sub-objects + `provider_settings`, so adding a field to `ModelInfoV1` is a compile error in the read and write projections rather than a runtime failure; the two ways a row can fail to lift (an out-of-domain enum string, an out-of-range `ctx_max_input_tokens`) surface as `DomainError::Internal`. The 4 OData-filterable capability booleans come from scalar columns on read; they override anything in `capabilities_full` JSONB (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
 
 **Indexes**: (tenant_id), (tenant_id, canonical_id) UNIQUE, (provider_id), (lifecycle_status)
 

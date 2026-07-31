@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
-use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
+use toolkit_db::odata::sea_orm_filter::{LimitCfg, PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{DBRunner, SecureEntityExt, secure_update_with_scope};
 use toolkit_odata::{ODataQuery, Page, SortDir, normalize_filter_for_hash};
 use toolkit_security::AccessScope;
@@ -68,7 +68,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::model_not_found(canonical_id))?;
 
-        Ok(mapper::model_entity_to_v1(&entity))
+        mapper::model_entity_to_v1(&entity)
     }
 
     async fn list(
@@ -90,20 +90,35 @@ impl ModelRepository for ModelRepositoryImpl {
             );
         }
 
-        let page =
-            paginate_odata::<ModelFilterField, ModelODataMapper, model::Entity, ModelV1, _, _>(
-                base,
-                conn,
-                query,
-                ("canonical_id", SortDir::Asc),
-                LimitCfg {
-                    default: 20,
-                    max: 100,
-                },
-                |m| mapper::model_entity_to_v1(&m),
-            )
-            .await
-            .map_err(|e| DomainError::internal(format!("OData pagination failed: {e}")))?;
+        // `paginate_odata_try` because `model_entity_to_v1` is fallible — a row
+        // with an out-of-domain enum string surfaces as `DomainError::Internal`
+        // rather than panicking the worker.
+        let page = paginate_odata_try::<
+            ModelFilterField,
+            ModelODataMapper,
+            model::Entity,
+            ModelV1,
+            _,
+            _,
+            _,
+        >(
+            base,
+            conn,
+            query,
+            ("canonical_id", SortDir::Asc),
+            LimitCfg {
+                default: 20,
+                max: 100,
+            },
+            |m| mapper::model_entity_to_v1(&m),
+        )
+        .await
+        .map_err(|e| match e {
+            PaginateOdataTryError::OData(odata_err) => {
+                DomainError::internal(format!("OData pagination failed: {odata_err}"))
+            }
+            PaginateOdataTryError::MapError(domain_err) => domain_err,
+        })?;
 
         Ok(page)
     }
@@ -154,7 +169,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(mapper::model_entity_to_v1(&entity))
+        mapper::model_entity_to_v1(&entity)
     }
 
     async fn update(
@@ -175,7 +190,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .ok_or(DomainError::model_not_found(canonical_id))?;
 
         // Build the patched ActiveModel via the mapper (PATCH semantics).
-        let am = mapper::model_update_active_model(&existing, req);
+        let am = mapper::model_update_active_model(&existing, req)?;
 
         let model_id = existing.id;
 
@@ -184,7 +199,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(mapper::model_entity_to_v1(&updated))
+        mapper::model_entity_to_v1(&updated)
     }
 
     async fn soft_delete(

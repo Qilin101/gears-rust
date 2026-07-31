@@ -1022,7 +1022,25 @@ async fn create_and_read_round_trip_full_model_info() {
         .await
         .expect("create provider");
 
-    let req = make_create_model_req("openai", "gpt-4o");
+    let mut req = make_create_model_req("openai", "gpt-4o");
+    // Populate the fields that ride inside the JSONB sub-objects (rather than
+    // in a promoted scalar column) so the whole-payload assertion at the end of
+    // this test covers them too.
+    req.info.capabilities.response_schema = true;
+    req.info.capabilities.file_input = MediaCapability {
+        enabled: true,
+        supported_mime_types: vec!["application/pdf".to_owned()],
+    };
+    req.info.capabilities.web_search = WebSearchCapability {
+        enabled: true,
+        allowed_domains: false,
+        excluded_domains: true,
+    };
+    req.info.disabled_capabilities.vision = DisabledMediaCapability {
+        disabled: false,
+        disabled_mime_types: vec!["image/gif".to_owned()],
+    };
+    req.info.default_parameters.temperature = Some(0.5);
     let info_in = req.info.clone();
     service
         .create_model(&ctx, &req)
@@ -1083,6 +1101,12 @@ async fn create_and_read_round_trip_full_model_info() {
         fetched.info.allow_parameter_override,
         info_in.allow_parameter_override,
     );
+
+    // ── The whole payload round-trips verbatim ─────────────────────────────
+    // Field-for-field equality of the SDK type in and out: the column layout
+    // is lossless, including the capability fields that have no scalar column
+    // and ride inside `capabilities_full` / `disabled_capabilities_full`.
+    assert_eq!(fetched.info, info_in);
 }
 
 /// Verify that non-empty `additional_info` and `allow_extra_params` (the
