@@ -58,15 +58,18 @@ use super::entity;
 
 /// Decode a JSONB sub-object column into its typed form.
 ///
+/// Takes the column by value so the decode moves strings out of the JSON tree
+/// instead of copying them.
+///
 /// The write path always stores the complete sub-object, so a NULL column or a
 /// value the type no longer accepts means the row predates the current shape;
 /// both decode to `T::default()`.
-fn from_json_column<T>(column: Option<&serde_json::Value>) -> T
+fn from_json_column<T>(column: Option<serde_json::Value>) -> T
 where
     T: Default + serde::de::DeserializeOwned,
 {
     column
-        .and_then(|v| T::deserialize(v).ok())
+        .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
 
@@ -112,7 +115,7 @@ fn supported_api_to_csv(apis: &HashSet<SupportedApi>) -> Option<String> {
 /// [`DomainError::Internal`] when `status` holds a value outside the
 /// [`ProviderStatus`] domain (structurally prevented by the write path;
 /// reachable only through legacy / manually-repaired rows).
-pub fn provider_entity_to_v1(e: &entity::provider::Model) -> Result<ProviderV1, DomainError> {
+pub fn provider_entity_to_v1(e: entity::provider::Model) -> Result<ProviderV1, DomainError> {
     let status = ProviderStatus::from_wire(&e.status).ok_or_else(|| {
         DomainError::internal(format!(
             "providers.status out-of-domain value `{}` on provider {}",
@@ -122,12 +125,12 @@ pub fn provider_entity_to_v1(e: &entity::provider::Model) -> Result<ProviderV1, 
 
     Ok(ProviderV1 {
         id: e.id,
-        slug: e.slug.clone(),
-        name: e.name.clone(),
+        slug: e.slug,
+        name: e.name,
         gts_type: gts::GtsTypeId::new(&e.gts_type),
         status,
         managed: e.managed,
-        metadata: e.metadata.clone(),
+        metadata: e.metadata,
         discovery_enabled: e.discovery_enabled,
         discovery_interval_seconds: e
             .discovery_interval_seconds
@@ -214,7 +217,7 @@ pub fn provider_update_active_model(
 /// [`DomainError::Internal`] when `lifecycle_status` / `approval_status` hold
 /// values outside their enum domain, or when the row fails to lift into
 /// [`ModelInfoV1`] (see [`model_entity_to_info_v1`]).
-pub fn model_entity_to_v1(e: &entity::model::Model) -> Result<ModelV1, DomainError> {
+pub fn model_entity_to_v1(e: entity::model::Model) -> Result<ModelV1, DomainError> {
     let lifecycle_status = LifecycleStatus::from_wire(&e.lifecycle_status).ok_or_else(|| {
         DomainError::internal(format!(
             "models.lifecycle_status out-of-domain value `{}` on model {}",
@@ -230,6 +233,8 @@ pub fn model_entity_to_v1(e: &entity::model::Model) -> Result<ModelV1, DomainErr
 
     Ok(ModelV1 {
         id: e.id,
+        // Cloned rather than moved: `model_entity_to_info_v1` consumes `e` and
+        // names `canonical_id` in its diagnostics.
         canonical_id: e.canonical_id.clone(),
         lifecycle_status,
         approval_status,
@@ -248,10 +253,10 @@ pub fn model_entity_to_v1(e: &entity::model::Model) -> Result<ModelV1, DomainErr
 /// # Errors
 /// [`DomainError::Internal`] when `ctx_max_input_tokens` is outside the `u32`
 /// range the SDK type carries.
-fn model_entity_to_info_v1(e: &entity::model::Model) -> Result<ModelInfoV1, DomainError> {
+fn model_entity_to_info_v1(e: entity::model::Model) -> Result<ModelInfoV1, DomainError> {
     // `capabilities_full` carries the complete `ModelCapabilities`; the four
     // indexed flags are then overwritten from their authoritative columns.
-    let mut capabilities: ModelCapabilities = from_json_column(e.capabilities_full.as_ref());
+    let mut capabilities: ModelCapabilities = from_json_column(e.capabilities_full);
     capabilities.vision.enabled = e.cap_vision;
     capabilities.function_calling = e.cap_function_calling;
     capabilities.streaming = e.cap_streaming;
@@ -266,45 +271,42 @@ fn model_entity_to_info_v1(e: &entity::model::Model) -> Result<ModelInfoV1, Doma
 
     Ok(ModelInfoV1 {
         gts_type: gts::GtsTypeId::new(e.gts_type.as_deref().unwrap_or_default()),
-        display_name: e.display_name.clone(),
-        description: e.description.clone(),
-        family: e.family.clone(),
-        vendor: e.vendor.clone(),
+        display_name: e.display_name,
+        description: e.description,
+        family: e.family,
+        vendor: e.vendor,
         managed: e.managed,
-        architecture: e.architecture.clone(),
+        architecture: e.architecture,
         size_bytes: e.size_bytes.and_then(|v| u64::try_from(v).ok()),
-        format: e.format.clone(),
-        region: e.region.clone(),
-        hosted_by: e.hosted_by.clone(),
+        format: e.format,
+        region: e.region,
+        hosted_by: e.hosted_by,
         last_release_at: e.last_release_at,
-        reasoning_level: e.reasoning_level.clone(),
-        version: e.version.clone(),
+        reasoning_level: e.reasoning_level,
+        version: e.version,
         sort_order: e.sort_order.and_then(|v| i32::try_from(v).ok()),
-        icon: e.icon.clone(),
-        multiplier_display: e.multiplier_display.clone(),
+        icon: e.icon,
+        multiplier_display: e.multiplier_display,
         performance: ModelPerformance {
             response_latency_ms: e
                 .perf_response_latency_ms
                 .and_then(|v| u32::try_from(v).ok()),
             tokens_per_second: e.perf_tokens_per_second.and_then(|v| u32::try_from(v).ok()),
         },
-        additional_info: from_json_column(e.additional_info.as_ref()),
+        additional_info: from_json_column(e.additional_info),
         supported_api: supported_api_from_csv(e.supported_api.as_deref()),
-        provider_model_id: e.provider_model_id.clone().unwrap_or_default(),
+        provider_model_id: e.provider_model_id.unwrap_or_default(),
         capabilities,
-        disabled_capabilities: from_json_column(e.disabled_capabilities_full.as_ref()),
+        disabled_capabilities: from_json_column(e.disabled_capabilities_full),
         context_window: ContextWindow {
             max_input_tokens,
             max_output_tokens: e.ctx_max_output_tokens.and_then(|v| u32::try_from(v).ok()),
             output_vector_size: e.ctx_output_vector_size.and_then(|v| u32::try_from(v).ok()),
         },
-        default_parameters: from_json_column(e.default_parameters.as_ref()),
+        default_parameters: from_json_column(e.default_parameters),
         allow_parameter_override: e.allow_parameter_override,
-        allow_extra_params: from_json_column(e.allow_extra_params.as_ref()),
-        provider_settings: e
-            .provider_settings
-            .clone()
-            .unwrap_or(serde_json::Value::Null),
+        allow_extra_params: from_json_column(e.allow_extra_params),
+        provider_settings: e.provider_settings.unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -346,8 +348,9 @@ fn project_info(info: &ModelInfoV1, am: &mut entity::model::ActiveModel) {
     am.allow_extra_params = Set(Some(to_json_column(&info.allow_extra_params)));
 
     // — Polymorphic provider settings — a JSON `null` payload stores NULL —
-    let provider_settings = to_json_column(&info.provider_settings);
-    am.provider_settings = Set((!provider_settings.is_null()).then_some(provider_settings));
+    // Already a `serde_json::Value`, so it is cloned rather than re-serialized.
+    am.provider_settings =
+        Set((!info.provider_settings.is_null()).then(|| info.provider_settings.clone()));
 
     // — OData-filterable columns —
     am.gts_type = Set(Some(info.gts_type.to_string()));
@@ -430,7 +433,7 @@ pub fn model_update_active_model(
     // Reconstruct ModelInfoV1 from the existing promoted columns, apply the
     // patches, and re-project every column through the same projection the
     // create path uses.
-    let mut info = model_entity_to_info_v1(existing)?;
+    let mut info = model_entity_to_info_v1(existing.clone())?;
     let info_changed = apply_info_patches(&mut info, req);
     if info_changed {
         project_info(&info, &mut active);

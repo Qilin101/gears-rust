@@ -58,7 +58,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found(id))?;
 
-        mapper::provider_entity_to_v1(&entity)
+        mapper::provider_entity_to_v1(entity)
     }
 
     async fn find_by_slug(
@@ -76,7 +76,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found_by_slug(slug))?;
 
-        mapper::provider_entity_to_v1(&entity)
+        mapper::provider_entity_to_v1(entity)
     }
 
     async fn list(
@@ -107,7 +107,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
                 default: 20,
                 max: 100,
             },
-            |m| mapper::provider_entity_to_v1(&m),
+            mapper::provider_entity_to_v1,
         )
         .await
         .map_err(|e| match e {
@@ -146,7 +146,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::provider_entity_to_v1(&entity)
+        mapper::provider_entity_to_v1(entity)
     }
 
     async fn update(
@@ -176,7 +176,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::provider_entity_to_v1(&updated)
+        mapper::provider_entity_to_v1(updated)
     }
 
     async fn delete(

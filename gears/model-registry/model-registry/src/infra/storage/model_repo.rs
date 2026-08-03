@@ -68,7 +68,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::model_not_found(canonical_id))?;
 
-        mapper::model_entity_to_v1(&entity)
+        mapper::model_entity_to_v1(entity)
     }
 
     async fn list(
@@ -110,7 +110,7 @@ impl ModelRepository for ModelRepositoryImpl {
                 default: 20,
                 max: 100,
             },
-            |m| mapper::model_entity_to_v1(&m),
+            mapper::model_entity_to_v1,
         )
         .await
         .map_err(|e| match e {
@@ -169,7 +169,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::model_entity_to_v1(&entity)
+        mapper::model_entity_to_v1(entity)
     }
 
     async fn update(
@@ -199,7 +199,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::model_entity_to_v1(&updated)
+        mapper::model_entity_to_v1(updated)
     }
 
     async fn soft_delete(

@@ -239,7 +239,7 @@ fn make_model_entity(
 #[test]
 fn provider_entity_to_v1_active() {
     let entity = make_provider_entity(test_provider_id(), test_tenant_id(), "openai", "active");
-    let v1 = provider_entity_to_v1(&entity).expect("provider maps");
+    let v1 = provider_entity_to_v1(entity).expect("provider maps");
 
     assert_eq!(v1.id, test_provider_id());
     assert_eq!(v1.slug, "openai");
@@ -254,7 +254,7 @@ fn provider_entity_to_v1_active() {
 #[test]
 fn provider_entity_to_v1_disabled() {
     let entity = make_provider_entity(test_provider_id(), test_tenant_id(), "old", "disabled");
-    let v1 = provider_entity_to_v1(&entity).expect("provider maps");
+    let v1 = provider_entity_to_v1(entity).expect("provider maps");
 
     assert_eq!(v1.status, ProviderStatus::Disabled);
 }
@@ -264,7 +264,7 @@ fn provider_entity_to_v1_no_metadata() {
     let mut entity =
         make_provider_entity(test_provider_id(), test_tenant_id(), "no-meta", "active");
     entity.metadata = None;
-    let v1 = provider_entity_to_v1(&entity).expect("provider maps");
+    let v1 = provider_entity_to_v1(entity).expect("provider maps");
 
     assert!(v1.metadata.is_none());
 }
@@ -276,7 +276,7 @@ fn provider_entity_to_v1_rejects_corrupt_status() {
     let mut entity = make_provider_entity(test_provider_id(), test_tenant_id(), "openai", "active");
     entity.status = "retired".to_owned();
 
-    let err = provider_entity_to_v1(&entity).expect_err("out-of-domain status must be rejected");
+    let err = provider_entity_to_v1(entity).expect_err("out-of-domain status must be rejected");
     assert!(
         matches!(&err, DomainError::Internal { .. }),
         "expected Internal, got {err:?}"
@@ -358,7 +358,7 @@ fn model_entity_to_v1_openai() {
         "openai::gpt-4o",
     );
 
-    let model: ModelV1 = model_entity_to_v1(&entity).expect("model maps");
+    let model: ModelV1 = model_entity_to_v1(entity).expect("model maps");
 
     assert_eq!(model.canonical_id, "openai::gpt-4o");
     assert_eq!(model.lifecycle_status, LifecycleStatus::Production);
@@ -394,7 +394,7 @@ fn model_entity_to_v1_anthropic() {
     entity.provider_model_id = Some("claude-sonnet-4-20250514".to_owned());
     entity.gts_type = Some("gts.cf.genai.model.info.v1~cf.genai._.anthropic.v1~".to_owned());
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     assert_eq!(model.canonical_id, "anthropic::claude-sonnet-4-20250514");
     assert_eq!(model.info.vendor.as_deref(), Some("Anthropic"));
@@ -424,7 +424,7 @@ fn model_entity_to_v1_unknown_provider() {
     entity.provider_model_id = Some("custom-model".to_owned());
     entity.gts_type = Some("gts.cf.genai.model.info.v1~cf.genai._.custom.v1~".to_owned());
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     assert_eq!(model.canonical_id, "custom::custom-model");
     assert_eq!(
@@ -448,7 +448,7 @@ fn model_entity_to_v1_rejects_corrupt_lifecycle_status() {
     entity.lifecycle_status = "retired".to_owned();
 
     let err =
-        model_entity_to_v1(&entity).expect_err("out-of-domain lifecycle_status must be rejected");
+        model_entity_to_v1(entity).expect_err("out-of-domain lifecycle_status must be rejected");
     assert!(
         matches!(&err, DomainError::Internal { .. }),
         "expected Internal, got {err:?}"
@@ -466,7 +466,7 @@ fn model_entity_to_v1_rejects_corrupt_approval_status() {
     entity.approval_status = "escalated".to_owned();
 
     let err =
-        model_entity_to_v1(&entity).expect_err("out-of-domain approval_status must be rejected");
+        model_entity_to_v1(entity).expect_err("out-of-domain approval_status must be rejected");
     assert!(
         matches!(&err, DomainError::Internal { .. }),
         "expected Internal, got {err:?}"
@@ -641,7 +641,7 @@ fn model_entity_to_v1_preserves_provider_settings() {
         "openai::gpt-4o",
     );
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     let ps = &model.info.provider_settings;
     assert_eq!(ps.get("oagw_alias"), Some(&json!("openai-prod")));
@@ -736,7 +736,7 @@ fn model_entity_to_v1_round_trips_all_promoted_columns() {
         cap_reasoning_effort: true,
     };
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     // Scalar field round-trip
     assert_eq!(model.info.display_name, "GPT-4o");
@@ -862,7 +862,7 @@ fn model_entity_to_v1_default_db_values_reconstruct_without_error() {
         cap_reasoning_effort: false,
     };
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     assert_eq!(model.canonical_id, "openai::gpt-4o");
     assert_eq!(model.info.vendor.as_deref(), Some("OpenAI"));
@@ -892,7 +892,7 @@ fn model_entity_to_v1_handles_null_jsonb_sub_objects() {
     entity.allow_extra_params = None;
     entity.cap_reasoning_effort = false;
 
-    let model = model_entity_to_v1(&entity).expect("model maps");
+    let model = model_entity_to_v1(entity).expect("model maps");
 
     assert_eq!(model.info.display_name, "GPT-4o");
     assert_eq!(model.info.context_window.max_input_tokens, 128_000);
