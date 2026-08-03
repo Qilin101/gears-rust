@@ -1,4 +1,4 @@
-<!-- Updated: 2026-07-23 by Constructor Tech -->
+<!-- Updated: 2026-08-03 by Constructor Tech -->
 
 # Technical Design — Model Registry
 
@@ -41,25 +41,29 @@
 
 ### 1.1 Architectural Vision
 
-Model Registry provides a centralized catalog of AI models with tenant-level availability and approval workflows. The service is the authoritative source for model metadata, capabilities, API resolution (provider routing and OAGW alias), default inference parameters, context window limits, cost data, and tenant access control. LLM Gateway queries the registry to resolve model identifiers to provider endpoints and verify tenant access.
+Model Registry provides a centralized catalog of AI models with tenant-level availability and approval status. The service is the authoritative source for model metadata, capabilities, API resolution (provider routing and OAGW alias), default inference parameters, context window limits, cost data, and tenant access control. LLM Gateway queries the registry to resolve model identifiers to provider routing and to read the tenant's approval state for a model.
 
-The architecture follows the Gears SDK pattern with clear separation between public API surface (`model-registry-sdk`) and implementation (`model-registry`). The system is optimized for high read throughput (1000:1 read:write ratio) with distributed caching (Redis default, pluggable backend). All provider API calls route through Outbound API Gateway for credential injection and circuit breaking.
+The architecture follows the Gears SDK pattern with clear separation between public API surface (`model-registry-sdk`) and implementation (`model-registry`). The system is optimized for high read throughput (1000:1 read:write ratio) behind a cache-first read path abstracted by the `CacheService` trait. **P1 ships one backend — the in-process `InMemoryCache`**; the `redis` Cargo feature is declared as the seam for a distributed backend and carries no implementation yet. Provider API calls for model discovery route through Outbound API Gateway; that is a P2 capability — P1 makes no outbound provider calls at all and populates the catalog exclusively from admin writes.
 
-The design emphasizes tenant isolation with hierarchical inheritance. Providers and approvals inherit down the tenant tree additively, with child tenants able to shadow inherited providers. Cache isolation ensures tenant data separation with TTL-based invalidation.
+The design emphasizes tenant isolation with hierarchical inheritance. Providers and models are visible additively over the tenant ancestor chain resolved from `tenant-resolver`, with child tenants shadowing inherited providers by slug and inherited models by canonical ID. Cache isolation ensures tenant data separation via a tenant-ID key prefix, TTL-based expiry by ownership (own 30 minutes, inherited 5 minutes), and whole-tenant invalidation on every write.
+
+**Implementation status**: the P1 scope described in §1.2, §3.3, and §3.6 is implemented in [`model-registry/`](../model-registry/) (gear `model-registry`, package `cf-gears-model-registry`, feature-gated in `cf-gears-example-server`). Sections and rows marked P2/P3/P4 are forward-looking design and are absent from both the `ModelRegistryClientV1` trait and the REST surface until their phase is scheduled.
 
 ### 1.2 Architecture Drivers
 
 #### Functional Drivers
 
-- [x] `p1` — `cpt-cf-model-registry-fr-tenant-isolation` — Tenant ID prefix in cache keys, query filters enforce tenant scope
-- [x] `p1` — `cpt-cf-model-registry-fr-authorization` — Role-based + GTS-based access control via SecurityContext
-- [x] `p1` — `cpt-cf-model-registry-fr-input-validation` — DTO validation in REST layer, domain validation in service
-- [x] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL strategy
-- [x] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup with DB fallback, approval status check
-- [x] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — OData pagination with capability/provider filtering
+Checked drivers are implemented in the gear crate and covered by its unit and SQLite integration suites. Unchecked drivers are designed below but intentionally absent from the P1 SDK trait and REST surface.
+
+- [x] `p1` — `cpt-cf-model-registry-fr-tenant-isolation` — `AccessScope` applied to every `SecureConn` query, plus a tenant-ID prefix on every cache key
+- [x] `p1` — `cpt-cf-model-registry-fr-authorization` — every service method derives its `AccessScope` from the `authz-resolver` PDP through `PolicyEnforcer` (resource types `model_registry.provider` / `model_registry.model`; actions `get`, `list`, `create`, `update`, `delete`)
+- [x] `p1` — `cpt-cf-model-registry-fr-input-validation` — wire-string → enum parsing in the REST layer with a field-violation problem on an unknown value; slug, discovery-interval and lifecycle-transition validation in the service; identity fields structurally absent from the update request types
+- [x] `p1` — `cpt-cf-model-registry-fr-cache-isolation` — Cache key format `mr:{tenant_id}:{entity}:{id}`, TTL by ownership, `invalidate_tenant` scoped by key prefix
+- [x] `p1` — `cpt-cf-model-registry-fr-get-tenant-model` — Cache-first lookup across the tenant chain with DB fallback; `approval_status` is **returned on the model, not enforced** — the caller decides (§3.5)
+- [x] `p1` — `cpt-cf-model-registry-fr-list-tenant-models` — Cursor pagination with `$filter` / `$orderby` / `$select` over real columns, merged additively across the ancestor chain
 - [x] `p1` — `cpt-cf-model-registry-fr-manual-model-management` — Admin CRUD on models with `approval_status` patched via `update_model`; the same REST surface continues to accept admin calls in P2 but routes them through the Approval Service.
-- [x] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support
-- [ ] `p1` — `cpt-cf-model-registry-fr-model-pricing` — AICredits cost data per tier (sync/batch/cached)
+- [x] `p1` — `cpt-cf-model-registry-fr-provider-management` — CRUD with inheritance/shadowing support, and a referential pre-check that refuses to delete a provider that still owns models
+- [ ] `p1` — `cpt-cf-model-registry-fr-model-pricing` — AICredits cost data per tier (sync/batch/cached). Storage only in P1: each provider's `cost` block rides inside `provider_settings`; there is no pricing surface, no per-tier resolution, and no AICredits integration
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-discovery` — OAGW integration, provider plugin abstraction
 - [ ] `p2` — `cpt-cf-model-registry-fr-model-approval` — Approval Service integration, event-driven status sync; replaces P1 admin-direct status writes on the same endpoints
 - [ ] `p2` — `cpt-cf-model-registry-fr-bulk-operations` — Batch approval via Approval Service
@@ -76,67 +80,74 @@ The design emphasizes tenant isolation with hierarchical inheritance. Providers 
 
 #### NFR Allocation
 
-| NFR ID | NFR Summary | Allocated To | Design Response | Verification Approach |
-|--------|-------------|--------------|-----------------|----------------------|
-| `cpt-cf-model-registry-nfr-performance` | get_tenant_model <10ms P99 | Cache Layer + Repository | Distributed cache (Redis) with 30min TTL for own data, 5min for inherited | Performance benchmarks measure P99 latency |
-| `cpt-cf-model-registry-nfr-availability` | 99.9% uptime | Service + Cache | Stateless design, cache fallback to DB, fail-closed for approval checks | Availability monitoring, SLO dashboards |
-| `cpt-cf-model-registry-nfr-scale` | 10K tenants, 2M models | Repository + Cache | Cache isolation by tenant, indexed queries, connection pooling | Load testing at scale targets |
-| `cpt-cf-model-registry-nfr-rate-limiting` | Admin ops rate limited | API Layer | Rate limit middleware, configurable per-operation limits | Rate limit metrics, 429 response monitoring |
+| NFR ID | NFR Summary | Allocated To | Design Response | P1 status | Verification Approach |
+|--------|-------------|--------------|-----------------|-----------|----------------------|
+| `cpt-cf-model-registry-nfr-performance` | get_tenant_model <10ms P99 | Cache Layer + Repository | Cache-first read with 30min TTL for own data, 5min for inherited | Implemented against the in-process `InMemoryCache`; a distributed backend is the `redis` feature seam | Benchmarks deferred — no measured P99 yet (§4 Technical Debt) |
+| `cpt-cf-model-registry-nfr-availability` | 99.9% uptime | Service + Cache | Stateless design, cache miss falls through to DB | Implemented. **No fail-closed approval gate** — `get_tenant_model` returns the model with its `approval_status` regardless of value | Availability monitoring, SLO dashboards (platform) |
+| `cpt-cf-model-registry-nfr-scale` | 10K tenants, 2M models | Repository + Cache | Cache isolation by tenant, B-tree indexes on every filterable column, `SecureConn` pooling | Schema and indexes in place | Load testing at scale targets — not yet run |
+| `cpt-cf-model-registry-nfr-rate-limiting` | Admin ops rate limited | API Layer | Rate limit middleware, configurable per-operation limits | **Not implemented in P1** — routes carry no rate-limit layer; lands with the P2 discovery trigger, which is the endpoint that needs it | Rate limit metrics, 429 response monitoring |
 
-**Error budgets & alerting thresholds**: Availability NFR `99.9%` translates to a 30-day error budget of ~43 minutes of downtime per month; latency NFR `<10ms P99 on get_tenant_model` is alerted on a 5-minute rolling window above `15ms` (warn) / `25ms` (page). The discovery path is excluded from the user-facing latency SLO — its budget is end-to-end discovery latency above the configured `discovery_interval_seconds` per provider. Module-level alerting routes to the platform observability stack (see §4 Out of Scope "Observability") so dashboards/alerts/runbooks live alongside the platform's other modules.
+**Error budgets & alerting thresholds** (target posture; the signals themselves land with platform observability integration): availability NFR `99.9%` translates to a 30-day error budget of ~43 minutes of downtime per month; latency NFR `<10ms P99 on get_tenant_model` is alerted on a 5-minute rolling window above `15ms` (warn) / `25ms` (page). The discovery path is excluded from the user-facing latency SLO — its budget is end-to-end discovery latency above the configured `discovery_interval_seconds` per provider. Module-level alerting routes to the platform observability stack (see §4 Out of Scope "Observability") so dashboards/alerts/runbooks live alongside the platform's other modules.
 
 #### Architecture Decisions
 
 The following ADRs capture the load-bearing decisions that shape this design. Each ADR is referenced from the principle or constraint it materializes (see §2).
 
-| ADR ID | Decision | Materialized By |
-|--------|----------|-----------------|
-| `cpt-cf-model-registry-adr-pluggable-cache` | Pluggable distributed cache (Redis default, InMemory for testing) with TTL-based invalidation | `cpt-cf-model-registry-principle-cache-first` |
-| `cpt-cf-model-registry-adr-tenant-inheritance` | Additive provider/approval inheritance with child-shadowing semantics | `cpt-cf-model-registry-principle-additive-inheritance` |
-| `cpt-cf-model-registry-adr-approval-delegation` | Delegate approval workflow (state machine, notifications, audit) to generic Approval Service | `cpt-cf-model-registry-principle-approval-delegation` |
-| `cpt-cf-model-registry-adr-oagw-provider-access` | All provider API calls route through Outbound API Gateway (no direct provider calls) | `cpt-cf-model-registry-constraint-oagw-dependency` |
-| `cpt-cf-model-registry-adr-gts-typed-provider-settings` | GTS-typed provider settings: `ModelInfoV1<P: GtsSchema = serde_json::Value>` envelope with per-provider GTS leaves; `gts_type` is the canonical discriminator for storage and the SDK | `cpt-cf-model-registry-component-sdk` |
+| ADR ID | Decision | Materialized By | P1 status |
+|--------|----------|-----------------|-----------|
+| `cpt-cf-model-registry-adr-pluggable-cache` | Pluggable cache behind the `CacheService` trait with TTL-based expiry | `cpt-cf-model-registry-principle-cache-first` | Trait + `InMemoryCache` shipped; `redis` feature declared, backend not written |
+| `cpt-cf-model-registry-adr-tenant-inheritance` | Additive provider/model inheritance with child-shadowing semantics | `cpt-cf-model-registry-principle-additive-inheritance` | Implemented in `domain/inheritance.rs` + the two list paths |
+| `cpt-cf-model-registry-adr-approval-delegation` | Delegate approval workflow (state machine, notifications, audit) to generic Approval Service | `cpt-cf-model-registry-principle-approval-delegation` | P2. P1 writes `models.approval_status` directly from `update_model`, keeping the seam intact |
+| `cpt-cf-model-registry-adr-oagw-provider-access` | All provider API calls route through Outbound API Gateway (no direct provider calls) | `cpt-cf-model-registry-constraint-oagw-dependency` | P2. P1 makes no outbound calls, so the constraint is vacuously held |
+| `cpt-cf-model-registry-adr-gts-typed-provider-settings` | GTS-typed provider settings: `ModelInfoV1<P: GtsSchema = serde_json::Value>` envelope with per-provider GTS leaves; `gts_type` is the canonical discriminator for storage and the SDK | `cpt-cf-model-registry-component-sdk` | Implemented; `gts_type` is a scalar column keying the `provider_settings` blob |
 
 ### 1.3 Architecture Layers
 
 ```mermaid
 graph TB
-    subgraph API["API Layer"]
-        REST[REST Handlers]
-        DTO[DTOs]
+    subgraph API["API Layer — api/rest"]
+        REST[handlers.rs + routes.rs]
+        DTO[dto.rs / parse.rs / error.rs]
     end
 
-    subgraph Application["Application Layer"]
-        SVC[ModelRegistryService]
-        CACHE[CacheService]
+    subgraph Application["Application Layer — domain"]
+        SVC[Service&lt;R, M, C&gt;]
+        INHERIT[inheritance.rs]
     end
 
-    subgraph Domain["Domain Layer"]
-        REPO[Repository Traits]
-        EVENTS[Domain Events]
+    subgraph Domain["Domain Layer — domain"]
+        REPO[ProviderRepository / ModelRepository traits]
+        CACHE[CacheService trait]
         CLIENT[LocalClient]
     end
 
-    subgraph Infrastructure["Infrastructure Layer"]
-        STORAGE[(PostgreSQL)]
-        REDIS[(Redis Cache)]
-        OAGW[Outbound API GW]
+    subgraph Infrastructure["Infrastructure Layer — infra/storage"]
+        REPO_IMPL[ProviderRepositoryImpl / ModelRepositoryImpl]
+        MEMCACHE[InMemoryCache]
+        STORAGE[(PostgreSQL / SQLite)]
+        OAGW[Outbound API GW — P2]
     end
 
+    REST --> DTO
     REST --> SVC
+    SVC --> INHERIT
     SVC --> CACHE
     SVC --> REPO
-    CACHE --> REDIS
-    REPO --> STORAGE
-    SVC --> OAGW
+    CLIENT --> SVC
+    REPO_IMPL -.implements.-> REPO
+    MEMCACHE -.implements.-> CACHE
+    REPO_IMPL --> STORAGE
+    SVC -.P2.-> OAGW
 ```
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| API | Request/response handling, validation, OData parsing | REST/OpenAPI, Axum handlers |
-| Application | Business logic orchestration, cache management | Domain service, cache service |
-| Domain | Repository traits, domain events, SDK client impl | Rust traits, async-trait |
-| Infrastructure | Data persistence, caching, external calls | PostgreSQL, Redis, OAGW |
+| API | Request/response handling, wire-string parsing, `OData` query extraction, `Problem` mapping | REST/OpenAPI via `OperationBuilder`, Axum handlers, `utoipa` DTOs |
+| Application | Authorization, cache orchestration, inheritance resolution, validation | `Service<R, M, C>` generic over both repository traits and the cache backend |
+| Domain | Repository traits, cache trait, domain errors, SDK client impl | Rust traits, `async-trait`; `LocalClient` registered in ClientHub as `dyn ModelRegistryClientV1` |
+| Infrastructure | Data persistence, entity ↔ SDK mapping, `OData` field binding, in-process cache | SeaORM entities + migrations, `SecureConn`/`AccessScope`, `InMemoryCache` |
+
+The service is generic over `(ProviderRepository, ModelRepository, CacheService)`; the gear wires the concrete triple `Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>`, and tests substitute mock tenant/authz clients against the same generic surface.
 
 ## 2. Principles & Constraints
 
@@ -148,23 +159,33 @@ graph TB
 
 All operations are scoped by tenant context. Cache keys include tenant ID prefix. Query filters enforce tenant hierarchy visibility. Write operations validate tenant ownership. Admin operations verify actor role for target tenant.
 
+Realization: every service method first calls the `authz-resolver` PDP to obtain an `AccessScope`, every repository trait method takes that scope as a required parameter, and every query in both implementations is issued through `.secure().scope_with(scope)` rather than a raw SeaORM query — so an unscoped query is visible as a missing `.secure()` call at review time. Reads that consult ancestor tenants build an explicit `AccessScope::for_tenant(ancestor_id)` per ancestor rather than widening the caller's own scope.
+
 #### Cache-First Reads
 
 **ID**: `cpt-cf-model-registry-principle-cache-first`
 
-Read operations check distributed cache before database. Cache misses populate cache from DB. TTL-based expiry prevents stale data accumulation. Own data uses 30-minute TTL; inherited data uses 5-minute TTL for faster propagation of parent changes. Cache backend is pluggable (Redis default, InMemory for testing, custom plugins supported).
+Read operations check the cache before the database, walking the tenant chain closest-first. Cache misses populate the cache from DB. TTL-based expiry prevents stale data accumulation. Own data uses 30-minute TTL; inherited data uses 5-minute TTL for faster propagation of parent changes; both are configurable (`own_ttl_seconds`, `inherited_ttl_seconds`). The backend sits behind the `CacheService` trait — P1 ships `InMemoryCache` only, and a distributed backend plugs in behind the declared `redis` Cargo feature without touching the service.
+
+Two cache entities exist: `mr:{tenant_id}:provider:{provider_id}` and `mr:{tenant_id}:model:{canonical_id}`. List responses are **not** cached — only single-entity reads are. Invalidation is coarse: any write invalidates the writer tenant's whole key prefix (see §4 Cache Invalidation Strategy).
 
 #### Additive Inheritance
 
 **ID**: `cpt-cf-model-registry-principle-additive-inheritance`
 
-Providers and approvals inherit down the tenant hierarchy additively. Child tenants see parent's providers plus their own. Child tenants can shadow inherited providers by creating a provider with the same slug. Child tenants cannot expand beyond parent's permissions.
+Providers and models inherit down the tenant hierarchy additively. Child tenants see their ancestors' providers and models plus their own. A child shadows an inherited provider by creating one with the same slug, and an inherited model by creating one with the same `canonical_id`. Child tenants cannot expand beyond parent's permissions.
+
+Realization: `resolve_ancestors` fetches the chain from `tenant-resolver` on every read; the own-tenant query carries the caller's `OData` filter and pagination, each ancestor query carries the same filter with pagination removed so shadowing is computed over the complete inherited set, and the merged result is then truncated to the caller's limit. Ownership classification (`Own` vs `Inherited`) selects the cache TTL.
 
 #### Approval Service Delegation
 
 **ID**: `cpt-cf-model-registry-principle-approval-delegation`
 
+**Phase**: P2 — the delegation itself is not implemented in P1.
+
 Model Registry does not implement approval workflow logic. It delegates to a generic Approval Service that handles state machine, concurrency control, and audit trail. Model Registry registers models as approvable resources and reacts to approval status change events.
+
+P1 keeps the seam without the service: `approval_status` is a first-class column on `models`, set on create (default `pending`) and patched by `update_model`. There is no workflow state machine, no notification, and no audit trail in this module — the only guard is that approval cannot be changed on a model in a terminal lifecycle state (`deprecated` / `sunset`). P2 replaces the write path only; reads and `$filter` continue to serve from the same column.
 
 #### Discovery Plugin Extensibility (P2)
 
@@ -184,6 +205,8 @@ When two principles produce conflicting guidance, resolve in this order: **tenan
 
 **ID**: `cpt-cf-model-registry-constraint-oagw-dependency`
 
+**Phase**: P2 — P1 makes no outbound provider calls, so the gear declares no OAGW dependency yet (`deps = ["tenant-resolver", "authz-resolver"]`).
+
 All provider API calls for model discovery must route through Outbound API Gateway. OAGW handles credential injection, circuit breaking, and outbound URL policy enforcement. Direct provider calls are not permitted.
 
 #### No Credential Storage
@@ -196,13 +219,15 @@ Model Registry does not store provider credentials. Provider configuration inclu
 
 **ID**: `cpt-cf-model-registry-constraint-approval-service`
 
+**Phase**: P2 — see `cpt-cf-model-registry-principle-approval-delegation` for the P1 stand-in.
+
 Approval workflow (state machine, notifications, audit) is handled by generic Approval Service. Model Registry provides model-specific criteria schema for auto-approval rules. This constraint ensures consistent approval patterns across the platform.
 
 #### Immutable Provider Slugs
 
 **ID**: `cpt-cf-model-registry-constraint-immutable-slugs`
 
-Provider slugs are immutable after creation. Changing a slug would invalidate all canonical model IDs referencing that provider. Slug format: 1-64 chars, lowercase alphanumeric + hyphen, unique within tenant.
+Provider slugs are immutable after creation. Changing a slug would invalidate all canonical model IDs referencing that provider. Slug format: 1-64 chars, lowercase alphanumeric + hyphen, unique within tenant — validated in the service on create; the update path simply never projects `slug`, so a slug in a PATCH body is ignored rather than rejected.
 
 #### Content Logging Restrictions
 
@@ -215,7 +240,7 @@ Provider cost data and model capabilities are not PII, but discovery responses m
 The constraint families below are explicitly **not applicable** to Model Registry v1. They are recorded here so reviewers can distinguish "considered and excluded" from "forgotten":
 
 - **Regulatory constraints**: Not applicable in v1 — Model Registry stores model metadata, provider routing, and approval status, but no PII, PHI, PCI, or other regulated data. Revisit when EU/HIPAA/FedRAMP tenants onboard or if discovery surfaces start carrying regulated content.
-- **Vendor / licensing constraints**: Not applicable — all shipped dependencies (`SeaORM`, `Redis`, `axum`, `gts`, `gts-macros`, `tokio`, `serde`) are MIT/Apache-2.0 dual-licensed. No proprietary, copyleft, or restrictive components are introduced; no vendor exclusivity clauses apply.
+- **Vendor / licensing constraints**: Not applicable — all shipped dependencies (`SeaORM`, `axum`, `gts`, `tokio`, `serde`, `utoipa`, `chrono`, `uuid` plus the workspace `toolkit-*` crates) are MIT/Apache-2.0 dual-licensed and pass `make deny`. No proprietary, copyleft, or restrictive components are introduced; no vendor exclusivity clauses apply. A Redis client is not a dependency in P1.
 - **Data-residency constraints**: Not applicable at the Model Registry layer. Storage residency is delegated to the platform's chosen PostgreSQL deployment; the registry does not pin a region. Tenant-level residency policy, when introduced, will live at the platform deployment layer rather than inside this module.
 - **Resource constraints (budget / team / time)**: Not applicable as architectural constraints. Resource planning is owned by program management and is not a property the design encodes; engineering capacity for the v1 scope is tracked outside this document.
 - **Legacy-integration constraints**: Not applicable — Model Registry is a new module with no legacy database, no migration from a prior catalog, and no backward-compatibility commitment to a pre-existing Model Registry contract. The pre-GTS `AnyProviderSettings` / `ProviderKind` carrier was removed in the same change set as this design (see [`cpt-cf-model-registry-adr-gts-typed-provider-settings`](./ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md)) and never shipped to production.
@@ -226,7 +251,9 @@ The constraint families below are explicitly **not applicable** to Model Registr
 
 **Technology**: Rust structs (SDK models)
 
-**Location**: [`model-registry-sdk/src/models/`](../model-registry-sdk/src/models/) — split per concern into `common.rs`, `info.rs`, `entity.rs`, `provider_settings.rs`, `default_parameters.rs` (the unified `DefaultInferenceParametersV1` and its supporting types — `TextFormat`/`TextFormatKind`/`TextVerbosity`, `ReasoningConfig`/`ReasoningSummary`, `ToolChoice`, `TruncationStrategy`), `request.rs`, plus a `providers/` subdirectory with one file per shipped provider (current shipped set: `openai.rs`, `anthropic.rs`; the directory is the documented extension point — adding a new provider doesn't require touching anything else). The narrowed `ServiceTier` (`Auto | Default`) stays in `common.rs`; provider-specific helper enums (e.g. the five-variant `OpenAiServiceTier`) live next to their provider's file.
+**Location**: [`model-registry-sdk/src/models/`](../model-registry-sdk/src/models/) — split per concern into `common.rs`, `info.rs`, `entity.rs`, `default_parameters.rs` (the unified `DefaultInferenceParametersV1` and its supporting types — `TextFormat`/`TextFormatKind`/`TextVerbosity`, `ReasoningConfig`/`ReasoningSummary`, `ToolChoice`, `TruncationStrategy`), `request.rs`, plus a `providers/` subdirectory with one file per shipped provider (current shipped set: `openai.rs`, `anthropic.rs`; the directory is the documented extension point — adding a new provider doesn't require touching anything else). The narrowed `ServiceTier` (`Auto | Default`) stays in `common.rs`; provider-specific helper enums (e.g. the five-variant `OpenAiServiceTier`) live next to their provider's file.
+
+The five entity structs (`ModelV1`, `ProviderV1`, `ModelInfoV1`, `ModelCapabilities`, `DisabledCapabilities`) are **not** `#[non_exhaustive]`, so downstream crates construct and destructure them with plain struct literals — this is what lets both the storage projections and the REST DTO conversions be exhaustive `From` impls that fail to compile when a field is added. The six enums and `ModelRegistryError` remain `#[non_exhaustive]`, so every `match` over them in the gear carries a `_ =>` arm.
 
 **Core Entities**:
 
@@ -490,10 +517,11 @@ The trade-off comparison against the rejected alternatives — a tagged enum (`A
 
 #### Invariants
 
-- **Provider slug immutability**: once a provider is created, its `slug` cannot change — changing it would invalidate every `canonical_id = {provider_slug}::{provider_model_id}` referencing it. Enforced at the application layer in the service.
+- **Provider slug immutability**: once a provider is created, its `slug` cannot change — changing it would invalidate every `canonical_id = {provider_slug}::{provider_model_id}` referencing it. Enforced structurally: `UpdateProviderRequestV1` has no `slug` field, so the update projection never writes the column.
 - **Canonical model ID format**: `{provider_slug}::{provider_model_id}` is the only canonical form; aliases resolve to canonical IDs but never to other aliases.
-- **`info.gts_type` discriminator immutability**: once a model is created, `gts_type` cannot change without a model replacement — it determines the on-disk shape of `provider_settings` and the typed view consumers narrow to.
-- **Approval status denormalized on `models`**: `ModelV1::approval_status` is read from and written to the `models.approval_status` column. P1 updates flow through `Service::update_model` → `ModelRepository::update` → mapper; the mapper projects the new status from `UpdateModelRequestV1::approval_status` when present. P2 swaps the write path to the Approval Service while the denormalized column continues to serve reads and OData filtering. The discovery write path never writes approval state.
+- **`info.gts_type` discriminator immutability**: once a model is created, `gts_type` cannot change without a model replacement — it determines the on-disk shape of `provider_settings` and the typed view consumers narrow to. Enforced structurally rather than by a check: `UpdateModelRequestV1` and the corresponding REST DTO carry **no fields** for `gts_type`, `canonical_id`, `provider_slug`, or `provider_model_id`, so the update projection has nothing to write and an attempt to send them is simply ignored by deserialization.
+- **Approval status lives on `models`**: `ModelV1::approval_status` is read from and written to the `models.approval_status` column — there is no separate approvals table in P1. Updates flow through `Service::update_model` → `ModelRepository::update` → mapper; the mapper projects the new status from `UpdateModelRequestV1::approval_status` when present. Creates default to `pending` unless `CreateModelRequestV1::approval_status` is supplied. P2 swaps the write path to the Approval Service while the same column continues to serve reads and `OData` filtering. The discovery write path never writes approval state.
+- **Terminal lifecycle states are read-only**: `deprecated` and `sunset` accept no transition out, and no approval change may be applied to a model already in either state (`InvalidTransition`). Every other lifecycle transition — including demotion — is permitted.
 - **Tenant-scoped uniqueness**: `(tenant_id, slug)` is unique per provider, `(tenant_id, canonical_id)` is unique per model, `(tenant_id, name)` is unique per alias, `(tenant_id, lower(name))` is unique per tag (case-insensitive), and `(tenant_id, model_id, tag_id)` is unique per tag assignment.
 - **Tag managed independently of models**: a tag's lifecycle (create/update/delete) is decoupled from the catalog; deleting a tag cascades only to its `model_tags` rows within the owning tenant scope and never mutates `models`.
 - **Cache-key tenant prefix**: every cache key is prefixed with `mr:{tenant_id}:` — no tenantless keys exist.
@@ -503,7 +531,7 @@ The trade-off comparison against the rejected alternatives — a tagged enum (`A
 ```mermaid
 graph TB
     subgraph SDK["model-registry-sdk"]
-        TRAIT[ModelRegistryClient trait]
+        TRAIT[ModelRegistryClientV1 trait]
         MODELS[Models]
         ERRORS[Errors]
     end
@@ -516,39 +544,45 @@ graph TB
         end
 
         subgraph Domain["domain"]
-            SERVICE[ModelRegistryService]
+            SERVICE[Service&lt;R, M, C&gt;]
             LOCAL[LocalClient]
-            REPO_TRAIT[Repository trait]
+            REPO_TRAIT[ProviderRepository + ModelRepository]
             CACHE_SVC[CacheService]
+            MEMCACHE[InMemoryCache]
         end
 
         subgraph Infra["infra/storage"]
-            REPO_IMPL[RepositoryImpl]
-            ENTITIES[SeaORM Entities]
+            PROV_IMPL[ProviderRepositoryImpl]
+            MODEL_IMPL[ModelRepositoryImpl]
+            ENTITIES[SeaORM Entities + mapper + odata_mapper]
             MIGRATIONS[Migrations]
         end
     end
 
     subgraph External["External Services"]
-        OAGW[Outbound API GW]
-        APPROVAL[Approval Service]
+        OAGW[Outbound API GW — P2]
+        APPROVAL[Approval Service — P2]
         TENANT[Tenant Resolver]
-        REDIS[(Redis)]
-        PG[(PostgreSQL)]
+        AUTHZ[AuthZ Resolver]
+        PG[(PostgreSQL / SQLite)]
     end
 
     HANDLERS --> SERVICE
-    SERVICE --> LOCAL
-    LOCAL --> TRAIT
+    LOCAL --> SERVICE
+    LOCAL -.implements.-> TRAIT
     SERVICE --> CACHE_SVC
     SERVICE --> REPO_TRAIT
-    REPO_IMPL --> REPO_TRAIT
-    REPO_IMPL --> ENTITIES
-    CACHE_SVC --> REDIS
-    REPO_IMPL --> PG
-    SERVICE --> OAGW
-    SERVICE --> APPROVAL
+    MEMCACHE -.implements.-> CACHE_SVC
+    PROV_IMPL -.implements.-> REPO_TRAIT
+    MODEL_IMPL -.implements.-> REPO_TRAIT
+    PROV_IMPL --> ENTITIES
+    MODEL_IMPL --> ENTITIES
+    PROV_IMPL --> PG
+    MODEL_IMPL --> PG
     SERVICE --> TENANT
+    SERVICE --> AUTHZ
+    SERVICE -.P2.-> OAGW
+    SERVICE -.P2.-> APPROVAL
 ```
 
 #### model-registry-sdk
@@ -557,61 +591,63 @@ graph TB
 
 SDK crate containing public API surface. Transport-agnostic trait, models, and errors. Consumers depend only on this crate.
 
-**Interface**: `ModelRegistryClient` trait with async methods taking `&SecurityContext`.
+**Interface**: `ModelRegistryClientV1` trait with async methods taking `&SecurityContext`.
 
 #### ModelRegistryService
 
 **ID**: `cpt-cf-model-registry-component-service`
 
-Domain service orchestrating business logic. Handles cache management, repository access, OAGW calls for discovery, and Approval Service integration.
+Application service orchestrating authorization, caching, inheritance resolution, validation, and persistence. Declared as `Service<R, M, C>` generic over `ProviderRepository`, `ModelRepository`, and `CacheService`, so unit tests inject mocks against the same code path the gear runs. Holds the `DBProvider`, both repositories, the cache, the `tenant-resolver` client, a `PolicyEnforcer`, and the gear config. OAGW calls for discovery and Approval Service integration are P2 additions to this component.
 
-**Interface**: Internal domain methods, event emission.
+**Interface**: Internal domain methods (`get_provider`, `list_providers`, `create_provider`, `update_provider`, `delete_provider`, `get_tenant_model`, `list_tenant_models`, `create_model`, `update_model`, `delete_model`) returning `Result<_, DomainError>`. Emits no events in P1.
 
 #### LocalClient
 
 **ID**: `cpt-cf-model-registry-component-local-client`
 
-Local client implementing `ModelRegistryClient` trait. Bridges domain service to SDK interface. Registered in ClientHub for in-process consumers.
+Local client implementing the `ModelRegistryClientV1` trait over `Arc<Service<…>>`. Bridges the domain service to the SDK interface and is the single place `DomainError` is converted to `ModelRegistryError`. Registered in ClientHub by `Gear::init` for in-process consumers.
 
-**Interface**: Implements `ModelRegistryClient` trait.
+**Interface**: Implements `ModelRegistryClientV1` (all ten P1 methods).
 
 #### CacheService
 
 **ID**: `cpt-cf-model-registry-component-cache`
 
-Distributed cache abstraction. Handles cache key generation with tenant prefix, TTL management, and invalidation. Backends are compiled-in via Cargo feature flags (not runtime plugins): `RedisCache` (default for production), `InMemoryCache` (for testing and lightweight single-node deployments). Deployments without Redis are supported — the in-memory backend avoids the operational overhead of a separate Redis instance while the database's own query cache provides comparable latency for moderate-scale setups. Redis becomes beneficial at high scale (10K+ tenants, 2M+ models) where cross-instance cache consistency and horizontal scaling matter.
+Cache abstraction. Handles cache key generation with tenant prefix, TTL management, and prefix invalidation. Backends are compiled in via Cargo feature flags (not runtime plugins). **P1 ships exactly one backend — `InMemoryCache`** (TTL-aware `HashMap` behind an async `RwLock`, values stored as serialized JSON, expired entries lazily evicted on read); the `redis` feature is declared in the crate manifest as the seam for a `RedisCache` and is currently empty. Deployments without Redis are the P1 operating posture — the in-memory backend avoids the operational overhead of a separate Redis instance while the database's own query cache provides comparable latency for moderate-scale setups. Redis becomes beneficial at high scale (10K+ tenants, 2M+ models) where cross-instance cache consistency and horizontal scaling matter; until that backend exists, a multi-replica deployment sees per-replica caches bounded by the TTLs rather than a shared view.
 
 **Interface**: `get`, `set`, `delete`, `invalidate_tenant`.
 
-#### RepositoryImpl
+#### Repository Implementations
 
 **ID**: `cpt-cf-model-registry-component-repository`
 
-SeaORM-based repository implementation. Handles CRUD operations, tenant-scoped queries, and OData filtering.
+SeaORM-based persistence, split one implementation type per trait (Parnas information hiding): `ProviderRepositoryImpl` (`provider_repo.rs`) and `ModelRepositoryImpl` (`model_repo.rs`). Both are zero-state unit structs that take the connection and `AccessScope` per call, so transaction boundaries stay caller-controlled. Shared helpers (`is_fk_violation`, `map_scope_error`) live in `error_mapping.rs` and are `pub(super)` — scoped to `infra::storage`. Entity ↔ SDK conversion lives in `mapper.rs`; the `OData` field→column bindings in `odata_mapper.rs`. Each impl reads the other's table where a referential check requires it (provider delete pre-checks `models`; model create resolves the provider by slug); both reads stay inside the storage layer.
 
-**Interface**: Implements `ModelRegistryRepository` trait.
+**Interface**: `ProviderRepositoryImpl` implements `ProviderRepository`; `ModelRepositoryImpl` implements `ModelRepository`.
 
 #### Extension Points
 
 The module exposes four deliberate extension points and two API stability zones:
 
-- **Pluggable cache backend** (compile-time): `CacheService` trait with feature-gated implementations (`RedisCache`, `InMemoryCache`). New backends plug in via Cargo feature flag, no runtime plugin loading.
+- **Pluggable cache backend** (compile-time): `CacheService` trait with feature-gated implementations. `InMemoryCache` ships in P1; `RedisCache` is the reserved `redis` feature. New backends plug in via Cargo feature flag, no runtime plugin loading.
 - **Open-ended provider settings** (runtime via GTS): per-provider settings types live under `model-registry-sdk/src/models/providers/` (one file per provider — `OpenAiSettingsV1`, `AnthropicSettingsV1`, …). Adding a new provider does **not** require touching shared code; operators can also wire unknown providers through the raw-JSON default carrier (`serde_json::Value`) without an SDK release.
-- **ClientHub trait surfaces**: `ModelRegistryClient` is the SDK-stable trait that consumers depend on; in-process consumers resolve it via ClientHub, OoP consumers via gRPC. New transports plug in without changing the trait.
+- **ClientHub trait surfaces**: `ModelRegistryClientV1` is the SDK-stable trait that consumers depend on; in-process consumers resolve it via ClientHub, OoP consumers via gRPC. New transports plug in without changing the trait.
 - **Pluggable discovery plugins (P2, runtime registration)**: per-provider discovery plugins implement the `DiscoveryPlugin` trait (`cpt-cf-model-registry-contract-discovery-plugin`). Plugins register a `GtsTypeId` (the provider GTS type they serve) and a `GtsTypeId` (the discovery-settings schema they accept). Plugin selection is by exact match on the provider's GTS type; a missing plugin for one provider fails that provider's discovery run only and MUST NOT block other providers (`cpt-cf-model-registry-nfr-discovery-plugin-isolation`). New providers onboard by adding a plugin registration — no edits to existing plugins or the core discovery path (`cpt-cf-model-registry-nfr-discovery-plugin-extensibility`). Discovery-settings payloads are validated against the plugin's declared GTS schema before any network call.
 
 **API stability zones**:
 
-- **Public-stable**: `model-registry-sdk` crate (`ModelRegistryClient` trait, `ModelV1<P>`, `ModelInfoV1<P>`, error types). Breaking changes ship as an SDK major version with a deprecation window.
+- **Public-stable**: `model-registry-sdk` crate (`ModelRegistryClientV1` trait, `ModelV1<P>`, `ModelInfoV1<P>`, error types). Breaking changes ship as an SDK major version with a deprecation window.
 - **Internal**: everything in `model-registry/` (handlers, repository, service internals). Free to evolve without external coordination.
 
 ### 3.3 API Contracts
 
 **Technology**: REST/OpenAPI
 
-**Location**: Auto-generated via `utoipa` from handler annotations
+**Location**: Auto-generated via `utoipa` from `OperationBuilder` registrations in `api/rest/routes.rs`
 
-**Implementation scope**: Only **P1** endpoints are being implemented in the current phase. P2 (discovery, bulk approval) and P3 (provider health, aliases) endpoints below are **postponed** — they are retained in this table as forward-looking design but are intentionally absent from the `ModelRegistryClientV1` SDK trait and the REST surface until their phases are scheduled.
+**Implementation scope**: the ten **P1** endpoints are implemented. P2 (discovery, bulk approval) and P3 (provider health, aliases, tags) endpoints below are **postponed** — they are retained in this table as forward-looking design but are intentionally absent from the `ModelRegistryClientV1` SDK trait and the REST surface until their phases are scheduled.
+
+Every P1 operation is registered with `.authenticated()` and a license-feature requirement, declares its `utoipa` request/response schema, and registers the error responses it can actually produce (`400`, `401`, `403`, `404`, `409`, `422`, `500` as applicable). Creates return `201` with the entity; deletes return `204` with no body.
 
 **Endpoints Overview**:
 
@@ -620,12 +656,12 @@ The module exposes four deliberate extension points and two API stability zones:
 | `GET` | `/model-registry/v1/models` | List tenant models with OData filtering | P1 |
 | `GET` | `/model-registry/v1/models/{canonical_id}` | Get model by canonical ID | P1 |
 | `POST` | `/model-registry/v1/models` | Create model (manual catalog entry) | P1 |
-| `PATCH` | `/model-registry/v1/models/{canonical_id}` | Update model fields (capabilities, limits, cost, lifecycle) and approval `status` (`approved`/`rejected`/`revoked`). P1: direct DB write; P2 onward: status changes route via Approval Service while other field updates remain direct | P1 |
+| `PATCH` | `/model-registry/v1/models/{canonical_id}` | Update model fields and `approval_status` (`pending`/`approved`/`rejected`/`revoked`). Scalar display/infrastructure fields patch individually (nullable ones accept explicit `null` to clear); the sub-objects `performance`, `capabilities`, `disabled_capabilities`, `context_window`, `default_parameters`, and `provider_settings` are **replaced wholesale**, not deep-merged. `canonical_id`, `provider_slug`, `provider_model_id`, and `gts_type` are immutable. P1: direct DB write; P2 onward: status changes route via Approval Service while other field updates remain direct | P1 |
 | `DELETE` | `/model-registry/v1/models/{canonical_id}` | Soft-delete model (mark `deprecated`) | P1 |
 | `GET` | `/model-registry/v1/providers` | List tenant providers | P1 |
 | `GET` | `/model-registry/v1/providers/{id}` | Get provider by ID | P1 |
-| `POST` | `/model-registry/v1/providers` | Register new provider (P1: slug/name/gts_type/status/metadata; **P2** also accepts `discovery_settings`, validated against the selected plugin's settings GTS schema with `validation_error` (400) on mismatch) | P1 (+P2 `discovery_settings`) |
-| `PATCH` | `/model-registry/v1/providers/{id}` | Update provider (status, discovery config, **P2** `discovery_settings`) | P1 (+P2 `discovery_settings`) |
+| `POST` | `/model-registry/v1/providers` | Register new provider (P1 body: `slug`, `name`, `gts_type`, `managed`, `metadata`, `discovery_enabled`, `discovery_interval_seconds`; `status` is **not** accepted — new providers are always created `active`. **P2** also accepts `discovery_settings`, validated against the selected plugin's settings GTS schema with `validation_error` (400) on mismatch) | P1 (+P2 `discovery_settings`) |
+| `PATCH` | `/model-registry/v1/providers/{id}` | Update provider (`name`, `status`, `managed`, `metadata`, `discovery_enabled`, `discovery_interval_seconds`; **P2** `discovery_settings`). `slug` is immutable and ignored if present | P1 (+P2 `discovery_settings`) |
 | `DELETE` | `/model-registry/v1/providers/{id}` | Delete provider | P1 |
 | `POST` | `/model-registry/v1/providers/{id}/discover` | Trigger model discovery | P2 |
 | `POST` | `/model-registry/v1/models/bulk-approve` | Batch approve models (`approve_models([])`, `reject_models([])`) via Approval Service | P2 |
@@ -643,23 +679,32 @@ The module exposes four deliberate extension points and two API stability zones:
 **Tag identifier in the API**: tags are addressed by their UUID `id` in path parameters and request bodies — **never** by `name`. A tag `name` is free-form (may contain spaces and other characters that do not round-trip safely as a URL path segment), so it is supplied only in the create/update request body and returned in responses, while `{tag_id}` is the stable, URL-safe handle for all path-addressed operations.
 
 **OData Support**:
-- `$filter`: `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `capabilities.vision.enabled`, `capabilities.function_calling`, `capabilities.streaming`, `capabilities.reasoning.effort`, `vendor`, `family`, `managed`, `architecture`, `format`, `tag` (P3). All filterable fields are typed scalar columns on `models` — none of the listed names are JSONB-path expressions. The `tag` filter is **not** an `info`-JSONB path — tags are relational, so the filter compiles to a join/`EXISTS` against the `model_tags` table scoped to the request tenant (subset matching: a model matches when it carries all requested tags). The `tag` predicate matches on the tag **name** as a quoted OData literal (e.g. `tag eq 'best for reasoning'`); this is a URL-encoded query-string value, not a path segment, so free-form names round-trip safely here — the id-only rule applies to path-addressed operations. `tag_id eq '<uuid>'` is also accepted for callers that already hold the id. Provider family is discriminated by exact-match or prefix-match on `gts_type` against the schema chain (e.g. `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). Filtering on the `MediaCapability.supported_mime_types` arrays (and the analogous `file_input` / `image_generation` / `audio_input` / `audio_output` `enabled` flags) is **not exposed in v1** — the OData filter layer maps fields to flat enum variants, and per-MIME-type predicates require array-membership semantics that aren't in scope yet. **Per-provider settings fields and `default_parameters` are also not filterable in v1** — the per-provider JSONB shapes vary; provider-specific and parameter-default filter spaces are deferred.
-- `$select`: field projection
-- `$top`, `$skip`: pagination
-- `$orderby`: sorting
+
+The filterable/orderable wire surface is declared once per resource as an annotated query struct (`ModelQuery`, `ProviderQuery`); `#[derive(ODataFilterable)]` generates the field enum, and a hand-written `FieldToColumn` impl binds each field to exactly one real SeaORM column. A field name that is not on the list below is rejected by the parser as an unknown-field validation error — there is no JSONB-path filtering and no join support in the toolkit `OData` layer.
+
+- `$filter` on models (15 fields, all flat names bound to real `models` columns): `canonical_id`, `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, `vision`, `function_calling`, `streaming`, `reasoning_effort`. The four capability fields are **flat names, not JSONB paths** — `vision` binds to `cap_vision`, `reasoning_effort` to `cap_reasoning_effort`, and so on; a filter written as `capabilities.vision.enabled` is rejected. Provider family is discriminated by exact-match or prefix-match on `gts_type` against the schema chain (e.g. `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`). `supported_api` is stored as a sorted comma-separated shadow of the model's API set, so it supports substring/exact predicates rather than set semantics.
+- `$filter` on providers (6 fields): `slug`, `name`, `status`, `gts_type`, `managed`, `discovery_enabled`.
+- **Not filterable in v1**: `provider_settings.*`, `default_parameters.*`, `additional_info.*`, `capabilities_full` sub-fields, and the `MediaCapability.supported_mime_types` arrays (with the analogous `file_input` / `image_generation` / `audio_input` / `audio_output` `enabled` flags). The filter layer maps each field to one flat column; per-MIME predicates need array-membership semantics and the per-provider JSONB shapes vary, so both filter spaces are deferred.
+- `$filter` on `tag` / `tag_id` is **P3** and arrives with the `model_tags` table. It is not an `info`-JSONB path — tags are relational, so the filter compiles to a join/`EXISTS` against `model_tags` scoped to the request tenant (subset matching: a model matches when it carries all requested tags). The `tag` predicate matches the tag **name** as a quoted OData literal (e.g. `tag eq 'best for reasoning'`); that is a URL-encoded query-string value, not a path segment, so free-form names round-trip safely here — the id-only rule applies to path-addressed operations. `tag_id eq '<uuid>'` is also accepted for callers that already hold the id.
+- `$select`: field projection. `$orderby`: sorting over the same field set. Pagination is **cursor-based** (`$top` plus an opaque cursor) with a default page size of 20 and a hard maximum of 100; the default sort key is `canonical_id asc` for models and `slug asc` for providers.
+- **Default lifecycle exclusion**: `list_tenant_models` excludes `deprecated` and `sunset` rows unless the caller's `$filter` itself references `lifecycle_status`, in which case the caller's predicate stands alone. Direct `get` by canonical ID does not hide them — it returns `ModelDeprecated` instead.
+- **Inheritance interacts with pagination**: the own-tenant query carries the caller's filter, order, and pagination; each ancestor query carries the same filter and order with pagination removed, so child-shadowing is computed over the complete inherited set. The merged list is then truncated to the caller's page size. Consequence: the cursor anchors on own-tenant rows, so paging past the first page of a tenant that inherits heavily is not a stable ordered walk of the merged set (§4 Technical Debt).
 
 **Versioning Policy**: All endpoints carry a `/v1/` URL prefix. v1 is **additive-only** — new optional fields, new endpoints, and new enum variants may ship without a major bump. Breaking changes (renamed fields, removed endpoints, narrowed enum sets, semantic changes) ship as `/v2/` with `/v1/` retained for one platform release as the deprecation window. Per-provider GTS leaves are versioned independently from the URL path: `OpenAiSettingsV1` and a future `OpenAiSettingsV2` may coexist in the catalog and are discriminated at runtime by `gts_type`; consumers narrow to whichever generation matches.
 
-| Dependency Gear    | Interface Used | Purpose |
-|-------------------|----------------|---------|
-| `tenant-resolver` | SDK client via ClientHub | Resolve tenant hierarchy (parent chain) |
-| `approval-service` | SDK client via ClientHub | Manage approval workflow, query status |
-| `outbound-api-gateway` | SDK client via ClientHub | Execute provider API calls for discovery |
+| Dependency Gear    | Interface Used | Purpose | Phase |
+|-------------------|----------------|---------|-------|
+| `tenant-resolver` | `TenantResolverClient` via ClientHub | Resolve tenant hierarchy (ancestor chain) for additive inheritance and TTL classification | P1 |
+| `authz-resolver` | `AuthZResolverClient` wrapped in `PolicyEnforcer` via ClientHub | Per-operation authorization decision and the compiled `AccessScope` used by every query | P1 |
+| `approval-service` | SDK client via ClientHub | Manage approval workflow, query status | P2 |
+| `outbound-api-gateway` | SDK client via ClientHub | Execute provider API calls for discovery | P2 |
 
 **Dependency Rules**:
 - No circular dependencies
 - Always use SDK modules for inter-gear communication
 - `SecurityContext` must be propagated across all in-process calls
+
+The gear declares `deps = ["tenant-resolver", "authz-resolver"]` and `capabilities = [rest, db]`; the P2 dependencies are added to that list when their phases land.
 
 #### External Interfaces
 
@@ -667,17 +712,19 @@ The module exposes four deliberate extension points and two API stability zones:
 
 **ID**: `cpt-cf-model-registry-interface-redis`
 
+**Phase**: not wired in P1 — the cache is in-process (`InMemoryCache`) and the module opens no Redis connection. The contract below describes the backend the reserved `redis` feature will implement; the key format and TTL strategy are already honored by the in-memory backend, so switching backends changes no call site.
+
 **Type**: Database
 **Direction**: bidirectional
 **Protocol / Driver**: Redis protocol via `redis-rs` or `bb8-redis`
 **Data Format**: JSON-serialized cache entries
 **Compatibility**: Redis 6.x+, supports cluster mode
 
-**Cache Key Format**: `mr:{tenant_id}:{entity}:{id}`
+**Cache Key Format**: `mr:{tenant_id}:{entity}:{id}` where `entity` is `provider` (keyed by UUID) or `model` (keyed by canonical ID)
 
-**TTL Strategy**:
+**TTL Strategy** (configurable — `own_ttl_seconds` / `inherited_ttl_seconds`):
 - Own data (tenant created): 30 minutes
-- Inherited data (from parent): 5 minutes
+- Inherited data (from an ancestor): 5 minutes
 
 ##### External Interface: PostgreSQL
 
@@ -685,13 +732,15 @@ The module exposes four deliberate extension points and two API stability zones:
 
 **Type**: Database
 **Direction**: bidirectional
-**Protocol / Driver**: SeaORM with PostgreSQL driver
+**Protocol / Driver**: SeaORM through `toolkit-db` (`SecureConn` / `DBRunner`), scoped by `AccessScope`
 **Data Format**: Relational schema (see 3.6)
-**Compatibility**: PostgreSQL 14+
+**Compatibility**: PostgreSQL 14+ in production. The migration dispatches column types per backend, so MySQL and SQLite are also supported; SQLite is the dev/test target and the reason the schema carries no `GIN` indexes and no `ALTER ADD NOT NULL` steps.
 
 ##### External Interface: Provider APIs (via OAGW)
 
 **ID**: `cpt-cf-model-registry-interface-provider-apis`
+
+**Phase**: P2 — no outbound provider traffic exists in P1.
 
 **Type**: External API
 **Direction**: outbound
@@ -701,16 +750,19 @@ The module exposes four deliberate extension points and two API stability zones:
 
 ### 3.4 Internal Dependencies
 
-| Dependency Module | Interface Used | Purpose |
-|-------------------|----------------|---------|
-| `tenant-resolver` | SDK client via ClientHub | Resolve tenant hierarchy (parent chain) |
-| `approval-service` | SDK client via ClientHub | Manage approval workflow, query status |
-| `outbound-api-gateway` | SDK client via ClientHub | Execute provider API calls for discovery |
+| Dependency Module | Interface Used | Purpose | Phase |
+|-------------------|----------------|---------|-------|
+| `tenant-resolver` | `TenantResolverClient` via ClientHub | Resolve tenant hierarchy (ancestor chain) | P1 |
+| `authz-resolver` | `AuthZResolverClient` + `PolicyEnforcer` via ClientHub | Authorization decisions and `AccessScope` derivation | P1 |
+| `approval-service` | SDK client via ClientHub | Manage approval workflow, query status | P2 |
+| `outbound-api-gateway` | SDK client via ClientHub | Execute provider API calls for discovery | P2 |
 
 **Dependency Rules**:
 - No circular dependencies
 - Always use SDK modules for inter-module communication
 - `SecurityContext` must be propagated across all in-process calls
+
+**Failure behavior in P1**: an ancestor-scoped list query that fails is logged and skipped — the caller receives the partial (own-tenant + surviving ancestors) result rather than an error. A `tenant-resolver` or PDP failure surfaces as `DomainError::Internal` / `Forbidden` and fails the request.
 
 ### 3.5 Interactions & Sequences
 
@@ -726,29 +778,44 @@ The module exposes four deliberate extension points and two API stability zones:
 sequenceDiagram
     actor LLMGateway
     participant MR as ModelRegistry
-    participant Cache as Redis
-    participant DB as PostgreSQL
-    participant Approval as ApprovalService
+    participant PDP as AuthZResolver
     participant Tenant as TenantResolver
+    participant Cache as CacheService
+    participant DB as PostgreSQL
 
     LLMGateway->>MR: get_tenant_model(ctx, canonical_id)
-    MR->>Cache: get(mr:{tenant}:model:{id})
+    MR->>PDP: access_scope(ctx, model, "get")
+    PDP-->>MR: AccessScope
+    MR->>Tenant: get_ancestors(tenant_id)
+    Tenant-->>MR: [parent, ..., root]
+
+    loop tenant chain, closest first
+        MR->>Cache: get(mr:{tenant}:model:{canonical_id})
+    end
     alt Cache Hit
-        Cache-->>MR: model + approval_status
+        Cache-->>MR: Model (approval_status included)
+        note over MR: deprecated/sunset → drop key, ModelDeprecated
         MR-->>LLMGateway: Model
     else Cache Miss
-        MR->>DB: SELECT model WHERE canonical_id
-        DB-->>MR: model
-        MR->>Tenant: get_ancestor_chain(tenant_id)
-        Tenant-->>MR: [tenant, parent, ..., root]
-        MR->>Approval: get_approval_status(model_id, tenant_chain)
-        Approval-->>MR: approved | pending | rejected
-        MR->>Cache: set(mr:{tenant}:model:{id}, TTL)
+        MR->>DB: SELECT … WHERE canonical_id (own scope)
+        alt found in own tenant
+            DB-->>MR: row
+            MR->>Cache: set(mr:{own}:model:{id}, own TTL)
+        else not found
+            loop each ancestor
+                MR->>DB: SELECT … WHERE canonical_id (ancestor scope)
+            end
+            DB-->>MR: row or none
+            MR->>Cache: set(mr:{ancestor}:model:{id}, inherited TTL)
+        end
+        note over MR: no row anywhere → ModelNotFound
         MR-->>LLMGateway: Model
     end
 ```
 
-**Description**: Resolves a canonical model ID for a tenant, checking cache first, then database with approval status from Approval Service. Returns model info with provider details if approved.
+**Description**: Resolves a canonical model ID for a tenant. The PDP decision and the ancestor chain are resolved first, then the cache is probed for each tenant in the chain closest-first, then the database — own tenant first, then each ancestor in chain order. The row that answers is cached under its owning tenant's key with the TTL for its ownership class.
+
+`approval_status` is read from the `models` row and **returned on the model**; this call does not fail closed on `pending` / `rejected` / `revoked`, and it makes no Approval Service call in P1. The caller (LLM Gateway) decides what to do with a non-approved model. `ModelNotApproved` is reserved for a future explicit access-gate path and is never produced by this read. A model in a terminal lifecycle state (`deprecated` or `sunset`) yields `ModelDeprecated` — and when the offending row came from cache, that key is dropped on the way out so it does not linger for the rest of its TTL. A canonical ID absent from the whole chain yields `ModelNotFound`.
 
 #### Model Discovery
 
@@ -886,13 +953,39 @@ Plugin invocation is wrapped at the `(tenant_id, provider_id)` boundary. A panic
 
 **Actors**: `cpt-cf-model-registry-actor-tenant-admin`
 
+**P1 — direct admin write (implemented)**:
+
+```mermaid
+sequenceDiagram
+    actor TenantAdmin
+    participant MR as ModelRegistry
+    participant PDP as AuthZResolver
+    participant DB as PostgreSQL
+    participant Cache as CacheService
+
+    TenantAdmin->>MR: PATCH /models/{canonical_id} {approval_status}
+    MR->>PDP: access_scope(ctx, model, "update")
+    PDP-->>MR: AccessScope
+    MR->>DB: SELECT … WHERE canonical_id
+    DB-->>MR: existing row
+    alt lifecycle is deprecated or sunset
+        MR-->>TenantAdmin: 400 problem+json (invalid_argument)
+    else
+        MR->>DB: UPDATE models SET approval_status, updated_at
+        MR->>Cache: invalidate_tenant(mr:{tenant}:*)
+        MR-->>TenantAdmin: 200 ModelDto
+    end
+```
+
+**P2 — delegated workflow (planned)**:
+
 ```mermaid
 sequenceDiagram
     actor TenantAdmin
     participant ApprovalUI as ApprovalServiceUI
     participant Approval as ApprovalService
     participant MR as ModelRegistry
-    participant Cache as Redis
+    participant Cache as CacheService
 
     TenantAdmin->>ApprovalUI: approve model
     ApprovalUI->>Approval: approve(resource_type=model, resource_id)
@@ -902,7 +995,7 @@ sequenceDiagram
     MR->>Cache: invalidate(mr:{tenant}:models:*)
 ```
 
-**Description**: Approval workflow managed by Approval Service. Model Registry receives status change events and invalidates relevant cache entries.
+**Description**: In P1 the admin PATCHes `approval_status` on the model endpoint; the service authorizes the call, refuses the change when the model is in a terminal lifecycle state, writes the column, and invalidates the tenant's cache prefix. There is no workflow state machine, no decision record, and no notification in this module. In P2 the approval workflow moves to the Approval Service, which owns the state machine and audit trail; Model Registry then consumes status-change events and invalidates the affected cache entries, while the `models.approval_status` column continues to serve reads and `$filter`.
 
 #### Tag Assignment & Tag-Filtered List
 
@@ -911,6 +1004,8 @@ sequenceDiagram
 **Use cases**: `cpt-cf-model-registry-usecase-assign-tag`, `cpt-cf-model-registry-usecase-list-tenant-models`
 
 **Actors**: `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-llm-gateway`
+
+**Phase**: P3 — tags, `model_tags`, the tag endpoints, and the `tag` filter are all absent in P1.
 
 ```mermaid
 sequenceDiagram
@@ -948,6 +1043,8 @@ sequenceDiagram
 
 **Actors**: `cpt-cf-model-registry-actor-platform-admin`, `cpt-cf-model-registry-actor-llm-gateway`
 
+**Phase**: P2 for the discovery leg, P3 for the `provider_health` record. P1 has neither; its catalog reads are simply always served from cache/DB because nothing else can perturb them.
+
 ```mermaid
 sequenceDiagram
     actor Admin
@@ -977,19 +1074,23 @@ sequenceDiagram
     MR-->>LLMGateway: Model (degraded-mode read)
 ```
 
-**Description**: When a provider call fails, OAGW surfaces the error to Model Registry, which records the failure on `provider_health` (`consecutive_failures`, `last_error`, `last_error_message`). No catalog rows are mutated and no cache entries are invalidated. Tenant reads (`get_tenant_model`, `list_tenant_models`) continue to serve cached and persisted catalog data — this is the degraded-mode contract from `cpt-cf-model-registry-fr-degraded-mode`. Repeated failures flip provider health to `unhealthy`, which is exposed via `GET /providers/{id}/health` so operators can see provider-level issues without inferring them from discovery latency. Approval checks remain fail-closed per the availability NFR; data already approved before the outage stays accessible.
+**Description**: When a provider call fails, OAGW surfaces the error to Model Registry, which records the failure on `provider_health` (`consecutive_failures`, `last_error`, `last_error_message`). No catalog rows are mutated and no cache entries are invalidated. Tenant reads (`get_tenant_model`, `list_tenant_models`) continue to serve cached and persisted catalog data — this is the degraded-mode contract from `cpt-cf-model-registry-fr-degraded-mode`. Repeated failures flip provider health to `unhealthy`, which is exposed via `GET /providers/{id}/health` so operators can see provider-level issues without inferring them from discovery latency. Reads are unaffected by an approval-service outage because `approval_status` is served from the `models` column, not fetched per request; only the future explicit access-gate path fails closed (§4 Fault Tolerance Policies).
 
 #### Event Catalog
 
-| Event | Producer | Consumer (this module) | Schema location | Ordering / Replay |
-|-------|----------|------------------------|-----------------|-------------------|
-| `tenant.reparented` | tenant-resolver | Cache invalidation handler | `tenant-resolver-sdk` events module | Per-tenant ordered; idempotent — replay invalidates already-cold cache keys harmlessly |
-| `approval.status_changed` | approval-service | Cache invalidation handler | `approval-service-sdk` events module | Per-`(tenant_id, model_id)` ordered; replay re-invalidates the same keys |
-| `tenant.deleted` | platform tenant lifecycle | Hard-delete cascade + `invalidate_tenant` | platform tenant-lifecycle SDK | At-least-once; idempotent — second delivery is a no-op against an empty tenant |
+**P1 status**: Model Registry subscribes to **no** events and emits none. The gear has no event handlers; the table below is the planned inbound surface, each row landing with the phase that needs it. Until then, cache freshness rests entirely on write-time tenant invalidation plus the TTLs.
+
+| Event | Producer | Consumer (this module) | Schema location | Phase | Ordering / Replay |
+|-------|----------|------------------------|-----------------|-------|-------------------|
+| `tenant.reparented` | tenant-resolver | Cache invalidation handler | `tenant-resolver-sdk` events module | P3 | Per-tenant ordered; idempotent — replay invalidates already-cold cache keys harmlessly |
+| `approval.status_changed` | approval-service | Cache invalidation handler | `approval-service-sdk` events module | P2 | Per-`(tenant_id, model_id)` ordered; replay re-invalidates the same keys |
+| `tenant.deleted` | platform tenant lifecycle | Hard-delete cascade + `invalidate_tenant` | platform tenant-lifecycle SDK | P2 | At-least-once; idempotent — second delivery is a no-op against an empty tenant |
 
 Producers own the event schemas; Model Registry treats them as upstream contracts. The module emits no events of its own in v1 — derived state lives only in cache and DB. When/if an outbound event surface is added it will be registered alongside the producer SDK following the same per-`(tenant_id, resource_id)` ordering pattern.
 
 ### 3.6 Database schemas & tables
+
+All P1 tables are created by the single migration `infra/storage/migrations/initial_001.rs`, which emits backend-dispatched raw SQL (`UUID`/`VARCHAR(36)`/`TEXT` for identifiers, `JSONB`/`JSON`/`TEXT` for JSON columns, `TIMESTAMPTZ`/`DATETIME(6)`/`TEXT` for timestamps, `BIGINT`/`BIGINT`/`INTEGER` for integers). The types shown below are the PostgreSQL rendering. Two tables exist in P1: `providers` and `models`. The `provider_health`, `aliases`, `tags`, and `model_tags` tables are P3 design and are **not created**.
 
 #### Table: providers
 
@@ -998,22 +1099,23 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | id | UUID | PK | Primary key |
-| tenant_id | UUID | NOT NULL, INDEX | Owner tenant |
-| slug | VARCHAR(64) | NOT NULL | Human-readable identifier |
+| tenant_id | UUID | NOT NULL | Owner tenant; part of the composite unique key and of every scoped query predicate |
+| slug | VARCHAR(255) | NOT NULL | Human-readable identifier. The 1-64 character format rule is enforced in the service, not by the column width |
 | name | VARCHAR(255) | NOT NULL | Display name |
 | gts_type | VARCHAR(255) | NOT NULL | GTS type identifier |
-| status | VARCHAR(20) | NOT NULL, DEFAULT 'active' | active, disabled |
+| status | VARCHAR(50) | NOT NULL, DEFAULT 'active' | active, disabled. Not settable on create — always starts `active` |
 | managed | BOOLEAN | NOT NULL, DEFAULT false | Whether Gears can manage this provider (e.g. install/unload models on ollama, lm_studio) |
 | metadata | JSONB | | Provider-specific metadata, GTS-typed (e.g. `gts.cf.genai.models.provider.v1~x.genai.local.provider.v1~` for local providers with capabilities like `install_model`, `import_model`, `streaming`) |
 | discovery_enabled | BOOLEAN | NOT NULL, DEFAULT false | Discovery feature flag |
-| discovery_interval_seconds | INTEGER | | **P2.** Discovery interval hint for external schedulers. The module does not run an in-module scheduler; the value is read by the platform scheduler / Kubernetes CronJob when deciding when to call `POST /providers/{id}/discover`. NULL means "no cadence configured — trigger manually only". |
-| discovery_settings | JSONB | | **P2.** GTS-typed discovery-settings payload for the selected `DiscoveryPlugin`. Validated against the plugin's `accepts_settings_gts_type` on provider create/update before any network call; rejected with `validation_error` (400) on schema mismatch. NULL when discovery is disabled or no plugin is selected for this provider's `gts_type`. Stored separately from `metadata` because (a) it carries a distinct validation contract (the plugin's settings GTS schema) and (b) it is read on every discovery invocation. |
+| discovery_interval_seconds | INTEGER | | Column exists in P1 and is settable through the API; it is **only consumed in P2**, as a discovery-interval hint for external schedulers. The module runs no in-module scheduler; the value is read by the platform scheduler / Kubernetes CronJob when deciding when to call `POST /providers/{id}/discover`. NULL means "no cadence configured — trigger manually only". Because the column is 32-bit, the service rejects values above `i32::MAX` rather than letting them truncate |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |
-| updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp |
+| updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp; bumped only when a PATCH actually set at least one field |
 
-**Indexes**: (tenant_id), (tenant_id, slug) UNIQUE
+**P2 addition — `discovery_settings` JSONB**: GTS-typed discovery-settings payload for the selected `DiscoveryPlugin`, validated against the plugin's `accepts_settings_gts_type` on provider create/update before any network call and rejected with `validation_error` (400) on schema mismatch. NULL when discovery is disabled or no plugin is selected for this provider's `gts_type`. Kept separate from `metadata` because (a) it carries a distinct validation contract (the plugin's settings GTS schema) and (b) it is read on every discovery invocation. **Not present in the P1 schema.**
 
-**Constraints**: slug immutable after creation (enforced at application level)
+**Indexes**: PK (id), (tenant_id, slug) UNIQUE. There is no standalone `(tenant_id)` index — the composite unique key has `tenant_id` as its leading column, so tenant-scoped scans use it.
+
+**Constraints**: slug immutable after creation (the update projection never writes it); deleting a provider that still owns models is refused with `ProviderHasModels` (application pre-check, backed by the `models.provider_id` FK `ON DELETE RESTRICT` as a TOCTOU guard)
 
 #### Table: models
 
@@ -1022,17 +1124,17 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | id | UUID | PK | Primary key (matches `ModelV1::id`) |
-| provider_id | UUID | FK, NOT NULL | Foreign key to providers |
-| tenant_id | UUID | NOT NULL, INDEX | Owner tenant (denormalized for query performance) |
-| canonical_id | VARCHAR(512) | NOT NULL | Format: `{provider_slug}::{provider_model_id}` (matches `ModelV1::canonical_id`) |
-| lifecycle_status | VARCHAR(20) | NOT NULL | `production` / `preview` / `experimental` / `deprecated` / `sunset` (matches `ModelV1::lifecycle_status`) |
-| deprecated_at | TIMESTAMPTZ | | Soft-delete timestamp |
+| provider_id | UUID | NOT NULL, FK → `providers(id)` ON DELETE RESTRICT | Owning provider |
+| tenant_id | UUID | NOT NULL | Owner tenant (denormalized for query performance) |
+| canonical_id | VARCHAR(255) | NOT NULL | Format: `{provider_slug}::{provider_model_id}` (matches `ModelV1::canonical_id`), derived on create and immutable |
+| lifecycle_status | VARCHAR(50) | NOT NULL | `production` / `preview` / `experimental` / `deprecated` / `sunset` (matches `ModelV1::lifecycle_status`) |
+| deprecated_at | TIMESTAMPTZ | | Soft-delete timestamp, set by `DELETE /models/{canonical_id}` |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |
 | updated_at | TIMESTAMPTZ | NOT NULL | Last update timestamp |
 
-#### 17 promoted scalar columns (from `ModelInfoV1`)
+#### Promoted scalar columns (from `ModelInfoV1`)
 
-The `info` JSONB column has been **dropped** (2026-07-24). Every `ModelInfoV1` field that promotes cleanly is now a typed column on this table:
+There is **no `info` JSONB column**. Every `ModelInfoV1` field that promotes cleanly is a typed column on this table (seventeen of them):
 
 | Column | Type | Constraints | Source field |
 |--------|------|-------------|--------------|
@@ -1042,23 +1144,23 @@ The `info` JSONB column has been **dropped** (2026-07-24). Every `ModelInfoV1` f
 | region | VARCHAR(64) | NULL | `region` |
 | hosted_by | VARCHAR(64) | NULL | `hosted_by` |
 | last_release_at | TIMESTAMPTZ | NULL | `last_release_at` |
-| reasoning_level | VARCHAR(32) | NULL | `reasoning_level` |
+| reasoning_level | VARCHAR(64) | NULL | `reasoning_level` |
 | version | VARCHAR(64) | NULL | `version` |
-| sort_order | INTEGER | NULL | `sort_order` |
+| sort_order | BIGINT | NULL | `sort_order` |
 | icon | TEXT | NULL | `icon` |
-| multiplier_display | VARCHAR(32) | NULL | `multiplier_display` |
-| perf_response_latency_ms | INTEGER | NULL | `performance.response_latency_ms` |
-| perf_tokens_per_second | INTEGER | NULL | `performance.tokens_per_second` |
-| ctx_max_input_tokens | INTEGER | NOT NULL, DEFAULT `0` | `context_window.max_input_tokens` |
-| ctx_max_output_tokens | INTEGER | NULL | `context_window.max_output_tokens` |
-| ctx_output_vector_size | INTEGER | NULL | `context_window.output_vector_size` |
+| multiplier_display | VARCHAR(64) | NULL | `multiplier_display` |
+| perf_response_latency_ms | BIGINT | NULL | `performance.response_latency_ms` |
+| perf_tokens_per_second | BIGINT | NULL | `performance.tokens_per_second` |
+| ctx_max_input_tokens | BIGINT | NOT NULL, DEFAULT `0` | `context_window.max_input_tokens` |
+| ctx_max_output_tokens | BIGINT | NULL | `context_window.max_output_tokens` |
+| ctx_output_vector_size | BIGINT | NULL | `context_window.output_vector_size` |
 | allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT `0` | `allow_parameter_override` |
 
-The `NOT NULL DEFAULT`s keep `SQLite` cheap to write (it cannot `ALTER ADD NOT NULL`); the application layer always populates real values on create/update. Type abbreviations (`TEXT` / `INTEGER` / `BIGINT`) are the SQLite rendering of the portable types shown in `migrations/initial_001.rs` (PostgreSQL gets `BIGINT` for `size_bytes`; SQLite maps everything to `TEXT`/`INTEGER` for portability).
+The three `NOT NULL DEFAULT`s exist because SQLite cannot `ALTER ADD NOT NULL`, so the default has to be present at CREATE time; the application layer always writes real values on create/update. Every integer column is `BIGINT` on PostgreSQL and MySQL — their `INTEGER` is 32-bit and overflows `size_bytes` at 2 GiB, which is smaller than any modern weight file — and `INTEGER` on SQLite, which is already 8-byte. The bounded short-text columns render as `VARCHAR(64)` on PostgreSQL/MySQL and `TEXT` on SQLite. Because `ctx_max_input_tokens` is stored wider than the SDK's `u32`, a row outside `u32` range fails to lift and surfaces as `DomainError::Internal` rather than silently truncating.
 
-#### 5 JSONB sub-object columns (the rest of `ModelInfoV1`)
+#### JSONB sub-object columns (the rest of `ModelInfoV1`)
 
-Sub-objects that don't promote cleanly live as small JSONB columns. Same backend-dispatched type (`jsonb_nullable` in the migration) as `provider_settings`:
+Sub-objects that don't promote cleanly live as five small nullable JSONB columns. Same backend-dispatched type (`jsonb_nullable` in the migration) as `provider_settings`. Each column stores its **complete** sub-object, so a NULL column or a value the type no longer accepts decodes to the type's `Default` rather than failing the read:
 
 | Column | Holds | Rationale |
 |---|---|---|
@@ -1072,11 +1174,11 @@ Sub-objects that don't promote cleanly live as small JSONB columns. Same backend
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
-| provider_settings | JSONB | NOT NULL | Polymorphic provider settings JSON whose shape is identified by the row's scalar `gts_type` discriminator. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives as flat scalar fields (`allow_parameter_override`, `allow_extra_params`) above. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
+| provider_settings | JSONB | NULL | Polymorphic provider settings JSON whose shape is identified by the row's scalar `gts_type` discriminator. Nullable — a model may be catalogued before its routing payload is supplied, and the read path lifts a NULL column as JSON `null`. Concrete shape is one of the per-provider settings types shipped in the SDK (e.g. `OpenAiSettingsV1`, `AnthropicSettingsV1`; the shipped set is open-ended and lives in `models/providers/`). The shape is **flat** — connection routing (`oagw_alias`, endpoint/variant/version, etc.) and provider-wire parameter defaults (`temperature`, provider-specific knobs, …) sit at the top level; only `cost` is nested. The override policy is **not** stored here — it lives in its own columns above: `allow_parameter_override` as a promoted `BOOLEAN` scalar and `allow_extra_params` as one of the five JSONB sub-object columns. For unknown / not-yet-modeled providers the column is the raw JSON the operator provided (the SDK reads it as the default `serde_json::Value` carrier). Replaces the pre-GTS `api_resolution` + `parameters` + `cost` columns — the shape varies per provider, so one polymorphic blob is the smallest sensible storage |
 
-#### 13 denormalized columns for OData filtering
+#### Denormalized columns for OData filtering
 
-The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, `vision`, `function_calling`, `streaming`, `reasoning_effort`) maps to the existing columns below (2 come from the identity/lifecycle block above; the rest are denormalized scalar shadows):
+The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval_status`, `gts_type`, `supported_api`, `provider_model_id`, `vendor`, `family`, `managed`, `architecture`, `format`, `vision`, `function_calling`, `streaming`, `reasoning_effort`) maps to the columns below (`canonical_id` and `lifecycle_status` come from the identity/lifecycle block above; the remaining thirteen are the scalar shadows listed here):
 
 | Column | Type | Constraints | Source |
 |--------|------|-------------|--------|
@@ -1087,20 +1189,22 @@ The 15-field OData filter surface (`canonical_id`, `lifecycle_status`, `approval
 | architecture | VARCHAR(255) | NULL | `architecture` |
 | format | VARCHAR(255) | NULL | `format` |
 | provider_model_id | VARCHAR(255) | NULL | `provider_model_id` |
-| supported_api | VARCHAR(50) | NULL | `supported_api` |
+| supported_api | VARCHAR(50) | NULL | `supported_api`, encoded as a **sorted comma-separated list** of the set's members (NULL for an empty set). Unknown members are dropped on read — the column is a filter shadow, not the source of truth for anything |
 | approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | `approval_status` field on `ModelV1`. Source of truth for both reads and writes; P1 updates flow through `update_model`, P2 swaps the write path to the Approval Service while the column continues to serve reads and OData filtering |
 | cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.vision.enabled` |
 | cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.function_calling` |
 | cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.streaming` |
 | cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.reasoning.effort` |
 
-Scalar columns are the source of truth; the four additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column identified by `gts_type`. On the read path the mapper builds `ModelV1` / `ModelInfoV1` directly via struct literals from the 17 scalar columns + 5 JSONB sub-objects + `provider_settings`, so adding a field to `ModelInfoV1` is a compile error in the read and write projections rather than a runtime failure; the two ways a row can fail to lift (an out-of-domain enum string, an out-of-range `ctx_max_input_tokens`) surface as `DomainError::Internal`. The 4 OData-filterable capability booleans come from scalar columns on read; they override anything in `capabilities_full` JSONB (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
+Scalar columns are the source of truth; the five additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column, identified by `gts_type`.
 
-**Indexes**: (tenant_id), (tenant_id, canonical_id) UNIQUE, (provider_id), (lifecycle_status)
+Both directions of the mapping are **typed struct-literal projections** — no `serde_json` round-trip through an intermediate value. The read path builds `ModelV1` / `ModelInfoV1` field-by-field from the scalar columns, the five JSONB sub-objects, and `provider_settings`; the write path `Set`s every column from `req.info.*`. Adding a field to `ModelInfoV1` is therefore a compile error in both projections rather than a silent runtime degradation. The two ways a row can fail to lift — an out-of-domain enum string, an out-of-range `ctx_max_input_tokens` — surface as `DomainError::Internal`. The four OData-filterable capability booleans come from their scalar columns on read and **override** whatever `capabilities_full` holds for the same fields (columns are authoritative). The toolkit OData layer (`FieldToColumn::map_field`) maps each filter field to exactly one real SeaORM `Column` and has no JSONB-path filtering or join support.
 
-**B-tree Indexes** (on the denormalized columns for OData filtering):
-- `(gts_type)`, `(vendor)`, `(family)`, `(architecture)`, `(format)`, `(provider_model_id)`, `(supported_api)`, `(approval_status)`
-- capability flags: `(cap_vision)`, `(cap_function_calling)`, `(cap_streaming)`, `(cap_reasoning_effort)`
+Write-path consequence: because the projection is whole-row, any PATCH that touches an `info.*` field re-projects every scalar and JSONB column. The SQL is verbose but always self-consistent — a denormalized shadow column cannot drift from the sub-object it shadows.
+
+**Indexes**: PK (id), (tenant_id, canonical_id) UNIQUE, plus thirteen single-column B-tree indexes: `(lifecycle_status)`, `(approval_status)`, `(gts_type)`, `(vendor)`, `(family)`, `(architecture)`, `(format)`, `(provider_model_id)`, `(supported_api)`, `(cap_vision)`, `(cap_function_calling)`, `(cap_streaming)`, `(cap_reasoning_effort)` — one per filterable shadow column. As on `providers`, there is no standalone `(tenant_id)` index: `tenant_id` leads the composite unique key. There is no `(provider_id)` index either; the only query on that column is the pre-delete existence check on a provider, whose cardinality is bounded by one tenant's catalog.
+
+**No PostgreSQL `GIN` indexes** — they would break the SQLite dev/test path and are unnecessary now that every filterable field is a real column.
 
 `provider_settings`, `capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`: no per-provider / per-shape index in v1 — the shapes vary, so per-shape filter paths are deferred (see §3.3 OData).
 
@@ -1179,7 +1283,9 @@ Join table for the many-to-many Model ↔ Tag relationship. Assignments are tena
 
 #### Migrations & Schema Versioning
 
-Schema migrations are managed by SeaORM migration scripts under `model-registry/src/infrastructure/migrations/`. Each migration is forward-only, idempotent on repeated apply, and named `mYYYYMMDD_HHMM_<slug>.rs`. The polymorphic JSONB column `provider_settings` versions its **payload** shape independently from the table schema: the GTS schema chain in `gts_type` (e.g. `OpenAiSettingsV1` vs a future `OpenAiSettingsV2`) is the per-row payload version, so one row may use `V1` while a freshly-discovered row uses `V2` without a table migration. SeaORM migrations are reserved for column-level changes (new columns, indexes, constraints); JSONB-payload evolution rides the GTS leaf schema bump.
+Schema migrations are managed by SeaORM migration scripts under [`model-registry/src/infra/storage/migrations/`](../model-registry/src/infra/storage/migrations/) and surfaced to the platform through the gear's `DatabaseCapability::migrations`. Each migration is forward-only and idempotent on repeated apply (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`), with a matching `down` for the test round-trip. P1 carries exactly one migration, `initial_001`, holding the final schema — the gear had not been deployed when the storage layout was settled, so no incremental column migration exists.
+
+The polymorphic JSONB column `provider_settings` versions its **payload** shape independently from the table schema: the GTS schema chain in `gts_type` (e.g. `OpenAiSettingsV1` vs a future `OpenAiSettingsV2`) is the per-row payload version, so one row may use `V1` while a freshly-discovered row uses `V2` without a table migration. SeaORM migrations are reserved for column-level changes (new columns, indexes, constraints); JSONB-payload evolution rides the GTS leaf schema bump.
 
 #### Technology Risks
 
@@ -1193,30 +1299,48 @@ Three module-level technology risks are tracked:
 
 ### Error Handling
 
-Error codes follow RFC 9457 Problem Details standard. Domain errors map to SDK errors, which map to Problem responses:
+Error codes follow the RFC 9457 Problem Details standard, produced through `toolkit-canonical-errors`. There are two mappings, and they are deliberately separate:
 
-| Domain Error | SDK Error | HTTP Status | Problem Type |
-|--------------|-----------|-------------|--------------|
-| ModelNotFound | ModelNotFound | 404 | model_not_found |
-| ModelNotApproved | ModelNotApproved | 403 | model_not_approved |
-| ModelDeprecated | ModelDeprecated | 410 | model_deprecated |
-| ProviderNotFound | ProviderNotFound | 404 | provider_not_found |
-| ProviderDisabled | ProviderDisabled | 404 | provider_disabled |
-| InvalidTransition | InvalidTransition | 409 | invalid_transition |
-| ValidationError | ValidationError | 400 | validation_error |
-| Unauthenticated | Unauthenticated | 401 | unauthenticated |
-| Forbidden | Forbidden | 403 | forbidden |
-| TagNotFound | TagNotFound | 404 | tag_not_found |
-| TagAlreadyExists | TagAlreadyExists | 409 | tag_already_exists |
+- `DomainError` → `ModelRegistryError` at the `LocalClient` boundary — what SDK consumers see.
+- `DomainError` → `CanonicalError` in `api/rest/error.rs` — what HTTP clients see. The canonical category (`not_found`, `permission_denied`, `already_exists`, `invalid_argument`, `internal`) fixes both the status code and the `gts.cf.core.errors.err.v1~cf.core.err.*` problem type, so this module never picks status codes by hand.
+
+| Domain Error | SDK Error | HTTP Status | Canonical category |
+|--------------|-----------|-------------|--------------------|
+| ModelNotFound | ModelNotFound | 404 | `not_found` |
+| ProviderNotFound | ProviderNotFound | 404 | `not_found` |
+| ProviderNotFoundBySlug | ProviderNotFoundBySlug | 404 | `not_found` |
+| ModelDeprecated | ModelDeprecated | 404 | `not_found` |
+| ModelNotApproved | ModelNotApproved | 403 | `permission_denied` |
+| Forbidden | Forbidden | 403 | `permission_denied` |
+| ProviderDisabled | ProviderDisabled | 403 | `permission_denied` |
+| ProviderConflict | ProviderConflict | 409 | `already_exists` |
+| ProviderHasModels | ProviderHasModels | 409 | `already_exists` |
+| InvalidTransition | InvalidTransition | 400 | `invalid_argument` |
+| Validation | Validation | 400 | `invalid_argument` |
+| Internal | Internal | 500 | `internal` |
+| Database | Internal | 500 | `internal` |
+
+Notes on the mapping as implemented:
+
+- **`ModelDeprecated` is 404, not 410.** A deprecated model is modelled as "no longer part of the catalog you can use" rather than a distinguishable gone-resource; the problem detail says so, and callers that need to tell the two apart read the detail rather than the status.
+- **`ModelNotApproved` is never produced by the read path** — `get_tenant_model` returns non-approved models with their status. The variant is reserved for a future explicit access-gate.
+- **`Unauthenticated` (401)** exists on the SDK error enum but is not constructed by this module: authentication is enforced by `OperationBuilder::authenticated()` before a handler runs, so the 401 comes from the toolkit's auth layer. `DomainError` has no `Unauthenticated` variant for that reason.
+- **`ProviderDisabled` is 403, not 404** — the provider exists and the caller may see it; what is refused is creating a model against it.
+- **Duplicate `canonical_id`** on create is a `Validation` (400), not a 409: the conflict is in the *derived* identity (`provider_slug` + `provider_model_id`), so it reads as a bad request body rather than a resource collision.
+- **`TagNotFound` / `TagAlreadyExists`** are P3 — they arrive with the tag surface and are not in the SDK error enum today.
 
 ### Cache Invalidation Strategy
 
-Cache invalidation occurs on:
-1. **Write operations**: Invalidate specific keys after create/update/delete
-2. **Discovery sync**: Invalidate all model keys for tenant after sync
-3. **Approval status change**: Invalidate model and list keys on event
-4. **Tenant re-parenting**: Invalidate all keys for affected tenant on `tenant.reparented` event
-5. **Tag assignment / deletion (P3)**: Assigning or removing tags on a model, or deleting a tag, invalidates the tenant's model-list keys (`mr:{tenant}:models:*`) so tag-filtered reads stay current
+P1 invalidation is deliberately coarse — the write paths are admin-rate, the read paths are not, and a whole-prefix drop is impossible to get subtly wrong:
+
+1. **Write operations (implemented)**: every successful `create` / `update` / `delete` on a provider or model calls `invalidate_tenant(writer_tenant_id)`, dropping every `mr:{tenant_id}:` key for that tenant rather than computing the affected key set. Descendant tenants that inherit the changed row are **not** invalidated — they pick the change up through the 5-minute inherited-data TTL, since explicit propagation would mean walking the tenant subtree on every write.
+2. **Stale-entry eviction on read (implemented)**: when a cached model turns out to be in a terminal lifecycle state, `get_tenant_model` deletes that key on its way to returning `ModelDeprecated`, so a soft-deleted model does not keep answering from cache for the rest of its TTL.
+3. **Discovery sync (P2)**: invalidate all model keys for the tenant after a sync.
+4. **Approval status change (P2)**: invalidate model and list keys on the `approval.status_changed` event.
+5. **Tenant re-parenting (P3)**: invalidate all keys for the affected tenant on the `tenant.reparented` event.
+6. **Tag assignment / deletion (P3)**: assigning or removing tags on a model, or deleting a tag, invalidates the tenant's model-list keys so tag-filtered reads stay current.
+
+Items 3-6 need an event-handling surface the gear does not have yet (§3.5 Event Catalog).
 
 ### Security Considerations
 
@@ -1225,11 +1349,13 @@ Cache invalidation occurs on:
 
 #### Authentication
 
-End-user authentication is **delegated** to the platform: `api-gateway` terminates user sessions (JWT bearer / SSO via the platform IdP), and the request-time `SecurityContext` is constructed by `authn-resolver` and propagates through ClientHub-injected SDK calls. Service-to-service authentication uses the same `SecurityContext` carried as an `AuthContext` on every in-process trait call (see §3.1 — `ModelRegistryClient` methods take `&SecurityContext`). Out-of-process consumers receive an mTLS-authenticated gRPC channel and a propagated `AuthContext` per `docs/modkit_unified_system/09_oop_grpc_sdk_pattern.md`. MFA, SSO federation, session timeout, and credential lifecycle are platform concerns — Model Registry stores no session state, no secrets, and no credential material.
+End-user authentication is **delegated** to the platform: `api-gateway` terminates user sessions (JWT bearer / SSO via the platform IdP), and the request-time `SecurityContext` is constructed by `authn-resolver` and propagates through ClientHub-injected SDK calls. Every P1 route is registered with `OperationBuilder::authenticated()`, so an unauthenticated request is rejected by the toolkit before any handler code runs. Service-to-service authentication uses the same `SecurityContext` carried on every in-process trait call (see §3.1 — `ModelRegistryClientV1` methods take `&SecurityContext`). Out-of-process consumers receive an mTLS-authenticated gRPC channel and a propagated auth context per `docs/toolkit_unified_system/`. MFA, SSO federation, session timeout, and credential lifecycle are platform concerns — Model Registry stores no session state, no secrets, and no credential material.
 
 #### Authorization
 
-Authorization is **role-based + GTS-typed** and evaluated per-operation against the request's `SecurityContext` (`AccessScope`):
+Authorization is evaluated **per operation** by the `authz-resolver` PDP, not by hand-rolled role checks in this module. Each service method calls `PolicyEnforcer::access_scope(ctx, resource, action, None)` and receives an `AccessScope` that is then applied to every query for that request; a denied decision surfaces as `DomainError::Forbidden` → 403. The resource types are `model_registry.provider` and `model_registry.model` (both declaring the `owner_tenant_id` and `resource_id` properties); the actions are `get`, `list`, `create`, `update`, `delete`.
+
+The matrix below is the **intended policy** — it is configured in `authz-resolver`, not encoded in this gear. What the gear guarantees structurally is narrower and independent of policy content: no query escapes its `AccessScope`, and ancestor reads use an explicitly constructed ancestor scope rather than a widened caller scope.
 
 | Role | Read Models / Providers | Manage Providers (CRUD) | Manage Models (CRUD) | Approve / Reject / Revoke | Trigger Discovery | Manage Aliases |
 |------|-------------------------|--------------------------|----------------------|---------------------------|-------------------|----------------|
@@ -1244,91 +1370,121 @@ GTS-typed scoping further narrows write access by provider/lifecycle type when p
 
 #### Audit & Compliance
 
+**P1 status**: no audit-sink integration exists in this module yet. What P1 emits is structured `tracing` output — forbidden-access warnings and internal/database errors carry their context — which the platform log pipeline collects. The contract below is the target posture and lands with platform observability integration.
+
 All admin-surface operations (model/provider/alias/tag create/update/delete/discover/approve/reject/revoke, plus tag assign/remove on models) are logged with `(actor_id, tenant_id, operation, target_id, timestamp, source_ip, request_id)` to the platform audit sink (append-only, tamper-evident). The module does **not** own its own audit retention — log retention, tamper-proofing (write-once storage / cryptographic chaining), and SIEM integration are inherited from the platform observability stack (see §4 Out of Scope "Observability"). Incident-response hooks are exposed via the platform's standard alert routing — Model Registry emits structured warning logs for `approval-check fail-closed`, `discovery 5xx burst`, and `tenant-isolation violation suspected`, which the platform incident-response runbook subscribes to.
 
 ### Data Protection
 
 Encryption and PII handling follow the platform's enterprise-data baseline; Model Registry inherits the platform contract rather than introducing its own scheme.
 
-- **Encryption at rest**: PostgreSQL data — including the polymorphic `info` and `provider_settings` JSONB columns — relies on the platform's database-disk encryption (PostgreSQL TDE / cloud-managed volume encryption). Redis cache nodes use platform-managed disk encryption. Model Registry does not perform application-layer field encryption because no row column carries user PII or regulated data — provider routing aliases, capability flags, and pricing are operationally sensitive but not regulated.
-- **Encryption in transit**: REST traffic terminates at the platform's gateway/ingress over TLS 1.2+; intra-cluster traffic to PostgreSQL uses SSL with certificate verification (`sslmode=verify-full` in connection strings); Redis traffic uses `rediss://` (TLS) plus AUTH where the deployment's Redis is exposed beyond a private subnet. The OAGW link is enforced by Outbound API Gateway and is out of scope here.
+- **Encryption at rest**: PostgreSQL data — including the polymorphic `provider_settings` JSONB column and the five JSONB sub-object columns — relies on the platform's database-disk encryption (PostgreSQL TDE / cloud-managed volume encryption). In P1 the cache is in-process, so no cache data reaches disk at all; a future Redis backend inherits platform-managed disk encryption. Model Registry does not perform application-layer field encryption because no row column carries user PII or regulated data — provider routing aliases, capability flags, and pricing are operationally sensitive but not regulated.
+- **Encryption in transit**: REST traffic terminates at the platform's gateway/ingress over TLS 1.2+; intra-cluster traffic to PostgreSQL uses SSL with certificate verification (`sslmode=verify-full` in connection strings). A future Redis backend uses `rediss://` (TLS) plus AUTH where the deployment's Redis is exposed beyond a private subnet. The OAGW link is enforced by Outbound API Gateway and is out of scope here.
 - **Key-management ownership**: Delegated to the platform. Database encryption keys, TLS certificates, and Redis AUTH secrets are owned and rotated by the platform's secrets/KMS layer; Model Registry consumes them through configuration injection and never embeds, exports, or rotates keys itself. Provider credentials are owned and rotated by OAGW per `cpt-cf-model-registry-constraint-no-credentials`.
 - **PII classification**: Model Registry data is classified as **non-PII operational metadata**. Tenant identifiers and actor identifiers (`created_by`) are pseudonymous UUIDs scoped to the platform; they reference identity records owned by the IAM/tenant-resolver subsystem. No free-form user content, message bodies, prompts, or completions are persisted in Model Registry tables.
-- **Secure data disposal**: When a tenant is deleted by the platform, Model Registry receives the platform's tenant-deletion event and performs a hard-delete cascade across `providers`, `models`, `provider_health`, `aliases`, `tags`, and `model_tags` for the affected `tenant_id`, then issues `invalidate_tenant` against the cache backend. Soft-delete columns (`deprecated_at`) are preserved for in-tenant lifecycle transitions only and do not satisfy data-disposal contracts.
+- **Secure data disposal** (P2 — the event handler does not exist in P1): When a tenant is deleted by the platform, Model Registry receives the platform's tenant-deletion event and performs a hard-delete cascade across `providers`, `models`, `provider_health`, `aliases`, `tags`, and `model_tags` for the affected `tenant_id`, then issues `invalidate_tenant` against the cache backend. Soft-delete columns (`deprecated_at`) are preserved for in-tenant lifecycle transitions only and do not satisfy data-disposal contracts. Until the handler ships, tenant purge is an operator-run DB action.
 
 ### Consistency Model
 
 The registry serves a high read:write ratio and chooses a deliberate consistency posture per data path.
 
-- **Overall model — eventual consistency, TTL-bounded**: cache values trail authoritative state by at most the relevant TTL — 30 minutes for own data, 5 minutes for inherited data (§2.1 "Cache-First Reads"). Read-after-write within the same instance is strongly consistent because every write operation invalidates the affected cache keys before returning success. Read-after-write across instances is bounded by the cache invalidation propagation delay (typically <1s for Redis pub/sub) plus the read instance's local cache hit window; for inherited views the bound is at most 5 minutes. The §3.5 sequences ("Get Tenant Model", "Model Approval Integration") encode this behavior.
-- **Idempotency — discovery upsert loop**: Each iteration of the discovery loop in `cpt-cf-model-registry-seq-model-discovery` performs an upsert keyed on the natural key `(provider_id, provider_model_id)`, with the canonical id `{provider_slug}::{provider_model_id}` serving as the user-visible alias. Re-running discovery is therefore idempotent on the catalog: a model that already exists is updated in place, a model that disappears from the provider's response is marked `deprecated_at = now()`, and a new model is inserted with `lifecycle_status = preview`. Approval registrations (`Approval.register_approvable`) are also idempotent on `(tenant_id, model_id)` per the Approval Service contract.
-- **Transaction boundaries**: Multi-row writes use a single PostgreSQL transaction per provider per discovery run. Inserts, updates, and deprecation marks for a provider's catalog snapshot commit together so partial failures cannot leave the catalog in a half-synced state. The cache invalidation step (`invalidate(mr:{tenant}:models:*)`) executes only on transaction commit; if the transaction rolls back, the cache stays warm with the prior consistent view. Cross-table writes that update both `providers` and `provider_health` for a single provider also share one transaction. Cross-tenant writes (e.g. a parent's provider change reflected in a child's read view) are not transactional — child views are reconciled via the inherited-data TTL described above.
+- **Overall model — eventual consistency, TTL-bounded**: cache values trail authoritative state by at most the relevant TTL — 30 minutes for own data, 5 minutes for inherited data (§2.1 "Cache-First Reads"). Read-after-write within the same instance is strongly consistent because every write drops the writing tenant's whole cache prefix before returning success. **In P1 the cache is per-replica**, so read-after-write across instances is bounded by the TTL rather than by an invalidation-propagation delay: a second replica can serve a stale own-tenant read for up to 30 minutes after another replica's write. A single-replica deployment does not have this window, which is why the in-memory backend is the documented posture for small deployments and a distributed backend is the prerequisite for multi-replica scale-out. For inherited views the bound is the 5-minute TTL in either topology. The §3.5 sequences ("Get Tenant Model", "Model Approval Integration") encode this behavior.
+- **Idempotency of the P1 write paths**: `create_model` rejects a duplicate derived `canonical_id` within the tenant rather than upserting, so creates are not idempotent by design — a repeated create is a `Validation` error, not a silent overwrite. `update_model` and `delete_model` are idempotent in effect: a PATCH re-applying the same values converges, and soft-deleting an already-deprecated model leaves it deprecated. The discovery upsert loop below is P2.
+- **Idempotency — discovery upsert loop (P2)**: Each iteration of the discovery loop in `cpt-cf-model-registry-seq-model-discovery` performs an upsert keyed on the natural key `(provider_id, provider_model_id)`, with the canonical id `{provider_slug}::{provider_model_id}` serving as the user-visible alias. Re-running discovery is therefore idempotent on the catalog: a model that already exists is updated in place, a model that disappears from the provider's response is marked `deprecated_at = now()`, and a new model is inserted with `lifecycle_status = preview`. Approval registrations (`Approval.register_approvable`) are also idempotent on `(tenant_id, model_id)` per the Approval Service contract.
+- **Transaction boundaries**: every P1 operation is a single-row write, so no operation spans a multi-statement transaction; the repositories take the connection per call and leave transaction control to the caller, which keeps the seam available for P2. Cache invalidation happens after the write returns success — a write that fails leaves the cache untouched, and the coarse prefix drop means a partially-applied invalidation cannot leave one entity stale while a sibling is fresh. P2 adds a single transaction per provider per discovery run so inserts, updates, and deprecation marks for one catalog snapshot commit together, with the cache invalidation deferred to commit. Cross-tenant writes (e.g. a parent's provider change reflected in a child's read view) are not transactional in any phase — child views reconcile through the inherited-data TTL described above.
 
 ### Capacity & Cost
 
 This subsection records the capacity-planning, cost-allocation, and cost-data-lifecycle posture for v1; it materializes ARCH-DESIGN-010 and is bounded by the NFR allocation in §1.2.
 
 - **Capacity planning**: Targets are 10 000 tenants × 200 models = 2 million catalog rows (`cpt-cf-model-registry-nfr-scale`) and ≤ 10 ms P99 on `get_tenant_model` (`cpt-cf-model-registry-nfr-performance`) at 99.9% availability (`cpt-cf-model-registry-nfr-availability`). The hot path is fronted by the cache, sized for ~5% working-set of the catalog at 99.9% hit rate; the database is sized for the full 2M rows with the indexes listed in §3.6. Per-tenant model counts above 10× the median (~2 000 models) are treated as outliers and trigger an operator review of the tenant's discovery scope rather than a capacity expansion. Discovery throughput is bounded by the per-provider distributed lock — at most one in-flight discovery per provider per cluster regardless of caller (admin or external scheduler); aggregate provider load is OAGW's concern via its rate-limit configuration.
-- **Cost-allocation strategy by scale**: The `CacheService` backend is selected at compile time per deployment profile. Small / single-node deployments (<1K tenants, <100K models) use `InMemoryCache` and pay no Redis infrastructure cost — the database's own query cache provides comparable latency at this scale. Production deployments (10K+ tenants, 2M+ models) use `RedisCache` for cross-instance cache consistency and horizontal scale; this is the only configuration where Redis infrastructure cost (managed Redis cluster, network, replication) becomes a line item. The trade-off is documented in `cpt-cf-model-registry-adr-pluggable-cache`.
-- **AICredits cost-data lifecycle**: Per-model token and built-in-tool pricing live in each provider settings struct's nested `cost` block (`OpenAiCost`, `AnthropicCost`) as `u64` micro-credits (×1 000 000 scaling) and are persisted in the polymorphic `provider_settings` JSONB column. Cost data is updated by the same discovery write path as the rest of the model — no separate cost-sync job runs. Historical pricing is not retained inside the registry; price changes overwrite in place. The AICredits accounting subsystem consumes the registry's current cost view at gateway request time and is responsible for its own historical ledger. When a model is deprecated, its `cost` block is preserved on the row until tenant deletion so in-flight billing reconciliation can still resolve the price that applied at the time of consumption.
+- **Cost-allocation strategy by scale**: The `CacheService` backend is selected at compile time per deployment profile. Small / single-node deployments (<1K tenants, <100K models) use `InMemoryCache` and pay no Redis infrastructure cost — the database's own query cache provides comparable latency at this scale. This is the **only** profile P1 supports, since `RedisCache` is not written yet. Production deployments (10K+ tenants, 2M+ models) will use `RedisCache` for cross-instance cache consistency and horizontal scale; that is the only configuration where Redis infrastructure cost (managed Redis cluster, network, replication) becomes a line item. The trade-off is documented in `cpt-cf-model-registry-adr-pluggable-cache`.
+- **AICredits cost-data lifecycle**: Per-model token and built-in-tool pricing live in each provider settings struct's nested `cost` block (`OpenAiCost`, `AnthropicCost`) as `u64` micro-credits (×1 000 000 scaling) and are persisted inside the polymorphic `provider_settings` JSONB column. In P1 that data arrives only through admin `POST` / `PATCH` on the model surface — there is no discovery write path and no cost-sync job. Historical pricing is not retained inside the registry; price changes overwrite in place. The AICredits accounting subsystem consumes the registry's current cost view at gateway request time and is responsible for its own historical ledger. When a model is deprecated, its `cost` block is preserved on the row (soft delete only mutates `lifecycle_status` and `deprecated_at`) so in-flight billing reconciliation can still resolve the price that applied at the time of consumption.
 
 ### Fault Tolerance Policies
 
-Outbound calls (discovery and provider health probes, both routed through OAGW) carry explicit reliability policies:
+**P1 posture.** The only dependency calls P1 makes are in-process ClientHub calls to `tenant-resolver` and `authz-resolver`, and they are unwrapped: no retry layer, no per-call timeout, no circuit breaker. A PDP or tenant-resolver failure fails the request (`Forbidden` or `Internal`). Two degradations are implemented deliberately:
+
+- **Partial-result tolerance on ancestor list queries**: an ancestor-scoped `list` that errors is logged at `warn` and skipped, so a failing ancestor narrows the visible set instead of failing the caller's list. The own-tenant query is not tolerated this way — if it fails, the request fails.
+- **Cache is never load-bearing**: a cache miss, a deserialization mismatch, or a serialization failure on write degrades to the DB path rather than erroring; `InMemoryCache::set` logs and skips on failure instead of propagating.
+
+There is no in-module bulkhead, and no fail-closed approval gate: `get_tenant_model` returns whatever `approval_status` the row carries.
+
+**Target posture** for the outbound calls that arrive with P2 (discovery and provider health probes, both routed through OAGW):
 
 - **Retries on dependency calls**: ClientHub-mediated calls to `tenant-resolver`, `approval-service`, and `outbound-api-gateway` use 3 attempts with exponential backoff (50ms → 200ms → 800ms) and ±25% jitter. Reads are always retryable; writes are retried only on transport-level failures (connection reset, 5xx with `Retry-After`) — never on 4xx, never on `ApprovalService` 409 conflicts.
 - **Timeouts**: `tenant-resolver.get_ancestor_chain` 200ms; `approval-service.get_status` 200ms; OAGW discovery 30s per provider with circuit-breaking delegated to OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); cache `get` 50ms with DB fallback.
 - **Bulkheads**: The per-provider distributed lock on discovery is the explicit bulkhead — at most one in-flight discovery per provider per cluster, regardless of caller (admin or external scheduler). Cache-write fan-out on tenant-deletion is bounded by an N-key batch invalidation rather than a per-key loop.
-- **Fail-closed on approval check**: Per `cpt-cf-model-registry-nfr-availability`, an approval-service outage causes `get_tenant_model` to deny rather than allow; cached approved status remains readable until TTL expiry.
+- **Fail-closed on approval check**: an approval-service outage causes the approval-gated read path to deny rather than allow; cached approved status remains readable until TTL expiry. This applies to the future explicit access-gate path (`ModelNotApproved`), not to `get_tenant_model`, which by contract reports status rather than enforcing it.
 
 ### Dependency SLAs
 
-| Dependency | Target P99 | Behavior on SLO miss |
-|------------|------------|----------------------|
-| `tenant-resolver.get_ancestor_chain` | <50ms | Retry policy above; on terminal failure, fail-closed (cannot resolve inheritance → 503) |
-| `approval-service.get_status` | <100ms | Retry policy; terminal failure → fail-closed (`ModelNotApproved` 403 unless cache holds an approved status within TTL) |
-| `outbound-api-gateway` (discovery) | <30s per provider | Discovery degrades to "last known" (§3.5 Discovery Failure); catalog reads unaffected |
-| Redis cache | <10ms | Fall through to DB; warm cache in background |
-| PostgreSQL | <50ms (point read), <200ms (filtered list) | Surface 503 to caller; no in-process retry on connection-pool exhaustion |
+Targets are the design intent; the "P1 behavior" column records what the code does today.
+
+| Dependency | Target P99 | Behavior on SLO miss | P1 behavior |
+|------------|------------|----------------------|-------------|
+| `tenant-resolver.get_ancestors` | <50ms | Retry policy above; on terminal failure, fail-closed (cannot resolve inheritance → 503) | Single unwrapped in-process call; failure → `Internal` (500). No retry, no timeout |
+| `authz-resolver` (PDP decision) | <50ms | Retry policy; terminal failure → deny | Single call per operation; `Denied` → 403, evaluation/compile failure → 500 |
+| `approval-service.get_status` | <100ms | Retry policy; terminal failure → fail-closed (`ModelNotApproved` 403 unless cache holds an approved status within TTL) | Not called — approval status is a column (P2) |
+| `outbound-api-gateway` (discovery) | <30s per provider | Discovery degrades to "last known" (§3.5 Discovery Failure); catalog reads unaffected | Not called (P2) |
+| Cache backend | <10ms | Fall through to DB; warm cache in background | In-process map behind an async `RwLock`; miss falls through to DB |
+| PostgreSQL | <50ms (point read), <200ms (filtered list) | Surface 503 to caller; no in-process retry on connection-pool exhaustion | `DbError` → `DomainError::Database` → 500; no in-process retry |
 
 ### Technical Debt & Roadmap
 
-Known module-level debt is tracked here for visibility; phase-by-phase remediation lives in `DECOMPOSITION.md` once it is generated:
+Known module-level debt is tracked here for visibility; phase-by-phase remediation lives in `DECOMPOSITION.md` once it is generated.
+
+Carried out of the P1 implementation:
+
+- **No distributed cache backend**: `RedisCache` is an empty `redis` Cargo feature. Until it exists, a multi-replica deployment has per-replica caches and read-after-write across replicas is TTL-bounded rather than invalidation-bounded (§4 Consistency Model). This is the single largest blocker to the scale NFR.
+- **`max_page_size` config key is not wired**: `ModelRegistryConfig::max_page_size` (default 100) is parsed but unused — both repositories hard-code `LimitCfg { default: 20, max: 100 }`. Either thread the config value through the repository calls or drop the key; today it silently does nothing.
+- **Ancestor merge is not a stable paginated order**: ancestor rows are fetched without pagination, merged, then truncated to the page size, so the cursor anchors on own-tenant rows only (§3.3). A tenant inheriting a large catalog cannot walk the merged set page by page. Fixing it needs either a UNION-based query across the scope set or a merge-aware cursor.
+- **Ancestor fan-out is one query per ancestor**: `get_provider` / `get_tenant_model` / both list paths issue a query per ancestor tenant, so read cost grows linearly with tenant depth. An `AccessScope` spanning the whole chain plus a single ordered query would collapse this, at the cost of losing per-row ownership classification (which currently drives TTL selection).
+- **Whole-tenant cache invalidation**: every write drops the tenant's entire cache prefix (§4 Cache Invalidation Strategy). Correct and cheap to reason about, wasteful under write bursts; narrowing it needs per-entity key computation on the write paths.
+- **Whole-row re-projection on PATCH**: any PATCH touching an `info.*` field rewrites all scalar and JSONB columns (§3.6). Keeps shadows consistent by construction; produces verbose SQL.
+- **Lifecycle-filter detection is textual**: the default `deprecated`/`sunset` exclusion is skipped by string-matching `lifecycle_status` in the normalized filter expression rather than by inspecting the parsed AST. A filter that mentions the field in an unexpected shape changes the default-exclusion behavior.
+- **Mixed mappers**: `mapper.rs` and `odata_mapper.rs` each still carry both provider and model concerns, unlike the repositories, which were split per trait. Splitting them is a mechanical follow-up.
+- **Layering deviation — `toolkit-db` types in the domain layer**: `domain/repo.rs` takes `&impl DBRunner` and `DomainError` wraps `toolkit_db::DbError`, so the domain module depends on an infrastructure crate. The architectural lint that catches this (`DE0301`) is explicitly allowed at the top of `domain/mod.rs` with a TODO. Removing the deviation means re-parameterizing the repository traits over an abstract connection handle and giving `DomainError` its own storage-failure variant — deliberately deferred, and the reason the allow is annotated rather than silent.
+- **No measured performance**: the `<10ms P99` NFR has no benchmark and no load test behind it (§1.2).
+
+Longer-standing design debt:
 
 - **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-provider OData mappings and the matching promoted columns / indexes.
 - **Inherited-cache TTL trade-off**: child tenants pick up parent provider/approval changes via the 5-minute inherited-data TTL rather than explicit invalidation; tightens to event-driven invalidation only when an O(tenant-tree) walk becomes acceptable.
-- **Distributed-lock stability**: the per-provider discovery lock relies on a healthy lock service; degraded lock service serializes calls through the lock-lease window. The lock service is platform-owned; this module does not run its own scheduler.
+- **Distributed-lock stability (P2)**: the per-provider discovery lock relies on a healthy lock service; degraded lock service serializes calls through the lock-lease window. The lock service is platform-owned; this module does not run its own scheduler.
 
 ### Documentation Strategy
 
 The module follows the platform documentation model:
 
-- **Architecture / specification docs** (PRD, DESIGN, ADR, DECOMPOSITION, FEATURE) live under `modules/model-registry/docs/` and are validated by Cypilot.
-- **REST API contract** is auto-generated via `utoipa` from handler annotations; published to the platform OpenAPI catalog at deploy time.
+- **Architecture / specification docs** (PRD, DESIGN, ADR, UPSTREAM_REQS, and DECOMPOSITION/FEATURE once generated) live under [`gears/model-registry/docs/`](.) and are validated by `cfs validate --artifact <path>`.
+- **REST API contract** is auto-generated via `utoipa` from the `OperationBuilder` registrations; published to the platform OpenAPI catalog at deploy time and checkable locally with `make openapi`.
 - **GTS schemas** are emitted by `#[struct_to_gts_schema]` and published to the platform schema registry — no hand-maintained schema duplicates.
 - **Runbooks** for operator procedures (credential rotation via OAGW, discovery failure triage, tenant cache invalidation) live in the platform ops repository alongside other module runbooks.
 - **In-code documentation**: public SDK items carry rustdoc with stability annotations; internal items document invariants only.
 
 ### Testing Strategy
 
-| Test layer | Approach | Location |
-|------------|----------|----------|
-| Unit | `#[cfg(test)]` next to module code; `InMemoryCache` backend; mock SDK clients via trait impls; `SecurityContext` test fixtures per `docs/modkit_unified_system/12_unit_testing.md` | `model-registry/src/**/*_tests.rs` |
-| Integration | `modkit-db --features integration` against ephemeral PostgreSQL; full repository + service stack | `model-registry/tests/` |
-| Contract | SDK trait conformance — every `ModelRegistryClient` impl (Local, gRPC) runs the shared trait test suite | `model-registry-sdk/tests/conformance/` |
-| End-to-end | `testing/e2e/` Python suite drives REST endpoints against a running server with seeded providers/models | `testing/e2e/` |
-| Performance | Criterion benches on cache hit-path and OData filter compilation; load test in pre-prod against the scale NFR | `model-registry/benches/`, `testing/load/` |
-| Security | Tenant-isolation property tests (no cross-tenant read), authorization matrix tests (each role × each endpoint), audit-log assertion tests | unit + integration |
+| Test layer | Approach | Location | P1 status |
+|------------|----------|----------|-----------|
+| Unit | `#[cfg(test)] mod tests` next to module code, plus `*_test.rs` sibling files for the larger suites (mapper, DTO, error mapping); `InMemoryCache` as the real backend; mock `TenantResolverClient` / authz clients via trait impls | `model-registry/src/**` | Implemented |
+| Integration | In-memory SQLite via `toolkit-db`'s `sqlite` feature, migrations applied per test; real repositories + real service + mocked inter-gear clients | `model-registry/tests/integration.rs` | Implemented — provider/model CRUD, `OData` filter and pagination, soft-delete hiding, approval read/write, tenant isolation, parent/child inheritance and shadowing, cache-first read, full `ModelInfoV1` storage round-trip |
+| Contract | SDK trait conformance — every `ModelRegistryClientV1` impl (Local, gRPC) runs a shared trait test suite | `model-registry-sdk/tests/` | Not written. `LocalClient` delegation and error mapping are covered by unit tests instead; a shared suite is only worth building once a second impl (gRPC) exists |
+| End-to-end | Python suite driving REST endpoints against a running server with seeded providers/models | `testing/e2e/` | Skipped — the repo's e2e harness is not currently operational. The integration suite exercises the same paths through the service layer; the REST layer is covered by handler and DTO unit tests |
+| Performance | Criterion benches on cache hit-path and `OData` filter compilation; load test in pre-prod against the scale NFR | `model-registry/benches/`, `testing/load/` | Not written (§4 Technical Debt) |
+| Security | Tenant-isolation tests (no cross-tenant read on get or list, cross-tenant `canonical_id` invisible), immutability-rejection tests, error-mapping tests over every `DomainError` variant | unit + integration | Implemented, except the authorization-matrix tests (role × endpoint), which belong with the `authz-resolver` policy fixtures rather than this crate |
 
-Test data fixtures are constructed via factory functions; no fixture files committed. Test environments are isolated per-test (ephemeral DB schema) — no shared state between tests.
+Test data fixtures are constructed via factory functions using plain struct literals (the SDK entity structs are not `#[non_exhaustive]`, so a new field breaks the fixtures at compile time); no fixture files are committed. Each test gets its own in-memory database, so there is no shared state between tests. The DB-setup helpers are intentionally duplicated between the two repository test modules to keep each self-contained.
+
+Scope the verification loop to this crate: `cargo test -p cf-gears-model-registry`, `cargo clippy -p cf-gears-model-registry --all-targets --all-features -- -D warnings`, `cargo dylint --all -p cf-gears-model-registry`.
 
 ### Data Governance
 
 - **Ownership**: the Model Registry team owns schema, write paths, and the SDK contract. Tenant-scoped data is owned by the tenant administrator (per platform tenancy model); platform-scoped data (e.g. `platform-admin`-created providers) is owned by the platform operations team.
-- **Lineage**: provider config flows from `POST /providers` (manual) or discovery (OAGW → provider API). Models flow from `POST /models` (manual catalog entry) or discovery. Approval status flows from Approval Service (P2+) or from admin direct writes (P1). Costs flow from discovery only.
-- **Data dictionary**: column-level descriptions are co-located with the §3.6 schema tables; the polymorphic `info` and `provider_settings` JSONB shapes are described by their GTS schemas (`gts.cf.genai.model.info.v1~` chain), which the platform schema registry exposes.
+- **Lineage**: in P1 every row is admin-authored — provider config flows from `POST /providers`, models from `POST /models`, approval status and costs from `POST` / `PATCH` on the model surface. P2 adds discovery (OAGW → provider API) as a second source for provider config, models, and costs, and moves approval status to the Approval Service.
+- **Data dictionary**: column-level descriptions are co-located with the §3.6 schema tables; the polymorphic `provider_settings` shape and the five JSONB sub-object shapes are described by their GTS schemas (`gts.cf.genai.model.info.v1~` chain), which the platform schema registry exposes.
 - **Master data**: providers are tenant-scoped master data (one slug per tenant); models are tenant-scoped reference data (catalog snapshot of provider state).
-- **Quality monitoring**: discovery emits per-provider deltas (created / updated / deprecated counts) to the platform metrics pipeline; sustained zero-delta on a `discovery_enabled` provider raises a data-freshness alert.
+- **Quality monitoring** (P2, with discovery): discovery emits per-provider deltas (created / updated / deprecated counts) to the platform metrics pipeline; sustained zero-delta on a `discovery_enabled` provider raises a data-freshness alert. P1 has no freshness signal — the catalog is exactly what admins wrote.
 
 ### Out of Scope / Not Applicable
 
@@ -1336,13 +1492,13 @@ Several Design checklist domains are intentionally **not addressed** by this DES
 
 - **UX & frontend session management — Not applicable**: Model Registry is a backend service. Its only client surface is REST/OpenAPI for the platform's admin UI and for the LLM Gateway. There are no human-facing screens, no browser sessions, no frontend authentication state, and no UX flows owned by this module. Catalog browsing UI lives in the platform admin app and is documented there.
 - **Compliance — Not applicable in v1**: Model Registry stores no regulated data (see §2.2 "Constraint Applicability"). HIPAA / SOC 2 / GDPR / FedRAMP controls are inherited from the platform deployment they are not encoded as module-level requirements.
-- **IaC / deployment topology — Not applicable at module level**: Deployment topology, container packaging, autoscaling policy, replica counts, and infrastructure-as-code definitions (Helm charts, Terraform, Kubernetes manifests) are owned by the platform deployment repository and are not duplicated here. The module is stateless and deploys as a standard CyberFabric module per the platform deployment guide; see `docs/modkit_unified_system/` for the platform-level deployment model.
+- **IaC / deployment topology — Not applicable at module level**: Deployment topology, container packaging, autoscaling policy, replica counts, and infrastructure-as-code definitions (Helm charts, Terraform, Kubernetes manifests) are owned by the platform deployment repository and are not duplicated here. The module is stateless and deploys as a standard CyberFabric gear per the platform deployment guide; see `docs/toolkit_unified_system/` for the platform-level deployment model. In P1 the gear is compiled into `cf-gears-example-server` behind the `model-registry` Cargo feature.
 - **Recovery architecture — Not applicable at module level**: Backup, point-in-time recovery, disaster-recovery RTO/RPO, and cross-region failover are properties of the platform's PostgreSQL and Redis deployments, not of Model Registry. The module is stateless application-layer code; restoring it amounts to redeploying from CI plus restoring the underlying database. RTO/RPO targets, when set, will live in the platform recovery plan.
 - **Threat-model — Not applicable at module level**: A module-scoped threat model is not produced for v1. The platform-level threat model covers transport, identity, tenant isolation, and outbound provider access (the OAGW boundary). Module-specific threat surfaces — discovery responses parsed as untrusted JSON, JSONB injection via provider settings, cache-key collision across tenants — are addressed by the §2.1 isolation principles, the §4 Data Protection contract, and the OAGW boundary; revisit when this module gains a non-platform-mediated trust boundary.
 - **Frontend session management — Not applicable**: This module owns no frontend, no cookies, no CSRF surface, and no browser session state.
 - **Observability (OPS-DESIGN-001/002) — Deferred to platform**: Logs, metrics, traces, and alerting integration follow the platform observability stack — structured tracing via the platform's OpenTelemetry pipeline, metrics exported through the platform's Prometheus endpoint, and dashboards/alerts defined alongside the platform's other modules. Module-specific signal taxonomy (per-tenant cache hit rate, discovery latency P99 per provider, approval-check fail-closed counter) will be documented during DECOMPOSITION when the FEATUREs that emit those signals are scoped.
-- **Dead-letter / poison-message handling — Not applicable**: Model Registry consumes a small synchronous event surface (`tenant.reparented`, `approval.status_changed`, `tenant.deleted`) where every handler is idempotent and re-deliverable. There is no module-owned message bus and no work queue; DLQ semantics are owned by the producer SDKs (Approval Service, tenant lifecycle) and the platform event bus.
-- **Resource pooling, vertical scaling limits, fine-grained CPU/memory/storage/bandwidth efficiency (PERF-DESIGN-001/002/004 details) — Deferred to platform**: connection pooling is provided by `modkit-db`'s `SecureConn` pool; horizontal scaling is the documented strategy (§4 Capacity & Cost) and vertical limits are dictated by the platform's instance-class catalog. Resource-efficiency tuning (per-allocation profiling, page-cache sizing, storage tiering) is owned by the platform deployment plan rather than this module.
+- **Dead-letter / poison-message handling — Not applicable**: Model Registry consumes no events at all in P1, and the planned inbound surface (`tenant.reparented`, `approval.status_changed`, `tenant.deleted`) is a small set of handlers that are idempotent and re-deliverable by design. There is no module-owned message bus and no work queue in any phase; DLQ semantics are owned by the producer SDKs (Approval Service, tenant lifecycle) and the platform event bus.
+- **Resource pooling, vertical scaling limits, fine-grained CPU/memory/storage/bandwidth efficiency (PERF-DESIGN-001/002/004 details) — Deferred to platform**: connection pooling is provided by `toolkit-db`'s `SecureConn` pool; horizontal scaling is the documented strategy (§4 Capacity & Cost) and vertical limits are dictated by the platform's instance-class catalog. Resource-efficiency tuning (per-allocation profiling, page-cache sizing, storage tiering) is owned by the platform deployment plan rather than this module.
 - **CORS, network segmentation, output encoding (SEC-DESIGN-004 details) — Deferred to platform**: REST traffic terminates at `api-gateway` which owns CORS policy, ingress filtering, network segmentation (private subnet for module → DB / Redis / OAGW links), and HTML/text output encoding. Model Registry returns JSON only; bytes are not transformed downstream.
 - **Replication, sharding, hot/warm/cold tiering, archival (DATA-DESIGN-001 details) — Deferred to platform**: PostgreSQL replication topology, read-replicas, sharding policy, and archival lifecycle are properties of the platform's database deployment. The module is partition-friendly (every table is `tenant_id`-scoped) so future sharding by `tenant_id` does not require schema changes; until that ships, the platform's single-cluster deployment is the operating posture.
 - **Feature flags / canary / blue-green / rollback (REL-DESIGN-005 details) — Deferred to platform**: deployment-rollout primitives are owned by the platform deployment pipeline. Module-internal phase gating (P1/P2/P3/P4 capability flags, `discovery_enabled` per provider, the `managed` provider flag) lives in DB columns and Cargo features rather than a runtime feature-flag service.
@@ -1356,4 +1512,9 @@ Several Design checklist domains are intentionally **not addressed** by this DES
   - `cpt-cf-model-registry-adr-oagw-provider-access` — [0003-cpt-cf-model-registry-adr-oagw-provider-access.md](./ADR/0003-cpt-cf-model-registry-adr-oagw-provider-access.md)
   - `cpt-cf-model-registry-adr-tenant-inheritance` — [0004-cpt-cf-model-registry-adr-tenant-inheritance.md](./ADR/0004-cpt-cf-model-registry-adr-tenant-inheritance.md)
   - `cpt-cf-model-registry-adr-gts-typed-provider-settings` — [0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md](./ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md)
+- **Upstream requirements**: [UPSTREAM_REQS.md](./UPSTREAM_REQS.md)
 - **Features**: [features/](./features/) (to be created for detailed specs)
+- **Implementation (P1)**:
+  - SDK — [`model-registry-sdk/`](../model-registry-sdk/) (`cf-gears-model-registry-sdk`)
+  - Gear — [`model-registry/`](../model-registry/) (`cf-gears-model-registry`, lib `model_registry`)
+  - Delivery plan — [`docs/plans/completed/20260717-implement-model-registry-gear.md`](../../../docs/plans/completed/20260717-implement-model-registry-gear.md)
