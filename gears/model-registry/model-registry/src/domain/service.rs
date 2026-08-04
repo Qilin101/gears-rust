@@ -28,7 +28,9 @@ use uuid::Uuid;
 
 use super::cache::{CacheService, cache_key};
 use super::error::DomainError;
-use super::inheritance::{Ownership, cache_ttl_seconds, merge_inherited_page, resolve_ancestors};
+use super::inheritance::{
+    InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page, resolve_ancestors,
+};
 use super::repo::{ModelRepository, ProviderRepository};
 
 use crate::config::ModelRegistryConfig;
@@ -171,43 +173,27 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             }
         }
 
-        // 4. Cache miss — search own tenant DB
+        // 4. Cache miss — walk the chain in the DB, closest tenant first.
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let own_tenant_id = ctx.subject_tenant_id();
+        let conn = &conn;
+        let found = find_in_chain(
+            &inheritance,
+            &own_scope,
+            |e| matches!(e, DomainError::ProviderNotFound { .. }),
+            |scope| async move { self.provider_repo.find_by_id(conn, &scope, id).await },
+        )
+        .await?;
 
-        match self.provider_repo.find_by_id(&conn, &own_scope, id).await {
-            Ok(provider) => {
-                let key = cache_key(&own_tenant_id, "provider", &id.to_string());
-                let ttl = cache_ttl_seconds(Ownership::Own, &self.config);
-                self.cache.set(&key, &provider, ttl).await;
-                return Ok(provider);
-            }
-            Err(DomainError::ProviderNotFound { .. }) => { /* fall through */ }
-            Err(e) => return Err(e),
-        }
+        let Some((owner_tenant_id, provider)) = found else {
+            return Err(DomainError::provider_not_found(id));
+        };
 
-        // 5. Search ancestor tenants
-        for ancestor in &inheritance.ancestors {
-            let ancestor_id = ancestor.id.0;
-            let ancestor_scope = AccessScope::for_tenant(ancestor_id);
+        // 5. Cache under the owning tenant, with the TTL its ownership implies.
+        let key = cache_key(&owner_tenant_id, "provider", &id.to_string());
+        let ttl = cache_ttl_seconds(inheritance.classify(owner_tenant_id), &self.config);
+        self.cache.set(&key, &provider, ttl).await;
 
-            match self
-                .provider_repo
-                .find_by_id(&conn, &ancestor_scope, id)
-                .await
-            {
-                Ok(provider) => {
-                    let key = cache_key(&ancestor_id, "provider", &id.to_string());
-                    let ttl = cache_ttl_seconds(Ownership::Inherited, &self.config);
-                    self.cache.set(&key, &provider, ttl).await;
-                    return Ok(provider);
-                }
-                Err(DomainError::ProviderNotFound { .. }) => { /* continue */ }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(DomainError::provider_not_found(id))
+        Ok(provider)
     }
 
     /// List providers visible to the caller's tenant with `OData` filtering.
@@ -420,61 +406,39 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             }
         }
 
-        // 4. Cache miss — search own tenant DB
+        // 4. Cache miss — walk the chain in the DB, closest tenant first.
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let own_tenant_id = ctx.subject_tenant_id();
+        let conn = &conn;
+        let found = find_in_chain(
+            &inheritance,
+            &own_scope,
+            |e| matches!(e, DomainError::ModelNotFound { .. }),
+            |scope| async move {
+                self.model_repo
+                    .find_by_canonical(conn, &scope, canonical_id)
+                    .await
+            },
+        )
+        .await?;
 
-        match self
-            .model_repo
-            .find_by_canonical(&conn, &own_scope, canonical_id)
-            .await
-        {
-            Ok(model) => {
-                // If deprecated or sunset, return ModelDeprecated before caching
-                if matches!(
-                    model.lifecycle_status,
-                    crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
-                ) {
-                    return Err(DomainError::model_deprecated(canonical_id));
-                }
-                let key = cache_key(&own_tenant_id, "model", canonical_id);
-                let ttl = cache_ttl_seconds(Ownership::Own, &self.config);
-                self.cache.set(&key, &model, ttl).await;
-                return Ok(model);
-            }
-            Err(DomainError::ModelNotFound { .. }) => { /* fall through */ }
-            Err(e) => return Err(e),
+        let Some((owner_tenant_id, model)) = found else {
+            return Err(DomainError::model_not_found(canonical_id));
+        };
+
+        // 5. A deprecated or sunset model is reported as such, never cached.
+        if matches!(
+            model.lifecycle_status,
+            crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+        ) {
+            return Err(DomainError::model_deprecated(canonical_id));
         }
 
-        // 5. Search ancestor tenants
-        for ancestor in &inheritance.ancestors {
-            let ancestor_id = ancestor.id.0;
-            let ancestor_scope = AccessScope::for_tenant(ancestor_id);
+        // 6. Cache under the owning tenant, with the TTL its ownership implies.
+        let key = cache_key(&owner_tenant_id, "model", canonical_id);
+        let ttl = cache_ttl_seconds(inheritance.classify(owner_tenant_id), &self.config);
+        self.cache.set(&key, &model, ttl).await;
 
-            match self
-                .model_repo
-                .find_by_canonical(&conn, &ancestor_scope, canonical_id)
-                .await
-            {
-                Ok(model) => {
-                    // If deprecated or sunset, return ModelDeprecated before caching
-                    if matches!(
-                        model.lifecycle_status,
-                        crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
-                    ) {
-                        return Err(DomainError::model_deprecated(canonical_id));
-                    }
-                    let key = cache_key(&ancestor_id, "model", canonical_id);
-                    let ttl = cache_ttl_seconds(Ownership::Inherited, &self.config);
-                    self.cache.set(&key, &model, ttl).await;
-                    return Ok(model);
-                }
-                Err(DomainError::ModelNotFound { .. }) => { /* continue */ }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(DomainError::model_not_found(canonical_id))
+        Ok(model)
     }
 
     /// List models with `OData` filtering and inheritance.
@@ -539,14 +503,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
         // 4. Find the provider in own or ancestor tenants, verify it is
         //    active (not disabled), and build a scope that can resolve the FK.
-        let provider_tenant_id = self
-            .find_provider_tenant(&conn, &inheritance, &req.provider_slug)
-            .await?;
-
-        let provider_scope = AccessScope::for_tenants(vec![provider_tenant_id]);
-        let provider = self
-            .provider_repo
-            .find_by_slug(&conn, &provider_scope, &req.provider_slug)
+        let (provider_tenant_id, provider) = self
+            .find_visible_provider(&conn, &inheritance, &req.provider_slug)
             .await?;
 
         if !matches!(provider.status, crate::ProviderStatus::Active) {
@@ -650,48 +608,33 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         Ok(())
     }
 
-    /// Find the provider tenant that owns a given slug, searching own tenant
-    /// first then ancestor tenants in chain order.
+    /// Resolve a provider slug against the tenant chain, returning the owning
+    /// tenant ID and the provider itself.
     ///
-    /// Returns the tenant ID where the provider was found, or a `Validation`
-    /// error if the provider does not exist in any tenant in the chain.
-    async fn find_provider_tenant(
+    /// Searches the own tenant first, then ancestors in chain order, so a child
+    /// tenant's provider shadows an inherited one with the same slug.
+    ///
+    /// Returns a `Validation` error when the slug does not exist in any tenant
+    /// in the chain.
+    async fn find_visible_provider(
         &self,
         conn: &impl toolkit_db::secure::DBRunner,
-        inheritance: &super::inheritance::InheritanceContext,
+        inheritance: &InheritanceContext,
         slug: &str,
-    ) -> Result<Uuid, DomainError> {
-        // Search own tenant first
-        let own_tenant_id = inheritance.tenant_id();
-        let own_scope = AccessScope::for_tenants(vec![own_tenant_id]);
-        match self
-            .provider_repo
-            .find_by_slug(conn, &own_scope, slug)
-            .await
-        {
-            Ok(_) => return Ok(own_tenant_id),
-            Err(DomainError::ProviderNotFoundBySlug { .. }) => { /* continue searching */ }
-            Err(e) => return Err(e),
-        }
-
-        // Search ancestor tenants in chain order (closest first)
-        for ancestor in &inheritance.ancestors {
-            let ancestor_id = ancestor.id.0;
-            let ancestor_scope = AccessScope::for_tenants(vec![ancestor_id]);
-            match self
-                .provider_repo
-                .find_by_slug(conn, &ancestor_scope, slug)
-                .await
-            {
-                Ok(_) => return Ok(ancestor_id),
-                Err(DomainError::ProviderNotFoundBySlug { .. }) => { /* continue */ }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(DomainError::validation(format!(
-            "provider with slug `{slug}` not found in own or ancestor tenants"
-        )))
+    ) -> Result<(Uuid, ProviderV1), DomainError> {
+        let own_scope = AccessScope::for_tenant(inheritance.tenant_id());
+        find_in_chain(
+            inheritance,
+            &own_scope,
+            |e| matches!(e, DomainError::ProviderNotFoundBySlug { .. }),
+            |scope| async move { self.provider_repo.find_by_slug(conn, &scope, slug).await },
+        )
+        .await?
+        .ok_or_else(|| {
+            DomainError::validation(format!(
+                "provider with slug `{slug}` not found in own or ancestor tenants"
+            ))
+        })
     }
 }
 

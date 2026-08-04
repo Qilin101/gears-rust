@@ -198,6 +198,56 @@ impl InheritanceContext {
 }
 
 // ---------------------------------------------------------------------------
+// find_in_chain
+// ---------------------------------------------------------------------------
+
+/// Search the tenant chain closest-first for a single resource, returning the
+/// tenant that owns the first match.
+///
+/// `fetch` is invoked with the caller's own scope first, then with a scope
+/// narrowed to each ancestor in turn, stopping at the first hit — so the closest
+/// tenant shadows the rest. An error satisfying `is_not_found` advances the
+/// search to the next tenant; any other error aborts it.
+///
+/// `Ok(None)` means no tenant in the chain holds the resource. The caller
+/// raises its own not-found error, since the identifying key differs per
+/// resource type.
+///
+/// Ancestor scopes are built here rather than widening the caller's own scope,
+/// per the tenant-isolation principle (DESIGN §2.1).
+///
+/// # Errors
+///
+/// Propagates any error from `fetch` that `is_not_found` rejects.
+pub async fn find_in_chain<T, L, Fut>(
+    inheritance: &InheritanceContext,
+    own_scope: &AccessScope,
+    is_not_found: fn(&DomainError) -> bool,
+    fetch: L,
+) -> Result<Option<(Uuid, T)>, DomainError>
+where
+    L: Fn(AccessScope) -> Fut,
+    Fut: Future<Output = Result<T, DomainError>>,
+{
+    let candidates = std::iter::once((inheritance.tenant_id(), own_scope.clone())).chain(
+        inheritance
+            .ancestors
+            .iter()
+            .map(|a| (a.id.0, AccessScope::for_tenant(a.id.0))),
+    );
+
+    for (tenant_id, scope) in candidates {
+        match fetch(scope).await {
+            Ok(item) => return Ok(Some((tenant_id, item))),
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
 // merge_inherited_page
 // ---------------------------------------------------------------------------
 
@@ -339,6 +389,7 @@ pub fn cache_ttl_seconds(ownership: Ownership, config: &ModelRegistryConfig) -> 
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tenant_resolver_sdk::{
         GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse, GetTenantsOptions,
         IsAncestorOptions, TenantInfo, TenantResolverError, TenantStatus,
@@ -628,6 +679,139 @@ mod tests {
         assert_eq!(result[0].0, Ownership::Own);
     }
 
+    // ── Tests: find_in_chain ───────────────────────────────────────────────
+
+    fn provider_missing() -> DomainError {
+        DomainError::provider_not_found(Uuid::nil())
+    }
+
+    fn is_provider_missing(e: &DomainError) -> bool {
+        matches!(e, DomainError::ProviderNotFound { .. })
+    }
+
+    #[tokio::test]
+    async fn test_find_in_chain_stops_at_own_tenant() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let calls = AtomicUsize::new(0);
+
+        let found = find_in_chain(
+            &ctx,
+            &AccessScope::for_tenant(child_id()),
+            is_provider_missing,
+            |_scope| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok("hit") }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(found, Some((child_id(), "hit")));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ancestors must not be queried once the own tenant matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_in_chain_falls_through_to_closest_ancestor() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let found = find_in_chain(
+            &ctx,
+            &AccessScope::for_tenant(child_id()),
+            is_provider_missing,
+            |scope| async move {
+                if scope_targets(&scope, parent_id()) {
+                    Ok("from-parent")
+                } else if scope_targets(&scope, grandparent_id()) {
+                    Ok("from-grandparent")
+                } else {
+                    Err(provider_missing())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        // Both ancestors hold the resource; the closer one wins.
+        assert_eq!(found, Some((parent_id(), "from-parent")));
+    }
+
+    #[tokio::test]
+    async fn test_find_in_chain_returns_none_when_chain_is_exhausted() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let calls = AtomicUsize::new(0);
+
+        let found = find_in_chain(
+            &ctx,
+            &AccessScope::for_tenant(child_id()),
+            is_provider_missing,
+            |_scope| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<&str, _>(provider_missing()) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(found, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "every tenant in the chain should have been tried"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_in_chain_aborts_on_unrelated_error() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let calls = AtomicUsize::new(0);
+
+        let result = find_in_chain(
+            &ctx,
+            &AccessScope::for_tenant(child_id()),
+            is_provider_missing,
+            |_scope| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<&str, _>(DomainError::internal("database unavailable")) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a non-not-found error must abort the walk, not skip the tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_in_chain_uses_caller_scope_for_own_tenant() {
+        let ctx = InheritanceContext::new(child_id(), vec![]);
+        // The caller's PDP scope may be broader than a single tenant; it must
+        // reach the fetch untouched rather than be rebuilt from the chain.
+        let own_scope = AccessScope::for_tenants(vec![child_id(), parent_id()]);
+        let expected = own_scope.clone();
+
+        let found = find_in_chain(&ctx, &own_scope, is_provider_missing, move |scope| {
+            let is_caller_scope = scope == expected;
+            async move {
+                if is_caller_scope {
+                    Ok("hit")
+                } else {
+                    Err(provider_missing())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(found, Some((child_id(), "hit")));
+    }
+
     // ── Tests: merge_inherited_page ────────────────────────────────────────
 
     fn page_of(items: &[&str]) -> Page<String> {
@@ -648,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_inherited_page_skips_ancestor_queries_when_no_ancestors() {
         let ctx = InheritanceContext::new(child_id(), vec![]);
-        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let calls = AtomicUsize::new(0);
 
         let result = merge_inherited_page(
             &ctx,
@@ -656,14 +840,14 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             |_scope, _q| {
-                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok(page_of(&[])) }
             },
         )
         .await;
 
         assert_eq!(result.items, ["a", "b"]);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
