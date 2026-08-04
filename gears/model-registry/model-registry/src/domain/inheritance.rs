@@ -9,15 +9,20 @@
 //! cached longer (`own_ttl_seconds`, default 30 min) because they change
 //! less frequently than inherited entries, which may change at any time
 //! in the ancestor tenant (`inherited_ttl_seconds`, default 5 min).
+//!
+//! [`merge_inherited_page`] applies the same rule to paged list reads, so
+//! every list endpoint shares one implementation of the merge.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::Hash;
 
 use tenant_resolver_sdk::{
     BarrierMode, GetAncestorsOptions, TenantId, TenantRef, TenantResolverClient,
 };
 use toolkit_macros::domain_model;
-use toolkit_security::SecurityContext;
+use toolkit_odata::{ODataQuery, Page};
+use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use super::error::DomainError;
@@ -65,12 +70,14 @@ impl Ownership {
 pub struct InheritanceContext {
     /// Ancestor tenant chain from direct parent to root.
     pub ancestors: Vec<TenantRef>,
-    /// Set of ancestor tenant IDs for O(1) membership checks.
-    ancestor_ids: HashSet<Uuid>,
     /// The requesting tenant's ID.
     tenant_id: Uuid,
     /// Full chain from closest (self) to root: `[self, parent, grandparent, ...]`.
     chain_ids: Vec<Uuid>,
+    /// Distance of each chain tenant from the requestor: `0` is self, `1` the
+    /// direct parent, and so on. Drives both membership checks and the
+    /// closest-wins ordering in [`Self::apply_additive_visibility`].
+    pos_in_chain: HashMap<Uuid, usize>,
 }
 
 impl InheritanceContext {
@@ -80,16 +87,22 @@ impl InheritanceContext {
     /// [`TenantResolverClient::get_ancestors`]).
     #[must_use]
     pub fn new(tenant_id: Uuid, ancestors: Vec<TenantRef>) -> Self {
-        let ancestor_ids: HashSet<Uuid> = ancestors.iter().map(|a| a.id.0).collect();
         let mut chain_ids = Vec::with_capacity(1 + ancestors.len());
         chain_ids.push(tenant_id);
         chain_ids.extend(ancestors.iter().map(|a| a.id.0));
 
+        // Keep the *first* (closest) position for each tenant, so a malformed
+        // chain that repeats a tenant cannot demote it to a farther position.
+        let mut pos_in_chain: HashMap<Uuid, usize> = HashMap::with_capacity(chain_ids.len());
+        for (pos, id) in chain_ids.iter().enumerate() {
+            pos_in_chain.entry(*id).or_insert(pos);
+        }
+
         Self {
             ancestors,
-            ancestor_ids,
             tenant_id,
             chain_ids,
+            pos_in_chain,
         }
     }
 
@@ -107,9 +120,14 @@ impl InheritanceContext {
 
     /// Returns `true` when the given `TenantRef` is an ancestor of the
     /// requesting tenant.
+    ///
+    /// Position `0` in the chain is the requestor itself, so only positions
+    /// greater than zero are ancestors.
     #[must_use]
     pub fn is_ancestor(&self, candidate_id: Uuid) -> bool {
-        self.ancestor_ids.contains(&candidate_id)
+        self.pos_in_chain
+            .get(&candidate_id)
+            .is_some_and(|&pos| pos > 0)
     }
 
     /// Classify a resource by its owning tenant ID.
@@ -153,18 +171,10 @@ impl InheritanceContext {
         F: Fn(&T) -> K,
         K: Eq + Hash,
     {
-        // Build a position map: tenant_id → index in chain (closer = lower).
-        let pos_in_chain: HashMap<Uuid, usize> = self
-            .chain_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
-
         // Index items by chain position, filter out tenants not in chain.
         let mut indexed: Vec<(usize, Uuid, T)> = items
             .into_iter()
-            .filter_map(|(tid, item)| pos_in_chain.get(&tid).map(|&pos| (pos, tid, item)))
+            .filter_map(|(tid, item)| self.pos_in_chain.get(&tid).map(|&pos| (pos, tid, item)))
             .collect();
 
         // Sort by chain position: closest tenant first.
@@ -184,6 +194,87 @@ impl InheritanceContext {
         }
 
         result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// merge_inherited_page
+// ---------------------------------------------------------------------------
+
+/// Merge a tenant's own page of results with the inherited set from every
+/// ancestor, applying child-shadowing by `key_fn`.
+///
+/// `own_page` is the result of the caller's own-tenant query, which carries the
+/// full `OData` query including pagination. `list_for_scope` is invoked once per
+/// ancestor with an [`AccessScope`] narrowed to that ancestor and a copy of the
+/// caller's query with pagination removed — shadowing must be computed over the
+/// ancestor's complete matching set, not its first page. The merged result is
+/// then truncated back to the caller's limit.
+///
+/// An ancestor whose query fails is logged and skipped, yielding partial
+/// results rather than failing the whole read: an ancestor tenant being
+/// unavailable must not hide the caller's own data.
+///
+/// Ancestor scopes are built here rather than widening the caller's own scope,
+/// per the tenant-isolation principle (DESIGN §2.1).
+pub async fn merge_inherited_page<T, K, F, L, Fut>(
+    inheritance: &InheritanceContext,
+    own_page: Page<T>,
+    query: &ODataQuery,
+    key_fn: F,
+    list_for_scope: L,
+) -> Page<T>
+where
+    F: Fn(&T) -> K,
+    K: Eq + Hash,
+    L: Fn(AccessScope, ODataQuery) -> Fut,
+    Fut: Future<Output = Result<Page<T>, DomainError>>,
+{
+    let Page { items, page_info } = own_page;
+
+    // Tag every row with the tenant whose scope produced it, so shadowing can
+    // resolve collisions by chain distance.
+    let own_tenant_id = inheritance.tenant_id();
+    let mut tagged: Vec<(Uuid, T)> = items.into_iter().map(|it| (own_tenant_id, it)).collect();
+
+    for ancestor in &inheritance.ancestors {
+        let ancestor_id = ancestor.id.0;
+        // Same filter/order/select as the caller, without pagination.
+        let ancestor_query = ODataQuery {
+            filter: query.filter.clone(),
+            filter_hash: query.filter_hash.clone(),
+            order: query.order.clone(),
+            select: query.select.clone(),
+            ..ODataQuery::default()
+        };
+
+        match list_for_scope(AccessScope::for_tenant(ancestor_id), ancestor_query).await {
+            Ok(ancestor_page) => {
+                tagged.extend(ancestor_page.items.into_iter().map(|it| (ancestor_id, it)));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    ancestor_tenant_id = %ancestor_id,
+                    "ancestor list query failed, continuing with partial results"
+                );
+            }
+        }
+    }
+
+    let mut merged: Vec<T> = inheritance
+        .apply_additive_visibility(tagged, key_fn)
+        .into_iter()
+        .map(|(_ownership, item)| item)
+        .collect();
+
+    if let Some(limit) = query.limit {
+        merged.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+
+    Page {
+        items: merged,
+        page_info,
     }
 }
 
@@ -535,6 +626,125 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1, "own-provider");
         assert_eq!(result[0].0, Ownership::Own);
+    }
+
+    // ── Tests: merge_inherited_page ────────────────────────────────────────
+
+    fn page_of(items: &[&str]) -> Page<String> {
+        Page {
+            items: items.iter().map(|s| (*s).to_owned()).collect(),
+            page_info: toolkit_odata::PageInfo {
+                next_cursor: None,
+                prev_cursor: None,
+                limit: 50,
+            },
+        }
+    }
+
+    fn scope_targets(scope: &AccessScope, tenant: Uuid) -> bool {
+        scope.contains_uuid(toolkit_security::pep_properties::OWNER_TENANT_ID, tenant)
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_skips_ancestor_queries_when_no_ancestors() {
+        let ctx = InheritanceContext::new(child_id(), vec![]);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["a", "b"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            |_scope, _q| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(page_of(&[])) }
+            },
+        )
+        .await;
+
+        assert_eq!(result.items, ["a", "b"]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_unions_with_closest_wins() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["own-only", "shared"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            |scope, _q| async move {
+                if scope_targets(&scope, parent_id()) {
+                    Ok(page_of(&["shared", "from-parent"]))
+                } else if scope_targets(&scope, grandparent_id()) {
+                    Ok(page_of(&["shared", "from-parent", "gp-only"]))
+                } else {
+                    panic!("ancestor scope must target exactly one chain tenant")
+                }
+            },
+        )
+        .await;
+
+        // `shared` resolves to the child, `from-parent` to the parent rather
+        // than the grandparent, and each key appears exactly once.
+        assert_eq!(
+            result.items,
+            ["own-only", "shared", "from-parent", "gp-only"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_keeps_partial_results_on_ancestor_failure() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["own"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            |scope, _q| async move {
+                if scope_targets(&scope, parent_id()) {
+                    Err(DomainError::internal("parent unavailable"))
+                } else {
+                    Ok(page_of(&["gp"]))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result.items, ["own", "gp"]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_strips_ancestor_pagination_then_truncates() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let query = ODataQuery {
+            limit: Some(3),
+            cursor: None,
+            select: Some(vec!["slug".to_owned()]),
+            ..ODataQuery::default()
+        };
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["a", "b"]),
+            &query,
+            |s: &String| s.clone(),
+            |_scope, ancestor_query| async move {
+                // Ancestors must be queried without pagination so shadowing
+                // sees the complete inherited set, but keep projection.
+                assert!(ancestor_query.limit.is_none());
+                assert!(ancestor_query.cursor.is_none());
+                assert_eq!(ancestor_query.select, Some(vec!["slug".to_owned()]));
+                Ok(page_of(&["c", "d"]))
+            },
+        )
+        .await;
+
+        // 2 own + 2 from each of 2 ancestors, deduped to 4, truncated to 3.
+        assert_eq!(result.items, ["a", "b", "c"]);
     }
 
     // ── Tests: Single-tenant case (no ancestors) ──────────────────────────

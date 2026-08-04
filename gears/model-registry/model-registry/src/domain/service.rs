@@ -28,9 +28,8 @@ use uuid::Uuid;
 
 use super::cache::{CacheService, cache_key};
 use super::error::DomainError;
-use super::inheritance::{Ownership, cache_ttl_seconds, resolve_ancestors};
+use super::inheritance::{Ownership, cache_ttl_seconds, merge_inherited_page, resolve_ancestors};
 use super::repo::{ModelRepository, ProviderRepository};
-use tracing;
 
 use crate::config::ModelRegistryConfig;
 use crate::{CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1};
@@ -231,61 +230,20 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant providers with OData
-        let mut page = self.provider_repo.list(&conn, &own_scope, &query).await?;
+        let own_page = self.provider_repo.list(&conn, &own_scope, &query).await?;
 
-        // 4. Get all providers from each ancestor
-        let mut ancestor_providers: Vec<ProviderV1> = Vec::new();
-        for ancestor in &inheritance.ancestors {
-            let ancestor_id = ancestor.id.0;
-            let ancestor_scope = AccessScope::for_tenant(ancestor_id);
-            // Apply the caller's filter to each ancestor query so filtering
-            // semantics are consistent across the full visible set. Pagination
-            // (limit/cursor) is only applied to the own-tenant query; ancestor
-            // items are fetched unfiltered-by-pagination and shadowed below.
-            let ancestor_query = ODataQuery {
-                filter: query.filter.clone(),
-                filter_hash: query.filter_hash.clone(),
-                order: query.order.clone(),
-                select: query.select.clone(),
-                ..ODataQuery::default() // no limit/cursor for ancestors
-            };
-            match self
-                .provider_repo
-                .list(&conn, &ancestor_scope, &ancestor_query)
-                .await
-            {
-                Ok(ancestor_page) => {
-                    ancestor_providers.extend(ancestor_page.items);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        ancestor_tenant_id = %ancestor_id,
-                        "ancestor provider list query failed, continuing with partial results"
-                    );
-                }
-            }
-        }
-
-        // 5. Apply additive visibility with child-shadowing by slug
-        let own_slugs: std::collections::HashSet<String> =
-            page.items.iter().map(|p| p.slug.clone()).collect();
-
-        for ancestor_provider in ancestor_providers {
-            if !own_slugs.contains(&ancestor_provider.slug) {
-                page.items.push(ancestor_provider);
-            }
-        }
-
-        // 6. Re-apply pagination limit to the merged result set (ancestors
-        //    were fetched without pagination to enable correct shadowing,
-        //    but the merged set may exceed the caller's requested limit).
-        if let Some(limit) = query.limit {
-            let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
-            page.items.truncate(limit_usize);
-        }
-
-        Ok(page)
+        // 4. Merge the inherited set, shadowing ancestor providers by slug.
+        let conn = &conn;
+        Ok(merge_inherited_page(
+            &inheritance,
+            own_page,
+            &query,
+            |p| p.slug.clone(),
+            |scope, ancestor_query| async move {
+                self.provider_repo.list(conn, &scope, &ancestor_query).await
+            },
+        )
+        .await)
     }
 
     /// Create a new provider.
@@ -540,59 +498,20 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant models with OData
-        let mut page = self.model_repo.list(&conn, &own_scope, &query).await?;
+        let own_page = self.model_repo.list(&conn, &own_scope, &query).await?;
 
-        // 4. Get all models from each ancestor
-        let mut ancestor_models: Vec<crate::ModelV1> = Vec::new();
-        for ancestor in &inheritance.ancestors {
-            let ancestor_id = ancestor.id.0;
-            let ancestor_scope = AccessScope::for_tenant(ancestor_id);
-            // Apply the caller's filter to each ancestor query for consistent
-            // filtering across the full visible set (see list_providers).
-            let ancestor_query = ODataQuery {
-                filter: query.filter.clone(),
-                filter_hash: query.filter_hash.clone(),
-                order: query.order.clone(),
-                select: query.select.clone(),
-                ..ODataQuery::default()
-            };
-            match self
-                .model_repo
-                .list(&conn, &ancestor_scope, &ancestor_query)
-                .await
-            {
-                Ok(ancestor_page) => {
-                    ancestor_models.extend(ancestor_page.items);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        ancestor_tenant_id = %ancestor_id,
-                        "ancestor model list query failed, continuing with partial results"
-                    );
-                }
-            }
-        }
-
-        // 5. Apply additive visibility with child-shadowing by canonical_id
-        let own_canonical_ids: std::collections::HashSet<String> =
-            page.items.iter().map(|m| m.canonical_id.clone()).collect();
-
-        for ancestor_model in ancestor_models {
-            if !own_canonical_ids.contains(&ancestor_model.canonical_id) {
-                page.items.push(ancestor_model);
-            }
-        }
-
-        // 6. Re-apply pagination limit to the merged result set (ancestors
-        //    were fetched without pagination to enable correct shadowing,
-        //    but the merged set may exceed the caller's requested limit).
-        if let Some(limit) = query.limit {
-            let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
-            page.items.truncate(limit_usize);
-        }
-
-        Ok(page)
+        // 4. Merge the inherited set, shadowing ancestor models by canonical_id.
+        let conn = &conn;
+        Ok(merge_inherited_page(
+            &inheritance,
+            own_page,
+            &query,
+            |m| m.canonical_id.clone(),
+            |scope, ancestor_query| async move {
+                self.model_repo.list(conn, &scope, &ancestor_query).await
+            },
+        )
+        .await)
     }
 
     /// Create a new model.
@@ -1911,6 +1830,73 @@ mod tests {
         // Should see exactly one "openai::gpt-4o" (child shadows parent).
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // list_tenant_models — nearer ancestor shadows farther ancestor
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Two ancestors owning the same `canonical_id` must collapse to one row,
+    /// attributed to the closer ancestor. The child owns nothing here, so the
+    /// collision is resolved purely by chain distance.
+    #[tokio::test]
+    async fn test_list_tenant_models_parent_shadows_grandparent() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let child_tid = child_tenant();
+        let parent_tid = parent_id();
+        let grandparent_tid = grandparent_id();
+
+        let parent_scope = scope_for(parent_tid);
+        let grandparent_scope = scope_for(grandparent_tid);
+
+        let (_parent_provider_id, parent_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        let (_grandparent_provider_id, grandparent_slug) = create_test_provider(
+            &provider_repo,
+            &conn,
+            &grandparent_scope,
+            grandparent_tid,
+            "openai",
+        )
+        .await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &grandparent_scope,
+            grandparent_tid,
+            &grandparent_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let page = service
+            .list_tenant_models(&ctx, ODataQuery::default())
+            .await
+            .expect("list should succeed");
+
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert_eq!(ids, ["openai::gpt-4o"], "parent must shadow grandparent");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
