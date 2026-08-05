@@ -58,6 +58,7 @@
   - [UC-018: Approve Model for User Group](#uc-018-approve-model-for-user-group)
   - [UC-019: Override User Access](#uc-019-override-user-access)
   - [UC-020: Manually Manage Model Catalog](#uc-020-manually-manage-model-catalog)
+  - [UC-027: List All Tenant Models (Management)](#uc-027-list-all-tenant-models-management)
   - [UC-021: Create Tag](#uc-021-create-tag)
   - [UC-022: Delete Tag](#uc-022-delete-tag)
   - [UC-023: Assign / Remove Tags on Model](#uc-023-assign--remove-tags-on-model)
@@ -83,7 +84,7 @@ Model Registry is the authoritative source for model metadata, capabilities, pro
 **Key Concepts**:
 
 - **Canonical Model ID**: Deterministic identifier in format `{provider_slug}::{provider_model_id}` (e.g., `openai-prod::gpt-4o`, `ollama-us-west::mistral`). Parsing rule: split on **first** `::` occurrence.
-- **Provider Slug**: Human-readable unique identifier for a specific provider configuration (instance). Different instances of the same provider type have different slugs (e.g., `azure-corp-global`, `azure-rnd-team`, `ollama-us-west`, `ollama-us-east`). Each slug represents a separate provider with its own credentials, base URL, and configuration.
+- **Provider Slug**: Human-readable unique identifier for a specific provider configuration (instance). Different instances of the same provider type have different slugs (e.g., `azure-corp-global`, `azure-rnd-team`, `ollama-us-west`, `ollama-us-east`). Each slug represents a separate provider with its own credentials and configuration.
 - **Tenant Hierarchy**: Tree structure with root tenant at top; providers and approvals inherit down the tree (additive only)
 - **Provider Plugins**: Each provider type has its own plugin; all requests route through Outbound API Gateway
 
@@ -96,15 +97,16 @@ Model Registry is the authoritative source for model metadata, capabilities, pro
 | `openai` | `openai` | root | Platform OpenAI account |
 | `ollama` | `ollama-local` | tenant-B | Tenant B's self-hosted Ollama |
 
-**Provider Slug Resolution**: When resolving `{provider_slug}::{model_id}`, the system searches tenant → parent → ... → root (same as alias resolution). Child tenant's provider with same slug **shadows** parent's provider.
+**Provider Slug Resolution**: When resolving `{provider_slug}::{model_id}`, the system searches tenant → parent → ... → root (same as alias resolution). Child tenant's provider with same slug **shadows** parent's provider — and, because a model always belongs to exactly one provider owned by the same tenant (see Domain Model → Model), shadowing also replaces the parent's entire model set for that provider slug within the child's subtree.
 
 **Shadowing Example**:
-- Root tenant configures `azure-prod` pointing to platform Azure subscription
-- Tenant A configures own `azure-prod` pointing to their corporate Azure subscription
-- When Tenant A requests `azure-prod::gpt-4o`, it resolves to Tenant A's Azure
-- When Tenant B (no override) requests `azure-prod::gpt-4o`, it resolves to root's Azure
+- Root tenant configures `azure-prod` pointing to platform Azure subscription, with model `azure-prod::gpt-4o` discovered under it
+- Tenant A configures its own `azure-prod` provider (same slug, its own corporate Azure subscription) — a distinct provider row, owned by Tenant A
+- Root's `azure-prod::gpt-4o` is no longer visible anywhere in Tenant A's subtree; Tenant A sees no models under `azure-prod` until it creates or discovers its own (manually or via auto-discovery, always under Tenant A's own provider row)
+- If Tenant A later discovers or manually creates `azure-prod::gpt-4o` itself, that is a new, independent model row — approval, capabilities, and cost are Tenant A's own, unrelated to root's
+- When Tenant B (no override) requests `azure-prod::gpt-4o`, it still resolves to root's provider and model
 
-**Implication**: The same canonical ID can resolve to different provider instances depending on tenant context. Approvals are per (canonical_id, tenant) — approving `azure-prod::gpt-4o` in Tenant A approves their instance, not root's.
+**Implication**: The same canonical ID string can resolve to entirely different provider+model rows depending on tenant context, but never to a mix of one tenant's provider and another tenant's model — a model is only ever created in the same tenant as its provider (manually by a tenant admin, or by the auto-discovery plugin running for that tenant/provider pair). A child tenant cannot attach, override, or independently approve a single model on an ancestor's provider; the only lever it has over an inherited provider's models is to shadow the whole provider (see Domain Model → Provider → Inheritance & Shadowing).
 
 **Target Users**:
 
@@ -117,7 +119,7 @@ Model Registry is the authoritative source for model metadata, capabilities, pro
 - **Model discovery**: Automatic polling of provider APIs to discover available models
 - **Unified identification**: Canonical IDs abstract provider-specific naming
 - **Access control**: Tenant-level approval workflow with hierarchical inheritance
-- **Provider cost normalization**: AICredits-based provider cost data with tier support (sync/batch/cached) — used as input for billing calculations, not user-facing pricing
+- **Provider cost data**: AICredits-denominated cost carried on model info in the provider's own cost structure — used as input for billing calculations, not user-facing pricing
 
 **Success Criteria**:
 
@@ -139,7 +141,7 @@ LLM Gateway requires a centralized source of truth for model availability, capab
 | Term | Definition |
 |------|------------|
 | AICredits | Internal platform currency for model usage cost/pricing |
-| Provider Cost | Raw cost data from providers in AICredits; NOT user-facing pricing |
+| Provider Cost | Raw cost data from providers in AICredits, stored as part of model info in the provider's own cost structure; NOT user-facing pricing |
 | OAGW | Outbound API Gateway - handles provider authentication and circuit breaking |
 | GTS | Global Type System - platform-wide type definitions and contracts |
 | GTS Type (Provider) | Versioned provider type identifier (e.g., `gts.cf.genai.model.provider.v1~msft.azure._.ai_studio.v1~`) |
@@ -159,7 +161,7 @@ LLM Gateway requires a centralized source of truth for model availability, capab
 
 **ID**: `cpt-cf-model-registry-actor-tenant-admin`
 
-**Role**: Approves or rejects models for tenant access. Manages tenant-specific providers. Can only restrict access compared to parent tenant, not expand.
+**Role**: Approves or rejects models created under their own tenant's providers. Manages tenant-specific providers, including shadowing or disabling an inherited provider to restrict what its subtree sees. Can only restrict access compared to parent tenant, not expand — and cannot approve, reject, or otherwise override an individual model owned by an ancestor tenant; the only lever is shadowing the ancestor's provider.
 
 #### Platform Administrator
 
@@ -186,7 +188,7 @@ Project-wide runtime, OS, architecture, lifecycle policy, and integration patter
 - Model catalog CRUD (models, providers)
 - Tenant-level model availability configuration
 - Approval workflows (request → approve/reject)
-- Provider cost metadata (AICredits per tier) — raw cost from providers, not user-facing pricing
+- Provider cost metadata as part of model info (provider-specific cost structure, AICredits) — raw cost from providers, not user-facing pricing
 - Model capabilities metadata
 - Cache management with TTL-based invalidation
 
@@ -222,10 +224,11 @@ Represents a configured AI provider instance for a tenant.
 - `tenant_id`: Owner tenant
 - `name`: Display name
 - `gts_type`: GTS type identifier for provider (e.g., `gts.cf.genai.model.provider.v1~msft.azure._.ai_studio.v1~`)
-- `base_url`: Provider API endpoint
 - `status`: `active` | `disabled`
 - `discovery`: Discovery config (enabled, interval)
 - `timestamps`: created_at, updated_at
+
+**Connection details**: There is no generic `base_url` (or equivalent endpoint) field on Provider. Routing and connection parameters are provider-type-specific and live in the GTS-typed provider settings, present only for the provider types that need them — locally hosted providers, for example, need none.
 
 **GTS Type Benefits**:
 - Versioned metadata schema per provider type (settings, UI configurations)
@@ -241,19 +244,26 @@ Represents a configured AI provider instance for a tenant.
 **Inheritance & Shadowing**:
 - Providers inherit down tenant hierarchy (additive)
 - Child tenant sees parent's providers + own
-- Child tenant CAN shadow inherited provider by creating provider with same slug
-- Shadowing provider completely overrides parent's provider for that tenant and descendants
+- Child tenant CAN shadow an inherited provider by creating a provider with the same slug (regardless of the shadow's `status`)
+- Shadowing completely replaces the parent's provider **and every model attached to it** for that tenant and its descendants — those inherited models become unavailable in the child's subtree; the shadowing provider starts with no models of its own until the child creates them (manually) or discovers them (auto-discovery)
 - Resolution order: tenant → parent → ... → root (first match wins)
 
-**Excluding inherited providers**: Child tenant can exclude an inherited provider by shadowing it with `status: disabled`. This allows tenants to enforce their own policies (vendor partnership, liability cap, region restrictions, compliance isolation).
+**Model creation is same-tenant only**: A model always belongs to exactly one provider, and a model's `tenant_id` MUST equal its provider's `tenant_id`. Child tenants can never create a model — manually or via auto-discovery — against a provider owned by an ancestor tenant, whether or not that provider is shadowed. The only way a child tenant changes what it sees from an ancestor's provider is by shadowing the provider itself (above); there is no per-model shadowing.
 
-Example: Root has `azure-prod` (active). Tenant A shadows with `azure-prod` (disabled) → Azure is excluded for Tenant A and all its descendants.
+**Disabling a provider**: Disabling a provider — whether it is the tenant's own provider or a shadow of an inherited one — makes **every model attached to it unavailable for eval** in that tenant's subtree, in addition to suspending auto-discovery and refusing creation of new models against it. Disabled providers and their models remain visible via management/admin listing (see `cpt-cf-model-registry-fr-list-tenant-models-management`) so admins can audit and re-enable them. Re-enabling restores eval availability for its models (each still subject to its own approval status).
+
+Example: Root has `azure-prod` (active) with model `azure-prod::gpt-4o` (approved). Tenant A shadows with its own `azure-prod`:
+- Whether Tenant A's shadow is `active` or `disabled`, root's `azure-prod::gpt-4o` is no longer available for eval anywhere in Tenant A's subtree.
+- If Tenant A's shadow is `active`, Tenant A can create or discover its own models under it.
+- If Tenant A later disables its own `azure-prod`, every model Tenant A created under it also becomes unavailable for eval, without deleting them.
 
 **Health**: ProviderHealth stored at provider's owner tenant only. Child tenants inherit health status from parent.
 
 #### Model
 
 Represents an AI model in the catalog.
+
+**Ownership**: A model belongs to exactly one provider (`provider_id`). `tenant_id` always equals that provider's owning tenant — a model can only be created (manually or via auto-discovery) in the same tenant that owns its provider; see Provider → Inheritance & Shadowing → "Model creation is same-tenant only".
 
 **Fields**:
 - **Identification**: canonical_id (`{provider_slug}::{provider_model_id}`), provider_id, tenant_id, provider_model_id
@@ -266,7 +276,7 @@ Represents an AI model in the catalog.
   - `format`: string — model format (e.g., `gguf`, `mlx`, `safetensors`, `api-only`)
 - **Capabilities (Tier 1)**: Boolean flags for text/image/audio/video/document input/output, tools, structured_output, streaming, embeddings, realtime_audio, batch_api
 - **Limits (Tier 2)**: context_window, max_output_tokens, max_images_per_request, max_image_size_mb, max_audio_duration_sec
-- **Provider Cost**: AICredits per tier (sync/batch/cached) for input/output tokens and media — raw provider cost data, not user-facing pricing
+- **Provider Cost**: Part of the model's provider-specific settings; the field set follows the provider's own cost structure, denominated in AICredits — raw provider cost data, not user-facing pricing
 - **Status**: active, deprecated (soft-delete with deprecated_at timestamp)
 - **Version**: Provider's model version, stored as-is
 - **Tags (P3)**: Associated set of tenant-scoped Tag labels (many-to-many). Managed independently of the model via tag management (see Tag entity below), not part of provider-supplied metadata.
@@ -392,7 +402,8 @@ The system must enforce role-based and GTS-based authorization.
 | List/Get models | Any authenticated user |
 | Request model approval | Tenant member |
 | Approve/Reject request | Tenant admin |
-| Manage providers | Platform admin (root tenant) |
+| List all tenant models (management) | Tenant admin |
+| Manage providers | Platform admin (root tenant providers) or tenant admin (own tenant's providers, including shadowing) |
 
 **GTS-based access** (model/provider access control):
 | Access Type | GTS Claim Required | Example |
@@ -419,7 +430,7 @@ The system must validate all input data.
 | Provider slug | 1-64 chars, lowercase alphanumeric + hyphen. Unique within tenant. Immutable. |
 | Provider name | 1-32 chars, lowercase alphanumeric + hyphen |
 | Capabilities | Must conform to GTS capability schema |
-| Pricing values | Non-negative decimal (AICredits) |
+| Cost values | Non-negative (AICredits); the field set is provider-specific and validated against the provider settings schema |
 
 #### Cache Isolation
 
@@ -443,12 +454,13 @@ Format: `mr:{tenant_id}:{entity}:{id}`
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-get-tenant-model`
 
-The system must resolve a canonical model ID for a tenant, returning model info and provider details if approved.
+The system must resolve a canonical model ID for a tenant, returning model info and provider details only if the model is approved for the tenant AND its provider is active.
 
 Resolution:
 1. Look up model in catalog by canonical ID
-2. Check tenant approval status (direct or inherited)
-3. Return model info + provider details
+2. Check the model's provider status — if `disabled`, fail with `provider_disabled`
+3. Check tenant approval status (direct or inherited)
+4. Return model info + provider details
 
 Response structure defined in GTS contract.
 
@@ -458,17 +470,39 @@ Response structure defined in GTS contract.
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-list-tenant-models`
 
-The system must return all models available for a tenant.
+The system must return all models available for a tenant **for eval** — i.e. approved and attached to an active provider.
 
 Includes:
-- Models from tenant's own providers (if approved)
-- Models inherited from parent tenant hierarchy (if approved at any level)
+- Models from tenant's own providers (if approved and the provider is active)
+- Models inherited from parent tenant hierarchy (if approved at any level and the owning provider is active)
+
+Excludes models whose provider is disabled, and models hidden by provider shadowing (see Domain Model → Provider → Inheritance & Shadowing).
 
 Follows OData pagination standard. Supports OData `$filter` for filtering by capability, provider, approval_status, and tag (P3).
 
 Capability filtering uses subset matching: model must have AT LEAST requested capabilities.
 
+This is the **eval-facing (user) API**. For the management/admin view — including unapproved models, models on disabled providers, models hidden by shadowed ancestor providers, and (optionally) deprecated models — see `cpt-cf-model-registry-fr-list-tenant-models-management`.
+
 **Actors**: `cpt-cf-model-registry-actor-llm-gateway`
+
+#### Management Model Listing
+
+- [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-list-tenant-models-management`
+
+The system must provide a management (admin) view of a tenant's model catalog, distinct from the eval-facing `list_tenant_models`.
+
+Includes, in addition to everything `list_tenant_models` returns:
+- Models pending approval, rejected, or revoked (not just `approved`)
+- Models attached to a disabled provider (the tenant's own, or inherited)
+- Models attached to an ancestor provider that has been shadowed by this tenant (or an intermediate tenant between this one and that ancestor) — otherwise fully invisible to normal resolution — surfaced read-only and clearly marked as shadowed/unavailable, for audit purposes
+- Deprecated models, when the caller opts in (excluded by default, same as the eval view)
+
+This view never grants write access to models the requesting tenant doesn't own: shadowed-ancestor models and models on ancestor-owned providers remain read-only (see Domain Model → Provider → Inheritance & Shadowing → "Model creation is same-tenant only").
+
+**Authorization**: Tenant admin (or platform admin) only — not any authenticated user, unlike `list_tenant_models`.
+
+**Actors**: `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-platform-admin`
 
 #### Manual Model Management
 
@@ -477,19 +511,20 @@ Capability filtering uses subset matching: model must have AT LEAST requested ca
 The system must allow admins to manually create, update, and remove model catalog entries without auto-discovery or an external workflow service.
 
 **Operations**:
-- **Create model** — admin supplies `provider_slug` + `provider_model_id` (registry derives `canonical_id`), display fields, capabilities, limits, provider cost, and lifecycle status.
+- **Create model** — admin supplies `provider_slug` + `provider_model_id` (registry derives `canonical_id`), display fields, capabilities, limits, provider cost, and lifecycle status. `provider_slug` MUST resolve to a provider owned by the creating tenant itself; an inherited (ancestor-owned) provider — shadowed or not — is not a valid target, even for the tenant admin that owns it (returns `provider_not_owned`).
 - **Update model** — admin edits any mutable field; `canonical_id` remains immutable after creation.
 - **Soft-delete model** — admin marks model as `deprecated`; record retained, hidden from default `list_tenant_models`.
 
 **Approval status (P1)**:
-- Approval status is managed directly by the tenant admin via the Model Registry API — no Approval Service in P1.
+- Approval status is managed directly by the tenant admin of the model's own tenant (which always equals its provider's tenant) via the Model Registry API — no Approval Service in P1. A descendant tenant that merely inherits the model has no approval authority over it; its only lever is shadowing the model's provider (see Domain Model → Provider → Inheritance & Shadowing).
 - Admin can set status to `approved`, `rejected`, or `revoked`. Default for newly created models is `pending` (admin must explicitly approve), unless created with `status=approved` in a single call (admin convenience).
 - State transitions follow the approval state machine and are enforced by Model Registry domain logic; no workflow engine in P1.
-- Approval granularity in P1: tenant-level — approval grants access to all users in tenant.
+- Approval granularity in P1: tenant-level — approval grants access to all users in tenant (and, by inheritance, descendant tenants, unless shadowed).
+- A model that is not `approved` (i.e. `pending`, `rejected`, or `revoked`) is not available for eval — see `cpt-cf-model-registry-fr-get-tenant-model` / `cpt-cf-model-registry-fr-list-tenant-models`.
 
 **Authorization**:
-- Platform admin: manage models for any provider (root or tenant-owned).
-- Tenant admin: manage models for own providers; manage approval status for own tenant.
+- Platform admin: manage models for any provider (root or tenant-owned) — always within that provider's own owning tenant; platform admin never creates a model whose tenant differs from its provider's tenant.
+- Tenant admin: manage models for own providers only; manage approval status for own tenant's models.
 
 **Out of scope for P1**:
 - Auto-discovery from provider endpoints (P2)
@@ -507,29 +542,33 @@ The system must support tenant-scoped provider configuration.
 Provider inheritance:
 - Providers inherit down tenant hierarchy (additive only)
 - Child tenant sees parent's providers + own providers
-- Child CAN shadow inherited provider by creating provider with same slug (overrides for that tenant and descendants)
-- Child CAN exclude inherited provider by shadowing with `status: disabled` (for compliance, vendor policy, region restrictions)
+- Child CAN shadow inherited provider by creating provider with same slug (overrides for that tenant and descendants), regardless of the shadow's `status` — shadowing hides every model attached to the inherited provider, not just the provider record itself
+- Child tenant CANNOT create a model — manually or via auto-discovery — against a provider owned by an ancestor tenant, shadowed or not; model creation always requires the model's tenant to match its provider's tenant (`provider_not_owned` if attempted)
+- Disabling a provider (own, or a shadow of an inherited one) makes every model attached to it unavailable for eval, in addition to suspending auto-discovery and refusing new model creation against it
 
 Provider config:
-- ID, slug, name, gts_type, base URL, status (active/disabled)
+- ID, slug, name, gts_type, status (active/disabled)
 - Discovery enabled/interval
+- Provider-type-specific connection settings (GTS-typed), only where the provider type requires them — there is no generic `base_url` field
 
 Credentials handled by OAGW — not stored in Model Registry.
 
-**Actors**: `cpt-cf-model-registry-actor-platform-admin`
+**Actors**: `cpt-cf-model-registry-actor-platform-admin` (root tenant providers), `cpt-cf-model-registry-actor-tenant-admin` (own tenant's providers, including shadowing an inherited provider)
 
 #### Model Provider Cost
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-model-pricing`
 
-The system must store and provide model provider cost data in AICredits.
+The system must store model provider cost data as part of model info and return it whenever model info is returned.
 
 **Important**: This is raw provider cost data obtained from providers, NOT user-facing pricing. User-facing pricing (including promos, volume discounts, tiered pricing, regional pricing) is the responsibility of License Manager.
 
 Cost structure:
 - Unit: AICredits (internal platform currency)
-- Tiers: sync, batch, cached (different rates per tier)
-- Media: per image input, per audio minute, per image output
+- Cost is part of the model's provider-specific settings, so its **shape follows the provider's own cost structure** — rate dimensions, tiers, and units differ per provider (e.g. cached-input rates, long-context rates, cache-write tiers, per-tool-call rates). There is no cross-provider normalized cost schema.
+- Consumers read the cost fields of the provider they are calling, after narrowing the provider settings by GTS type
+
+Cost is returned **together with model info** (`get_tenant_model` / `list_tenant_models`); there is no separate cost operation.
 
 Model Registry returns **provider cost only**. Caller (LLM Gateway) fetches tenant pricing from License Manager and computes final user-facing price.
 
@@ -899,7 +938,8 @@ All limits must be configurable.
 | `provider_not_found` | 404 | Provider identifier does not exist |
 | `tag_not_found` | 404 | Tag does not exist for tenant (own or inherited) |
 | `tag_already_exists` | 409 | Tag with the same name already exists in tenant |
-| `provider_disabled` | 404 | Provider exists but is disabled |
+| `provider_disabled` | 403 | Provider exists but is disabled — the requested operation (e.g. creating a model against it, running discovery) is refused; also returned by `get_tenant_model`/`list_tenant_models` for any model attached to a disabled provider, since disabling makes all of that provider's models unavailable for eval |
+| `provider_not_owned` | 403 | Provider exists (inherited from an ancestor tenant) but a model can only be created against a provider owned by the same tenant |
 | `invalid_transition` | 409 | Invalid approval state transition (e.g., concurrent modification) |
 | `validation_error` | 400 | Input validation failed |
 | `unauthorized` | 403 | Actor lacks required role for operation |
@@ -931,8 +971,9 @@ Error responses follow RFC 9457 Problem Details standard.
 To be defined in DESIGN.md.
 
 Key interfaces:
-- `ModelRegistryClient` — SDK for LLM Gateway integration
-- `AdminClient` — SDK for Tenant Admin UI
+- `ModelRegistryClient` — the single SDK client used by every consumer (LLM Gateway, Chat Engine, Tenant Admin UI). There is no separate admin client: read and admin operations are methods on the same trait, differentiated by authorization rather than by client type. Two method groups:
+  - **Eval-facing (user) methods** — `get_tenant_model`, `list_tenant_models`. Resolve/list only models that are approved AND attached to an active provider. Callable by any authenticated user in the tenant hierarchy. This is the "resolve model name / list available models for tenant" surface.
+  - **Management methods** — `list_tenant_models_management` (full-visibility listing: any approval status, disabled-provider models, models hidden behind a shadowed ancestor provider, optionally deprecated) plus the catalog- and provider-mutation calls (create/update/soft-delete model, register/disable/enable/shadow provider, approve/reject/revoke). Tenant admin or platform admin only.
 
 ### External Integration Contracts
 
@@ -948,7 +989,7 @@ Key interfaces:
 
 ## 13. Use Cases
 
-> **Note on use-case numbering**: UC-025 and UC-026 are P2 use cases appended after the existing P2 use case UC-017. They appear in the table of contents ahead of the P3/P4 use cases UC-018–UC-024. This ordering is intentional to preserve stable, existing UC IDs; UC-018–UC-024 are not renumbered.
+> **Note on use-case numbering**: UC-025 and UC-026 are P2 use cases appended after the existing P2 use case UC-017. They appear in the table of contents ahead of the P3/P4 use cases UC-018–UC-024. UC-027 is a P1 use case appended after UC-026 for the same reason — new stable ID, but placed in the table of contents after its thematic predecessor UC-020. This ordering is intentional to preserve stable, existing UC IDs; UC-018–UC-024 are not renumbered.
 
 ### UC-001: Get Tenant Model
 
@@ -961,13 +1002,15 @@ Key interfaces:
 **Flow**:
 1. LLM Gateway sends `get_tenant_model(ctx, canonical_id)`
 2. Registry looks up model in catalog
-3. Registry checks tenant approval (direct or inherited from parent)
-4. Registry returns model info + provider details
+3. Registry checks the model's provider status
+4. Registry checks tenant approval (direct or inherited from parent)
+5. Registry returns model info + provider details
 
 **Postconditions**: Model info returned or error.
 
 **Acceptance criteria**:
 - Returns `model_not_found` (404) if model not in catalog
+- Returns `provider_disabled` (403) if the model's provider is disabled
 - Returns `model_not_approved` (403) if not approved for tenant (or any ancestor)
 - Returns `model_deprecated` (410) if model was soft-deleted
 
@@ -981,7 +1024,7 @@ Key interfaces:
 
 **Flow**:
 1. LLM Gateway sends `list_tenant_models(ctx)` with OData query params
-2. Registry collects approved models for tenant (direct + inherited)
+2. Registry collects models for tenant (direct + inherited) that are approved and attached to an active provider
 3. Registry applies OData filters
 4. Registry returns paginated models list
 
@@ -992,6 +1035,7 @@ Key interfaces:
 - Supports `$filter` by capability flags, provider slug, provider GTS type, approval_status, lifecycle_status, managed, architecture, format, tag (P3)
 - Tag filtering uses subset matching: model must carry AT LEAST the requested tags
 - Returns only approved models by default
+- Excludes models whose provider is disabled
 - Excludes deprecated models
 
 ### UC-003: Model Discovery
@@ -1071,57 +1115,63 @@ Key interfaces:
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-usecase-register-provider`
 
-**Actor**: `cpt-cf-model-registry-actor-platform-admin`
+**Actor**: `cpt-cf-model-registry-actor-platform-admin` (root tenant), `cpt-cf-model-registry-actor-tenant-admin` (own tenant, including shadowing)
 
 **Preconditions**: Provider plugin exists for the specified type.
 
 **Flow**:
-1. Admin provides provider config (slug, name, gts_type, base_url, discovery config)
+1. Admin provides provider config (slug, name, gts_type, discovery config, plus provider-type-specific settings where the provider type requires them)
 2. Registry validates slug is unique within tenant
 3. Registry validates GTS type is supported (plugin exists)
 4. Registry validates config against plugin requirements
 5. Registry creates provider record with status `active`
 
-**Postconditions**: Provider available for model sync. If slug matches parent's provider, this provider shadows the inherited one.
+**Postconditions**: Provider available for model sync. If slug matches parent's provider, this provider shadows the inherited one — the inherited provider and every model attached to it become unavailable within this tenant's subtree; the new provider starts with no models until this tenant creates or discovers them.
 
 **Acceptance criteria**:
 - Provider slug must be unique within tenant (can shadow parent's provider with same slug)
 - Slug is immutable after creation
 - GTS type must be valid and supported (plugin exists for this GTS type)
+- Shadowing an inherited provider hides all of that provider's models in this tenant's subtree, regardless of the new provider's `status`
 
 ### UC-007: Disable Provider
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-usecase-disable-provider`
 
-**Actor**: `cpt-cf-model-registry-actor-platform-admin`
+**Actor**: `cpt-cf-model-registry-actor-platform-admin` (root tenant), `cpt-cf-model-registry-actor-tenant-admin` (own tenant)
 
 **Preconditions**: Provider is active.
 
 **Flow**:
 1. Admin requests provider disable
 2. Registry marks provider status as `disabled`
-3. Registry suspends discovery for this provider
+3. Registry suspends auto-discovery for this provider
+4. Every model attached to this provider becomes unavailable for eval
 
-**Postconditions**: Provider disabled, models not resolvable.
+**Postconditions**: Provider disabled, auto-discovery suspended, and all of its models unavailable for eval. Catalog entries are retained (not deleted) and remain visible via the management listing.
 
 **Acceptance criteria**:
-- Disabled provider's models return `provider_not_found`
-- Discovery suspended
+- Auto-discovery is suspended for the provider; a discovery trigger against it returns `provider_disabled`
+- `get_tenant_model` / `list_tenant_models` (eval) return `provider_disabled` for models attached to this provider, even if previously approved
+- Models already in the catalog for this provider remain visible via `cpt-cf-model-registry-fr-list-tenant-models-management`, marked as unavailable
+- Operations that extend the provider (e.g. creating a new model against it) are refused with `provider_disabled`
+- Disabling does not delete or change the approval status of any model — re-enabling restores eval availability without re-approval
 
 ### UC-008: Re-enable Provider
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-usecase-reenable-provider`
 
-**Actor**: `cpt-cf-model-registry-actor-platform-admin`
+**Actor**: `cpt-cf-model-registry-actor-platform-admin` (root tenant), `cpt-cf-model-registry-actor-tenant-admin` (own tenant)
 
 **Preconditions**: Provider is disabled.
 
 **Flow**:
 1. Admin requests provider re-enable
 2. Registry marks provider status as `active`
-3. Discovery resumes on next scheduled run
+3. Auto-discovery resumes on the next trigger or scheduled run
+4. Every model attached to this provider becomes available for eval again (subject to its own approval status)
 
-**Postconditions**: Provider active, models resolvable.
+**Postconditions**: Provider active; auto-discovery and provider-extending operations are permitted again; its models are eval-available again without re-approval.
 
 ### UC-009: Get Model Provider Cost
 
@@ -1132,16 +1182,17 @@ Key interfaces:
 **Preconditions**: Model exists.
 
 **Flow**:
-1. Gateway sends `get_provider_cost(model_id)`
-2. Registry retrieves provider cost for model
-3. Registry returns provider cost by tier
+1. Gateway resolves the model (UC-001 `get_tenant_model`, or UC-002 for a list)
+2. Registry returns model info, which carries the provider-specific cost block
+3. Gateway narrows the provider settings by GTS type and reads the cost fields for the provider it is calling
 
-**Postconditions**: Provider cost returned.
+**Postconditions**: Provider cost returned as part of model info.
 
 **Acceptance criteria**:
-- Returns provider cost in AICredits (caller computes final user-facing price via License Manager)
-- Tiers: sync, batch, cached
-- Media cost included if applicable
+- Cost travels with model info — there is no separate cost operation to call
+- Cost fields follow the provider's own cost structure, denominated in AICredits
+- A model with no cost data supplied returns model info without a cost block rather than an error
+- Caller computes the final user-facing price via License Manager
 
 ### UC-010: Configure Auto-Approval Rule
 
@@ -1423,8 +1474,34 @@ Key interfaces:
 - `canonical_id` is immutable after creation; rename requires delete + recreate
 - Status transitions follow the approval state machine
 - Soft-delete sets status to `deprecated` without purging the record; resurrection allowed by re-creating with same `canonical_id` only if previous record purged
-- Tenant admin can manage models for own providers only; platform admin can manage any
+- Tenant admin can manage models for own providers only; platform admin can manage any, always within that provider's owning tenant
+- Creating a model against a provider owned by an ancestor tenant returns `provider_not_owned`, regardless of actor role
 - In P2, the same admin endpoints route through the Approval Service; the API surface remains backward-compatible
+
+### UC-027: List All Tenant Models (Management)
+
+- [ ] `p1` - **ID**: `cpt-cf-model-registry-usecase-list-all-tenant-models-management`
+
+**Actor**: `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-platform-admin`
+
+**Preconditions**: Actor has admin role for target tenant.
+
+**Flow**:
+1. Admin sends `list_tenant_models_management(ctx)` with OData query params, optionally requesting deprecated models
+2. Registry collects all models for the tenant (direct + inherited), regardless of approval_status or provider status
+3. Registry additionally collects models attached to providers that this tenant (or an intermediate tenant) has shadowed, marking them as shadowed and unavailable
+4. Registry applies OData filters and pagination
+5. Registry returns the full list, with each model's approval_status, provider status, and shadowed flag visible
+
+**Postconditions**: Full tenant model catalog view returned, unfiltered by approval or provider-active status.
+
+**Acceptance criteria**:
+- Returns models in every approval_status (`pending`, `approved`, `rejected`, `revoked`), not just `approved`
+- Returns models attached to disabled providers, marked accordingly
+- Returns models attached to shadowed ancestor providers, marked as shadowed and unavailable for eval
+- Excludes deprecated models unless the caller explicitly requests them
+- Returns `unauthorized` (403) for a caller without tenant-admin (or platform-admin) role
+- Follows OData pagination standard
 
 ### UC-021: Create Tag
 
@@ -1517,6 +1594,7 @@ Key interfaces:
 | Security | Authorization checks pass for all protected endpoints | P1 |
 | Integration | LLM Gateway can resolve models and check availability | P1 |
 | Integration | Tenant Admin UI can manage approvals | P1 |
+| Integration | Tenant Admin UI can list the full tenant model catalog (unapproved, disabled-provider, and shadowed-ancestor models) via the management API | P1 |
 | Discovery | Discovery for an unrecognized provider GTS type (no plugin capability available) returns a `validation_error` (400) and invokes no plugin | P2 |
 | Discovery | A plugin failure for one provider does not prevent discovery from completing for any other provider in the same run | P2 |
 | Discovery | A discovery run for the same (tenant, provider) pair is idempotent: consecutive runs with identical plugin output produce no catalog mutations | P2 |
@@ -1543,7 +1621,7 @@ Key interfaces:
 8. Platform provides distributed tracing, structured logging, metrics, and health endpoints
 9. Each discovery plugin correctly implements the discovery plugin contract (`cpt-cf-model-registry-contract-discovery-plugin`): it accepts a GTS-typed discovery-settings payload and returns a well-formed list of model definitions. The registry is not responsible for correcting malformed plugin output beyond schema validation at the plugin boundary.
 10. The GTS type system provides the tooling (`make dylint`, `make gts-docs`) to validate discovery-settings GTS schema ids at build time, consistent with the validation already enforced for provider-settings GTS ids.
-11. When a provider is removed or disabled, the lifecycle of its previously discovered catalog entries (deprecation or purge) is governed by `cpt-cf-model-registry-fr-provider-management`; detailed handling is deferred to DESIGN.md.
+11. When a provider is removed, the lifecycle of its previously discovered catalog entries (deprecation or purge) is governed by `cpt-cf-model-registry-fr-provider-management`; detailed handling is deferred to DESIGN.md. Disabling a provider does not delete or change its catalog entries, but does make all of them unavailable for eval until the provider is re-enabled (see UC-007).
 
 ## 17. Risks
 
@@ -1598,3 +1676,5 @@ Key interfaces:
 | Contract: Discovery Plugin Contract | `cpt-cf-model-registry-contract-discovery-plugin` (P2, §12) |
 | UC-025: Add a New Provider Discovery Plugin | `cpt-cf-model-registry-usecase-add-discovery-plugin` (P2, §13) |
 | UC-026: Auto-Discover Models via Plugin | `cpt-cf-model-registry-usecase-auto-discover-via-plugin` (P2, §13) |
+| FR: Management Model Listing | `cpt-cf-model-registry-fr-list-tenant-models-management` (P1, §6) |
+| UC-027: List All Tenant Models (Management) | `cpt-cf-model-registry-usecase-list-all-tenant-models-management` (P1, §13) |
