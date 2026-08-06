@@ -52,6 +52,23 @@ pub(crate) const MODEL_RESOURCE: ResourceType = ResourceType::from_static(
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 );
 
+/// Reject a listing query that carries `$select`.
+///
+/// The listing methods return whole `ProviderV1` / `ModelV1` values and there
+/// is no projection stage, so `select` cannot be honoured and ignoring it
+/// would hand back more than the caller asked for. The REST layer rejects the
+/// clause earlier with a `$select` field violation (a better shape over HTTP);
+/// this guard covers the in-process SDK path, including a query built by
+/// `QueryBuilder::select`.
+fn reject_select(query: &ODataQuery) -> Result<(), DomainError> {
+    if query.select.is_some() {
+        return Err(DomainError::validation(
+            "$select is not supported by this endpoint; responses always carry every field",
+        ));
+    }
+    Ok(())
+}
+
 /// Well-known action names for PDP evaluation.
 pub(crate) mod actions {
     /// Get / read a single resource.
@@ -206,6 +223,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError> {
+        reject_select(query)?;
+
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
             .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
@@ -452,6 +471,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<crate::ModelV1>, DomainError> {
+        reject_select(query)?;
+
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
             .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
@@ -1888,6 +1909,41 @@ mod tests {
             .expect("list with limit should succeed");
 
         assert_eq!(page.items.len(), 2);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // listing — $select is rejected on both surfaces
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_listing_rejects_select() {
+        let db = setup_db().await;
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
+        let query = ODataQuery::default().with_select(vec!["vendor".to_owned()]);
+
+        let err = service
+            .list_tenant_models(&ctx, &query)
+            .await
+            .expect_err("$select is unsupported on models");
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected a validation error, got {err:?}"
+        );
+
+        let err = service
+            .list_providers(&ctx, &query)
+            .await
+            .expect_err("$select is unsupported on providers");
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected a validation error, got {err:?}"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════

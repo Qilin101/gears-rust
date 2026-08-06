@@ -39,6 +39,7 @@ All P1 endpoints are implemented under `/model-registry/v1/`. Each endpoint requ
 - **Approval management**: Direct approval status writes via `PATCH /models/{canonical_id}` (P1)
 - **Tenant isolation**: `AccessScope`-enforced queries at the repository layer
 - **OData filtering**: `$filter` / `$orderby` on the allowlisted fields published by `model_registry_sdk::odata`, plus cursor-based pagination (`$top` + opaque cursor). `$select` and `$skip` are not supported
+- **Typed query building**: SDK consumers build queries with `QueryBuilder::<ModelSchema>` and the `MODEL_*` / `PROVIDER_*` field references instead of `$filter` text — see `model-registry-sdk/src/odata/`
 
 ## Build & Run
 

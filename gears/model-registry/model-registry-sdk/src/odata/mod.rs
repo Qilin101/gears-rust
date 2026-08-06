@@ -16,8 +16,45 @@
 //!
 //! [`ODataQuery`]: toolkit_odata::ODataQuery
 
+//! # Building a query
+//!
+//! ```rust,ignore
+//! use model_registry_sdk::odata::{
+//!     ModelSchema, MODEL_CANONICAL_ID, MODEL_LIFECYCLE_STATUS, MODEL_STREAMING,
+//!     QueryBuilder, SortDir,
+//! };
+//! use model_registry_sdk::LifecycleStatus;
+//!
+//! let query = QueryBuilder::<ModelSchema>::new()
+//!     .filter(MODEL_STREAMING.eq(true).and(MODEL_LIFECYCLE_STATUS.eq(LifecycleStatus::Production)))
+//!     .order_by(MODEL_CANONICAL_ID, SortDir::Asc)
+//!     .page_size(50)
+//!     .build();
+//! let page = client.list_tenant_models(&ctx, &query).await?;
+//! ```
+//!
+//! `build()` computes the `filter_hash` cursor pagination validates, so a
+//! builder-constructed query is safe to page with. Values become AST literals
+//! directly — there is no `$filter` text to quote or escape.
+//!
+//! `QueryBuilder::select` is inert here: this gear rejects `$select`, and
+//! `list_tenant_models` / `list_providers` return a validation error for a
+//! query that carries one.
+
 mod models;
 mod providers;
+mod values;
 
-pub use models::{ModelFilterField, ModelQuery};
-pub use providers::{ProviderFilterField, ProviderQuery};
+pub use models::{
+    MODEL_APPROVAL_STATUS, MODEL_ARCHITECTURE, MODEL_CANONICAL_ID, MODEL_FAMILY, MODEL_FORMAT,
+    MODEL_FUNCTION_CALLING, MODEL_GTS_TYPE, MODEL_LIFECYCLE_STATUS, MODEL_MANAGED,
+    MODEL_PROVIDER_MODEL_ID, MODEL_REASONING_EFFORT, MODEL_STREAMING, MODEL_SUPPORTED_API,
+    MODEL_VENDOR, MODEL_VISION, ModelFilterField, ModelQuery, ModelSchema,
+};
+pub use providers::{
+    PROVIDER_DISCOVERY_ENABLED, PROVIDER_GTS_TYPE, PROVIDER_MANAGED, PROVIDER_NAME, PROVIDER_SLUG,
+    PROVIDER_STATUS, ProviderFilterField, ProviderQuery, ProviderSchema,
+};
+
+// Re-exported so a caller needs one import path to build a query.
+pub use toolkit_odata::{FieldRef, QueryBuilder, Schema, SortDir};

@@ -13,8 +13,11 @@
 //!          → no provider plugin registered → LlmGatewayError (expected)
 //!
 //! main → ModelRegistryClientV1::list_tenant_models
-//!          → ODataQuery built from `ModelFilterField` (the SDK's allowlist)
+//!          → QueryBuilder<ModelSchema> + typed FieldRefs (no $filter text)
 //!          → Page<ModelV1> (filter evaluated in the mock)
+//!
+//! main → ModelRegistryClientV1::list_tenant_models
+//!          → the same listing as raw $filter text, for comparison
 //! ```
 //!
 //! Run with: `cargo run -p cf-gears-llm-gateway-demo`
@@ -38,8 +41,11 @@ use llm_gateway_sdk::models::content::OutputContentPart;
 use llm_gateway_sdk::models::core::ResponseInput;
 use llm_gateway_sdk::models::items::OutputItem;
 use llm_gateway_sdk::{CreateResponseBody, LlmGatewayClientV1, LlmGatewayProviderPluginClientV1};
-use model_registry_sdk::odata::ModelFilterField;
-use model_registry_sdk::{ModelInfoV1, ModelRegistryClientV1, OpenAiSettingsV1};
+use model_registry_sdk::odata::{
+    MODEL_CANONICAL_ID, MODEL_GTS_TYPE, MODEL_LIFECYCLE_STATUS, MODEL_STREAMING, ModelFilterField,
+    ModelSchema, QueryBuilder, SortDir,
+};
+use model_registry_sdk::{LifecycleStatus, ModelInfoV1, ModelRegistryClientV1, OpenAiSettingsV1};
 use toolkit_odata::filter::FilterField as _;
 use toolkit_odata::pagination::short_filter_hash;
 use toolkit_odata::{ODataQuery, parse_filter_string};
@@ -131,39 +137,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
-    // --- 3. List models through the OData surface the SDK publishes. ---
-    list_models_with_filter(registry.as_ref(), &ctx).await?;
+    // --- 3/4. List models through the OData surface the SDK publishes. ---
+    list_models_with_builder(registry.as_ref(), &ctx).await?;
+    list_models_with_filter_text(registry.as_ref(), &ctx).await?;
 
     Ok(())
 }
 
-/// Build an `ODataQuery` against the model-registry SDK and list with it.
+/// List models with a query built from the SDK's typed field references.
 ///
-/// The filterable surface is published by the SDK as [`ModelFilterField`], so
-/// the field names in a `$filter` come from the type rather than string
-/// literals: renaming a field is a compile error here, not a 400 at runtime.
-async fn list_models_with_filter(
+/// `QueryBuilder` assembles the filter AST directly: no `$filter` text, so no
+/// quoting or escaping of the values, and `build()` computes the `filter_hash`
+/// that cursor pagination validates.
+async fn list_models_with_builder(
     registry: &dyn ModelRegistryClientV1,
     ctx: &SecurityContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n─── Request 3: list_tenant_models with an OData $filter ───");
+    println!("\n─── Request 3: list_tenant_models via the typed QueryBuilder ───");
 
-    // The question a gateway actually asks: which models can I route to the
-    // OpenAI plugin, streaming?
-    let filter = format!(
-        "{gts_type} eq '{OPENAI_PROVIDER_TYPE}' and {streaming} eq true",
-        gts_type = ModelFilterField::GtsType.name(),
-        streaming = ModelFilterField::Streaming.name(),
+    // The question a gateway actually asks: which production models can I route
+    // to the OpenAI plugin, streaming? `MODEL_LIFECYCLE_STATUS.eq(..)` takes the
+    // SDK enum, so a misspelled status is a compile error.
+    let query = QueryBuilder::<ModelSchema>::new()
+        .filter(
+            MODEL_GTS_TYPE
+                .eq(OPENAI_PROVIDER_TYPE)
+                .and(MODEL_STREAMING.eq(true))
+                .and(MODEL_LIFECYCLE_STATUS.eq(LifecycleStatus::Production)),
+        )
+        .order_by(MODEL_CANONICAL_ID, SortDir::Asc)
+        .page_size(10)
+        .build();
+    println!(
+        "→ built    : filter_hash={:?}, limit={:?}",
+        query.filter_hash, query.limit
     );
-    println!("→ $filter  : {filter}");
-
-    let parsed = parse_filter_string(&filter)?;
-    let mut query = ODataQuery::default().with_limit(10);
-    // Cursor pagination validates the hash to detect a filter changed mid-walk.
-    if let Some(hash) = short_filter_hash(Some(parsed.as_expr())) {
-        query = query.with_filter_hash(hash);
-    }
-    let query = query.with_filter(parsed.into_expr());
 
     let page = registry.list_tenant_models(ctx, &query).await?;
     println!(
@@ -179,6 +187,39 @@ async fn list_models_with_filter(
             model.info.capabilities.vision.enabled,
         );
     }
+
+    Ok(())
+}
+
+/// Same listing expressed as raw `$filter` text — the shape that arrives over
+/// HTTP, and the fallback when a filter is assembled at runtime.
+///
+/// Field names still come from [`ModelFilterField`] rather than string
+/// literals, but the values are interpolated into the query text, so this form
+/// has to worry about quoting in a way the builder does not.
+async fn list_models_with_filter_text(
+    registry: &dyn ModelRegistryClientV1,
+    ctx: &SecurityContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n─── Request 4: the same listing as raw $filter text ───");
+
+    let filter = format!(
+        "{gts_type} eq '{OPENAI_PROVIDER_TYPE}' and {streaming} eq true",
+        gts_type = ModelFilterField::GtsType.name(),
+        streaming = ModelFilterField::Streaming.name(),
+    );
+    println!("→ $filter  : {filter}");
+
+    let parsed = parse_filter_string(&filter)?;
+    let mut query = ODataQuery::default().with_limit(10);
+    // The builder does this step for you.
+    if let Some(hash) = short_filter_hash(Some(parsed.as_expr())) {
+        query = query.with_filter_hash(hash);
+    }
+    let query = query.with_filter(parsed.into_expr());
+
+    let page = registry.list_tenant_models(ctx, &query).await?;
+    println!("← matched  : {} of 2 fixtures", page.items.len());
 
     // Field names outside the allowlist never reach the backend: the SDK enum
     // is the same gate the real repository applies before touching a column.

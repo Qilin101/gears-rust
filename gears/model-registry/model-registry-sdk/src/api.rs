@@ -43,13 +43,21 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// List models available to the caller's tenant with `OData` filtering.
     ///
+    /// Build `query` with [`QueryBuilder`](crate::odata::QueryBuilder) over
+    /// [`ModelSchema`](crate::odata::ModelSchema) and the `MODEL_*` field
+    /// references in [`crate::odata`] — that route needs no `$filter` text and
+    /// computes the cursor `filter_hash` for you.
+    ///
     /// `query.filter` and `query.order` accept exactly the fields enumerated
     /// by [`ModelFilterField`](crate::odata::ModelFilterField); anything
     /// outside that allowlist is rejected as an unknown-field validation
     /// error. Field names are flat (`gts_type`, `vision`), not nested under
     /// `info.`. Per-provider parameter and cost fields are not filterable in
-    /// v1 — see `docs/DESIGN.md` §3.3. `query.select` is not supported and is
-    /// ignored: this method always returns whole [`ModelV1`] values.
+    /// v1 — see `docs/DESIGN.md` §3.3.
+    ///
+    /// `query.select` is **not supported**: this method always returns whole
+    /// [`ModelV1`] values, and a query carrying one is rejected with
+    /// [`ModelRegistryError::Validation`] rather than silently ignored.
     ///
     /// Returns `ModelV1` (the default `P = serde_json::Value` for
     /// heterogeneous lists). Consumers narrowed to a specific provider (e.g.
@@ -125,8 +133,11 @@ pub trait ModelRegistryClientV1: Send + Sync {
     /// List providers for the caller's tenant with `OData` filtering.
     ///
     /// `query.filter` and `query.order` accept exactly the fields enumerated
-    /// by [`ProviderFilterField`](crate::odata::ProviderFilterField).
-    /// `query.select` is not supported and is ignored.
+    /// by [`ProviderFilterField`](crate::odata::ProviderFilterField); build it
+    /// with [`QueryBuilder`](crate::odata::QueryBuilder) over
+    /// [`ProviderSchema`](crate::odata::ProviderSchema) and the `PROVIDER_*`
+    /// field references. `query.select` is not supported and is rejected with
+    /// [`ModelRegistryError::Validation`].
     async fn list_providers(
         &self,
         ctx: &SecurityContext,
