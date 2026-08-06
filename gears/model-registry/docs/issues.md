@@ -228,4 +228,19 @@ above:
   read-path check/default-exclusion.
 - [ ] The entire eleventh endpoint/method, `list_tenant_models_management`
   (`cpt-cf-model-registry-fr-list-tenant-models-management`, UC-027) — SDK trait method, REST
-  route, service method, and authorization gating to tenant-admin/platform-admin.
+  route, service method, and authorization gating to tenant-admin/platform-admin. The API shape is
+  now specified rather than sketched (DESIGN §3.3 "Two listing endpoints — eval vs management",
+  §3.5 `seq-list-tenant-models-management`): a separate endpoint at
+  `GET /model-registry/v1/admin/models` — **not** a widening query parameter on `GET /v1/models` —
+  returning `ModelManagementDto` (`ModelDto` + `shadowed` / `provider_disabled` /
+  `available_for_eval`), with `include_deprecated` as an explicit flag and one shared repository
+  query parameterized by an `Eval` | `Management` visibility mode.
+- [ ] **Remove the lifecycle-filter escape hatch from `list_tenant_models`.** DESIGN §3.3 now makes
+  the `deprecated`/`sunset` exclusion an unconditional mandatory predicate (matching PRD UC-002),
+  and states the narrowing invariant: `$filter` never widens visibility. The shipped code still
+  skips the exclusion whenever the normalized filter text mentions `lifecycle_status`, so
+  `$filter=lifecycle_status ne 'sunset'` currently returns deprecated rows to eval callers. Delete
+  the string-matching branch instead of hardening it (§4 Technical Debt).
+- [ ] `provider_disabled` joins the OData filter enum (15 → 16 fields) on both listings, so the
+  management view can isolate models blocked by a disabled provider; on the eval listing it can only
+  narrow.

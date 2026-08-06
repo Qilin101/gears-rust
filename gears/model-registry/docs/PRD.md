@@ -477,7 +477,7 @@ Includes:
 
 Excludes models whose provider is disabled, and models hidden by provider shadowing (see Domain Model → Provider → Inheritance & Shadowing).
 
-Follows OData pagination standard. Supports OData `$filter` for filtering by capability, provider, approval_status, and tag (P3).
+Follows OData pagination standard. Supports OData `$filter` for filtering by capability, provider, approval_status, and tag (P3). Filtering only ever narrows the set this operation already grants — the exclusions above are unconditional and no `$filter` clause switches one off.
 
 Capability filtering uses subset matching: model must have AT LEAST requested capabilities.
 
@@ -495,9 +495,11 @@ Includes, in addition to everything `list_tenant_models` returns:
 - Models pending approval, rejected, or revoked (not just `approved`)
 - Models attached to a disabled provider (the tenant's own, or inherited)
 - Models attached to an ancestor provider that has been shadowed by this tenant (or an intermediate tenant between this one and that ancestor) — otherwise fully invisible to normal resolution — surfaced read-only and clearly marked as shadowed/unavailable, for audit purposes
-- Deprecated models, when the caller opts in (excluded by default, same as the eval view)
+- Deprecated models, when the caller opts in via an explicit request flag (excluded by default). The eval view excludes them unconditionally and offers no such flag.
 
 This view never grants write access to models the requesting tenant doesn't own: shadowed-ancestor models and models on ancestor-owned providers remain read-only (see Domain Model → Provider → Inheritance & Shadowing → "Model creation is same-tenant only").
+
+This is a **separate operation from `list_tenant_models`, not a wider mode of it.** The two differ in required role, in which rows are candidates at all (the management view keeps rows hidden by provider shadowing), and in what each row reports. An admin must still be able to call `list_tenant_models` and see exactly what an ordinary tenant member sees, so the eval view MUST NOT widen its result set for admin callers. Filter parameters on either operation only ever narrow a result set; they never expand visibility beyond what the operation grants.
 
 **Authorization**: Tenant admin (or platform admin) only — not any authenticated user, unlike `list_tenant_models`.
 
@@ -1020,9 +1022,10 @@ Key interfaces:
 - Follows OData pagination standard
 - Supports `$filter` by capability flags, provider slug, provider GTS type, approval_status, lifecycle_status, managed, architecture, format, tag (P3)
 - Tag filtering uses subset matching: model must carry AT LEAST the requested tags
-- Returns only approved models by default
-- Excludes models whose provider is disabled
-- Excludes deprecated models
+- Returns only approved models, unconditionally — `$filter` narrows within that set but never widens it (`$filter=approval_status eq 'pending'` returns an empty page, not pending models)
+- Excludes models whose provider is disabled, unconditionally
+- Excludes deprecated models, unconditionally — there is no opt-in flag and no `$filter` clause that re-admits them
+- Does not widen its result set for admin callers: an admin sees exactly what an ordinary tenant member sees, and uses UC-027 for the full catalog
 
 ### UC-003: Model Discovery
 
@@ -1472,7 +1475,7 @@ Key interfaces:
 **Preconditions**: Actor has admin role for target tenant.
 
 **Flow**:
-1. Admin sends `list_tenant_models_management(ctx)` with OData query params, optionally requesting deprecated models
+1. Admin sends `list_tenant_models_management(ctx)` with OData query params, optionally setting the `include_deprecated` flag
 2. Registry collects all models for the tenant (direct + inherited), regardless of approval_status or provider status
 3. Registry additionally collects models attached to providers that this tenant (or an intermediate tenant) has shadowed, marking them as shadowed and unavailable
 4. Registry applies OData filters and pagination
@@ -1484,9 +1487,10 @@ Key interfaces:
 - Returns models in every approval_status (`pending`, `approved`, `rejected`, `revoked`), not just `approved`
 - Returns models attached to disabled providers, marked accordingly
 - Returns models attached to shadowed ancestor providers, marked as shadowed and unavailable for eval
-- Excludes deprecated models unless the caller explicitly requests them
+- Excludes deprecated models unless the caller sets `include_deprecated` — an explicit request flag, not a side effect of an OData `$filter` clause
 - Returns `unauthorized` (403) for a caller without tenant-admin (or platform-admin) role
 - Follows OData pagination standard
+- `$filter` narrows only: no filter value returns rows this operation would otherwise withhold, and none disables the `include_deprecated` default
 
 ### UC-021: Create Tag
 
