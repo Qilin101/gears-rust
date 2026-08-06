@@ -8,6 +8,7 @@
 
 use model_registry_sdk::models::{ApprovalStatus, LifecycleStatus, ProviderStatus};
 use toolkit_canonical_errors::CanonicalError;
+use toolkit_odata::ODataQuery;
 
 use super::error::ModelRegistryResourceError;
 
@@ -73,6 +74,27 @@ pub(super) fn approval_status(raw: &str) -> Result<ApprovalStatus, CanonicalErro
             .join(", ");
         invalid("approval_status", "INVALID_APPROVAL_STATUS", raw, &expected)
     })
+}
+
+/// Reject `$select` on the listing endpoints.
+///
+/// The listing handlers return whole `ModelDto` / `ProviderDto` values — there
+/// is no projection stage — so accepting `$select` and ignoring it would
+/// silently return more than the caller asked for.
+///
+/// # Errors
+/// `UNSUPPORTED_SELECT` when the request carries a `$select` clause.
+pub(super) fn reject_select(query: &ODataQuery) -> Result<(), CanonicalError> {
+    if query.select.is_some() {
+        return Err(ModelRegistryResourceError::invalid_argument()
+            .with_field_violation(
+                "$select",
+                "$select is not supported by this endpoint; responses always carry every field",
+                "UNSUPPORTED_SELECT",
+            )
+            .create());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -160,5 +182,17 @@ mod tests {
             "INVALID_APPROVAL_STATUS",
             &["pending", "revoked"],
         );
+    }
+
+    #[test]
+    fn reject_select_accepts_query_without_select() {
+        reject_select(&ODataQuery::default()).expect("no $select is fine");
+    }
+
+    #[test]
+    fn reject_select_rejects_query_with_select() {
+        let query = ODataQuery::default().with_select(vec!["vendor".to_owned()]);
+        let err = reject_select(&query).expect_err("$select is unsupported");
+        assert_violation(&err, "$select", "UNSUPPORTED_SELECT", &["not supported"]);
     }
 }

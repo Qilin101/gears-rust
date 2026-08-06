@@ -1973,6 +1973,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-odata-macros",
  "cf-gears-toolkit-security",
  "chrono",
  "gts",

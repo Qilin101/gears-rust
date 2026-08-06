@@ -58,7 +58,7 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync, C: C
     async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ModelV1>, ModelRegistryError> {
         self.service
             .list_tenant_models(ctx, query)
@@ -115,7 +115,7 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync, C: C
     async fn list_providers(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, ModelRegistryError> {
         self.service
             .list_providers(ctx, query)

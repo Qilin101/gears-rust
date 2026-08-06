@@ -5,6 +5,8 @@
 use std::sync::Arc;
 
 use axum::{Extension, Router, http::StatusCode};
+use model_registry_sdk::odata::{ModelFilterField, ProviderFilterField};
+use toolkit::api::operation_builder::OperationBuilderODataExt;
 use toolkit::api::{OpenApiRegistry, OperationBuilder};
 
 use super::dto;
@@ -52,6 +54,8 @@ pub fn register_routes(
             StatusCode::OK,
             "Paginated provider list",
         )
+        .with_odata_filter::<ProviderFilterField>()
+        .with_odata_orderby::<ProviderFilterField>()
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -152,6 +156,8 @@ pub fn register_routes(
             StatusCode::OK,
             "Paginated model list",
         )
+        .with_odata_filter::<ModelFilterField>()
+        .with_odata_orderby::<ModelFilterField>()
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

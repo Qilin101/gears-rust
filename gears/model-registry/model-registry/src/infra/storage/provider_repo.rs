@@ -20,7 +20,8 @@ use crate::{CreateProviderRequestV1, ProviderV1, UpdateProviderRequestV1};
 use super::entity::{model, provider};
 use super::error_mapping::{is_fk_violation, map_scope_error};
 use super::mapper;
-use super::odata_mapper::{ProviderFilterField, ProviderODataMapper};
+use super::odata_mapper::ProviderODataMapper;
+use model_registry_sdk::odata::ProviderFilterField;
 
 // =============================================================================
 // ProviderRepositoryImpl — holds no per-instance state

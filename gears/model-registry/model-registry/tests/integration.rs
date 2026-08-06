@@ -490,7 +490,7 @@ async fn full_lifecycle_single_tenant() {
         ..Default::default()
     };
     let page = service
-        .list_tenant_models(&ctx, query)
+        .list_tenant_models(&ctx, &query)
         .await
         .expect("list models with OData filter");
     assert_eq!(page.items.len(), 1, "one pending model should be listed");
@@ -536,7 +536,7 @@ async fn full_lifecycle_single_tenant() {
 
     // ── Step 10: Verify deprecated model is hidden from default list ────────
     let list_after = service
-        .list_tenant_models(&ctx, ODataQuery::default())
+        .list_tenant_models(&ctx, &ODataQuery::default())
         .await
         .expect("list models after soft-delete");
     assert!(
@@ -568,7 +568,7 @@ async fn tenant_isolation() {
 
     // Tenant B should not see any providers.
     let providers_page = service
-        .list_providers(&ctx_b, ODataQuery::default())
+        .list_providers(&ctx_b, &ODataQuery::default())
         .await
         .expect("list providers as tenant B");
     assert!(
@@ -578,7 +578,7 @@ async fn tenant_isolation() {
 
     // Tenant B should not see any models.
     let models_page = service
-        .list_tenant_models(&ctx_b, ODataQuery::default())
+        .list_tenant_models(&ctx_b, &ODataQuery::default())
         .await
         .expect("list models as tenant B");
     assert!(
@@ -664,7 +664,7 @@ async fn child_inherits_provider_and_model_from_parent() {
 
     // ── Child can list the inherited model ──────────────────────────────────
     let models_page = service
-        .list_tenant_models(&ctx, ODataQuery::default())
+        .list_tenant_models(&ctx, &ODataQuery::default())
         .await
         .expect("child list inherited models");
     assert_eq!(
@@ -691,7 +691,7 @@ async fn child_inherits_provider_and_model_from_parent() {
 
     // ── Child can list inherited providers ──────────────────────────────────
     let providers_page = service
-        .list_providers(&ctx, ODataQuery::default())
+        .list_providers(&ctx, &ODataQuery::default())
         .await
         .expect("child list inherited providers");
     assert_eq!(
@@ -738,7 +738,7 @@ async fn child_shadows_parent_by_same_canonical_id() {
 
     // Child's list should show exactly 1 model (child shadows parent).
     let page = service
-        .list_tenant_models(&ctx, ODataQuery::default())
+        .list_tenant_models(&ctx, &ODataQuery::default())
         .await
         .expect("child list models");
     assert_eq!(
@@ -879,7 +879,7 @@ async fn odata_filters_work_on_filterable_columns() {
     let page = service
         .list_tenant_models(
             &ctx,
-            ODataQuery {
+            &ODataQuery {
                 filter: Some(Box::new(parsed.into_expr())),
                 ..Default::default()
             },
@@ -894,7 +894,7 @@ async fn odata_filters_work_on_filterable_columns() {
     let page = service
         .list_tenant_models(
             &ctx,
-            ODataQuery {
+            &ODataQuery {
                 filter: Some(Box::new(parsed.into_expr())),
                 ..Default::default()
             },
@@ -909,7 +909,7 @@ async fn odata_filters_work_on_filterable_columns() {
     let page = service
         .list_tenant_models(
             &ctx,
-            ODataQuery {
+            &ODataQuery {
                 filter: Some(Box::new(parsed.into_expr())),
                 ..Default::default()
             },
@@ -923,7 +923,7 @@ async fn odata_filters_work_on_filterable_columns() {
     let page = service
         .list_tenant_models(
             &ctx,
-            ODataQuery {
+            &ODataQuery {
                 filter: Some(Box::new(parsed.into_expr())),
                 ..Default::default()
             },
@@ -961,7 +961,7 @@ async fn provider_crud_through_service() {
 
     // ── List ────────────────────────────────────────────────────────────────
     let page = service
-        .list_providers(&ctx, ODataQuery::default())
+        .list_providers(&ctx, &ODataQuery::default())
         .await
         .expect("list providers");
     assert_eq!(page.items.len(), 1);

@@ -1,76 +1,26 @@
-//! `OData` filter / order surface for the `model-registry` listing endpoints.
+//! Binds the SDK's `OData` filter allowlists to real `SeaORM` columns.
 //!
-//! The filterable wire surface is declared once per resource, as an annotated
-//! query struct; `#[derive(ODataFilterable)]` generates the `FilterField` enum
-//! (`<Struct>FilterField`) with its `FIELDS` / `name()` / `kind()` impl. Each
-//! filter field maps to a **real database column** — the toolkit `OData` layer
-//! (`toolkit-db` / `sea_orm_filter`) does not support JSONB-path filtering or
-//! joins — and that binding stays hand-written below, since no derive can
-//! infer it (`vision` → `Column::CapVision`).
+//! The filterable wire surface itself — [`ModelFilterField`] /
+//! [`ProviderFilterField`] — is public contract and lives in
+//! [`model_registry_sdk::odata`]. What stays here is the column binding, which
+//! names storage types the SDK does not expose and which no derive can infer
+//! (`vision` → `Column::CapVision`), plus the cursor-value extraction that
+//! keyset pagination needs.
 //!
-//! Non-allowlisted fields are rejected via
-//! [`toolkit_odata::filter::FilterField::from_name`] (returns `None`), which
-//! the `OData` parser surfaces as an unknown-field validation error.
+//! Every field maps to exactly one real column: the toolkit `OData` layer
+//! (`toolkit-db` / `sea_orm_filter`) supports neither JSONB-path filtering nor
+//! joins. Non-allowlisted fields never reach this module — they are rejected
+//! by [`toolkit_odata::filter::FilterField::from_name`] (returns `None`),
+//! which the `OData` parser surfaces as an unknown-field validation error.
 
+use model_registry_sdk::odata::{ModelFilterField, ProviderFilterField};
 use toolkit_db::odata::sea_orm_filter::{FieldToColumn, ODataFieldMapping};
-use toolkit_odata_macros::ODataFilterable;
-
-#[cfg(test)]
-use toolkit_odata::filter::{FieldKind, FilterField};
 
 use super::entity::{model, provider};
 
 // ===========================================================================
 // Model filter fields
 // ===========================================================================
-
-/// Filterable / orderable wire surface of `GET /model-registry/v1/models`.
-///
-/// Every field maps to a real `models` column (including the capability flags
-/// and `approval_status`). Non-allowlisted fields (`provider_settings.*`,
-/// `default_parameters.*`, `info.additional_info.*`, per-MIME array fields)
-/// are absent here and therefore rejected at the parser level.
-///
-/// The struct exists to carry the annotations — the generated
-/// [`ModelFilterField`] enum is what the repository uses.
-#[derive(ODataFilterable)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct ModelQuery {
-    #[odata(filter(kind = "String"))]
-    pub canonical_id: String,
-    #[odata(filter(kind = "String"))]
-    pub lifecycle_status: String,
-    #[odata(filter(kind = "String"))]
-    pub approval_status: String,
-    #[odata(filter(kind = "String"))]
-    pub gts_type: String,
-    #[odata(filter(kind = "String"))]
-    pub supported_api: String,
-    #[odata(filter(kind = "String"))]
-    pub provider_model_id: String,
-    #[odata(filter(kind = "String"))]
-    pub vendor: String,
-    #[odata(filter(kind = "String"))]
-    pub family: String,
-    #[odata(filter(kind = "Bool"))]
-    pub managed: bool,
-    #[odata(filter(kind = "String"))]
-    pub architecture: String,
-    #[odata(filter(kind = "String"))]
-    pub format: String,
-    #[odata(filter(kind = "Bool"))]
-    pub vision: bool,
-    #[odata(filter(kind = "Bool"))]
-    pub function_calling: bool,
-    #[odata(filter(kind = "Bool"))]
-    pub streaming: bool,
-    #[odata(filter(kind = "Bool"))]
-    pub reasoning_effort: bool,
-}
-
-/// `OData` filter / order field enum for `GET /model-registry/v1/models`,
-/// generated from [`ModelQuery`].
-pub use ModelQueryFilterField as ModelFilterField;
 
 /// Maps [`ModelFilterField`] to `models` columns and extracts cursor values.
 pub struct ModelODataMapper;
@@ -150,29 +100,6 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
 // Provider filter fields
 // ===========================================================================
 
-/// Filterable / orderable wire surface of `GET /model-registry/v1/providers`.
-///
-/// Every field maps to a real `providers` column.
-#[derive(ODataFilterable)]
-pub struct ProviderQuery {
-    #[odata(filter(kind = "String"))]
-    pub slug: String,
-    #[odata(filter(kind = "String"))]
-    pub name: String,
-    #[odata(filter(kind = "String"))]
-    pub status: String,
-    #[odata(filter(kind = "String"))]
-    pub gts_type: String,
-    #[odata(filter(kind = "Bool"))]
-    pub managed: bool,
-    #[odata(filter(kind = "Bool"))]
-    pub discovery_enabled: bool,
-}
-
-/// `OData` filter / order field enum for `GET /model-registry/v1/providers`,
-/// generated from [`ProviderQuery`].
-pub use ProviderQueryFilterField as ProviderFilterField;
-
 /// Maps [`ProviderFilterField`] to `providers` columns and extracts cursor values.
 pub struct ProviderODataMapper;
 
@@ -220,68 +147,8 @@ mod tests {
     use uuid::Uuid;
 
     // =======================================================================
-    // Model filter field tests
+    // Model column binding
     // =======================================================================
-
-    /// Returns all filterable field names as expected by `OData` API consumers.
-    fn expected_model_field_names() -> Vec<&'static str> {
-        vec![
-            "canonical_id",
-            "lifecycle_status",
-            "approval_status",
-            "gts_type",
-            "supported_api",
-            "provider_model_id",
-            "vendor",
-            "family",
-            "managed",
-            "architecture",
-            "format",
-            "vision",
-            "function_calling",
-            "streaming",
-            "reasoning_effort",
-        ]
-    }
-
-    #[test]
-    fn model_field_names_match_expected() {
-        let expected = expected_model_field_names();
-        let actual: Vec<&str> = ModelFilterField::FIELDS
-            .iter()
-            .map(FilterField::name)
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "model filter field names must match the API contract"
-        );
-    }
-
-    #[test]
-    fn model_field_kinds_are_correct() {
-        for field in ModelFilterField::FIELDS {
-            match field {
-                ModelFilterField::Managed
-                | ModelFilterField::Vision
-                | ModelFilterField::FunctionCalling
-                | ModelFilterField::Streaming
-                | ModelFilterField::ReasoningEffort => {
-                    assert_eq!(
-                        field.kind(),
-                        FieldKind::Bool,
-                        "field {field:?} should be Bool"
-                    );
-                }
-                _ => {
-                    assert_eq!(
-                        field.kind(),
-                        FieldKind::String,
-                        "field {field:?} should be String"
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     fn model_field_map_field_returns_correct_column() {
@@ -310,65 +177,6 @@ mod tests {
         assert_col(ModelFilterField::FunctionCalling, "cap_function_calling");
         assert_col(ModelFilterField::Streaming, "cap_streaming");
         assert_col(ModelFilterField::ReasoningEffort, "cap_reasoning_effort");
-    }
-
-    #[test]
-    fn model_from_name_resolves_exact_match() {
-        assert_eq!(
-            ModelFilterField::from_name("lifecycle_status"),
-            Some(ModelFilterField::LifecycleStatus)
-        );
-        assert_eq!(
-            ModelFilterField::from_name("canonical_id"),
-            Some(ModelFilterField::CanonicalId)
-        );
-        assert_eq!(
-            ModelFilterField::from_name("approval_status"),
-            Some(ModelFilterField::ApprovalStatus)
-        );
-        assert_eq!(
-            ModelFilterField::from_name("vision"),
-            Some(ModelFilterField::Vision)
-        );
-        assert_eq!(
-            ModelFilterField::from_name("reasoning_effort"),
-            Some(ModelFilterField::ReasoningEffort)
-        );
-    }
-
-    #[test]
-    fn model_from_name_is_case_insensitive() {
-        assert_eq!(
-            ModelFilterField::from_name("LIFECYCLE_STATUS"),
-            Some(ModelFilterField::LifecycleStatus)
-        );
-        assert_eq!(
-            ModelFilterField::from_name("Gts_Type"),
-            Some(ModelFilterField::GtsType)
-        );
-    }
-
-    #[test]
-    fn model_rejects_non_allowlisted_fields() {
-        // These fields should NOT be filterable per DESIGN §3.3
-        assert_eq!(ModelFilterField::from_name("provider_settings"), None);
-        assert_eq!(ModelFilterField::from_name("default_parameters"), None);
-        assert_eq!(ModelFilterField::from_name("additional_info"), None);
-        assert_eq!(ModelFilterField::from_name("context_window"), None);
-        assert_eq!(ModelFilterField::from_name("cost"), None);
-        assert_eq!(ModelFilterField::from_name("nonexistent_field"), None);
-    }
-
-    #[test]
-    fn model_rejects_jsonb_path_style_fields() {
-        // `OData` layer maps to real columns, not JSONB paths
-        assert_eq!(ModelFilterField::from_name("info.gts_type"), None);
-        assert_eq!(ModelFilterField::from_name("info.supported_api"), None);
-        assert_eq!(
-            ModelFilterField::from_name("info.capabilities.vision"),
-            None
-        );
-        assert_eq!(ModelFilterField::from_name("info.vendor"), None);
     }
 
     #[test]
@@ -507,50 +315,8 @@ mod tests {
     }
 
     // =======================================================================
-    // Provider filter field tests
+    // Provider column binding
     // =======================================================================
-
-    #[test]
-    fn provider_field_names_match_expected() {
-        let expected: Vec<&str> = vec![
-            "slug",
-            "name",
-            "status",
-            "gts_type",
-            "managed",
-            "discovery_enabled",
-        ];
-        let actual: Vec<&str> = ProviderFilterField::FIELDS
-            .iter()
-            .map(FilterField::name)
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "provider filter field names must match the API contract"
-        );
-    }
-
-    #[test]
-    fn provider_field_kinds_are_correct() {
-        for field in ProviderFilterField::FIELDS {
-            match field {
-                ProviderFilterField::Managed | ProviderFilterField::DiscoveryEnabled => {
-                    assert_eq!(
-                        field.kind(),
-                        FieldKind::Bool,
-                        "field {field:?} should be Bool"
-                    );
-                }
-                _ => {
-                    assert_eq!(
-                        field.kind(),
-                        FieldKind::String,
-                        "field {field:?} should be String"
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     fn provider_field_map_field_returns_correct_column() {
@@ -570,28 +336,6 @@ mod tests {
         assert_col(ProviderFilterField::GtsType, "gts_type");
         assert_col(ProviderFilterField::Managed, "managed");
         assert_col(ProviderFilterField::DiscoveryEnabled, "discovery_enabled");
-    }
-
-    #[test]
-    fn provider_from_name_resolves() {
-        assert_eq!(
-            ProviderFilterField::from_name("slug"),
-            Some(ProviderFilterField::Slug)
-        );
-        assert_eq!(
-            ProviderFilterField::from_name("discovery_enabled"),
-            Some(ProviderFilterField::DiscoveryEnabled)
-        );
-    }
-
-    #[test]
-    fn provider_rejects_non_allowlisted_fields() {
-        assert_eq!(ProviderFilterField::from_name("metadata"), None);
-        assert_eq!(
-            ProviderFilterField::from_name("discovery_interval_seconds"),
-            None
-        );
-        assert_eq!(ProviderFilterField::from_name("unknown_field"), None);
     }
 
     #[test]

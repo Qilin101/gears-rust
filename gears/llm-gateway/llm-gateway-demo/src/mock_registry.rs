@@ -3,19 +3,31 @@
 //!
 //! Currently ships two models -- `openai::gpt-4o` and `anthropic::claude-sonnet-4`
 //! -- with different provider types so the demo can exercise both the success
-//! path and the "no provider plugin registered" path. Only `get_tenant_model`
-//! is exercised by the demo; remaining trait methods are stubbed.
+//! path and the "no provider plugin registered" path.
+//!
+//! `get_tenant_model` and `list_tenant_models` are implemented; the remaining
+//! trait methods are stubbed. `list_tenant_models` evaluates the caller's
+//! `$filter` AST in memory against the fixtures, resolving each identifier
+//! through [`ModelFilterField::from_name`] — the same allowlist lookup the real
+//! gear performs before mapping a field to a `models` column.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use model_registry_sdk::odata::ModelFilterField;
 use model_registry_sdk::{
     CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryClientV1, ModelRegistryError,
     ModelV1, ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
-use toolkit_odata::{ODataQuery, Page};
+use toolkit_odata::ast::{CompareOperator, Expr, Value};
+use toolkit_odata::filter::FilterField as _;
+use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
+
+/// Page size applied when the caller sets no `limit`, matching the gear's own
+/// default.
+const DEFAULT_PAGE_SIZE: u64 = 20;
 
 /// Provider identity of the `OpenAI` model fixture.
 pub const OPENAI_PROVIDER_TYPE: &str = "gts.cf.genai.model.info.v1~cf.genai._.openai.v1~";
@@ -63,9 +75,35 @@ impl ModelRegistryClientV1 for MockModelRegistry {
     async fn list_tenant_models(
         &self,
         _ctx: &SecurityContext,
-        _query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ModelV1>, ModelRegistryError> {
-        Err(unsupported())
+        // Sorted by `canonical_id` so demo output is stable — the same default
+        // tiebreaker the real repository paginates on.
+        let mut candidates: Vec<&ModelV1> = self.by_id.values().collect();
+        candidates.sort_by(|a, b| a.canonical_id.cmp(&b.canonical_id));
+
+        let mut items = Vec::new();
+        for model in candidates {
+            let keep = match query.filter() {
+                Some(expr) => eval(expr, model)?,
+                None => true,
+            };
+            if keep {
+                items.push(model.clone());
+            }
+        }
+
+        let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+        items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+
+        Ok(Page {
+            items,
+            page_info: PageInfo {
+                next_cursor: None,
+                prev_cursor: None,
+                limit,
+            },
+        })
     }
 
     async fn create_model(
@@ -104,7 +142,7 @@ impl ModelRegistryClientV1 for MockModelRegistry {
     async fn list_providers(
         &self,
         _ctx: &SecurityContext,
-        _query: ODataQuery,
+        _query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, ModelRegistryError> {
         Err(unsupported())
     }
@@ -138,6 +176,108 @@ impl ModelRegistryClientV1 for MockModelRegistry {
 fn unsupported() -> ModelRegistryError {
     ModelRegistryError::Validation {
         message: "not implemented in demo".to_owned(),
+    }
+}
+
+// ===========================================================================
+// In-memory `$filter` evaluation
+// ===========================================================================
+
+/// The scalar one filter field resolves to for a given model.
+///
+/// Mirrors the real gear's column projection: the 15 fields the repository
+/// binds to `models` columns, read straight off [`ModelV1`] instead.
+enum Scalar {
+    Text(Option<String>),
+    Flag(bool),
+}
+
+/// Project a model onto one filterable field.
+fn project(model: &ModelV1, field: ModelFilterField) -> Scalar {
+    use ModelFilterField as F;
+
+    let caps = &model.info.capabilities;
+    match field {
+        F::CanonicalId => Scalar::Text(Some(model.canonical_id.clone())),
+        F::LifecycleStatus => Scalar::Text(Some(model.lifecycle_status.as_str().to_owned())),
+        F::ApprovalStatus => Scalar::Text(Some(model.approval_status.as_str().to_owned())),
+        F::GtsType => Scalar::Text(Some(model.info.gts_type.to_string())),
+        F::SupportedApi => {
+            // Sorted comma-joined shadow of the API set, as the gear stores it.
+            let mut apis: Vec<&str> = model
+                .info
+                .supported_api
+                .iter()
+                .map(|a| a.as_str())
+                .collect();
+            apis.sort_unstable();
+            Scalar::Text(Some(apis.join(",")))
+        }
+        F::ProviderModelId => Scalar::Text(Some(model.info.provider_model_id.clone())),
+        F::Vendor => Scalar::Text(model.info.vendor.clone()),
+        F::Family => Scalar::Text(model.info.family.clone()),
+        F::Managed => Scalar::Flag(model.info.managed),
+        F::Architecture => Scalar::Text(model.info.architecture.clone()),
+        F::Format => Scalar::Text(model.info.format.clone()),
+        F::Vision => Scalar::Flag(caps.vision.enabled),
+        F::FunctionCalling => Scalar::Flag(caps.function_calling),
+        F::Streaming => Scalar::Flag(caps.streaming),
+        F::ReasoningEffort => Scalar::Flag(caps.reasoning.effort),
+    }
+}
+
+/// Evaluate one `$filter` node against a model.
+///
+/// Covers the subset the demo needs: `and` / `or` / `not` over
+/// `<field> eq|ne <literal>`. Anything else is an explicit error rather than a
+/// silent mismatch.
+fn eval(expr: &Expr, model: &ModelV1) -> Result<bool, ModelRegistryError> {
+    match expr {
+        Expr::And(lhs, rhs) => Ok(eval(lhs, model)? && eval(rhs, model)?),
+        Expr::Or(lhs, rhs) => Ok(eval(lhs, model)? || eval(rhs, model)?),
+        Expr::Not(inner) => Ok(!eval(inner, model)?),
+        Expr::Compare(lhs, op, rhs) => compare(lhs, *op, rhs, model),
+        _ => Err(ModelRegistryError::Validation {
+            message: "demo mock supports only and/or/not over `field eq|ne literal`".to_owned(),
+        }),
+    }
+}
+
+/// Evaluate a single `<field> <op> <literal>` comparison.
+fn compare(
+    lhs: &Expr,
+    op: CompareOperator,
+    rhs: &Expr,
+    model: &ModelV1,
+) -> Result<bool, ModelRegistryError> {
+    let (Expr::Identifier(name), Expr::Value(literal)) = (lhs, rhs) else {
+        return Err(ModelRegistryError::Validation {
+            message: "demo mock expects `<field> <op> <literal>`".to_owned(),
+        });
+    };
+
+    // The SDK's allowlist is the gate: an unknown name never reaches the data.
+    let field =
+        ModelFilterField::from_name(name).ok_or_else(|| ModelRegistryError::Validation {
+            message: format!("`{name}` is not a filterable field on models"),
+        })?;
+
+    let equal = match (project(model, field), literal) {
+        (Scalar::Text(actual), Value::String(want)) => actual.as_deref() == Some(want.as_str()),
+        (Scalar::Flag(actual), Value::Bool(want)) => actual == *want,
+        _ => {
+            return Err(ModelRegistryError::Validation {
+                message: format!("literal type does not match the `{name}` field kind"),
+            });
+        }
+    };
+
+    match op {
+        CompareOperator::Eq => Ok(equal),
+        CompareOperator::Ne => Ok(!equal),
+        _ => Err(ModelRegistryError::Validation {
+            message: "demo mock supports only `eq` and `ne`".to_owned(),
+        }),
     }
 }
 

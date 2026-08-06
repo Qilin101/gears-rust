@@ -204,7 +204,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     pub async fn list_providers(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
@@ -216,14 +216,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant providers with OData
-        let own_page = self.provider_repo.list(&conn, &own_scope, &query).await?;
+        let own_page = self.provider_repo.list(&conn, &own_scope, query).await?;
 
         // 4. Merge the inherited set, shadowing ancestor providers by slug.
         let conn = &conn;
         Ok(merge_inherited_page(
             &inheritance,
             own_page,
-            &query,
+            query,
             |p| p.slug.clone(),
             |scope, ancestor_query| async move {
                 self.provider_repo.list(conn, &scope, &ancestor_query).await
@@ -450,7 +450,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     pub async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<crate::ModelV1>, DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
@@ -462,14 +462,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant models with OData
-        let own_page = self.model_repo.list(&conn, &own_scope, &query).await?;
+        let own_page = self.model_repo.list(&conn, &own_scope, query).await?;
 
         // 4. Merge the inherited set, shadowing ancestor models by canonical_id.
         let conn = &conn;
         Ok(merge_inherited_page(
             &inheritance,
             own_page,
-            &query,
+            query,
             |m| m.canonical_id.clone(),
             |scope, ancestor_query| async move {
                 self.model_repo.list(conn, &scope, &ancestor_query).await
@@ -1601,7 +1601,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service
-            .list_tenant_models(&ctx, ODataQuery::default())
+            .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -1663,7 +1663,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service
-            .list_tenant_models(&ctx, ODataQuery::default())
+            .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -1707,7 +1707,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service
-            .list_tenant_models(&ctx, ODataQuery::default())
+            .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -1766,7 +1766,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service
-            .list_tenant_models(&ctx, ODataQuery::default())
+            .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -1834,7 +1834,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service
-            .list_tenant_models(&ctx, ODataQuery::default())
+            .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("list should succeed");
 
@@ -1883,7 +1883,7 @@ mod tests {
             ..Default::default()
         };
         let page = service
-            .list_tenant_models(&ctx, query)
+            .list_tenant_models(&ctx, &query)
             .await
             .expect("list with limit should succeed");
 
@@ -1926,7 +1926,7 @@ mod tests {
             .build()
             .expect("ctx");
         let page = service_a
-            .list_tenant_models(&ctx_b, ODataQuery::default())
+            .list_tenant_models(&ctx_b, &ODataQuery::default())
             .await
             .expect("list should succeed");
 

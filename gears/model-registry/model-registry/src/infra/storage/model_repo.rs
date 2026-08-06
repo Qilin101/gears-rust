@@ -18,7 +18,8 @@ use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1}
 use super::entity::{self, model, provider};
 use super::error_mapping::map_scope_error;
 use super::mapper;
-use super::odata_mapper::{ModelFilterField, ModelODataMapper};
+use super::odata_mapper::ModelODataMapper;
+use model_registry_sdk::odata::ModelFilterField;
 
 // =============================================================================
 // ModelRepositoryImpl — holds no per-instance state

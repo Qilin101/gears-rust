@@ -43,22 +43,23 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// List models available to the caller's tenant with `OData` filtering.
     ///
-    /// Supports `$filter` on: `lifecycle_status`, `approval_status`,
-    /// `info.gts_type`, `info.supported_api`, `info.provider_model_id`,
-    /// `info.capabilities.*` (e.g. `vision`, `function_calling`, `streaming`,
-    /// `reasoning.effort`), `info.vendor`, `info.family`. Per-provider
-    /// parameter and cost fields are not filterable in v1 — see
-    /// `docs/DESIGN.md` §3.3.
+    /// `query.filter` and `query.order` accept exactly the fields enumerated
+    /// by [`ModelFilterField`](crate::odata::ModelFilterField); anything
+    /// outside that allowlist is rejected as an unknown-field validation
+    /// error. Field names are flat (`gts_type`, `vision`), not nested under
+    /// `info.`. Per-provider parameter and cost fields are not filterable in
+    /// v1 — see `docs/DESIGN.md` §3.3. `query.select` is not supported and is
+    /// ignored: this method always returns whole [`ModelV1`] values.
     ///
     /// Returns `ModelV1` (the default `P = serde_json::Value` for
     /// heterogeneous lists). Consumers narrowed to a specific provider (e.g.
     /// when they've already filtered on
-    /// `info.gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`)
+    /// `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`)
     /// can call [`ModelV1::try_into_typed`] on each result.
     async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ModelV1>, ModelRegistryError>;
 
     // ==================== Models — manual management (P1) ====================
@@ -122,10 +123,14 @@ pub trait ModelRegistryClientV1: Send + Sync {
     ) -> Result<ProviderV1, ModelRegistryError>;
 
     /// List providers for the caller's tenant with `OData` filtering.
+    ///
+    /// `query.filter` and `query.order` accept exactly the fields enumerated
+    /// by [`ProviderFilterField`](crate::odata::ProviderFilterField).
+    /// `query.select` is not supported and is ignored.
     async fn list_providers(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, ModelRegistryError>;
 
     /// Register a new provider for the caller's tenant.

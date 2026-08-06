@@ -45,7 +45,8 @@ pub async fn list_providers(
     Extension(svc): Extension<Arc<ConcreteService>>,
     OData(query): OData,
 ) -> ApiResult<JsonBody<ProviderListDto>> {
-    let page = svc.list_providers(&ctx, query).await?;
+    parse::reject_select(&query)?;
+    let page = svc.list_providers(&ctx, &query).await?;
 
     let items: Vec<ProviderDto> = page.items.into_iter().map(ProviderDto::from).collect();
 
@@ -148,7 +149,8 @@ pub async fn list_models(
     Extension(svc): Extension<Arc<ConcreteService>>,
     OData(query): OData,
 ) -> ApiResult<JsonBody<ModelListDto>> {
-    let page = svc.list_tenant_models(&ctx, query).await?;
+    parse::reject_select(&query)?;
+    let page = svc.list_tenant_models(&ctx, &query).await?;
 
     let items: Vec<ModelDto> = page.items.into_iter().map(ModelDto::from).collect();
 

@@ -38,7 +38,7 @@ All P1 endpoints are implemented under `/model-registry/v1/`. Each endpoint requ
 - **Tenant inheritance**: Additive inheritance with child-shadowing by slug/canonical_id
 - **Approval management**: Direct approval status writes via `PATCH /models/{canonical_id}` (P1)
 - **Tenant isolation**: `AccessScope`-enforced queries at the repository layer
-- **OData filtering**: `$filter`, `$top`, `$skip`, `$orderby`, `$select` on allowlisted fields
+- **OData filtering**: `$filter` / `$orderby` on the allowlisted fields published by `model_registry_sdk::odata`, plus cursor-based pagination (`$top` + opaque cursor). `$select` and `$skip` are not supported
 
 ## Build & Run
 
