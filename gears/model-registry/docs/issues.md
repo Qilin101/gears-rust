@@ -55,10 +55,11 @@ commit** — everything below is a documentation-only comparison; `[x]` items ar
    - `ProviderHasModels` → `already_exists` (DESIGN.md:1136, :1350) is still semantically wrong —
      nothing already exists; it's a precondition conflict (should read as a 409 conflict of a
      different category, or `invalid_argument`).
-9. [ ] **Stale `fr-model-pricing` driver line — new drift introduced by the update.** DESIGN.md:67
-   still reads "AICredits cost data **per tier (sync/batch/cached)**," the exact model the update
-   just retired in favor of provider-specific cost shapes (see item 2 above, and DESIGN.md's own
-   `OpenAiCost`/`AnthropicCost` §3.1). One-line wording fix.
+9. [x] **Stale `fr-model-pricing` driver line — new drift introduced by the update.** Resolved.
+   DESIGN.md:67 read "AICredits cost data **per tier (sync/batch/cached)**," the exact model the
+   update retired in favor of provider-specific cost shapes (see item 2 above). The driver line now
+   states that the cost shape follows the provider's own structure (`OpenAiCost`/`AnthropicCost`,
+   §3.1), with no cross-provider normalized schema, matching PRD.md:560-572 and DESIGN.md:1436.
 
 ## Critical
 
