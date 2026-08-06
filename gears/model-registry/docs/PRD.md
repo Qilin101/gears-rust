@@ -29,7 +29,6 @@
   - [Scale](#scale)
   - [Discovery Plugin Isolation](#discovery-plugin-isolation)
   - [Discovery Plugin Extensibility](#discovery-plugin-extensibility)
-  - [Rate Limiting](#rate-limiting)
 - [9. Error Codes](#9-error-codes)
 - [10. Security Considerations](#10-security-considerations)
 - [11. Consumers](#11-consumers)
@@ -201,7 +200,7 @@ Project-wide runtime, OS, architecture, lifecycle policy, and integration patter
 | User-facing pricing (promos, discounts, tiered, regional) | License Manager |
 | Usage metering & billing | License Manager |
 | Tenant hierarchy management | Tenant Resolver |
-| Actual rate limiting enforcement | Infrastructure / OAGW |
+| Rate limiting (limit definition and enforcement) | Infrastructure / OAGW |
 | Inference/routing health monitoring | OAGW (per-route, per-tenant-key availability) |
 | Approval workflow engine | Generic Approval Service (Model Registry integrates with it) |
 | Audit log storage & retention | Core platform |
@@ -915,19 +914,6 @@ The registry MUST support adding a new provider's discovery capability without m
 - **Rationale**: The AI provider landscape changes frequently. Operators must be able to onboard new providers at their own pace without gating on a core registry release.
 - **Verification method — inspection at P2 completion**: demonstrate that a new provider's discovery capability was added by providing only a new discovery plugin, with no changes to existing plugins or the core discovery path; the inspection is performed during the P2 release review and recorded there.
 
-### Rate Limiting
-
-- [ ] `p1` - **ID**: `cpt-cf-model-registry-nfr-rate-limiting`
-
-The system must specify rate limits for admin operations (enforcement by infrastructure).
-
-| Operation | Limit |
-|-----------|-------|
-| Model approval requests | 100/min per tenant |
-| Provider management | 10/min (platform-wide) |
-
-All limits must be configurable.
-
 ## 9. Error Codes
 
 | Code | HTTP Status | Description |
@@ -1356,7 +1342,6 @@ Key interfaces:
 
 **Acceptance criteria**:
 - Returns job status (queued/running/completed)
-- Rate limited to prevent abuse
 - Tenant admin can trigger discovery for own providers; Platform admin can trigger for any provider
 
 ### UC-025: Add a New Provider Discovery Plugin
