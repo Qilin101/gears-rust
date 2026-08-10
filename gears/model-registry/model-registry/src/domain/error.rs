@@ -40,6 +40,10 @@ pub enum DomainError {
     #[error("provider disabled: {id}")]
     ProviderDisabled { id: Uuid },
 
+    /// Provider not owned by the caller's tenant (exists only in an ancestor).
+    #[error("provider with slug `{slug}` not owned by caller's tenant")]
+    ProviderNotOwned { slug: String },
+
     /// Provider slug already exists (unique constraint).
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
@@ -117,6 +121,11 @@ impl DomainError {
     }
 
     #[must_use]
+    pub fn provider_not_owned(slug: impl Into<String>) -> Self {
+        Self::ProviderNotOwned { slug: slug.into() }
+    }
+
+    #[must_use]
     pub fn provider_has_models(id: Uuid, model_count: u64) -> Self {
         Self::ProviderHasModels { id, model_count }
     }
@@ -173,6 +182,7 @@ impl From<DomainError> for crate::ModelRegistryError {
             }
             DomainError::Forbidden(msg) => Self::forbidden(msg),
             DomainError::ProviderDisabled { id } => Self::provider_disabled(id),
+            DomainError::ProviderNotOwned { slug } => Self::provider_not_owned(slug),
             DomainError::ProviderConflict { slug } => Self::provider_conflict(slug),
             DomainError::ProviderHasModels { id, model_count } => {
                 Self::provider_has_models(id, model_count)
@@ -271,6 +281,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_not_owned_converts() {
+        let domain = DomainError::provider_not_owned("openai");
+        let sdk: ModelRegistryError = domain.into();
+        assert_eq!(
+            sdk.to_string(),
+            "provider with slug `openai` not owned by caller's tenant"
+        );
+    }
+
+    #[test]
     fn provider_conflict_converts() {
         let domain = DomainError::provider_conflict("openai");
         let sdk = ModelRegistryError::provider_conflict("openai");
@@ -360,6 +380,15 @@ mod tests {
     fn forbidden_display() {
         let err = DomainError::forbidden("no access");
         assert_eq!(err.to_string(), "forbidden: no access");
+    }
+
+    #[test]
+    fn provider_not_owned_display() {
+        let err = DomainError::provider_not_owned("openai");
+        assert_eq!(
+            err.to_string(),
+            "provider with slug `openai` not owned by caller's tenant"
+        );
     }
 
     #[test]

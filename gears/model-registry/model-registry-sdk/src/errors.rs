@@ -41,6 +41,9 @@ pub enum ModelRegistryError {
     #[error("forbidden: {detail}")]
     Forbidden { detail: String },
 
+    #[error("provider with slug `{slug}` not owned by caller's tenant")]
+    ProviderNotOwned { slug: String },
+
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
 
@@ -121,6 +124,11 @@ impl ModelRegistryError {
         Self::Forbidden {
             detail: detail.into(),
         }
+    }
+
+    #[must_use]
+    pub fn provider_not_owned(slug: impl Into<String>) -> Self {
+        Self::ProviderNotOwned { slug: slug.into() }
     }
 
     #[must_use]

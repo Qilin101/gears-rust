@@ -164,6 +164,14 @@ impl ModelRepository for ModelRepositoryImpl {
                 "provider with slug `{}` not found",
                 req.provider_slug,
             )))?;
+        // ^^ NOTE: Validation (400) is used here but the service-layer
+        // pre-check (`create_model`) resolves the provider own-tenant-only
+        // first and returns ProviderNotFoundBySlug (404) / ProviderNotOwned
+        // (403). This repository path is TOCTOU-only — reachable only when
+        // the provider is deleted between the pre-check and this query.
+        // Keeping Validation rather than adding a new error variant avoids
+        // coupling the repository to a domain concept ("ownership check")
+        // it does not implement.
 
         let initial_approval = req.approval_status.unwrap_or(ApprovalStatus::Pending);
         let am =

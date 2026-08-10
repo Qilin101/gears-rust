@@ -137,6 +137,15 @@ fn provider_conflict_maps_to_409() {
 }
 
 #[test]
+fn provider_not_owned_maps_to_403() {
+    assert_mapping(
+        DomainError::provider_not_owned("openai"),
+        403,
+        "gts.cf.core.errors.err.v1~cf.core.err.permission_denied",
+    );
+}
+
+#[test]
 fn provider_disabled_maps_to_403() {
     assert_mapping(
         DomainError::provider_disabled(Uuid::nil()),
@@ -209,6 +218,7 @@ fn all_error_variants_have_valid_status() {
     let cases: Vec<(DomainError, u16)> = vec![
         (DomainError::model_not_found("m1"), 404),
         (DomainError::provider_not_found(Uuid::nil()), 404),
+        (DomainError::provider_not_owned("slug"), 403),
         (DomainError::model_deprecated("m1"), 404),
         (DomainError::model_not_approved("m1"), 403),
         (DomainError::forbidden("x"), 403),

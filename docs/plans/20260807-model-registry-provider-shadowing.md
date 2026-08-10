@@ -605,26 +605,26 @@ forbids (§3.1 Invariants: `model.tenant_id == provider.tenant_id`).
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 - Modify: `gears/model-registry/model-registry/src/api/rest/error_test.rs`
 
-- [ ] add `ProviderNotOwned { slug }` to `DomainError` with a constructor. Carry the ancestor's
+- [x] add `ProviderNotOwned { slug }` to `DomainError` with a constructor. Carry the ancestor's
       `owner_tenant_id` in the log/trace only, not in the variant — DESIGN §4's table does not
       require it and a 403 body should not leak another tenant's UUID
-- [ ] add the matching `ModelRegistryError::ProviderNotOwned` and the `DomainError` → SDK mapping
-- [ ] map it to 403 / `permission_denied` in `api/rest/error.rs`, distinct from `ProviderNotFound`
+- [x] add the matching `ModelRegistryError::ProviderNotOwned` and the `DomainError` → SDK mapping
+- [x] map it to 403 / `permission_denied` in `api/rest/error.rs`, distinct from `ProviderNotFound`
       (nowhere in the chain) and `Forbidden` (a PDP denial)
-- [ ] resolve the provider **own-tenant-only** in `create_model`; drop the
+- [x] resolve the provider **own-tenant-only** in `create_model`; drop the
       `AccessScope::for_tenants([caller, provider_owner])` widening entirely
-- [ ] return `ProviderNotOwned` when the slug resolves only in an ancestor (E1/E2), and
+- [x] return `ProviderNotOwned` when the slug resolves only in an ancestor (E1/E2), and
       `ProviderNotFoundBySlug` (404) — not `Validation` (400) — when it resolves nowhere (E3)
-- [ ] remove or narrow `find_visible_provider` to its remaining callers, if any
-- [ ] decide the repository's own unresolved-slug error (`model_repo.rs:160-163` raises
+- [x] remove or narrow `find_visible_provider` to its remaining callers, if any
+- [x] decide the repository's own unresolved-slug error (`model_repo.rs:160-163` raises
       `Validation`): align it with E3's 404 or record in-code that it is deliberately left, being
       unreachable behind the service pre-check (a TOCTOU-only path)
-- [ ] invert `test_create_model_with_inherited_provider` (`service.rs:2102`) to expect
+- [x] invert `test_create_model_with_inherited_provider` (`service.rs:2102`) to expect
       `ProviderNotOwned` (G1)
-- [ ] write a test asserting an unknown slug yields `ProviderNotFoundBySlug`, not `Validation`
-- [ ] write a REST error-mapping test asserting `ProviderNotOwned` → 403 `permission_denied`
-- [ ] write an integration test asserting a model created against an own-tenant provider still succeeds
-- [ ] run tests - must pass before task 10
+- [x] write a test asserting an unknown slug yields `ProviderNotFoundBySlug`, not `Validation`
+- [x] write a REST error-mapping test asserting `ProviderNotOwned` → 403 `permission_denied`
+- [x] write an integration test asserting a model created against an own-tenant provider still succeeds
+- [x] run tests - must pass before task 10
 
 ### Task 10: `list_tenant_models_management` on the service, trait and client (F2, F3-SDK, F5)
 

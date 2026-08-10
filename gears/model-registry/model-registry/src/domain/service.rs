@@ -29,8 +29,8 @@ use uuid::Uuid;
 use super::cache::{CacheService, SlugOwnership, cache_key};
 use super::error::DomainError;
 use super::inheritance::{
-    AncestorFailure, InheritanceContext, build_chain_providers, cache_ttl_seconds, find_in_chain,
-    merge_inherited_page, resolve_ancestors,
+    AncestorFailure, build_chain_providers, cache_ttl_seconds, find_in_chain, merge_inherited_page,
+    resolve_ancestors,
 };
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
@@ -599,13 +599,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
         //    query error (B5). A skipped ancestor would un-shadow an earlier one.
         let conn = &conn;
-        let chain =
-            build_chain_providers(&inheritance, |scope| async move {
-                self.provider_repo
-                    .list_all_for_tenant(conn, &scope)
-                    .await
-            })
-            .await?;
+        let chain = build_chain_providers(&inheritance, |scope| async move {
+            self.provider_repo.list_all_for_tenant(conn, &scope).await
+        })
+        .await?;
 
         // 4. Get own-tenant models with ListVisibility::Eval.
         //    Skip own tenant when its allow-list slice is empty (B3) —
@@ -685,29 +682,57 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::CREATE)
             .await?;
 
-        // 3. Resolve ancestor chain
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        // 3. Resolve the provider **own-tenant-only** (E1). If the slug exists
+        //    only in an ancestor tenant, the caller does not own it and may not
+        //    create models against it (§3.1 Invariants).
         let conn = self.db.conn().map_err(DomainError::from)?;
+        let conn = &conn;
 
-        // 4. Find the provider in own or ancestor tenants, verify it is
-        //    active (not disabled), and build a scope that can resolve the FK.
-        let (provider_tenant_id, provider) = self
-            .find_visible_provider(&conn, &inheritance, &req.provider_slug)
-            .await?;
+        let own_scope = AccessScope::for_tenant(tenant_id);
+        let provider = match self
+            .provider_repo
+            .find_by_slug(conn, &own_scope, &req.provider_slug)
+            .await
+        {
+            Ok(provider) => provider,
+            Err(e @ DomainError::ProviderNotFoundBySlug { .. }) => {
+                // The slug does not exist in the caller's tenant. Check ancestors
+                // to decide whether it is "not found anywhere" (E3 → 404) or
+                // "found in an ancestor" (E1/E2 → 403).
+                let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+                match find_in_chain(
+                    &inheritance,
+                    &own_scope,
+                    |e| matches!(e, DomainError::ProviderNotFoundBySlug { .. }),
+                    |scope| async move {
+                        self.provider_repo
+                            .find_by_slug(conn, &scope, &req.provider_slug)
+                            .await
+                    },
+                )
+                .await?
+                {
+                    Some((_, _)) => {
+                        return Err(DomainError::provider_not_owned(&req.provider_slug));
+                    }
+                    None => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         if !matches!(provider.status, crate::ProviderStatus::Active) {
             return Err(DomainError::ProviderDisabled { id: provider.id });
         }
 
-        let scope = AccessScope::for_tenants(vec![tenant_id, provider_tenant_id]);
-
-        // 5. Create via repo (handles canonical_id derivation, approval default)
+        // 4. Create via repo with own-tenant scope only (no cross-tenant
+        //    widening — model.tenant_id MUST equal provider.tenant_id).
         let model = self
             .model_repo
-            .create(&conn, &scope, tenant_id, req)
+            .create(conn, &own_scope, tenant_id, req)
             .await?;
 
-        // 6. Invalidate own tenant cache
+        // 5. Invalidate own tenant cache
         self.cache.invalidate_tenant(tenant_id).await;
 
         Ok(model)
@@ -794,35 +819,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         self.cache.invalidate_tenant(tenant_id).await;
 
         Ok(())
-    }
-
-    /// Resolve a provider slug against the tenant chain, returning the owning
-    /// tenant ID and the provider itself.
-    ///
-    /// Searches the own tenant first, then ancestors in chain order, so a child
-    /// tenant's provider shadows an inherited one with the same slug.
-    ///
-    /// Returns a `Validation` error when the slug does not exist in any tenant
-    /// in the chain.
-    async fn find_visible_provider(
-        &self,
-        conn: &impl toolkit_db::secure::DBRunner,
-        inheritance: &InheritanceContext,
-        slug: &str,
-    ) -> Result<(Uuid, ProviderV1), DomainError> {
-        let own_scope = AccessScope::for_tenant(inheritance.tenant_id());
-        find_in_chain(
-            inheritance,
-            &own_scope,
-            |e| matches!(e, DomainError::ProviderNotFoundBySlug { .. }),
-            |scope| async move { self.provider_repo.find_by_slug(conn, &scope, slug).await },
-        )
-        .await?
-        .ok_or_else(|| {
-            DomainError::validation(format!(
-                "provider with slug `{slug}` not found in own or ancestor tenants"
-            ))
-        })
     }
 }
 
@@ -3316,20 +3312,22 @@ mod tests {
 
         let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
-        // Child tenant should be able to create a model referencing the parent's provider.
+        // Child tenant must NOT create a model referencing a parent's provider (E1).
         let req = make_create_model_req(&provider_slug, "gpt-4o");
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(child_tid)
             .build()
             .expect("ctx");
-        let model = service
+        let err = service
             .create_model(&ctx, &req)
             .await
-            .expect("create model with inherited provider");
+            .expect_err("inherited provider should be rejected");
 
-        assert_eq!(model.canonical_id, "openai::gpt-4o");
-        assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
+        assert!(
+            matches!(&err, DomainError::ProviderNotOwned { slug } if slug == "openai"),
+            "expected ProviderNotOwned('openai'), got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -3350,8 +3348,8 @@ mod tests {
             .expect_err("nonexistent provider should fail");
 
         assert!(
-            matches!(&err, DomainError::Validation { .. }),
-            "expected Validation for missing provider, got: {err:?}"
+            matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "nonexistent"),
+            "expected ProviderNotFoundBySlug('nonexistent'), got: {err:?}"
         );
     }
 
