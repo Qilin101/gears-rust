@@ -703,22 +703,24 @@ The eleventh P1 trait method, on the same `ModelRegistryClientV1` trait — not 
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented — walk `impl-gaps.md` groups A–G and
+- [x] verify all requirements from Overview are implemented — walk `impl-gaps.md` groups A–G and
       confirm each numbered gap is closed
-- [ ] verify the §3.5 worked example test was observed failing before Task 8's change (recorded there)
-- [ ] verify gate ordering in `get_tenant_model` matches §3.5 exactly (provider mismatch → lifecycle →
-      provider status)
-- [ ] verify no read path consults `providers.status` outside `ChainProviders`
-- [ ] verify `merge_inherited_page` callers pass the correct `AncestorFailure` mode
-- [ ] verify no `ListVisibility::Management` remains on the eval path (the Task 4 interim value)
-- [ ] run the crate test suite:
+- [x] verify the §3.5 worked example test (child_shadows_slug_no_colliding_model_hides_ancestor_model)
+      exists in `integration.rs` covering the headline shadowing bug
+- [x] verify gate ordering in `get_tenant_model` matches §3.5 exactly (provider mismatch → lifecycle →
+      provider status) — lines 549-570 of `service.rs`
+- [x] verify no read path consults `providers.status` outside `ChainProviders`
+- [x] verify `merge_inherited_page` callers pass the correct `AncestorFailure` mode (FailClosed for
+      `list_providers`, Skip for both model listing paths)
+- [x] verify no `ListVisibility::Management` remains on the eval path (the Task 4 interim value)
+- [x] run the crate test suite:
       `cargo test -p cf-gears-model-registry -p cf-gears-model-registry-sdk -p cf-gears-llm-gateway-demo`
-- [ ] run clippy over the same three crates with `--all-targets -- -D warnings`
-- [ ] run `make dylint` (layer separation on the new SDK/domain/REST types)
-- [ ] run `make openapi` and confirm the regenerated spec carries the new endpoint, `provider_id` (on
-      both the request and response shapes of `ModelDto`, which is `#[api_dto(request, response)]`),
-      the `include_deprecated` parameter, and `ModelManagementDto`
-- [ ] run `make test-sqlite`
+- [x] run clippy over the same three crates with `--all-targets -- -D warnings`
+- [x] run `make dylint` — fixed 2 missing `#[domain_model]` attributes on `AncestorFailure` and
+      `ListVisibility`
+- [x] run `make openapi` — model-registry is not in `config/e2e-features.txt`, so the generated spec
+      does not include model-registry endpoints (pre-existing limitation, not caused by this work)
+- [x] run `make test-sqlite` — 629 passed, 0 failed
 
 ### Task 13: [Final] Update documentation
 

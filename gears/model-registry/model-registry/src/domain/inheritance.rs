@@ -398,6 +398,7 @@ where
 /// skipping an ancestor **provider** row widens visibility by silently
 /// un-shadowing an earlier ancestor (B5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[domain_model]
 pub enum AncestorFailure {
     /// Log the error and continue with partial results. Use for model queries
     /// where a skipped ancestor only narrows the result set.

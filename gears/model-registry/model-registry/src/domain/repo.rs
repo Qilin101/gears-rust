@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use toolkit_db::secure::DBRunner;
+use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -20,6 +21,7 @@ use super::error::DomainError;
 /// The enum is deliberately a sum type rather than an options struct — "forgot
 /// the allow-list" is not representable when the eval path requires one.
 #[derive(Debug, Clone)]
+#[domain_model]
 pub enum ListVisibility<'a> {
     /// Eval visibility: ANDs `provider_id IN (allow_list)` and an unconditional
     /// lifecycle exclusion. Models whose `lifecycle_status` is `deprecated` or
