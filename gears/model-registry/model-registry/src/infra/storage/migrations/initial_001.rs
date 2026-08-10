@@ -141,6 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_models_cap_vision       ON models (cap_vision);
 CREATE INDEX IF NOT EXISTS idx_models_cap_fn_call      ON models (cap_function_calling);
 CREATE INDEX IF NOT EXISTS idx_models_cap_streaming    ON models (cap_streaming);
 CREATE INDEX IF NOT EXISTS idx_models_cap_reasoning    ON models (cap_reasoning_effort);
+CREATE INDEX IF NOT EXISTS idx_models_tenant_provider ON models (tenant_id, provider_id);
 ",
         );
 
@@ -395,6 +396,7 @@ mod tests {
             "idx_models_cap_fn_call",
             "idx_models_cap_streaming",
             "idx_models_cap_reasoning",
+            "idx_models_tenant_provider",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

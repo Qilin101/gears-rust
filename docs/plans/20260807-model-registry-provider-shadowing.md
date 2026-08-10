@@ -393,11 +393,11 @@ would break the SQLite dev/test path.
 **Files:**
 - Modify: `gears/model-registry/model-registry/src/infra/storage/migrations/initial_001.rs`
 
-- [ ] add `CREATE INDEX IF NOT EXISTS idx_models_tenant_provider ON models (tenant_id, provider_id);`
+- [x] add `CREATE INDEX IF NOT EXISTS idx_models_tenant_provider ON models (tenant_id, provider_id);`
       to the models index block
-- [ ] confirm the statement is emitted for both the SQLite and PostgreSQL rendering of the migration SQL
-- [ ] write a migration test asserting the index exists after `run_migrations_for_testing` on SQLite
-- [ ] run tests - must pass before task 3
+- [x] confirm the statement is emitted for both the SQLite and PostgreSQL rendering of the migration SQL
+- [x] write a migration test asserting the index exists after `run_migrations_for_testing` on SQLite
+- [x] run tests - must pass before task 3
 
 ### Task 3: Build the `ChainProviders` primitive (A1)
 
