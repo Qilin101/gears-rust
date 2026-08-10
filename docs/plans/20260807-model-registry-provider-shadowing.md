@@ -444,28 +444,28 @@ lifecycle escape hatch in the same edit — it lives in the function being rewri
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs` (call site + mock repos)
 - Modify: `gears/model-registry/model-registry/src/domain/local_client.rs` (mock repos in tests)
 
-- [ ] add `ListVisibility<'a> { Eval { allow_list: &'a [Uuid] }, Management { include_deprecated: bool } }`
+- [x] add `ListVisibility<'a> { Eval { allow_list: &'a [Uuid] }, Management { include_deprecated: bool } }`
       to `domain/repo.rs` and thread it through `ModelRepository::list`
-- [ ] in `model_repo.rs`, AND `provider_id IN allow_list` and the unconditional lifecycle exclusion
+- [x] in `model_repo.rs`, AND `provider_id IN allow_list` and the unconditional lifecycle exclusion
       onto the `Eval` query; apply **no** mandatory predicates on `Management` beyond the
       `include_deprecated=false` terminal-lifecycle drop
-- [ ] **delete** `filter_references_lifecycle_status` and its call site — the lifecycle exclusion is
+- [x] **delete** `filter_references_lifecycle_status` and its call site — the lifecycle exclusion is
       now unconditional on the eval path (B4, §3.3 "Lifecycle exclusion (eval, unconditional)")
-- [ ] pass `ListVisibility::Management { include_deprecated: false }` at **both** existing
+- [x] pass `ListVisibility::Management { include_deprecated: false }` at **both** existing
       `list_tenant_models` call sites (own page and the ancestor closure) as the interim value.
       ⚠️ Do **not** pass `Eval` here: no allow-list exists until Task 8 builds `ChainProviders`, and
       the ancestor closure shares the same `list` call, so a caller's own-tenant slice would filter
       out every ancestor row and break four existing inheritance tests. `Management` with
       `include_deprecated: false` is exactly behavior-preserving *plus* B4
-- [ ] update the mock `ModelRepository` impls in `service.rs` and `local_client.rs` tests
-- [ ] write repository tests: `Eval` with a non-empty allow-list returns only matching rows; `Eval`
+- [x] update the mock `ModelRepository` impls in `service.rs` and `local_client.rs` tests
+- [x] write repository tests: `Eval` with a non-empty allow-list returns only matching rows; `Eval`
       with an empty allow-list returns an empty page
-- [ ] write a repository test asserting `$filter=lifecycle_status eq 'deprecated'` on `Eval` returns
+- [x] write a repository test asserting `$filter=lifecycle_status eq 'deprecated'` on `Eval` returns
       an **empty page** (the escape hatch is gone) and that `Management { include_deprecated: true }`
       returns those same rows
-- [ ] write a repository test asserting `Management` returns rows whose `provider_id` is outside the
+- [x] write a repository test asserting `Management` returns rows whose `provider_id` is outside the
       allow-list
-- [ ] run tests - must pass before task 5
+- [x] run tests - must pass before task 5
 
 ### Task 5: Fail closed on ancestor provider queries (B5, G6)
 

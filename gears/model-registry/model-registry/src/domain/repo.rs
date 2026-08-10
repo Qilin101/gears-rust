@@ -11,6 +11,35 @@ use crate::{
 
 use super::error::DomainError;
 
+/// Controls which models are visible in a repository `list` query.
+///
+/// Separates the eval path (mandatory predicates: provider visibility + lifecycle
+/// exclusion) from the management path (no mandatory predicates beyond an optional
+/// deprecated/sunset exclusion).
+///
+/// The enum is deliberately a sum type rather than an options struct — "forgot
+/// the allow-list" is not representable when the eval path requires one.
+#[derive(Debug, Clone)]
+pub enum ListVisibility<'a> {
+    /// Eval visibility: ANDs `provider_id IN (allow_list)` and an unconditional
+    /// lifecycle exclusion. Models whose `lifecycle_status` is `deprecated` or
+    /// `sunset` are never returned through this path, regardless of the ``OData $filter`` in the query.
+    Eval {
+        /// Provider IDs allowed for this tenant. Must be a non-empty slice to
+        /// produce any results — an empty slice yields an empty page.
+        allow_list: &'a [Uuid],
+    },
+    /// Management visibility: no mandatory predicates. `include_deprecated`
+    /// controls whether terminal-lifecycle models (`deprecated` / `sunset`) are
+    /// returned; when `false`, they are excluded (the default for the management
+    /// listing).
+    Management {
+        /// When `false`, models whose `lifecycle_status` is `deprecated` or
+        /// `sunset` are excluded from results.
+        include_deprecated: bool,
+    },
+}
+
 /// Repository trait for provider persistence.
 ///
 /// Every method accepts a [`DBRunner`] connection and an [`AccessScope`] for
@@ -107,13 +136,20 @@ pub trait ModelRepository: Send + Sync {
 
     /// List models matching the `OData` query within the given access scope.
     ///
-    /// Filtering operates entirely on `models` columns. Deprecated models are
-    /// excluded by default unless the filter explicitly includes them.
+    /// Filtering operates entirely on `models` columns. The `visibility` mode
+    /// controls which mandatory predicates are applied:
+    ///
+    /// - [`ListVisibility::Eval`]: ANDs `provider_id IN (allow_list)` and an
+    ///   unconditional lifecycle exclusion (deprecated/sunset models are never
+    ///   returned, regardless of the `$filter`).
+    /// - [`ListVisibility::Management`]: no mandatory predicates beyond the
+    ///   optional `include_deprecated` exclusion.
     async fn list(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
+        visibility: ListVisibility<'_>,
     ) -> Result<Page<ModelV1>, DomainError>;
 
     /// Create a new model.

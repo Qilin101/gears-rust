@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{DBRunner, SecureEntityExt, secure_update_with_scope};
-use toolkit_odata::{ODataQuery, Page, SortDir, normalize_filter_for_hash};
+use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::repo::ModelRepository;
+use crate::domain::repo::{ListVisibility, ModelRepository};
 use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1};
 
 use super::entity::{self, model, provider};
@@ -37,19 +37,6 @@ impl ModelRepositoryImpl {
     pub fn new() -> Self {
         Self
     }
-}
-
-/// Check whether an `OData` filter expression references `lifecycle_status`.
-///
-/// When the caller explicitly filters on `lifecycle_status` (e.g.
-/// `lifecycle_status eq 'deprecated'`), the base exclusion of deprecated
-/// / sunset models is omitted so their filter works as intended.
-#[must_use]
-fn filter_references_lifecycle_status(query: &ODataQuery) -> bool {
-    query.filter.as_ref().is_some_and(|expr| {
-        let normalized = normalize_filter_for_hash(expr);
-        normalized.contains("id(lifecycle_status)")
-    })
 }
 
 #[async_trait]
@@ -77,13 +64,29 @@ impl ModelRepository for ModelRepositoryImpl {
         conn: &impl DBRunner,
         scope: &AccessScope,
         query: &ODataQuery,
+        visibility: ListVisibility<'_>,
     ) -> Result<Page<ModelV1>, DomainError> {
-        // Exclude deprecated / sunset models by default so the default list
-        // shows only active, non-deprecated models. If the caller explicitly
-        // wants deprecated models, they must add `lifecycle_status eq 'deprecated'`
-        // to the OData filter — detected below to avoid a contradictory AND.
         let mut base = model::Entity::find().secure().scope_with(scope);
-        if !filter_references_lifecycle_status(query) {
+
+        // ── Eval path ──────────────────────────────────────────────────────
+        // Mandatory predicates: allow-list membership + unconditional lifecycle
+        // exclusion (DESIGN §3.3). The OData `$filter` is ANDed on top; even
+        // a `$filter=lifecycle_status eq 'deprecated'` cannot escape the eval
+        // lifecycle exclusion — the escape hatch (B4) is removed here.
+        if let ListVisibility::Eval { allow_list } = visibility {
+            base = base.filter(
+                Condition::all()
+                    .add(model::Column::ProviderId.is_in(allow_list.to_vec()))
+                    .add(model::Column::LifecycleStatus.ne("deprecated"))
+                    .add(model::Column::LifecycleStatus.ne("sunset")),
+            );
+        }
+
+        // ── Management path ────────────────────────────────────────────────
+        // No mandatory predicates beyond the optional deprecated/sunset exclusion.
+        if let ListVisibility::Management { include_deprecated } = visibility
+            && !include_deprecated
+        {
             base = base.filter(
                 Condition::all()
                     .add(model::Column::LifecycleStatus.ne("deprecated"))
@@ -250,7 +253,7 @@ mod tests {
     use toolkit_db::migration_runner::run_migrations_for_testing;
     use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 
-    use crate::domain::repo::ProviderRepository;
+    use crate::domain::repo::{ListVisibility, ProviderRepository};
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
@@ -704,10 +707,18 @@ mod tests {
             .await
             .expect("soft delete");
 
-        // Default list must NOT include the deprecated model.
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &ODataQuery::default())
-            .await
-            .expect("list should succeed");
+        // Default list (Management, no deprecated) must NOT include the deprecated model.
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("list should succeed");
         assert!(
             page.items.is_empty(),
             "deprecated model should be hidden from default list"
@@ -768,9 +779,17 @@ mod tests {
         .await
         .expect("create gpt-4o-mini");
 
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &ODataQuery::default())
-            .await
-            .expect("list should succeed");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("list should succeed");
         assert!(!page.items.is_empty(), "should list non-deprecated models");
     }
 
@@ -807,6 +826,9 @@ mod tests {
             &conn,
             &scope_for(tenant_b),
             &ODataQuery::default(),
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
         )
         .await
         .expect("list should succeed");
@@ -842,9 +864,17 @@ mod tests {
             limit: Some(2),
             ..Default::default()
         };
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &query)
-            .await
-            .expect("list with limit");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &query,
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("list with limit");
         assert_eq!(page.items.len(), 2);
     }
 
@@ -890,9 +920,17 @@ mod tests {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()
         };
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &query)
-            .await
-            .expect("filtered list");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &query,
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("filtered list");
         assert_eq!(page.items.len(), 1);
         assert_eq!(
             page.items[0].approval_status,
@@ -930,9 +968,17 @@ mod tests {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()
         };
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &query)
-            .await
-            .expect("filtered list");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &query,
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("filtered list");
         assert_eq!(page.items.len(), 1);
     }
 
@@ -964,10 +1010,325 @@ mod tests {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()
         };
-        let page = ModelRepository::list(&model_repo, &conn, &scope, &query)
-            .await
-            .expect("filtered list");
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &query,
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("filtered list");
         assert_eq!(page.items.len(), 1);
+    }
+
+    // =======================================================================
+    // ListVisibility — Eval with allow-list filtering
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_list_eval_with_non_empty_allow_list() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        // Create two providers.
+        let (openai_id, openai_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        let (_anthropic_id, anthropic_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "anthropic").await;
+
+        // Create a model under each provider.
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&openai_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create openai model");
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&anthropic_slug, "claude-3"),
+        )
+        .await
+        .expect("create anthropic model");
+
+        // Eval with allow-list containing only openai's provider_id.
+        let allow_list = vec![openai_id];
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Eval {
+                allow_list: &allow_list,
+            },
+        )
+        .await
+        .expect("list with allow-list");
+
+        // Only the openai model should be returned.
+        assert_eq!(page.items.len(), 1, "only the openai model should be visible");
+        assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn model_list_eval_with_empty_allow_list() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Eval with empty allow-list — no models should be returned.
+        let allow_list: Vec<Uuid> = vec![];
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Eval {
+                allow_list: &allow_list,
+            },
+        )
+        .await
+        .expect("list with empty allow-list");
+
+        assert!(
+            page.items.is_empty(),
+            "empty allow-list should yield empty results"
+        );
+    }
+
+    // =======================================================================
+    // ListVisibility — Eval lifecycle escape hatch removed (B4)
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_list_eval_hides_deprecated_even_with_filter() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Create a model and then soft-delete it.
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+        // Create another model that stays active.
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+        )
+        .await
+        .expect("create gpt-4o-mini");
+
+        // Soft-delete the first one.
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete");
+
+        // Eval with $filter=lifecycle_status eq 'deprecated' — should return
+        // empty because the eval path unconditionally excludes deprecated/sunset
+        // and the escape hatch (B4) has been removed.
+        let parsed = toolkit_odata::parse_filter_string("lifecycle_status eq 'deprecated'")
+            .expect("parse filter");
+        let query = ODataQuery {
+            filter: Some(Box::new(parsed.into_expr())),
+            ..Default::default()
+        };
+        let allow_list = vec![provider_id];
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &query,
+            ListVisibility::Eval {
+                allow_list: &allow_list,
+            },
+        )
+        .await
+        .expect("eval list with deprecated filter");
+
+        // The eval path must return empty — no lifecycle_status filter can
+        // escape the unconditional exclusion.
+        assert!(
+            page.items.is_empty(),
+            "eval path must unconditionally exclude deprecated models"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_list_management_include_deprecated_returns_deprecated_rows() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Create two models.
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+        )
+        .await
+        .expect("create gpt-4o-mini");
+
+        // Soft-delete the first one.
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+            .await
+            .expect("soft delete");
+
+        // Management with include_deprecated: true — should return both.
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Management {
+                include_deprecated: true,
+            },
+        )
+        .await
+        .expect("management list with include_deprecated");
+
+        assert_eq!(
+            page.items.len(),
+            2,
+            "management include_deprecated should return all rows"
+        );
+
+        // Verify the deprecated model IS included.
+        let canonical_ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert!(
+            canonical_ids.contains(&"openai::gpt-4o"),
+            "deprecated model must be included"
+        );
+        assert!(
+            canonical_ids.contains(&"openai::gpt-4o-mini"),
+            "active model must be included"
+        );
+    }
+
+    // =======================================================================
+    // ListVisibility — Management returns rows outside allow-list
+    // =======================================================================
+
+    #[tokio::test]
+    async fn model_list_management_returns_rows_outside_allow_list() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        // Create two providers.
+        let (_openai_id, openai_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        let (_anthropic_id, anthropic_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "anthropic").await;
+
+        // Create a model under each provider.
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&openai_slug, "gpt-4o"),
+        )
+        .await
+        .expect("create openai model");
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &make_create_model_req(&anthropic_slug, "claude-3"),
+        )
+        .await
+        .expect("create anthropic model");
+
+        // Management listing must return ALL rows regardless of provider_id.
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Management {
+                include_deprecated: false,
+            },
+        )
+        .await
+        .expect("management list");
+
+        assert_eq!(
+            page.items.len(),
+            2,
+            "management path must return all rows regardless of provider_id"
+        );
+        let canonical_ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert!(canonical_ids.contains(&"openai::gpt-4o"));
+        assert!(canonical_ids.contains(&"anthropic::claude-3"));
     }
 
     // =======================================================================

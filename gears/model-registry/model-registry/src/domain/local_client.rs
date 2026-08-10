@@ -174,7 +174,7 @@ mod tests {
     use super::*;
     use crate::domain::cache::InMemoryCache;
     use crate::domain::error::DomainError;
-    use crate::domain::repo::{ModelRepository, ProviderRepository};
+    use crate::domain::repo::{ListVisibility, ModelRepository, ProviderRepository};
     use crate::{
         CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryError, ModelV1, ProviderV1,
         UpdateModelRequestV1, UpdateProviderRequestV1,
@@ -267,6 +267,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &ODataQuery,
+            _: ListVisibility<'_>,
         ) -> Result<toolkit_odata::Page<ModelV1>, DomainError> {
             Err(DomainError::internal("not implemented"))
         }

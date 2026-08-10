@@ -31,7 +31,7 @@ use super::error::DomainError;
 use super::inheritance::{
     InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page, resolve_ancestors,
 };
-use super::repo::{ModelRepository, ProviderRepository};
+use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
 use crate::config::ModelRegistryConfig;
 use crate::{CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1};
@@ -483,7 +483,19 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant models with OData
-        let own_page = self.model_repo.list(&conn, &own_scope, query).await?;
+        // Interim value: `Management` with `include_deprecated: false` keeps
+        // behavior-preserving semantics until Task 8 wires `ChainProviders`.
+        let own_page = self
+            .model_repo
+            .list(
+                &conn,
+                &own_scope,
+                query,
+                ListVisibility::Management {
+                    include_deprecated: false,
+                },
+            )
+            .await?;
 
         // 4. Merge the inherited set, shadowing ancestor models by canonical_id.
         let conn = &conn;
@@ -493,7 +505,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             query,
             |m| m.canonical_id.clone(),
             |scope, ancestor_query| async move {
-                self.model_repo.list(conn, &scope, &ancestor_query).await
+                self.model_repo
+                    .list(conn, &scope, &ancestor_query, ListVisibility::Management {
+                        include_deprecated: false,
+                    })
+                    .await
             },
         )
         .await)
