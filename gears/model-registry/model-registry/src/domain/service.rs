@@ -555,11 +555,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         }
 
         //    Gate 2: terminal lifecycle → ModelDeprecated.
+        //    NOTE: We keep the cached entry even though the model is deprecated
+        //    — the state is terminal, so re-fetching from DB every time just to
+        //    return the same error wastes a round-trip.
         if matches!(
             model.lifecycle_status,
             crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
         ) {
-            self.cache.delete(&model_key).await;
             return Err(DomainError::model_deprecated(canonical_id));
         }
 
@@ -782,6 +784,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     ) -> Result<crate::ModelV1, DomainError> {
         // 1. Validate provider_slug format
         Self::validate_slug(&req.provider_slug)?;
+
+        // 1b. Reject models created directly in a terminal lifecycle state.
+        if matches!(req.lifecycle_status, crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset) {
+            return Err(DomainError::validation(format!(
+                "cannot create a model with terminal lifecycle status `{:?}`",
+                req.lifecycle_status,
+            )));
+        }
 
         // 2. Verify authorization
         let tenant_id = ctx.subject_tenant_id();
@@ -1697,7 +1707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_tenant_models_skip_ancestor_query_error() {
+    async fn test_list_tenant_models_skips_ancestor_with_empty_page() {
         // Given: a service with real repos and TwoAncestorsResolver where the
         // parent has no provider/models. The ancestor query succeeds but returns
         // empty — this proves Skip returns partial results even with empty
@@ -3726,6 +3736,89 @@ mod tests {
             .expect("create model");
 
         assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn test_create_model_disabled_provider_rejected() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Disable the provider via the repository.
+        let update = crate::UpdateProviderRequestV1 {
+            status: Some(crate::ProviderStatus::Disabled),
+            ..Default::default()
+        };
+        provider_repo
+            .update(&conn, &scope, provider_id, &update)
+            .await
+            .expect("disable provider");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .create_model(&ctx, &req)
+            .await
+            .expect_err("disabled provider should be rejected");
+
+        assert!(
+            matches!(&err, DomainError::ProviderDisabled { .. }),
+            "expected ProviderDisabled, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_model_deprecated_lifecycle_rejected() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        req.lifecycle_status = crate::LifecycleStatus::Deprecated;
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .create_model(&ctx, &req)
+            .await
+            .expect_err("terminal lifecycle should be rejected");
+
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected Validation error for terminal lifecycle, got: {err:?}"
+        );
+
+        // Also verify Sunset is rejected.
+        req.lifecycle_status = crate::LifecycleStatus::Sunset;
+        let err = service
+            .create_model(&ctx, &req)
+            .await
+            .expect_err("Sunset lifecycle should also be rejected");
+
+        assert!(
+            matches!(&err, DomainError::Validation { .. }),
+            "expected Validation error for Sunset lifecycle, got: {err:?}"
+        );
     }
 
     #[tokio::test]

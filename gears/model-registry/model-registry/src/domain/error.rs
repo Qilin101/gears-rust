@@ -49,7 +49,7 @@ pub enum DomainError {
     ProviderConflict { slug: String },
 
     /// Provider has existing models that must be removed first.
-    #[error("provider has existing models: cannot delete provider with {model_count} model(s)")]
+    #[error("provider has existing models: cannot delete provider {id}")]
     ProviderHasModels { id: Uuid, model_count: u64 },
 
     /// Invalid state transition.

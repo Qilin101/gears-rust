@@ -25,6 +25,17 @@ All P1 endpoints are implemented under `/model-registry/v1/`. Each endpoint requ
 | `POST` | `/model-registry/v1/models` | Register a new model |
 | `PATCH` | `/model-registry/v1/models/{canonical_id}` | Partial update including approval status |
 | `DELETE` | `/model-registry/v1/models/{canonical_id}` | Soft-delete (marks deprecated) |
+| `GET` | `/model-registry/v1/admin/models` | Management listing with shadow/disabled/eval flags (tenant-admin/platform-admin only) |
+
+### Management DTO Fields
+
+The `GET /admin/models` response wraps `ModelV1` with three read-only flags in `ModelManagementV1`:
+
+- **`shadowed`** (bool) — the model's provider lost slug resolution in this tenant's chain; the model is excluded from eval listing but retained for audit
+- **`provider_disabled`** (bool) — the model's provider is disabled; the model is excluded from eval listing but retained for audit
+- **`available_for_eval`** (bool) — server-computed conjunction of every eval predicate (model approved, provider active, not shadowed, not deprecated/sunset)
+
+Deprecated models are excluded from the default management listing; pass `include_deprecated=true` to include them.
 
 ### OData Filterable Fields
 

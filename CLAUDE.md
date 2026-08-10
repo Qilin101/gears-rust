@@ -31,11 +31,15 @@ make setup                         # Install required dev tools
 make quickstart                    # Run server with SQLite (config/quickstart.yaml)
 make example                       # Run with example gears (users-info, etc.)
 cargo run --bin cf-gears-example-server -- --config config/quickstart.yaml run
+cargo run --bin cf-gears-example-server \
+  --features model-registry,static-authn,static-authz,static-tenants,static-credstore \
+  -- --config config/quickstart.yaml run  # With model-registry gear
 
 # Testing
 cargo test --workspace             # All tests
 cargo test -p <crate_name>         # Single crate tests
 cargo test -p <crate> -- <test_fn> # Single test function
+make -C gears/model-registry check # Model-registry-specific: fmt + clippy + test + dylint
 make test-sqlite                   # SQLite integration tests
 make test-pg                       # PostgreSQL integration tests
 

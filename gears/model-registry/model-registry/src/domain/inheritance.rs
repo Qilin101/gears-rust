@@ -21,7 +21,7 @@ use tenant_resolver_sdk::{
     BarrierMode, GetAncestorsOptions, TenantId, TenantRef, TenantResolverClient,
 };
 use toolkit_macros::domain_model;
-use toolkit_odata::{ODataQuery, Page};
+use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
@@ -491,11 +491,34 @@ where
         }
     }
 
-    let mut merged: Vec<T> = inheritance
+    let merged_unfiltered: Vec<(Ownership, T)> = inheritance
         .apply_additive_visibility(tagged, key_fn)
+        .into_iter()
+        .collect();
+
+    let has_ancestor_items = merged_unfiltered
+        .iter()
+        .any(|(ownership, _)| matches!(ownership, Ownership::Inherited));
+
+    let merged: Vec<T> = merged_unfiltered
         .into_iter()
         .map(|(_ownership, item)| item)
         .collect();
+
+    // When inheritance contributed items, cursor-based pagination is unreliable
+    // (the cursor references own-tenant positions, but the merged result includes
+    // ancestor rows too). Disable cursors to avoid skipping/duplicating items.
+    let page_info = if has_ancestor_items {
+        PageInfo {
+            next_cursor: None,
+            prev_cursor: None,
+            limit: page_info.limit,
+        }
+    } else {
+        page_info
+    };
+
+    let mut merged = merged;
 
     if let Some(limit) = query.limit {
         merged.truncate(usize::try_from(limit).unwrap_or(usize::MAX));

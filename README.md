@@ -95,6 +95,11 @@ cargo run --bin cf-gears-example-server -- --config config/no-db.yaml run
 
 # Option 3: Run with mock in-memory database for testing
 cargo run --bin cf-gears-example-server -- --config config/quickstart.yaml --mock run
+
+# Option 4: Run with model-registry gear enabled
+cargo run --bin cf-gears-example-server \
+  --features model-registry,static-authn,static-authz,static-tenants,static-credstore \
+  -- --config config/quickstart.yaml run
 ```
 
 ### Example Configuration (config/quickstart.yaml)

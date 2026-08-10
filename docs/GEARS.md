@@ -116,8 +116,13 @@ Provide conversational capabilities (chat messages, conversation history) as a c
 #### Responsibility
 Maintain a catalog of available models with tenant-level availability and approval workflow.
 #### High Level Scenarios
-- [ ] p1 - get tenant model (availability check)
-- [ ] p1 - list tenant models with filtering
+- [x] p1 - get tenant model (availability check)
+- [x] p1 - list tenant models with filtering
+- [x] p1 - provider management (CRUD with slug-based shadowing)
+- [x] p1 - manual model management (create, read, update, soft-delete)
+- [x] p1 - admin management listing with shadow/disabled/eval flags
+- [x] p1 - tenant inheritance and slug-based shadowing
+- [x] p1 - eval-path model visibility with disabled/shadowed exclusion
 - [ ] p2 - model discovery from providers (via Outbound API Gateway)
 - [ ] p2 - model approval workflow (pending → approved | rejected | revoked)
 - [ ] p2 - capability tagging (embeddings, vision, tools, function calling)
@@ -127,7 +132,7 @@ Maintain a catalog of available models with tenant-level availability and approv
 - [PRD](../gears/model-registry/docs/PRD.md)
 - [Design](../gears/model-registry/docs/DESIGN.md)
 - [API](../gears/model-registry/README.md)
-- TODO: SDK link
+- [SDK](../gears/model-registry/model-registry-sdk/)
 
 ### Prompts Registry
 #### Responsibility
