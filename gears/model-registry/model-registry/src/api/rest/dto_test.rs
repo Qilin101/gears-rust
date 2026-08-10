@@ -168,6 +168,7 @@ fn model_dto_serializes() {
 
     let dto = ModelDto {
         id: Uuid::nil(),
+        provider_id: Uuid::nil(),
         canonical_id: "openai::gpt-4o".into(),
         lifecycle_status: "production".into(),
         approval_status: "approved".into(),
@@ -176,6 +177,7 @@ fn model_dto_serializes() {
 
     let json = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(json["id"], json!(Uuid::nil().to_string()));
+    assert_eq!(json["provider_id"], json!(Uuid::nil().to_string()));
     assert_eq!(json["canonical_id"], "openai::gpt-4o");
     assert_eq!(json["lifecycle_status"], "production");
     assert_eq!(json["approval_status"], "approved");
@@ -350,6 +352,7 @@ fn model_list_dto_serializes() {
     let dto = ModelListDto {
         items: vec![ModelDto {
             id: Uuid::nil(),
+            provider_id: Uuid::nil(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: "production".into(),
             approval_status: "approved".into(),
@@ -546,6 +549,7 @@ mod model_from_v1 {
     ) -> ModelV1 {
         ModelV1 {
             id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
+            provider_id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: lifecycle,
             approval_status: approval,

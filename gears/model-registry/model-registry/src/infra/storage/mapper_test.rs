@@ -360,6 +360,8 @@ fn model_entity_to_v1_openai() {
 
     let model: ModelV1 = model_entity_to_v1(entity).expect("model maps");
 
+    assert_eq!(model.id, test_model_id());
+    assert_eq!(model.provider_id, test_provider_id());
     assert_eq!(model.canonical_id, "openai::gpt-4o");
     assert_eq!(model.lifecycle_status, LifecycleStatus::Production);
     assert_eq!(model.approval_status, ApprovalStatus::Approved);

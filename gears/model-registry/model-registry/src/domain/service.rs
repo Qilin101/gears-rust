@@ -1406,6 +1406,7 @@ mod tests {
         // round-trip is needed.
         let deprecated_model: crate::ModelV1 = crate::ModelV1 {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            provider_id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
             canonical_id: "openai::gpt-4o-old".to_owned(),
             lifecycle_status: crate::LifecycleStatus::Deprecated,
             approval_status: crate::ApprovalStatus::Pending,
@@ -2170,6 +2171,7 @@ mod tests {
         stale_info.display_name = "stale".to_owned();
         let stale_model: crate::ModelV1 = crate::ModelV1 {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            provider_id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
             canonical_id: "openai::gpt-4o".to_owned(),
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: crate::ApprovalStatus::Pending,

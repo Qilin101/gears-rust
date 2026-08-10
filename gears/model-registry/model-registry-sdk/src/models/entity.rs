@@ -22,6 +22,10 @@ use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub id: Uuid,
+    /// Foreign key to the provider that owns this model.
+    /// The visibility key (§3.6): a model is visible in eval listings only
+    /// when `provider_id` is in the tenant's allow-list.
+    pub provider_id: Uuid,
     /// Format: `{provider_slug}::{provider_model_id}`.
     pub canonical_id: String,
     pub lifecycle_status: LifecycleStatus,
@@ -61,6 +65,7 @@ impl ModelV1<serde_json::Value> {
     {
         Ok(ModelV1 {
             id: self.id,
+            provider_id: self.provider_id,
             canonical_id: self.canonical_id,
             lifecycle_status: self.lifecycle_status,
             approval_status: self.approval_status,
@@ -143,6 +148,7 @@ mod tests {
     fn raw_model(gts_type: &str, provider_settings_json: serde_json::Value) -> ModelV1 {
         ModelV1 {
             id: Uuid::nil(),
+            provider_id: Uuid::nil(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: LifecycleStatus::Production,
             approval_status: ApprovalStatus::Approved,
@@ -311,6 +317,10 @@ mod tests {
             serde_json::Value::String("transformer".into()),
         );
         let typed: ModelV1<OpenAiSettingsV1> = m.try_into_typed().expect("openai matches");
+        // provider_id survives narrowing.
+        assert_eq!(typed.provider_id, Uuid::nil());
+        // canonical_id survives narrowing.
+        assert_eq!(typed.canonical_id, "openai::gpt-4o");
         assert_eq!(
             typed.info.additional_info.get("architecture"),
             Some(&serde_json::Value::String("transformer".into()))

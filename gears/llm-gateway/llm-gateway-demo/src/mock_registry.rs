@@ -284,6 +284,7 @@ fn compare(
 /// One `OpenAI` model as it would arrive from the registry's JSONB row.
 const OPENAI_FIXTURE: &str = r#"{
   "id": "00000000-0000-0000-0000-000000000000",
+  "provider_id": "00000000-0000-0000-0000-000000000000",
   "canonical_id": "openai::gpt-4o",
   "lifecycle_status": "production",
   "approval_status": "approved",
@@ -374,6 +375,7 @@ const OPENAI_FIXTURE: &str = r#"{
 /// an explicit "no provider plugin" error from the gateway.
 const ANTHROPIC_FIXTURE: &str = r#"{
   "id": "00000000-0000-0000-0000-000000000001",
+  "provider_id": "00000000-0000-0000-0000-000000000001",
   "canonical_id": "anthropic::claude-sonnet-4",
   "lifecycle_status": "production",
   "approval_status": "approved",

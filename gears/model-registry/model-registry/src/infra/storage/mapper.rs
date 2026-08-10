@@ -236,6 +236,7 @@ pub fn model_entity_to_v1(e: entity::model::Model) -> Result<ModelV1, DomainErro
         // Cloned rather than moved: `model_entity_to_info_v1` consumes `e` and
         // names `canonical_id` in its diagnostics.
         canonical_id: e.canonical_id.clone(),
+        provider_id: e.provider_id,
         lifecycle_status,
         approval_status,
         info: model_entity_to_info_v1(e)?,

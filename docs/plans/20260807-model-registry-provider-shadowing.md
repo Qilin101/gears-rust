@@ -370,20 +370,20 @@ mapper. This is a deliberate, bounded compile break across ten struct-literal si
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs` (test fixtures)
 - Modify: `gears/llm-gateway/llm-gateway-demo/src/mock_registry.rs` (JSON fixtures)
 
-- [ ] add `pub provider_id: Uuid` to `ModelV1<P>` in `entity.rs`, documented as the visibility key (§3.6)
-- [ ] carry `provider_id` through `ModelV1::try_into_typed` so the typed narrowing preserves it
-- [ ] project `e.provider_id` in `mapper::model_entity_to_v1` (typed struct-literal projection, per the
+- [x] add `pub provider_id: Uuid` to `ModelV1<P>` in `entity.rs`, documented as the visibility key (§3.6)
+- [x] carry `provider_id` through `ModelV1::try_into_typed` so the typed narrowing preserves it
+- [x] project `e.provider_id` in `mapper::model_entity_to_v1` (typed struct-literal projection, per the
       gear's no-`json!`-round-trip rule)
-- [ ] add `pub provider_id: Uuid` to `ModelDto` and its `From<ModelV1<P>>` impl in `dto.rs`
-- [ ] fix the six `ModelV1` struct-literal sites and the two `ModelDto` literal sites
-- [ ] add `"provider_id"` to `OPENAI_FIXTURE` and `ANTHROPIC_FIXTURE` in
+- [x] add `pub provider_id: Uuid` to `ModelDto` and its `From<ModelV1<P>>` impl in `dto.rs`
+- [x] fix the six `ModelV1` struct-literal sites and the two `ModelDto` literal sites
+- [x] add `"provider_id"` to `OPENAI_FIXTURE` and `ANTHROPIC_FIXTURE` in
       `llm-gateway-demo/src/mock_registry.rs` — these deserialize `ModelV1` from JSON, so a missing
       required field is a **runtime** failure no compiler catches
-- [ ] write a mapper test asserting `provider_id` round-trips entity → `ModelV1` with the row's value
-- [ ] write a DTO test asserting `provider_id` appears in the serialized `ModelDto` JSON
-- [ ] write an SDK test asserting `try_into_typed` preserves `provider_id`
-- [ ] run `cargo test -p cf-gears-llm-gateway-demo` — `MockModelRegistry::new()` must still succeed
-- [ ] run tests - must pass before task 2
+- [x] write a mapper test asserting `provider_id` round-trips entity → `ModelV1` with the row's value
+- [x] write a DTO test asserting `provider_id` appears in the serialized `ModelDto` JSON
+- [x] write an SDK test asserting `try_into_typed` preserves `provider_id`
+- [x] run `cargo test -p cf-gears-llm-gateway-demo` — `MockModelRegistry::new()` must still succeed
+- [x] run tests - must pass before task 2
 
 ### Task 2: Add the `(tenant_id, provider_id)` index (A4)
 

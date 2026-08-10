@@ -150,6 +150,7 @@ impl From<ProviderV1> for ProviderDto {
 #[derive(Debug, Clone)]
 pub struct ModelDto {
     pub id: Uuid,
+    pub provider_id: Uuid,
     pub canonical_id: String,
     pub lifecycle_status: String,
     pub approval_status: String,
@@ -179,6 +180,7 @@ where
     fn from(source: ModelV1<P>) -> Self {
         Self {
             id: source.id,
+            provider_id: source.provider_id,
             canonical_id: source.canonical_id,
             lifecycle_status: source.lifecycle_status.as_str().to_owned(),
             approval_status: source.approval_status.as_str().to_owned(),
