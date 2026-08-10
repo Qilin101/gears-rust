@@ -565,32 +565,32 @@ slug has been shadowed survives whenever the shadowing tenant has no model of th
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 - Modify: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] change `merge_inherited_page`'s ancestor closure to `Fn(Uuid, AccessScope, ODataQuery)` and let
+- [x] change `merge_inherited_page`'s ancestor closure to `Fn(Uuid, AccessScope, ODataQuery)` and let
       it return `Option<Result<…>>`, so the caller can look up that tenant's allow-list slice and
       return `None` to skip it. Required: `AccessScope` exposes no tenant accessor, so the slice
       cannot be computed inside today's closure
-- [ ] ⚠️ **TDD exception** — before changing `list_tenant_models`, add the G3 fixture to
+- [x] ⚠️ **TDD exception** — before changing `list_tenant_models`, add the G3 fixture to
       `integration.rs` (near `:720`): child shadows the slug and owns **no** colliding model; assert
       the ancestor's model is invisible. Run it and confirm it **fails** against the current code.
       This is the one test whose value depends on observing the red state; the plan is otherwise
       code-first
-- [ ] build `ChainProviders(T0)` at the top of `list_tenant_models`, fail-closed
-- [ ] query each chain tenant with `ListVisibility::Eval { allow_list: chain.allow_slice_for(T) }`,
+- [x] build `ChainProviders(T0)` at the top of `list_tenant_models`, fail-closed
+- [x] query each chain tenant with `ListVisibility::Eval { allow_list: chain.allow_slice_for(T) }`,
       **skipping** any tenant whose slice is empty (B3)
-- [ ] handle the own-tenant skip: when T0's slice is empty there is no `own_page`, so synthesize an
+- [x] handle the own-tenant skip: when T0's slice is empty there is no `own_page`, so synthesize an
       empty `Page` carrying the caller's limit rather than propagating a missing `page_info`
-- [ ] keep the `canonical_id` dedupe as a documented redundant safety net, not the mechanism (B1)
-- [ ] confirm disabled providers now hide their models via the same predicate, with no separate
+- [x] keep the `canonical_id` dedupe as a documented redundant safety net, not the mechanism (B1)
+- [x] confirm disabled providers now hide their models via the same predicate, with no separate
       status check on the read path (B2)
-- [ ] update `test_list_tenant_models_child_shadows_ancestor` and `..._parent_shadows_grandparent`
+- [x] update `test_list_tenant_models_child_shadows_ancestor` and `..._parent_shadows_grandparent`
       (`service.rs:1744`, `:1807`) to assert through the allow-list rather than passing incidentally
       via `canonical_id` dedupe (G2)
-- [ ] confirm the G3 test now passes
-- [ ] write an integration test asserting a disabled provider hides its models from the eval listing,
+- [x] confirm the G3 test now passes
+- [x] write an integration test asserting a disabled provider hides its models from the eval listing,
       and that a `disabled` shadow hides both the ancestor's models and its own (G4)
-- [ ] write a test asserting a tenant with an empty allow-list slice is skipped entirely rather than
+- [x] write a test asserting a tenant with an empty allow-list slice is skipped entirely rather than
       queried
-- [ ] run tests - must pass before task 9
+- [x] run tests - must pass before task 9
 
 ### Task 9: Own-tenant-only `create_model` and `ProviderNotOwned` (E1–E3, G1)
 

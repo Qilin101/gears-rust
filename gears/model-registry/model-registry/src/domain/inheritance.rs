@@ -442,8 +442,8 @@ pub async fn merge_inherited_page<T, K, F, L, Fut>(
 where
     F: Fn(&T) -> K,
     K: Eq + Hash,
-    L: Fn(AccessScope, ODataQuery) -> Fut,
-    Fut: Future<Output = Result<Page<T>, DomainError>>,
+    L: Fn(Uuid, AccessScope, ODataQuery) -> Fut,
+    Fut: Future<Output = Option<Result<Page<T>, DomainError>>>,
 {
     let Page { items, page_info } = own_page;
 
@@ -463,11 +463,17 @@ where
             ..ODataQuery::default()
         };
 
-        match list_for_scope(AccessScope::for_tenant(ancestor_id), ancestor_query).await {
-            Ok(ancestor_page) => {
+        match list_for_scope(
+            ancestor_id,
+            AccessScope::for_tenant(ancestor_id),
+            ancestor_query,
+        )
+        .await
+        {
+            Some(Ok(ancestor_page)) => {
                 tagged.extend(ancestor_page.items.into_iter().map(|it| (ancestor_id, it)));
             }
-            Err(e) => match ancestor_failure {
+            Some(Err(e)) => match ancestor_failure {
                 AncestorFailure::Skip => {
                     tracing::warn!(
                         error = %e,
@@ -477,6 +483,10 @@ where
                 }
                 AncestorFailure::FailClosed => return Err(e),
             },
+            None => {
+                // Caller returned None — skip this ancestor (e.g. empty
+                // allow-list slice). No merge, no error.
+            }
         }
     }
 
@@ -1009,9 +1019,9 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::Skip,
-            |_scope, _q| {
+            |_tenant_id, _scope, _q| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                async { Ok(page_of(&[])) }
+                async { Some(Ok(page_of(&[]))) }
             },
         )
         .await
@@ -1031,11 +1041,11 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::Skip,
-            |scope, _q| async move {
+            |_tenant_id, scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
-                    Ok(page_of(&["shared", "from-parent"]))
+                    Some(Ok(page_of(&["shared", "from-parent"])))
                 } else if scope_targets(&scope, grandparent_id()) {
-                    Ok(page_of(&["shared", "from-parent", "gp-only"]))
+                    Some(Ok(page_of(&["shared", "from-parent", "gp-only"])))
                 } else {
                     panic!("ancestor scope must target exactly one chain tenant")
                 }
@@ -1062,11 +1072,11 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::Skip,
-            |scope, _q| async move {
+            |_tenant_id, scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
-                    Err(DomainError::internal("parent unavailable"))
+                    Some(Err(DomainError::internal("parent unavailable")))
                 } else {
-                    Ok(page_of(&["gp"]))
+                    Some(Ok(page_of(&["gp"])))
                 }
             },
         )
@@ -1086,11 +1096,11 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::FailClosed,
-            |scope, _q| async move {
+            |_tenant_id, scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
-                    Err(DomainError::internal("provider query failed"))
+                    Some(Err(DomainError::internal("provider query failed")))
                 } else {
-                    Ok(page_of(&["gp"]))
+                    Some(Ok(page_of(&["gp"])))
                 }
             },
         )
@@ -1121,16 +1131,16 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::FailClosed,
-            move |scope, _q| {
+            move |_tenant_id, scope, _q| {
                 let pq = Arc::clone(&pq);
                 let gq = Arc::clone(&gq);
                 async move {
                     if scope_targets(&scope, parent_id()) {
                         pq.fetch_add(1, Ordering::SeqCst);
-                        Err(DomainError::internal("parent query failed"))
+                        Some(Err(DomainError::internal("parent query failed")))
                     } else if scope_targets(&scope, grandparent_id()) {
                         gq.fetch_add(1, Ordering::SeqCst);
-                        Ok(page_of(&["gp"]))
+                        Some(Ok(page_of(&["gp"])))
                     } else {
                         panic!("unexpected scope")
                     }
@@ -1164,11 +1174,11 @@ mod tests {
             &ODataQuery::default(),
             |s: &String| s.clone(),
             AncestorFailure::Skip,
-            |scope, _q| async move {
+            |_tenant_id, scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
-                    Err(DomainError::internal("parent unavailable"))
+                    Some(Err(DomainError::internal("parent unavailable")))
                 } else {
-                    Ok(page_of(&["gp"]))
+                    Some(Ok(page_of(&["gp"])))
                 }
             },
         )
@@ -1195,13 +1205,13 @@ mod tests {
             &query,
             |s: &String| s.clone(),
             AncestorFailure::Skip,
-            |_scope, ancestor_query| async move {
+            |_tenant_id, _scope, ancestor_query| async move {
                 // Ancestors must be queried without pagination so shadowing
                 // sees the complete inherited set, but keep projection.
                 assert!(ancestor_query.limit.is_none());
                 assert!(ancestor_query.cursor.is_none());
                 assert_eq!(ancestor_query.select, Some(vec!["slug".to_owned()]));
-                Ok(page_of(&["c", "d"]))
+                Some(Ok(page_of(&["c", "d"])))
             },
         )
         .await

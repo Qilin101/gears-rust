@@ -755,6 +755,100 @@ async fn child_shadows_parent_by_same_canonical_id() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 4b. G3: Child shadows slug but has NO colliding model — ancestor's model must
+//     be invisible from the eval listing (headline shadowing bug fix)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn child_shadows_slug_no_colliding_model_hides_ancestor_model() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
+
+    // Create provider and model in the parent tenant.
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    // Create ONLY a provider in the child tenant with the SAME slug "openai",
+    // but NO model. This is the G3 scenario: the child shadows the slug but
+    // has no colliding model.
+    create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // Child's list should show ZERO models — the parent's model is hidden
+    // because the parent's provider lost the slug to the child, and the child
+    // has no model of its own.
+    let page = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("child list models");
+    assert!(
+        page.items.is_empty(),
+        "ancestor model must be hidden when child owns the slug but has no model, got {} items",
+        page.items.len(),
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4c. Disabled provider hides models from the eval listing (G4)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn disabled_provider_hides_models_from_eval_listing() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
+    let tenant_id = tenant_a();
+
+    // Create provider and model.
+    let (_pid, slug) = create_provider_direct(&provider_repo, &conn, tenant_id, "openai").await;
+    create_model_direct(&model_repo, &conn, tenant_id, &slug, "gpt-4o").await;
+
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_id);
+
+    // Verify model is visible before disabling.
+    let before = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("list before disable");
+    assert_eq!(
+        before.items.len(),
+        1,
+        "model visible before provider disable"
+    );
+
+    // Disable the provider via update_model (uses service properly).
+    let provider_id = before.items[0].provider_id;
+    service
+        .update_provider(
+            &ctx,
+            provider_id,
+            &UpdateProviderRequestV1 {
+                status: Some(model_registry::ProviderStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable provider");
+
+    // After disabling, the model should be hidden from the eval listing.
+    let after = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("list after disable");
+    assert!(
+        after.items.is_empty(),
+        "model must be hidden after provider is disabled"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 5. Cache-first read: second get_tenant_model hits cache
 // ═══════════════════════════════════════════════════════════════════════════════
 

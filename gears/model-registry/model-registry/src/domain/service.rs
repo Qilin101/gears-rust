@@ -29,8 +29,8 @@ use uuid::Uuid;
 use super::cache::{CacheService, SlugOwnership, cache_key};
 use super::error::DomainError;
 use super::inheritance::{
-    AncestorFailure, InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page,
-    resolve_ancestors,
+    AncestorFailure, InheritanceContext, build_chain_providers, cache_ttl_seconds, find_in_chain,
+    merge_inherited_page, resolve_ancestors,
 };
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
@@ -248,8 +248,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             query,
             |p| p.slug.clone(),
             AncestorFailure::FailClosed,
-            |scope, ancestor_query| async move {
-                self.provider_repo.list(conn, &scope, &ancestor_query).await
+            |_tenant_id, scope, ancestor_query| async move {
+                Some(self.provider_repo.list(conn, &scope, &ancestor_query).await)
             },
         )
         .await
@@ -573,7 +573,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// Returns models from the own tenant (with full `OData` support) merged with
     /// models inherited from ancestor tenants. Child-tenant models shadow
     /// ancestor models with the same `canonical_id`. Deprecated models are
-    /// excluded from the default list (filtered by the repository layer).
+    /// excluded from the eval list (filtered by the repository layer).
+    ///
+    /// The eval path builds `ChainProviders(T0)` and queries each chain tenant
+    /// with `ListVisibility::Eval`, passing only the winning active provider ids
+    /// for that tenant. Ancestors whose allow-list slice is empty are skipped
+    /// (B3). The `canonical_id` dedupe in `merge_inherited_page` is kept as a
+    /// redundant safety net (B1).
     pub async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
@@ -590,41 +596,71 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        // 3. Get own tenant models with OData
-        // Interim value: `Management` with `include_deprecated: false` keeps
-        // behavior-preserving semantics until Task 8 wires `ChainProviders`.
-        let own_page = self
-            .model_repo
-            .list(
-                &conn,
-                &own_scope,
-                query,
-                ListVisibility::Management {
-                    include_deprecated: false,
-                },
-            )
+        // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
+        //    query error (B5). A skipped ancestor would un-shadow an earlier one.
+        let conn = &conn;
+        let chain =
+            build_chain_providers(&inheritance, |scope| async move {
+                self.provider_repo
+                    .list_all_for_tenant(conn, &scope)
+                    .await
+            })
             .await?;
 
-        // 4. Merge the inherited set, shadowing ancestor models by canonical_id.
+        // 4. Get own-tenant models with ListVisibility::Eval.
+        //    Skip own tenant when its allow-list slice is empty (B3) —
+        //    synthesize an empty page rather than querying with an empty list.
+        let own_slice = chain.allow_slice_for(inheritance.tenant_id());
+        let own_page = if own_slice.is_empty() {
+            Page {
+                items: vec![],
+                page_info: toolkit_odata::PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit: query.limit.unwrap_or(0),
+                },
+            }
+        } else {
+            self.model_repo
+                .list(
+                    conn,
+                    &own_scope,
+                    query,
+                    ListVisibility::Eval {
+                        allow_list: &own_slice,
+                    },
+                )
+                .await?
+        };
+
+        // 5. Merge the inherited set, shadowing ancestor models by canonical_id.
         //    Skip ancestor query errors (model queries narrow, never widen).
-        let conn = &conn;
+        //    Inside the closure, check each tenant's allow-list slice and
+        //    return None to skip tenants with nothing to contribute.
         merge_inherited_page(
             &inheritance,
             own_page,
             query,
             |m| m.canonical_id.clone(),
             AncestorFailure::Skip,
-            |scope, ancestor_query| async move {
-                self.model_repo
-                    .list(
-                        conn,
-                        &scope,
-                        &ancestor_query,
-                        ListVisibility::Management {
-                            include_deprecated: false,
-                        },
-                    )
-                    .await
+            |tenant_id, scope, ancestor_query| {
+                let slice = chain.allow_slice_for(tenant_id);
+                async move {
+                    if slice.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            self.model_repo
+                                .list(
+                                    conn,
+                                    &scope,
+                                    &ancestor_query,
+                                    ListVisibility::Eval { allow_list: &slice },
+                                )
+                                .await,
+                        )
+                    }
+                }
             },
         )
         .await
@@ -1586,6 +1622,56 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    #[tokio::test]
+    async fn test_list_tenant_models_empty_allow_list_no_query() {
+        // Given: a child tenant with NO providers of its own. The
+        // allow-list slice for the child is empty — the own-tenant query
+        // is skipped and replaced with an empty synthetic page.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+
+        // Parent has a provider and model that the child WOULD inherit,
+        // but the child shadows the slug with no provider of its own.
+        let parent_tid = test_tenant();
+        let parent_scope = scope_for(parent_tid);
+        let (_parent_pid, parent_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        // Child tenant — NO provider, so allow_slice_for returns empty.
+        let child_tid = child_tenant();
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let page = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("empty allow-list must not error");
+
+        // The child shadows "openai" (no `register_provider` for that
+        // slug) so the ancestor model is hidden by G3, and the child has
+        // no own model — the result is empty.
+        assert!(
+            page.items.is_empty(),
+            "child with empty allow-list must see no models"
+        );
+    }
+
     // get_tenant_model — cache hit path
     // ═════════════════════════════════════════════════════════════════════════
 
