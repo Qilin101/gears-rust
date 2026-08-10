@@ -724,17 +724,17 @@ The eleventh P1 trait method, on the same `ModelRegistryClientV1` trait — not 
 
 ### Task 13: [Final] Update documentation
 
-- [ ] update `gears/model-registry/docs/impl-gaps.md`: mark groups A–G closed, leave H/I as the
+- [x] update `gears/model-registry/docs/impl-gaps.md`: mark groups A–G closed, leave H/I as the
       remaining open items
-- [ ] update DESIGN §4 Technical Debt — the entries describing the `canonical_id` merge bug and the
+- [x] update DESIGN §4 Technical Debt — the entries describing the `canonical_id` merge bug and the
       lifecycle escape hatch as shipped debt are no longer accurate
-- [ ] update the DESIGN §3.3 "implementation scope" note and the endpoint table row for
+- [x] update the DESIGN §3.3 "implementation scope" note and the endpoint table row for
       `GET /v1/admin/models` — it is now implemented, not "P1 (design)"
-- [ ] update DESIGN §4 Authorization: the action list reads `get, list, create, update, delete` and
+- [x] update DESIGN §4 Authorization: the action list reads `get, list, create, update, delete` and
       must now include `list_management`
-- [ ] run `cfs validate` on the edited DESIGN.md (part of `make check`)
-- [ ] run `make gts-docs` if any GTS reference changed
-- [ ] move this plan to `docs/plans/completed/`
+- [x] run `cfs validate` on the edited DESIGN.md (part of `make check`)
+- [x] run `make gts-docs` if any GTS reference changed
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

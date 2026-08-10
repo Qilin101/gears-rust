@@ -2,7 +2,8 @@
 
 # Model Registry — implementation gaps vs DESIGN
 
-Audit of `gears/model-registry/` against [`DESIGN.md`](./DESIGN.md) as of `c42e30c8`.
+**Groups A–G are fully implemented as of 2026-08-10.** Groups H and I remain open as acknowledged
+deferred work and unresolved questions — see sections below. of `gears/model-registry/` against [`DESIGN.md`](./DESIGN.md) as of `c42e30c8`.
 Scope: what the **code** must change. Doc-level PRD↔DESIGN drift is tracked separately in
 [`issues.md`](./issues.md) and is out of scope here.
 
@@ -14,7 +15,9 @@ Groups are ordered by dependency: **A** unblocks **B/C/F**; **D** and **E** are 
 
 ---
 
-## A. Shared primitive — `ChainProviders` (blocks B, C, F)
+## ✅ A. Shared primitive — `ChainProviders` (blocks B, C, F)
+
+**Status: CLOSED** — `ChainProviders` built in `domain/inheritance.rs` (Task 3), `provider_id` surfaced on `ModelV1` and DTOs (Task 1), repository visibility mode parameterized (Task 4), `(tenant_id, provider_id)` index added (Task 2).
 
 | # | Gap | DESIGN | Code today |
 |---|-----|--------|------------|
@@ -27,7 +30,9 @@ Groups are ordered by dependency: **A** unblocks **B/C/F**; **D** and **E** are 
 Note on A2/A5: the SDK entity structs are deliberately not `#[non_exhaustive]`, so adding the field
 is an intended compile break across mapper, DTO conversions and every test fixture.
 
-## B. `list_tenant_models` (eval listing)
+## ✅ B. `list_tenant_models` (eval listing)
+
+**Status: CLOSED** — rewritten around `ChainProviders` allow-list (Task 8); lifecycle escape hatch deleted (Task 4); fail-closed on ancestor provider queries enforced (Task 5).
 
 | # | Gap | DESIGN | Code today |
 |---|-----|--------|------------|
@@ -37,7 +42,9 @@ is an intended compile break across mapper, DTO conversions and every test fixtu
 | B4 | **Lifecycle escape hatch still shipped.** When the normalized filter text mentions `lifecycle_status`, the `deprecated`/`sunset` exclusion is dropped — a narrowing-looking `$filter` widens visibility, via string matching over the normalized AST. | §3.3 "Lifecycle exclusion (eval, unconditional)" — supersedes the old rule; §4 Technical Debt says delete the branch | `infra/storage/model_repo.rs:42-91` |
 | B5 | Ancestor **provider** queries must fail closed; today the merge helper logs-and-skips every ancestor failure and `list_providers` uses it. With ≥2 ancestors a failed parent query un-shadows a grandparent provider — a widening failure mode. Skip-on-error stays correct for ancestor *model* queries only. | §3.4 "Failure behavior in P1"; §3.5 sub-decision 1 | `domain/inheritance.rs:301-312` used by `domain/service.rs:242-251` (providers) and `:490-499` (models) |
 
-## C. `get_tenant_model`
+## ✅ C. `get_tenant_model`
+
+**Status: CLOSED** — rewritten around slug resolution with the slug-cache entity (Tasks 6, 7); all gates and ordering implemented.
 
 | # | Gap | DESIGN | Code today |
 |---|-----|--------|------------|
@@ -50,14 +57,18 @@ is an intended compile break across mapper, DTO conversions and every test fixtu
 Keep intact: approval is **reported, not enforced** (§3.5, §4) — `ModelNotApproved` stays unreachable
 from this path in P1. And the existing drop-stale-key-on-`ModelDeprecated` behavior is correct.
 
-## D. Slug-ownership cache entity
+## ✅ D. Slug-ownership cache entity
+
+**Status: CLOSED** — `SlugOwnership` enum with tombstones, cache-first resolution helper, TTL by ownership class (Task 6).
 
 | # | Gap | DESIGN | Code today |
 |---|-----|--------|------------|
 | D1 | Third cache entity `mr:{tenant_id}:provider_slug:{slug}` does not exist. Without it, C1's per-hop slug resolution costs a DB round-trip per chain hop on the path carrying the `<10ms P99` NFR. | §2.1 (three cache entities), §3.5 sub-decision 3, §4 Cache Invalidation item 3 | `domain/cache.rs:21` + call sites — only `provider` (UUID) and `model` (canonical id) |
 | D2 | Must cache **negative** results (tombstone: "this tenant owns no provider under this slug") — the common hop is a miss. TTL by ownership of the tenant it is stored under; dropped by that tenant's existing `invalidate_tenant` prefix sweep (no new invalidation code needed). | §3.5 sub-decision 3 | — |
 
-## E. Model creation ownership
+## ✅ E. Model creation ownership
+
+**Status: CLOSED** — `create_model` resolves provider own-tenant-only with `ProviderNotOwned` (Task 9); REST error mapping for 403 `permission_denied`.
 
 | # | Gap | DESIGN | Code today |
 |---|-----|--------|------------|
@@ -65,7 +76,9 @@ from this path in P1. And the existing drop-stale-key-on-`ModelDeprecated` behav
 | E2 | `ProviderNotOwned` error does not exist — not in `DomainError`, not in `ModelRegistryError`, not in the REST mapping (403 / `permission_denied`). Distinct from `ProviderNotFound` (nowhere in the chain) and `Forbidden` (a PDP denial). | §4 Error Handling table + note | `domain/error.rs`, `model-registry-sdk/src/errors.rs`, `api/rest/error.rs` |
 | E3 | A slug that resolves nowhere in the chain returns `Validation` (400); the error table says `ProviderNotFound` / `ProviderNotFoundBySlug` (404). | §4 Error Handling table | `domain/service.rs:654-658` |
 
-## F. Management listing — `GET /model-registry/v1/admin/models` (feature absent)
+## ✅ F. Management listing — `GET /model-registry/v1/admin/models`
+
+**Status: CLOSED** — route, handler, DTO with three flags, `include_deprecated` query parameter, action-aware mock, auth gate (Task 10, 11).
 
 | # | Gap | DESIGN |
 |---|-----|--------|
@@ -78,7 +91,9 @@ from this path in P1. And the existing drop-stale-key-on-`ModelDeprecated` behav
 `shadowed` / `provider_disabled` must stay **response-only** — not OData filter fields (§3.3): neither
 binds to a real `models` column, and `FieldToColumn` maps one field to exactly one column.
 
-## G. Tests that encode the old behavior (must change with the fix)
+## ✅ G. Tests that encode the old behavior (must change with the fix)
+
+**Status: CLOSED** — all G1–G6 tests updated or added across Tasks 5–11 and verified in the integration suite.
 
 | # | Test | Change |
 |---|------|--------|
