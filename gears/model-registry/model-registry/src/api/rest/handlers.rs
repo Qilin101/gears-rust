@@ -6,14 +6,15 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Query};
 use toolkit::api::canonical_prelude::*;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::dto::{
-    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelListDto, ProviderDto,
-    ProviderListDto, UpdateModelRequestDto, UpdateProviderRequestDto,
+    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelListDto, ModelManagementDto,
+    ModelManagementListDto, ProviderDto, ProviderListDto, UpdateModelRequestDto,
+    UpdateProviderRequestDto,
 };
 use super::error::ModelRegistryResourceError;
 use super::parse;
@@ -315,4 +316,33 @@ pub async fn delete_model(
 ) -> ApiResult<impl IntoResponse> {
     svc.delete_model(&ctx, &canonical_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /model-registry/v1/admin/models` — management listing.
+pub(super) async fn list_management_models(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    OData(query): OData,
+    Query(params): Query<super::parse::AdminModelsQuery>,
+) -> ApiResult<JsonBody<ModelManagementListDto>> {
+    super::parse::reject_select(&query)?;
+    let page = svc
+        .list_tenant_models_management(&ctx, &query, params.include_deprecated)
+        .await?;
+
+    let items: Vec<ModelManagementDto> = page
+        .items
+        .into_iter()
+        .map(ModelManagementDto::from)
+        .collect();
+
+    Ok(Json(ModelManagementListDto {
+        items,
+        page_info: super::dto::PageInfoDto {
+            next_cursor: page.page_info.next_cursor,
+            prev_cursor: page.page_info.prev_cursor,
+            limit: u32::try_from(page.page_info.limit)
+                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
+        },
+    }))
 }

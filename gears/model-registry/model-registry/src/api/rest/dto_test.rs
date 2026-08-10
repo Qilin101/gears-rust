@@ -12,6 +12,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::dto::*;
+use model_registry_sdk::odata::ModelFilterField;
 
 // ---------------------------------------------------------------------------
 // ProviderDto — response (Serialize only)
@@ -673,4 +674,99 @@ mod model_from_v1 {
         let dto: ModelDto = v1.into();
         assert!(dto.info["last_release_at"].is_null());
     }
+}
+
+// ---------------------------------------------------------------------------
+// ModelManagementDto — response (Serialize only)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn model_management_dto_serializes() {
+    let dto = ModelManagementDto {
+        id: Uuid::nil(),
+        provider_id: Uuid::nil(),
+        canonical_id: "openai::gpt-4o".into(),
+        lifecycle_status: "production".into(),
+        approval_status: "approved".into(),
+        info: json!({"display_name": "GPT-4o"}),
+        shadowed: true,
+        provider_disabled: false,
+        available_for_eval: false,
+    };
+
+    let json = serde_json::to_value(&dto).expect("serialize ModelManagementDto");
+    assert_eq!(json["id"], json!(Uuid::nil().to_string()));
+    assert_eq!(json["provider_id"], json!(Uuid::nil().to_string()));
+    assert_eq!(json["canonical_id"], "openai::gpt-4o");
+    assert_eq!(json["lifecycle_status"], "production");
+    assert_eq!(json["approval_status"], "approved");
+    assert_eq!(json["shadowed"], true);
+    assert_eq!(json["provider_disabled"], false);
+    assert_eq!(json["available_for_eval"], false);
+}
+
+#[test]
+fn model_management_dto_serializes_all_flags_false() {
+    let dto = ModelManagementDto {
+        id: Uuid::nil(),
+        provider_id: Uuid::nil(),
+        canonical_id: "openai::gpt-4o".into(),
+        lifecycle_status: "production".into(),
+        approval_status: "approved".into(),
+        info: json!({}),
+        shadowed: false,
+        provider_disabled: false,
+        available_for_eval: true,
+    };
+
+    let json = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(json["shadowed"], false);
+    assert_eq!(json["provider_disabled"], false);
+    assert_eq!(json["available_for_eval"], true);
+}
+
+#[test]
+fn model_management_list_dto_serializes() {
+    let dto = ModelManagementListDto {
+        items: vec![ModelManagementDto {
+            id: Uuid::nil(),
+            provider_id: Uuid::nil(),
+            canonical_id: "openai::gpt-4o".into(),
+            lifecycle_status: "production".into(),
+            approval_status: "approved".into(),
+            info: json!({}),
+            shadowed: false,
+            provider_disabled: false,
+            available_for_eval: true,
+        }],
+        page_info: PageInfoDto {
+            next_cursor: Some("cursor-abc".into()),
+            prev_cursor: None,
+            limit: 20,
+        },
+    };
+
+    let json = serde_json::to_value(&dto).expect("serialize");
+    assert!(json["items"].is_array());
+    assert_eq!(json["items"][0]["shadowed"], false);
+    assert_eq!(json["items"][0]["available_for_eval"], true);
+    assert_eq!(json["page_info"]["next_cursor"], "cursor-abc");
+    assert_eq!(json["page_info"]["limit"], 20);
+}
+
+/// Regression guard: `shadowed` must NOT be a valid `ModelFilterField`.
+///
+/// If `shadowed` were added to `ModelFilterField`, it would be accepted as an
+/// `OData` `$filter` / `$orderby` parameter, but the three management flags are
+/// response-only and §3.3 explicitly forbids adding them to the filterable
+/// fields. This test asserts that `ModelFilterField::from_name` rejects the
+/// field, proving it is absent from the generated SDK schema.
+#[test]
+fn shadowed_is_not_an_odata_filter_field() {
+    use toolkit_odata::filter::FilterField;
+
+    assert!(
+        ModelFilterField::from_name("shadowed").is_none(),
+        "shadowed must not be a valid ModelFilterField"
+    );
 }

@@ -14,7 +14,7 @@
 //! field does call `serde_json::to_value` once (see [`model_info_to_json`]) to
 //! re-serialize the SDK's `ModelInfoV1<P>` into the wire-shape `JsonValue`.
 
-use model_registry_sdk::models::{ModelInfoV1, ModelV1, ProviderV1};
+use model_registry_sdk::models::{ModelInfoV1, ModelManagementV1, ModelV1, ProviderV1};
 use serde_json::Value as JsonValue;
 use toolkit_macros::api_dto;
 use uuid::Uuid;
@@ -315,6 +315,64 @@ pub struct UpdateModelRequestDto {
 pub struct ModelListDto {
     pub items: Vec<ModelDto>,
     pub page_info: PageInfoDto,
+}
+
+// ---------------------------------------------------------------------------
+// Management DTOs
+// ---------------------------------------------------------------------------
+
+/// Wire projection of [`ModelManagementV1`] — a model row annotated with
+/// provider-visibility flags for the admin endpoint.
+///
+/// The three bools are response-only (§3.3); they are **not** `OData` filterable
+/// fields and must not be added to `ModelFilterField`.
+#[api_dto(response)]
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ModelManagementDto {
+    pub id: Uuid,
+    pub provider_id: Uuid,
+    pub canonical_id: String,
+    pub lifecycle_status: String,
+    pub approval_status: String,
+    pub info: JsonValue,
+    /// The provider slug is shadowed by a closer tenant in the ancestor chain.
+    pub shadowed: bool,
+    /// The provider is disabled.
+    pub provider_disabled: bool,
+    /// The model would be visible in the eval (`list_tenant_models`) result.
+    pub available_for_eval: bool,
+}
+
+/// Cursor-paginated list envelope for `GET /model-registry/v1/admin/models`.
+#[api_dto(response)]
+#[derive(Debug, Clone)]
+pub struct ModelManagementListDto {
+    pub items: Vec<ModelManagementDto>,
+    pub page_info: PageInfoDto,
+}
+
+// Forwarding conversion: SDK `ModelManagementV1` → REST `ModelManagementDto`.
+//
+// Like `From<ModelV1> for ModelDto`, this drops the SDK's `model` wrapper
+// and flattens the three management bools alongside the model's scalar fields.
+impl<P> From<ModelManagementV1<P>> for ModelManagementDto
+where
+    P: gts::GtsSchema + gts::GtsSerialize,
+{
+    fn from(source: ModelManagementV1<P>) -> Self {
+        Self {
+            id: source.model.id,
+            provider_id: source.model.provider_id,
+            canonical_id: source.model.canonical_id,
+            lifecycle_status: source.model.lifecycle_status.as_str().to_owned(),
+            approval_status: source.model.approval_status.as_str().to_owned(),
+            info: model_info_to_json(&source.model.info),
+            shadowed: source.shadowed,
+            provider_disabled: source.provider_disabled,
+            available_for_eval: source.available_for_eval,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

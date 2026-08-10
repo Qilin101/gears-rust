@@ -1714,3 +1714,254 @@ async fn disabled_provider_hides_model_when_no_model_exists() {
         "expected ModelNotFound for non-existent model behind disabled provider, got: {err:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Mock AuthZResolverClient — action-aware: denies `list_management`, permits all else
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct MockAuthDenyingListManagement;
+
+#[async_trait]
+impl AuthZResolverClient for MockAuthDenyingListManagement {
+    async fn evaluate(
+        &self,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        // Deny list_management; allow everything else.
+        if request.action.name == "list_management" {
+            return Ok(EvaluationResponse {
+                decision: false,
+                context: authz_resolver_sdk::EvaluationResponseContext {
+                    constraints: vec![],
+                    deny_reason: Some(authz_resolver_sdk::DenyReason {
+                        error_code: "NOT_GRANTED".to_owned(),
+                        details: None,
+                    }),
+                },
+            });
+        }
+
+        let tenant_id = request
+            .subject
+            .properties
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_else(Uuid::nil);
+
+        Ok(EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::EvaluationResponseContext {
+                constraints: vec![authz_resolver_sdk::constraints::Constraint {
+                    predicates: vec![authz_resolver_sdk::constraints::Predicate::Eq(
+                        authz_resolver_sdk::constraints::EqPredicate {
+                            property: "owner_tenant_id".to_owned(),
+                            value: serde_json::json!(tenant_id.to_string()),
+                        },
+                    )],
+                }],
+                deny_reason: None,
+            },
+        })
+    }
+}
+
+/// Build a full `Service` instance with a custom enforcer for integration testing.
+fn build_service_with_enforcer<R: TenantResolverClient + Send + Sync + 'static>(
+    db: DBProvider<DbError>,
+    tenant_resolver: R,
+    enforcer: authz_resolver_sdk::pep::PolicyEnforcer,
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+    Service::new(
+        Arc::new(db),
+        Arc::new(ProviderRepositoryImpl::new()),
+        Arc::new(ModelRepositoryImpl::new()),
+        Arc::new(InMemoryCache::new()),
+        Arc::new(tenant_resolver),
+        enforcer,
+        ModelRegistryConfig::default(),
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. Management listing integration tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn list_management_denied_without_grant() {
+    let db = setup_db().await;
+    let enforcer =
+        authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthDenyingListManagement));
+    let service = build_service_with_enforcer(db, NoAncestorsResolver, enforcer);
+    let ctx = security_context(tenant_a());
+
+    let err = service
+        .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+        .await
+        .expect_err("list_management must be denied without grant");
+
+    assert!(
+        matches!(&err, DomainError::Forbidden { .. }),
+        "expected Forbidden for list_management without grant, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn management_listing_shows_shadowed_rows_from_ancestor() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
+
+    // Parent: provider "openai", model "openai::gpt-4o".
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    let parent_model =
+        create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    // Child: same provider slug "openai" but a DIFFERENT model.
+    let (_child_provider_id, child_slug) =
+        create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
+    let child_model =
+        create_model_direct(&model_repo, &conn, child_tenant(), &child_slug, "claude-4").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // Approve the child's model so available_for_eval is correctly computed.
+    let child_canonical_id = String::from("openai::claude-4");
+    service
+        .update_model(
+            &ctx,
+            &child_canonical_id,
+            &model_registry::UpdateModelRequestV1 {
+                approval_status: Some(model_registry::ApprovalStatus::Approved),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("approve child model");
+
+    // Eval listing must only show the child's model (parent's is shadowed).
+    let eval_page = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("eval list");
+    assert_eq!(
+        eval_page.items.len(),
+        1,
+        "eval listing must show exactly 1 model (child's only)"
+    );
+    assert_eq!(
+        eval_page.items[0].id, child_model.id,
+        "eval listing must show child's model, not parent's"
+    );
+
+    // Management listing must show BOTH rows, with correct shadowed flags.
+    let mgmt_page = service
+        .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+        .await
+        .expect("management list");
+
+    // Both rows should be present (management does not dedupe by canonical_id).
+    assert_eq!(
+        mgmt_page.items.len(),
+        2,
+        "management listing must show both own and inherited models"
+    );
+
+    // Child's model: not shadowed, available for eval.
+    let child_mgmt = mgmt_page
+        .items
+        .iter()
+        .find(|m| m.model.id == child_model.id)
+        .expect("child's model must be in management listing");
+    assert!(
+        !child_mgmt.shadowed,
+        "child's own model must not be shadowed"
+    );
+    assert!(
+        child_mgmt.available_for_eval,
+        "child's own model must be available for eval"
+    );
+
+    // Parent's model: shadowed, NOT available for eval.
+    let parent_mgmt = mgmt_page
+        .items
+        .iter()
+        .find(|m| m.model.id == parent_model.id)
+        .expect("parent's model must be in management listing");
+    assert!(
+        parent_mgmt.shadowed,
+        "parent's model must be marked shadowed"
+    );
+    assert!(
+        !parent_mgmt.available_for_eval,
+        "parent's shadowed model must not be available for eval"
+    );
+}
+
+#[tokio::test]
+async fn management_listing_shows_disabled_provider_rows() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
+    let tenant_id = tenant_a();
+    let _scope = scope_for(tenant_id);
+
+    // Create provider "openai" and model "gpt-4o".
+    let (pid, slug) = create_provider_direct(&provider_repo, &conn, tenant_id, "openai").await;
+    let model = create_model_direct(&model_repo, &conn, tenant_id, &slug, "gpt-4o").await;
+
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_id);
+
+    // Disable the provider via service update.
+    service
+        .update_provider(
+            &ctx,
+            pid,
+            &UpdateProviderRequestV1 {
+                status: Some(model_registry::ProviderStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable provider");
+
+    // Eval listing must be empty (provider disabled hides models).
+    let eval_page = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("eval list after disable");
+    assert!(
+        eval_page.items.is_empty(),
+        "eval listing must be empty when provider is disabled"
+    );
+
+    // Management listing must still show the model, with provider_disabled=true.
+    let mgmt_page = service
+        .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+        .await
+        .expect("management list after disable");
+    assert_eq!(
+        mgmt_page.items.len(),
+        1,
+        "management listing must show the disabled provider's model"
+    );
+
+    let mgmt = &mgmt_page.items[0];
+    assert!(
+        mgmt.provider_disabled,
+        "model from disabled provider must have provider_disabled=true"
+    );
+    assert!(
+        !mgmt.available_for_eval,
+        "model from disabled provider must not be available for eval"
+    );
+    assert_eq!(
+        mgmt.model.id, model.id,
+        "management listing must reference the correct model"
+    );
+}

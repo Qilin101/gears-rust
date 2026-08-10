@@ -9,7 +9,7 @@ use model_registry_sdk::odata::{ModelFilterField, ProviderFilterField};
 use toolkit::api::operation_builder::OperationBuilderODataExt;
 use toolkit::api::{OpenApiRegistry, OperationBuilder};
 
-use super::dto;
+use super::dto::{self, ModelManagementListDto};
 use super::handlers;
 use crate::domain::cache::InMemoryCache;
 use crate::domain::service::Service;
@@ -31,6 +31,7 @@ impl AsRef<str> for License {
 impl toolkit::api::operation_builder::LicenseFeature for License {}
 
 /// Register all P1 REST endpoints on the given router.
+#[allow(clippy::too_many_lines)]
 pub fn register_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
@@ -234,6 +235,42 @@ pub fn register_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Admin endpoints (1)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // GET /model-registry/v1/admin/models — management listing
+    router = OperationBuilder::get("/model-registry/v1/admin/models")
+        .operation_id("model_registry.list_management_models")
+        .summary("List models with management flags")
+        .description(
+            "List models visible to the caller's tenant with provider-visibility flags \
+             (shadowed, provider_disabled, available_for_eval). Intended for admin UIs.",
+        )
+        .tag("Admin")
+        .authenticated()
+        .require_license_features::<License>([])
+        .handler(handlers::list_management_models)
+        .json_response_with_schema::<ModelManagementListDto>(
+            openapi,
+            StatusCode::OK,
+            "Paginated model management list",
+        )
+        .with_odata_filter::<ModelFilterField>()
+        .with_odata_orderby::<ModelFilterField>()
+        .query_param_typed(
+            "include_deprecated",
+            false,
+            "Include deprecated and sunset models in the response (default: false)",
+            "boolean",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_422(openapi)
         .error_500(openapi)
         .register(router, openapi);
 

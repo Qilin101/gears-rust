@@ -675,31 +675,31 @@ The eleventh P1 trait method, on the same `ModelRegistryClientV1` trait — not 
 - Modify: `gears/model-registry/model-registry/src/api/rest/dto_test.rs`
 - Modify: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] add `ModelManagementDto` (= `ModelDto` + the three bools) and `ModelManagementListDto` with the
+- [x] add `ModelManagementDto` (= `ModelDto` + the three bools) and `ModelManagementListDto` with the
       standard `page_info`
-- [ ] add an `include_deprecated` query-parameter extractor (bool, default `false`) in `parse.rs` —
+- [x] add an `include_deprecated` query-parameter extractor (bool, default `false`) in `parse.rs` —
       a plain query parameter, **not** an OData filter side effect, and management-only
-- [ ] add the `list_management_models` handler
-- [ ] register `GET /model-registry/v1/admin/models` with its own `OperationBuilder` policy:
+- [x] add the `list_management_models` handler
+- [x] register `GET /model-registry/v1/admin/models` with its own `OperationBuilder` policy:
       `.authenticated()`, license features, the shared `ModelFilterField` OData filter/orderby,
       `.error_400/401/403/422/500`
-- [ ] declare `include_deprecated` to OpenAPI via `OperationBuilder::query_param_typed` — the
+- [x] declare `include_deprecated` to OpenAPI via `OperationBuilder::query_param_typed` — the
       `parse.rs` extractor alone leaves it undocumented in the spec `make openapi` regenerates
-- [ ] confirm `shadowed` / `provider_disabled` are **not** added to `ModelFilterField` — response-only
+- [x] confirm `shadowed` / `provider_disabled` are **not** added to `ModelFilterField` — response-only
       (§3.3)
-- [ ] add an **action-aware denying** `AuthZResolverClient` mock — both existing mocks
+- [x] add an **action-aware denying** `AuthZResolverClient` mock — both existing mocks
       (`service.rs:701`, `integration.rs:88`) are unconditionally permissive, and this mock is the
       only thing that can prove the service actually asks for `list_management`
-- [ ] write a DTO test asserting the three flags serialize on `ModelManagementDto`
-- [ ] keep a regression guard asserting `$filter=shadowed eq true` is rejected as an unknown field
+- [x] write a DTO test asserting the three flags serialize on `ModelManagementDto`
+- [x] keep a regression guard asserting `$filter=shadowed eq true` is rejected as an unknown field
       (it passes today — it proves the field was not added, not that anything new works)
-- [ ] write a **service-level** integration test: shadowed and disabled-provider rows present and
+- [x] write a **service-level** integration test: shadowed and disabled-provider rows present and
       marked via `list_tenant_models_management`, absent from `list_tenant_models` (G4-management).
       ⚠️ Not an HTTP test — this gear has no `axum`/`Router`/`oneshot` harness and
       `tests/integration.rs` drives `Service` directly; adding one is out of scope
-- [ ] write a test with the denying mock asserting a caller without the `list_management` grant is
+- [x] write a test with the denying mock asserting a caller without the `list_management` grant is
       refused (`DomainError::Forbidden` → 403)
-- [ ] run tests - must pass before task 12
+- [x] run tests - must pass before task 12
 
 ### Task 12: Verify acceptance criteria
 

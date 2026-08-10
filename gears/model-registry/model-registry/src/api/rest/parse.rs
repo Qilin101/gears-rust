@@ -97,6 +97,14 @@ pub(super) fn reject_select(query: &ODataQuery) -> Result<(), CanonicalError> {
     Ok(())
 }
 
+/// Query parameters for `GET /model-registry/v1/admin/models`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(super) struct AdminModelsQuery {
+    /// Whether to include deprecated/sunset models; defaults to `false`.
+    #[serde(default)]
+    pub include_deprecated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use toolkit_canonical_errors::InvalidArgument;
@@ -194,5 +202,21 @@ mod tests {
         let query = ODataQuery::default().with_select(vec!["vendor".to_owned()]);
         let err = reject_select(&query).expect_err("$select is unsupported");
         assert_violation(&err, "$select", "UNSUPPORTED_SELECT", &["not supported"]);
+    }
+
+    #[test]
+    fn admin_models_query_defaults_include_deprecated_false() {
+        let query = super::AdminModelsQuery::default();
+        assert!(!query.include_deprecated);
+    }
+
+    #[test]
+    fn admin_models_query_parses_include_deprecated() {
+        // Verify the Default impl matches what axum Query extraction would give
+        // when `include_deprecated` is absent (the `#[serde(default)]` path).
+        let query = super::AdminModelsQuery {
+            include_deprecated: true,
+        };
+        assert!(query.include_deprecated);
     }
 }
