@@ -1079,7 +1079,11 @@ mod tests {
         .expect("list with allow-list");
 
         // Only the openai model should be returned.
-        assert_eq!(page.items.len(), 1, "only the openai model should be visible");
+        assert_eq!(
+            page.items.len(),
+            1,
+            "only the openai model should be visible"
+        );
         assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
     }
 

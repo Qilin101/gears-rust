@@ -29,7 +29,8 @@ use uuid::Uuid;
 use super::cache::{CacheService, cache_key};
 use super::error::DomainError;
 use super::inheritance::{
-    InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page, resolve_ancestors,
+    AncestorFailure, InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page,
+    resolve_ancestors,
 };
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
@@ -238,17 +239,20 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let own_page = self.provider_repo.list(&conn, &own_scope, query).await?;
 
         // 4. Merge the inherited set, shadowing ancestor providers by slug.
+        //    Fail closed on ancestor query errors (B5): skipping an ancestor
+        //    provider row would un-shadow an ancestor and widen the caller's view.
         let conn = &conn;
-        Ok(merge_inherited_page(
+        merge_inherited_page(
             &inheritance,
             own_page,
             query,
             |p| p.slug.clone(),
+            AncestorFailure::FailClosed,
             |scope, ancestor_query| async move {
                 self.provider_repo.list(conn, &scope, &ancestor_query).await
             },
         )
-        .await)
+        .await
     }
 
     /// Create a new provider.
@@ -498,21 +502,28 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 4. Merge the inherited set, shadowing ancestor models by canonical_id.
+        //    Skip ancestor query errors (model queries narrow, never widen).
         let conn = &conn;
-        Ok(merge_inherited_page(
+        merge_inherited_page(
             &inheritance,
             own_page,
             query,
             |m| m.canonical_id.clone(),
+            AncestorFailure::Skip,
             |scope, ancestor_query| async move {
                 self.model_repo
-                    .list(conn, &scope, &ancestor_query, ListVisibility::Management {
-                        include_deprecated: false,
-                    })
+                    .list(
+                        conn,
+                        &scope,
+                        &ancestor_query,
+                        ListVisibility::Management {
+                            include_deprecated: false,
+                        },
+                    )
                     .await
             },
         )
-        .await)
+        .await
     }
 
     /// Create a new model.
@@ -698,6 +709,7 @@ mod tests {
         TenantResolverError, TenantStatus,
     };
     use toolkit_db::migration_runner::run_migrations_for_testing;
+    use toolkit_db::secure::DBRunner;
     use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
     use toolkit_odata::ODataQuery;
     use toolkit_security::{AccessScope, SecurityContext};
@@ -904,6 +916,107 @@ mod tests {
             _: &IsAncestorOptions,
         ) -> Result<bool, TenantResolverError> {
             unimplemented!()
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // FailingAncestorProviderRepo — mock ProviderRepository that fails on
+    // ancestor queries (succeeds only on the first `list` call)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use toolkit_odata::PageInfo as OdataPageInfo;
+
+    #[domain_model]
+    struct FailingAncestorProviderRepo {
+        call_count: AtomicUsize,
+    }
+
+    impl FailingAncestorProviderRepo {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProviderRepository for FailingAncestorProviderRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in list_providers test")
+        }
+
+        async fn find_by_slug(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _slug: &str,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in list_providers test")
+        }
+
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+        ) -> Result<Page<ProviderV1>, DomainError> {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                // First call (own tenant) succeeds with empty page
+                Ok(Page {
+                    items: vec![],
+                    page_info: OdataPageInfo {
+                        next_cursor: None,
+                        prev_cursor: None,
+                        limit: 20,
+                    },
+                })
+            } else {
+                Err(DomainError::internal("ancestor provider query failed"))
+            }
+        }
+
+        async fn list_all_for_tenant(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _req: &CreateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in list_providers test")
+        }
+
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+            _req: &UpdateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in list_providers test")
+        }
+
+        async fn delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used in list_providers test")
         }
     }
 
@@ -1220,6 +1333,151 @@ mod tests {
 
         let err = TestService::validate_slug("open_ai").unwrap_err();
         assert!(err.to_string().contains("lowercase alphanumeric"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // list_providers — fail closed on ancestor query errors
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// A `ModelRepository` stub that panics on every method — used only in
+    /// `list_providers` tests where `model_repo` methods are never called.
+    #[domain_model]
+    struct PanicModelRepo;
+
+    #[async_trait]
+    impl ModelRepository for PanicModelRepo {
+        async fn find_by_canonical(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _canonical_id: &str,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+            _visibility: ListVisibility<'_>,
+        ) -> Result<Page<crate::ModelV1>, DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _req: &crate::CreateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _canonical_id: &str,
+            _req: &crate::UpdateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+
+        async fn soft_delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _canonical_id: &str,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_providers_fails_closed_on_ancestor_query_error() {
+        // Given: a provider repo that fails on ancestor queries (only the first
+        // own-tenant list call succeeds), two ancestors, and no own providers.
+        let db = setup_db().await;
+        let provider_repo = Arc::new(FailingAncestorProviderRepo::new());
+        let model_repo = Arc::new(PanicModelRepo);
+        let cache = Arc::new(InMemoryCache::new());
+        let tenant_resolver: Arc<dyn TenantResolverClient> = Arc::new(TwoAncestorsResolver);
+        let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
+        let config = ModelRegistryConfig::default();
+
+        let service: Service<FailingAncestorProviderRepo, PanicModelRepo, InMemoryCache> =
+            Service {
+                db: Arc::new(db),
+                provider_repo,
+                model_repo,
+                cache,
+                tenant_resolver,
+                policy_enforcer: enforcer,
+                config,
+            };
+
+        // When: listing providers with ancestors that fail to query.
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tenant())
+            .build()
+            .expect("ctx");
+        let err = service
+            .list_providers(&ctx, &ODataQuery::default())
+            .await
+            .expect_err("ancestor query failure should propagate");
+
+        // Then: the error must be an Internal with the failure detail.
+        assert!(
+            matches!(&err, DomainError::Internal { detail, .. }
+                if detail.contains("ancestor provider query failed")),
+            "expected Internal error with ancestor failure detail, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_skip_ancestor_query_error() {
+        // Given: a service with real repos and TwoAncestorsResolver where the
+        // parent has no provider/models. The ancestor query succeeds but returns
+        // empty — this proves Skip returns partial results even with empty
+        // ancestor pages.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let child_tid = child_tenant();
+        let child_scope = scope_for(child_tid);
+
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &child_scope,
+            child_tid,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let page = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("Skip should allow partial results");
+
+        // The child's own model should be visible regardless of ancestor data.
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
     }
 
     // ═════════════════════════════════════════════════════════════════════════

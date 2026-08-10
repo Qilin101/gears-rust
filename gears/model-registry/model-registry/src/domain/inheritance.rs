@@ -26,8 +26,8 @@ use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use crate::config::ModelRegistryConfig;
 use crate::ProviderV1;
+use crate::config::ModelRegistryConfig;
 use model_registry_sdk::models::ProviderStatus;
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,9 @@ impl ChainProviders {
     pub fn allow_slice_for(&self, tenant_id: Uuid) -> Vec<Uuid> {
         self.by_id
             .values()
-            .filter(|p| p.owner_tenant == tenant_id && p.winner && p.status == ProviderStatus::Active)
+            .filter(|p| {
+                p.owner_tenant == tenant_id && p.winner && p.status == ProviderStatus::Active
+            })
             .map(|p| p.id)
             .collect()
     }
@@ -155,9 +157,7 @@ where
     {
         let own_scope = AccessScope::for_tenant(inheritance.tenant_id());
         let providers = list_all(own_scope).await?;
-        all_providers.extend(
-            providers.into_iter().map(|p| (inheritance.tenant_id(), p)),
-        );
+        all_providers.extend(providers.into_iter().map(|p| (inheritance.tenant_id(), p)));
     }
 
     // Ancestors in chain order.
@@ -387,6 +387,27 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// AncestorFailure — error propagation policy for ancestor queries
+// ---------------------------------------------------------------------------
+
+/// Controls how ancestor query failures are handled in
+/// [`merge_inherited_page`].
+///
+/// The two modes reflect an intentional asymmetry (DESIGN §3.5 sub-decision 4):
+/// dropping ancestor **model** rows only narrows what the caller sees, while
+/// skipping an ancestor **provider** row widens visibility by silently
+/// un-shadowing an earlier ancestor (B5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AncestorFailure {
+    /// Log the error and continue with partial results. Use for model queries
+    /// where a skipped ancestor only narrows the result set.
+    Skip,
+    /// Propagate the error immediately. Use for provider queries where a
+    /// skipped ancestor would un-shadow an ancestor provider.
+    FailClosed,
+}
+
+// ---------------------------------------------------------------------------
 // merge_inherited_page
 // ---------------------------------------------------------------------------
 
@@ -400,9 +421,13 @@ where
 /// ancestor's complete matching set, not its first page. The merged result is
 /// then truncated back to the caller's limit.
 ///
-/// An ancestor whose query fails is logged and skipped, yielding partial
-/// results rather than failing the whole read: an ancestor tenant being
-/// unavailable must not hide the caller's own data.
+/// `ancestor_failure` controls the error-propagation policy:
+/// - [`AncestorFailure::Skip`]: log and skip a failing ancestor, yielding
+///   partial results (correct for model queries — a skipped ancestor only
+///   narrows the caller's view).
+/// - [`AncestorFailure::FailClosed`]: propagate the error immediately (correct
+///   for provider queries — a skipped ancestor would un-shadow an ancestor and
+///   *widen* the caller's view).
 ///
 /// Ancestor scopes are built here rather than widening the caller's own scope,
 /// per the tenant-isolation principle (DESIGN §2.1).
@@ -411,8 +436,9 @@ pub async fn merge_inherited_page<T, K, F, L, Fut>(
     own_page: Page<T>,
     query: &ODataQuery,
     key_fn: F,
+    ancestor_failure: AncestorFailure,
     list_for_scope: L,
-) -> Page<T>
+) -> Result<Page<T>, DomainError>
 where
     F: Fn(&T) -> K,
     K: Eq + Hash,
@@ -441,13 +467,16 @@ where
             Ok(ancestor_page) => {
                 tagged.extend(ancestor_page.items.into_iter().map(|it| (ancestor_id, it)));
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    ancestor_tenant_id = %ancestor_id,
-                    "ancestor list query failed, continuing with partial results"
-                );
-            }
+            Err(e) => match ancestor_failure {
+                AncestorFailure::Skip => {
+                    tracing::warn!(
+                        error = %e,
+                        ancestor_tenant_id = %ancestor_id,
+                        "ancestor list query failed, continuing with partial results"
+                    );
+                }
+                AncestorFailure::FailClosed => return Err(e),
+            },
         }
     }
 
@@ -461,10 +490,10 @@ where
         merged.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     }
 
-    Page {
+    Ok(Page {
         items: merged,
         page_info,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +557,7 @@ pub fn cache_ttl_seconds(ownership: Ownership, config: &ModelRegistryConfig) -> 
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tenant_resolver_sdk::{
         GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse, GetTenantsOptions,
@@ -978,12 +1008,14 @@ mod tests {
             page_of(&["a", "b"]),
             &ODataQuery::default(),
             |s: &String| s.clone(),
+            AncestorFailure::Skip,
             |_scope, _q| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok(page_of(&[])) }
             },
         )
-        .await;
+        .await
+        .expect("merge should succeed");
 
         assert_eq!(result.items, ["a", "b"]);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -998,6 +1030,7 @@ mod tests {
             page_of(&["own-only", "shared"]),
             &ODataQuery::default(),
             |s: &String| s.clone(),
+            AncestorFailure::Skip,
             |scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
                     Ok(page_of(&["shared", "from-parent"]))
@@ -1008,7 +1041,8 @@ mod tests {
                 }
             },
         )
-        .await;
+        .await
+        .expect("merge should succeed");
 
         // `shared` resolves to the child, `from-parent` to the parent rather
         // than the grandparent, and each key appears exactly once.
@@ -1027,6 +1061,7 @@ mod tests {
             page_of(&["own"]),
             &ODataQuery::default(),
             |s: &String| s.clone(),
+            AncestorFailure::Skip,
             |scope, _q| async move {
                 if scope_targets(&scope, parent_id()) {
                     Err(DomainError::internal("parent unavailable"))
@@ -1035,8 +1070,112 @@ mod tests {
                 }
             },
         )
+        .await
+        .expect("merge with Skip should return partial results");
+
+        assert_eq!(result.items, ["own", "gp"]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_fail_closed_propagates_ancestor_error() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["own"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            AncestorFailure::FailClosed,
+            |scope, _q| async move {
+                if scope_targets(&scope, parent_id()) {
+                    Err(DomainError::internal("provider query failed"))
+                } else {
+                    Ok(page_of(&["gp"]))
+                }
+            },
+        )
         .await;
 
+        let err = result.expect_err("FailClosed should propagate the error");
+        assert!(
+            err.to_string().contains("provider query failed"),
+            "expected error about provider query, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_fail_closed_stops_at_first_failure() {
+        // When FailClosed is used, only the first ancestor failure should be
+        // propagated — the grandparent should never be queried.
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let parent_queried = Arc::new(AtomicUsize::new(0));
+        let grandparent_queried = Arc::new(AtomicUsize::new(0));
+
+        let pq = Arc::clone(&parent_queried);
+        let gq = Arc::clone(&grandparent_queried);
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["own"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            AncestorFailure::FailClosed,
+            move |scope, _q| {
+                let pq = Arc::clone(&pq);
+                let gq = Arc::clone(&gq);
+                async move {
+                    if scope_targets(&scope, parent_id()) {
+                        pq.fetch_add(1, Ordering::SeqCst);
+                        Err(DomainError::internal("parent query failed"))
+                    } else if scope_targets(&scope, grandparent_id()) {
+                        gq.fetch_add(1, Ordering::SeqCst);
+                        Ok(page_of(&["gp"]))
+                    } else {
+                        panic!("unexpected scope")
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "FailClosed should propagate error");
+        assert_eq!(
+            parent_queried.load(Ordering::SeqCst),
+            1,
+            "parent should have been queried"
+        );
+        assert_eq!(
+            grandparent_queried.load(Ordering::SeqCst),
+            0,
+            "grandparent should NOT be queried after parent failure with FailClosed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_skip_logs_and_continues_after_failure() {
+        // With Skip, a failing parent does not stop the grandparent from being
+        // queried.
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_of(&["own"]),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            AncestorFailure::Skip,
+            |scope, _q| async move {
+                if scope_targets(&scope, parent_id()) {
+                    Err(DomainError::internal("parent unavailable"))
+                } else {
+                    Ok(page_of(&["gp"]))
+                }
+            },
+        )
+        .await
+        .expect("Skip should return partial results");
+
+        // own + grandparent (parent skipped)
         assert_eq!(result.items, ["own", "gp"]);
     }
 
@@ -1055,6 +1194,7 @@ mod tests {
             page_of(&["a", "b"]),
             &query,
             |s: &String| s.clone(),
+            AncestorFailure::Skip,
             |_scope, ancestor_query| async move {
                 // Ancestors must be queried without pagination so shadowing
                 // sees the complete inherited set, but keep projection.
@@ -1064,7 +1204,8 @@ mod tests {
                 Ok(page_of(&["c", "d"]))
             },
         )
-        .await;
+        .await
+        .expect("merge should succeed");
 
         // 2 own + 2 from each of 2 ancestors, deduped to 4, truncated to 3.
         assert_eq!(result.items, ["a", "b", "c"]);
@@ -1269,7 +1410,11 @@ mod tests {
         let ctx = InheritanceContext::new(child_id(), vec![]);
         let providers = vec![
             make_provider(Uuid::nil(), "openai", ProviderStatus::Active),
-            make_provider(Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap(), "anthropic", ProviderStatus::Active),
+            make_provider(
+                Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap(),
+                "anthropic",
+                ProviderStatus::Active,
+            ),
         ];
 
         let chain = build_chain_providers(&ctx, |_scope| {
@@ -1299,7 +1444,11 @@ mod tests {
             let pp = parent_prov.clone();
             async move {
                 if is_child {
-                    Ok(vec![make_provider(own_id, "openai", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        own_id,
+                        "openai",
+                        ProviderStatus::Active,
+                    )])
                 } else {
                     Ok(vec![pp])
                 }
@@ -1321,15 +1470,16 @@ mod tests {
     async fn test_chain_providers_parent_shadows_grandparent() {
         let parent_id = parent_id();
         let grandparent_id = grandparent_id();
-        let ctx = InheritanceContext::new(parent_id, vec![
-            TenantRef {
+        let ctx = InheritanceContext::new(
+            parent_id,
+            vec![TenantRef {
                 id: TenantId(grandparent_id),
                 status: TenantStatus::Active,
                 tenant_type: None,
                 parent_id: None,
                 self_managed: false,
-            },
-        ]);
+            }],
+        );
 
         let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c1").unwrap();
         let gp_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c2").unwrap();
@@ -1338,9 +1488,17 @@ mod tests {
             let is_parent = scope_targets(&scope, parent_id);
             async move {
                 if is_parent {
-                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        parent_prov_id,
+                        "openai",
+                        ProviderStatus::Active,
+                    )])
                 } else {
-                    Ok(vec![make_provider(gp_prov_id, "openai", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        gp_prov_id,
+                        "openai",
+                        ProviderStatus::Active,
+                    )])
                 }
             }
         })
@@ -1369,9 +1527,17 @@ mod tests {
             let is_child = scope_targets(&scope, child_id());
             async move {
                 if is_child {
-                    Ok(vec![make_provider(child_only_id, "child-only", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        child_only_id,
+                        "child-only",
+                        ProviderStatus::Active,
+                    )])
                 } else {
-                    Ok(vec![make_provider(parent_only_id, "parent-only", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        parent_only_id,
+                        "parent-only",
+                        ProviderStatus::Active,
+                    )])
                 }
             }
         })
@@ -1398,9 +1564,17 @@ mod tests {
             let is_child = scope_targets(&scope, child_id());
             async move {
                 if is_child {
-                    Ok(vec![make_provider(child_prov_id, "openai", ProviderStatus::Disabled)])
+                    Ok(vec![make_provider(
+                        child_prov_id,
+                        "openai",
+                        ProviderStatus::Disabled,
+                    )])
                 } else {
-                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        parent_prov_id,
+                        "openai",
+                        ProviderStatus::Active,
+                    )])
                 }
             }
         })
@@ -1450,9 +1624,17 @@ mod tests {
             let is_child = scope_targets(&scope, child_id());
             async move {
                 if is_child {
-                    Ok(vec![make_provider(child_prov_id, "openai", ProviderStatus::Disabled)])
+                    Ok(vec![make_provider(
+                        child_prov_id,
+                        "openai",
+                        ProviderStatus::Disabled,
+                    )])
                 } else {
-                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Disabled)])
+                    Ok(vec![make_provider(
+                        parent_prov_id,
+                        "openai",
+                        ProviderStatus::Disabled,
+                    )])
                 }
             }
         })
@@ -1461,11 +1643,17 @@ mod tests {
 
         // Child's allow slice should be empty (disabled provider).
         let child_slice = chain.allow_slice_for(child_id());
-        assert!(child_slice.is_empty(), "child has no active winning providers");
+        assert!(
+            child_slice.is_empty(),
+            "child has no active winning providers"
+        );
 
         // Parent's allow slice should also be empty (lost to child).
         let parent_slice = chain.allow_slice_for(parent_id());
-        assert!(parent_slice.is_empty(), "parent has no active winning providers (lost)");
+        assert!(
+            parent_slice.is_empty(),
+            "parent has no active winning providers (lost)"
+        );
     }
 
     #[tokio::test]
@@ -1488,7 +1676,11 @@ mod tests {
                         make_provider(child_prov2, "child-anthropic", ProviderStatus::Active),
                     ])
                 } else {
-                    Ok(vec![make_provider(parent_prov, "parent-slug", ProviderStatus::Active)])
+                    Ok(vec![make_provider(
+                        parent_prov,
+                        "parent-slug",
+                        ProviderStatus::Active,
+                    )])
                 }
             }
         })

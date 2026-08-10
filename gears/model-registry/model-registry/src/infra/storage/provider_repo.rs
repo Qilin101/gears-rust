@@ -892,7 +892,11 @@ mod tests {
             .await
             .expect("list_all_for_tenant should succeed");
 
-        assert_eq!(all.len(), 25, "must return all 25 providers, not a truncated page");
+        assert_eq!(
+            all.len(),
+            25,
+            "must return all 25 providers, not a truncated page"
+        );
         let slugs: Vec<&str> = all.iter().map(|p| p.slug.as_str()).collect();
         assert!(
             slugs.contains(&"provider-0"),

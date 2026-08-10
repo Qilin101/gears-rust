@@ -476,20 +476,20 @@ Skip-on-error is correct for ancestor *model* queries and wrong for ancestor *pr
 - Modify: `gears/model-registry/model-registry/src/domain/inheritance.rs`
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 
-- [ ] add `AncestorFailure { Skip, FailClosed }` and change `merge_inherited_page` to take it and
+- [x] add `AncestorFailure { Skip, FailClosed }` and change `merge_inherited_page` to take it and
       return `Result<Page<T>, DomainError>`
-- [ ] pass `FailClosed` from `list_providers`; pass `Skip` from `list_tenant_models`
-- [ ] document the asymmetry inline: dropping ancestor model rows narrows, skipping an ancestor
+- [x] pass `FailClosed` from `list_providers`; pass `Skip` from `list_tenant_models`
+- [x] document the asymmetry inline: dropping ancestor model rows narrows, skipping an ancestor
       provider row widens
-- [ ] add a failing-ancestor `ProviderRepository` mock to `service.rs` tests — `build_service` /
+- [x] add a failing-ancestor `ProviderRepository` mock to `service.rs` tests — `build_service` /
       `build_service_with_cache` (`service.rs:1145-1170`) hard-wire the concrete
       `ProviderRepositoryImpl` and there is no such mock today; `Service` is constructible by struct
       literal from the in-module test mod
-- [ ] write a unit test asserting `FailClosed` propagates an ancestor error as `Internal` rather than
+- [x] write a unit test asserting `FailClosed` propagates an ancestor error as `Internal` rather than
       returning a partial page
-- [ ] write a unit test asserting `Skip` still yields partial results and logs, for model queries (G6)
-- [ ] write a service test asserting `list_providers` fails when an ancestor provider query errors
-- [ ] run tests - must pass before task 6
+- [x] write a unit test asserting `Skip` still yields partial results and logs, for model queries (G6)
+- [x] write a service test asserting `list_providers` fails when an ancestor provider query errors
+- [x] run tests - must pass before task 6
 
 ### Task 6: Slug-ownership cache entity with tombstones (D1, D2, G5)
 
