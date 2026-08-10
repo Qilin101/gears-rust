@@ -46,6 +46,18 @@ pub trait ProviderRepository: Send + Sync {
         query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError>;
 
+    /// Return every provider for a tenant, **unpaginated**.
+    ///
+    /// Used by [`build_chain_providers`](crate::domain::inheritance::build_chain_providers)
+    /// which needs each tenant's **complete** provider set. `list` is paginated
+    /// (default 20 / max 100), and a truncated fetch silently corrupts the
+    /// allow-list — the exact predicate this method exists to prevent.
+    async fn list_all_for_tenant(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+    ) -> Result<Vec<ProviderV1>, DomainError>;
+
     /// Create a new provider.
     ///
     /// Returns [`DomainError::ProviderConflict`] when a provider with the same

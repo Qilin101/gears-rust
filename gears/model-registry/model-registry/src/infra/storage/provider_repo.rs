@@ -121,6 +121,24 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(page)
     }
 
+    async fn list_all_for_tenant(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+    ) -> Result<Vec<ProviderV1>, DomainError> {
+        let entities = provider::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        entities
+            .into_iter()
+            .map(mapper::provider_entity_to_v1)
+            .collect()
+    }
+
     async fn create(
         &self,
         conn: &impl DBRunner,
@@ -842,6 +860,75 @@ mod tests {
             .await
             .expect("list with limit should succeed");
         assert_eq!(page.items.len(), 2);
+    }
+
+    // =========================================================================
+    // list_all_for_tenant
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_all_for_tenant_returns_all_providers() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = ProviderRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        // Create 25 providers — more than the default page size of 20.
+        for i in 0..25 {
+            ProviderRepository::create(
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
+                &make_create_req(&format!("provider-{i}"), &format!("Provider {i}")),
+            )
+            .await
+            .expect("create provider");
+        }
+
+        let all = ProviderRepository::list_all_for_tenant(&repo, &conn, &scope)
+            .await
+            .expect("list_all_for_tenant should succeed");
+
+        assert_eq!(all.len(), 25, "must return all 25 providers, not a truncated page");
+        let slugs: Vec<&str> = all.iter().map(|p| p.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"provider-0"),
+            "should include first provider"
+        );
+        assert!(
+            slugs.contains(&"provider-24"),
+            "should include last provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_for_tenant_respects_tenant_isolation() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let repo = ProviderRepositoryImpl;
+        let tenant_a = test_tenant();
+        let tenant_b = other_tenant();
+
+        ProviderRepository::create(
+            &repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &make_create_req("openai", "OpenAI"),
+        )
+        .await
+        .expect("tenant A create");
+
+        // Tenant B should see no providers.
+        let all = ProviderRepository::list_all_for_tenant(&repo, &conn, &scope_for(tenant_b))
+            .await
+            .expect("list_all_for_tenant should succeed");
+
+        assert!(all.is_empty(), "tenant B should see no providers");
     }
 
     // =========================================================================

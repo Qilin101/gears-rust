@@ -410,28 +410,28 @@ consumes.
 - Modify: `gears/model-registry/model-registry/src/infra/storage/provider_repo.rs`
 - Modify: `gears/model-registry/model-registry/src/domain/local_client.rs` (mock repo)
 
-- [ ] add `ProviderRepository::list_all_for_tenant` returning the tenant's **complete** provider set.
+- [x] add `ProviderRepository::list_all_for_tenant` returning the tenant's **complete** provider set.
       `list` is paginated (`LimitCfg { default: 20, max: 100 }`), and a truncated fetch silently
       corrupts the allow-list — the exact predicate this change introduces
-- [ ] add `ChainProvider { id, owner_tenant, slug, status, winner }` and `ChainProviders` with
+- [x] add `ChainProvider { id, owner_tenant, slug, status, winner }` and `ChainProviders` with
       `get`, `allow_list`, `allow_slice_for`, `is_allowed`
-- [ ] implement the winner computation over the chain: closest tenant owning a slug wins it,
+- [x] implement the winner computation over the chain: closest tenant owning a slug wins it,
       **on ownership alone** — status must not be a factor (document why inline: folding status in
       re-exposes the shadowed models)
-- [ ] implement `allow_list` as `winner AND status == active`
-- [ ] add a `build_chain_providers` constructor taking the `InheritanceContext` and a per-tenant
+- [x] implement `allow_list` as `winner AND status == active`
+- [x] add a `build_chain_providers` constructor taking the `InheritanceContext` and a per-tenant
       provider-fetch closure, failing closed on any query error (§3.5 sub-decision 1)
-- [ ] write tests: single tenant, child shadows parent, parent shadows grandparent, unrelated slugs
+- [x] write tests: single tenant, child shadows parent, parent shadows grandparent, unrelated slugs
       coexist
-- [ ] write a test asserting a **disabled shadow** marks the ancestor a loser *and* is itself absent
+- [x] write a test asserting a **disabled shadow** marks the ancestor a loser *and* is itself absent
       from `allow_list` (the §3.5 "why `winner` ignores status" case)
-- [ ] write a test asserting `build_chain_providers` returns `Internal` when any tenant's provider
+- [x] write a test asserting `build_chain_providers` returns `Internal` when any tenant's provider
       query errors, rather than skipping that tenant
-- [ ] write a test asserting `allow_slice_for` returns an empty slice for a tenant whose providers
+- [x] write a test asserting `allow_slice_for` returns an empty slice for a tenant whose providers
       all lost or are disabled
-- [ ] write a repository test with **more providers than the default page size** (>20), asserting
+- [x] write a repository test with **more providers than the default page size** (>20), asserting
       `list_all_for_tenant` returns them all and the resulting `allow_list` is complete
-- [ ] run tests - must pass before task 4
+- [x] run tests - must pass before task 4
 
 ### Task 4: Parameterize the repository query by visibility mode (A3, B4, F5)
 

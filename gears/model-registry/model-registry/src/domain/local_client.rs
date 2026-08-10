@@ -214,6 +214,13 @@ mod tests {
         ) -> Result<toolkit_odata::Page<ProviderV1>, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
+        async fn list_all_for_tenant(
+            &self,
+            _: &impl toolkit_db::secure::DBRunner,
+            _: &toolkit_security::AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            Err(DomainError::internal("not implemented"))
+        }
         async fn create(
             &self,
             _: &impl toolkit_db::secure::DBRunner,

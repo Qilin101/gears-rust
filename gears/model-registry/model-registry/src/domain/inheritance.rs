@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 use super::error::DomainError;
 use crate::config::ModelRegistryConfig;
+use crate::ProviderV1;
+use model_registry_sdk::models::ProviderStatus;
 
 // ---------------------------------------------------------------------------
 // Ownership
@@ -60,8 +62,145 @@ impl Ownership {
 }
 
 // ---------------------------------------------------------------------------
-// InheritanceContext
+// ChainProviders — tenant visibility primitive (DESIGN §3.5)
 // ---------------------------------------------------------------------------
+
+/// A single provider in the [`ChainProviders`] result, tagged with its
+/// owning tenant and its winner status.
+#[derive(Debug, Clone)]
+#[domain_model]
+pub struct ChainProvider {
+    pub id: Uuid,
+    pub owner_tenant: Uuid,
+    pub slug: String,
+    pub status: ProviderStatus,
+    pub winner: bool,
+}
+
+/// Complete provider map for a tenant chain, with pre-computed winner
+/// assignments and the eval-path allow-list.
+///
+/// `winner(p)` is determined by **ownership alone**: the closest chain
+/// tenant owning slug `p.slug` wins it, regardless of `p.status`. If
+/// status were folded into `winner`, a disabled shadow would hand the
+/// slug back to the ancestor, re-exposing exactly the models the shadow
+/// exists to hide.
+///
+/// `allow_list` is `winner AND status == active` — the eval path filters
+/// on this set. A disabled winner still *wins* its slug (so the ancestor's
+/// models are excluded) but is absent from `allow_list` (so its own models
+/// are excluded too).
+#[derive(Debug, Clone)]
+#[domain_model]
+pub struct ChainProviders {
+    by_id: HashMap<Uuid, ChainProvider>,
+    allow_list: Vec<Uuid>,
+}
+
+impl ChainProviders {
+    /// Look up a provider by its UUID.
+    #[must_use]
+    pub fn get(&self, provider_id: Uuid) -> Option<&ChainProvider> {
+        self.by_id.get(&provider_id)
+    }
+
+    /// The eval-path allow-list: provider ids that are both winners and active.
+    #[must_use]
+    pub fn allow_list(&self) -> &[Uuid] {
+        &self.allow_list
+    }
+
+    /// Return the slice of `allow_list` belonging to a specific tenant.
+    ///
+    /// Used by the listing path to pass only the relevant ids to each chain
+    /// tenant's repository query. Returns an empty slice when the tenant has
+    /// no winning active providers.
+    #[must_use]
+    pub fn allow_slice_for(&self, tenant_id: Uuid) -> Vec<Uuid> {
+        self.by_id
+            .values()
+            .filter(|p| p.owner_tenant == tenant_id && p.winner && p.status == ProviderStatus::Active)
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// Returns `true` when `provider_id` is in the eval-path allow-list.
+    #[must_use]
+    pub fn is_allowed(&self, provider_id: Uuid) -> bool {
+        self.allow_list.contains(&provider_id)
+    }
+}
+
+/// Build the complete [`ChainProviders`] for the given tenant chain.
+///
+/// `list_all` is invoked once per chain tenant (closest first), each call
+/// returning that tenant's **complete** provider set. Any query error fails
+/// the whole construction closed — a skipped ancestor provider query would
+/// silently un-shadow an ancestor (B5).
+///
+/// The winner is the closest chain tenant owning a given slug — ownership
+/// only, status is not a factor.
+pub async fn build_chain_providers<L, Fut>(
+    inheritance: &InheritanceContext,
+    list_all: L,
+) -> Result<ChainProviders, DomainError>
+where
+    L: Fn(AccessScope) -> Fut,
+    Fut: Future<Output = Result<Vec<ProviderV1>, DomainError>>,
+{
+    // Collect all providers from every tenant in the chain, closest first.
+    let mut all_providers: Vec<(Uuid, ProviderV1)> = Vec::new();
+
+    // Own tenant first.
+    {
+        let own_scope = AccessScope::for_tenant(inheritance.tenant_id());
+        let providers = list_all(own_scope).await?;
+        all_providers.extend(
+            providers.into_iter().map(|p| (inheritance.tenant_id(), p)),
+        );
+    }
+
+    // Ancestors in chain order.
+    for ancestor in &inheritance.ancestors {
+        let ancestor_id = ancestor.id.0;
+        let scope = AccessScope::for_tenant(ancestor_id);
+        let providers = list_all(scope).await?;
+        all_providers.extend(providers.into_iter().map(|p| (ancestor_id, p)));
+    }
+
+    // Determine winners: closest tenant owning a slug wins (ownership only).
+    let mut winners: HashMap<String, Uuid> = HashMap::new();
+    // Since all_providers is in chain order (closest first), the first
+    // occurrence of each slug wins.
+    for (tenant_id, provider) in &all_providers {
+        winners.entry(provider.slug.clone()).or_insert(*tenant_id);
+    }
+
+    // Build the by_id map, tagging each provider with its winner status.
+    let mut by_id: HashMap<Uuid, ChainProvider> = HashMap::with_capacity(all_providers.len());
+    for (tenant_id, provider) in all_providers {
+        let winner = winners.get(&provider.slug) == Some(&tenant_id);
+        by_id.insert(
+            provider.id,
+            ChainProvider {
+                id: provider.id,
+                owner_tenant: tenant_id,
+                slug: provider.slug.clone(),
+                status: provider.status,
+                winner,
+            },
+        );
+    }
+
+    // Build the allow-list: winners whose status is active.
+    let allow_list: Vec<Uuid> = by_id
+        .values()
+        .filter(|p| p.winner && p.status == ProviderStatus::Active)
+        .map(|p| p.id)
+        .collect();
+
+    Ok(ChainProviders { by_id, allow_list })
+}
 
 /// Resolved ancestor chain for a tenant, providing helper methods to
 /// classify ownership and compute additive visibility with child-shadowing.
@@ -1089,5 +1228,282 @@ mod tests {
             }
             other => panic!("expected Internal error, got {other:?}"),
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ChainProviders — tests
+    // ═════════════════════════════════════════════════════════════════════════
+
+    use chrono::Utc;
+    use gts::GtsTypeId;
+
+    fn make_provider(id: Uuid, slug: &str, status: ProviderStatus) -> ProviderV1 {
+        let now = Utc::now();
+        ProviderV1 {
+            id,
+            slug: slug.to_owned(),
+            name: slug.to_owned(),
+            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            status,
+            managed: false,
+            metadata: None,
+            discovery_enabled: false,
+            discovery_interval_seconds: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn single_ancestor() -> Vec<TenantRef> {
+        vec![TenantRef {
+            id: TenantId(parent_id()),
+            status: TenantStatus::Active,
+            tenant_type: None,
+            parent_id: None,
+            self_managed: false,
+        }]
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_single_tenant() {
+        let ctx = InheritanceContext::new(child_id(), vec![]);
+        let providers = vec![
+            make_provider(Uuid::nil(), "openai", ProviderStatus::Active),
+            make_provider(Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap(), "anthropic", ProviderStatus::Active),
+        ];
+
+        let chain = build_chain_providers(&ctx, |_scope| {
+            let ps = providers.clone();
+            async move { Ok(ps) }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Both providers should be winners and in the allow-list.
+        assert_eq!(chain.by_id.len(), 2);
+        assert_eq!(chain.allow_list().len(), 2);
+        assert!(chain.is_allowed(Uuid::nil()));
+        assert_eq!(chain.get(Uuid::nil()).map(|p| p.winner), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_child_shadows_parent() {
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let own_id = Uuid::nil();
+        let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000b1").unwrap();
+        let parent_prov = make_provider(parent_prov_id, "openai", ProviderStatus::Active);
+
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_child = scope_targets(&scope, child_id());
+            let pp = parent_prov.clone();
+            async move {
+                if is_child {
+                    Ok(vec![make_provider(own_id, "openai", ProviderStatus::Active)])
+                } else {
+                    Ok(vec![pp])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Child wins the "openai" slug.
+        let child_prov = chain.get(own_id).expect("child provider should exist");
+        assert!(child_prov.winner, "child should win the slug");
+        assert_eq!(child_prov.owner_tenant, child_id());
+        assert_eq!(chain.allow_list().len(), 1);
+        assert!(chain.is_allowed(own_id));
+        assert!(!chain.is_allowed(parent_prov_id));
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_parent_shadows_grandparent() {
+        let parent_id = parent_id();
+        let grandparent_id = grandparent_id();
+        let ctx = InheritanceContext::new(parent_id, vec![
+            TenantRef {
+                id: TenantId(grandparent_id),
+                status: TenantStatus::Active,
+                tenant_type: None,
+                parent_id: None,
+                self_managed: false,
+            },
+        ]);
+
+        let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c1").unwrap();
+        let gp_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c2").unwrap();
+
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_parent = scope_targets(&scope, parent_id);
+            async move {
+                if is_parent {
+                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Active)])
+                } else {
+                    Ok(vec![make_provider(gp_prov_id, "openai", ProviderStatus::Active)])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Parent wins the "openai" slug.
+        let parent_prov = chain.get(parent_prov_id).expect("parent provider");
+        assert!(parent_prov.winner);
+        let gp_prov = chain.get(gp_prov_id).expect("grandparent provider");
+        assert!(!gp_prov.winner, "grandparent should lose to parent");
+
+        assert_eq!(chain.allow_list().len(), 1);
+        assert!(chain.is_allowed(parent_prov_id));
+        assert!(!chain.is_allowed(gp_prov_id));
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_unrelated_slugs_coexist() {
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let child_only_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000d1").unwrap();
+        let parent_only_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000d2").unwrap();
+
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_child = scope_targets(&scope, child_id());
+            async move {
+                if is_child {
+                    Ok(vec![make_provider(child_only_id, "child-only", ProviderStatus::Active)])
+                } else {
+                    Ok(vec![make_provider(parent_only_id, "parent-only", ProviderStatus::Active)])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Both slugs should be winners with no collisions.
+        assert_eq!(chain.by_id.len(), 2);
+        assert_eq!(chain.allow_list().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_disabled_shadow() {
+        // A disabled shadow must still win its slug (so the ancestor's models
+        // are excluded), but be absent from the allow-list (so its own models
+        // are excluded too). §3.5 rationale: folding status into `winner` hands
+        // the slug back to the ancestor and re-exposes the shadowed models.
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let child_prov_id = Uuid::nil();
+        let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000e1").unwrap();
+
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_child = scope_targets(&scope, child_id());
+            async move {
+                if is_child {
+                    Ok(vec![make_provider(child_prov_id, "openai", ProviderStatus::Disabled)])
+                } else {
+                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Active)])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Child (disabled) must still win the slug.
+        let child = chain.get(child_prov_id).expect("child provider");
+        assert!(child.winner, "disabled shadow must still win the slug");
+        assert_eq!(child.owner_tenant, child_id());
+
+        // Parent must be a loser.
+        let parent = chain.get(parent_prov_id).expect("parent provider");
+        assert!(!parent.winner, "parent must lose to disabled child");
+
+        // Neither should be in the allow-list (child is disabled, parent lost).
+        assert_eq!(chain.allow_list().len(), 0, "no active winners");
+        assert!(!chain.is_allowed(child_prov_id));
+        assert!(!chain.is_allowed(parent_prov_id));
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_fails_closed_on_query_error() {
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let err = build_chain_providers(&ctx, |_scope| async move {
+            Err(DomainError::internal("database unavailable"))
+        })
+        .await
+        .expect_err("build should fail on query error");
+
+        assert!(
+            err.to_string().contains("database unavailable"),
+            "expected internal error with cause, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_allow_slice_empty_when_no_active_winners() {
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let child_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000f1").unwrap();
+        let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000f2").unwrap();
+
+        // Child has a provider but it's disabled; parent has one that's also disabled.
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_child = scope_targets(&scope, child_id());
+            async move {
+                if is_child {
+                    Ok(vec![make_provider(child_prov_id, "openai", ProviderStatus::Disabled)])
+                } else {
+                    Ok(vec![make_provider(parent_prov_id, "openai", ProviderStatus::Disabled)])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Child's allow slice should be empty (disabled provider).
+        let child_slice = chain.allow_slice_for(child_id());
+        assert!(child_slice.is_empty(), "child has no active winning providers");
+
+        // Parent's allow slice should also be empty (lost to child).
+        let parent_slice = chain.allow_slice_for(parent_id());
+        assert!(parent_slice.is_empty(), "parent has no active winning providers (lost)");
+    }
+
+    #[tokio::test]
+    async fn test_chain_providers_allow_slice_returns_only_active_winners_for_tenant() {
+        let ctx = InheritanceContext::new(child_id(), single_ancestor());
+
+        let child_id_v = child_id();
+        let parent_id_v = parent_id();
+
+        let child_prov = Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap();
+        let child_prov2 = Uuid::parse_str("00000000-0000-0000-0000-0000000000a2").unwrap();
+        let parent_prov = Uuid::parse_str("00000000-0000-0000-0000-0000000000a3").unwrap();
+
+        let chain = build_chain_providers(&ctx, |scope| {
+            let is_child = scope_targets(&scope, child_id_v);
+            async move {
+                if is_child {
+                    Ok(vec![
+                        make_provider(child_prov, "child-openai", ProviderStatus::Active),
+                        make_provider(child_prov2, "child-anthropic", ProviderStatus::Active),
+                    ])
+                } else {
+                    Ok(vec![make_provider(parent_prov, "parent-slug", ProviderStatus::Active)])
+                }
+            }
+        })
+        .await
+        .expect("build should succeed");
+
+        // Child's allow slice should have both child providers.
+        let child_slice = chain.allow_slice_for(child_id_v);
+        assert_eq!(child_slice.len(), 2);
+        assert!(child_slice.contains(&child_prov));
+        assert!(child_slice.contains(&child_prov2));
+
+        // Parent's allow slice should have the parent provider.
+        let parent_slice = chain.allow_slice_for(parent_id_v);
+        assert_eq!(parent_slice.len(), 1);
+        assert!(parent_slice.contains(&parent_prov));
     }
 }
