@@ -401,7 +401,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     ///
     /// The `ownership` parameter selects the TTL for both polarities (positive
     /// and tombstone).
-    #[allow(dead_code)]
     async fn resolve_slug_ownership(
         &self,
         conn: &impl toolkit_db::secure::DBRunner,
@@ -435,15 +434,24 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         }
     }
 
-    /// Get a model by canonical ID (cache-first, inheritance, approval resolve).
+    /// Get a model by canonical ID via slug resolution (DESIGN §3.5).
     ///
-    /// Returns the model with `approval_status` populated (never fail-closed on
-    /// pending/rejected/revoked — the caller decides). Returns `ModelDeprecated`
-    /// when a soft-deleted model is fetched directly. `ModelNotFound` when the
-    /// model does not exist in the tenant chain.
+    /// Resolves the provider slug from `canonical_id` (the segment before `::`)
+    /// closest-first across the tenant chain, then reads the model only from
+    /// the winning tenant. Applies gates in order (C2, C4):
     ///
-    /// Cache-first: tries each tenant in the chain (closest first), falls back
-    /// to DB, and populates cache on miss with TTL selected by ownership.
+    /// 1. `provider_id` mismatch → `ModelNotFound` (stale cache row)
+    /// 2. Terminal lifecycle → `ModelDeprecated`
+    /// 3. Disabled provider → `ProviderDisabled`
+    ///
+    /// Approval is **reported, not enforced** — `ModelNotApproved` stays
+    /// unreachable from this path.
+    ///
+    /// A malformed `canonical_id` (no `::` separator) yields `ModelNotFound` (C5).
+    /// An unresolved slug yields `ProviderNotFoundBySlug` (C3).
+    ///
+    /// Slug resolution is **fail-closed**: any non-not-found query error at any
+    /// chain hop propagates as `Internal` (B5).
     pub async fn get_tenant_model(
         &self,
         ctx: &SecurityContext,
@@ -457,55 +465,106 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 2. Resolve ancestor chain
         let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
 
-        // 3. Try cache for each tenant in chain (closest first)
-        for tenant_id in inheritance.chain_ids() {
-            let key = cache_key(tenant_id, "model", canonical_id);
-            if let Some(model) = self.cache.get::<crate::ModelV1>(&key).await {
-                // Return ModelDeprecated if the cached model is deprecated or sunset.
-                // Delete the stale cache entry so it doesn't accumulate.
-                if matches!(
-                    model.lifecycle_status,
-                    crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
-                ) {
-                    self.cache.delete(&key).await;
-                    return Err(DomainError::model_deprecated(canonical_id));
-                }
-                return Ok(model);
-            }
-        }
-
-        // 4. Cache miss — walk the chain in the DB, closest tenant first.
-        let conn = self.db.conn().map_err(DomainError::from)?;
-        let conn = &conn;
-        let found = find_in_chain(
-            &inheritance,
-            &own_scope,
-            |e| matches!(e, DomainError::ModelNotFound { .. }),
-            |scope| async move {
-                self.model_repo
-                    .find_by_canonical(conn, &scope, canonical_id)
-                    .await
-            },
-        )
-        .await?;
-
-        let Some((owner_tenant_id, model)) = found else {
+        // 3. Split canonical_id on the first `::` to get slug and model id (C5).
+        let slug = canonical_id.split_once("::").map(|(s, _)| s);
+        let Some(slug) = slug else {
             return Err(DomainError::model_not_found(canonical_id));
         };
 
-        // 5. A deprecated or sunset model is reported as such, never cached.
+        // 4. Resolve the slug closest-first via the Task 6 cache-first helper.
+        //    Stop at the first owner. Fail-closed on non-not-found errors (B5).
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        let conn = &conn;
+
+        let mut winner_tenant: Option<Uuid> = None;
+        let mut winner_provider: Option<crate::ProviderV1> = None;
+
+        for tenant_id in inheritance.chain_ids() {
+            let ownership = inheritance.classify(*tenant_id);
+            match self
+                .resolve_slug_ownership(conn, *tenant_id, slug, ownership)
+                .await
+            {
+                Ok(SlugOwnership::Owned(provider)) => {
+                    winner_tenant = Some(*tenant_id);
+                    winner_provider = Some(provider);
+                    break;
+                }
+                Ok(SlugOwnership::None) => {
+                    // Tombstone — no provider with this slug in this tenant.
+                }
+                Err(e) => {
+                    // Fail-closed: a skipped ancestor provider query would
+                    // un-shadow an earlier ancestor (B5).
+                    return Err(e);
+                }
+            }
+        }
+
+        let Some(winner) = winner_provider else {
+            return Err(DomainError::provider_not_found_by_slug(slug));
+        };
+        let Some(winner_tenant_id) = winner_tenant else {
+            return Err(DomainError::provider_not_found_by_slug(slug));
+        };
+
+        // 5. Scope the model read (C1):
+        //    - Winner is own tenant → use the PDP-derived own_scope (preserves
+        //      compiled constraints).
+        //    - Winner is an ancestor → construct a scoped scope.
+        let model_scope = if winner_tenant_id == inheritance.tenant_id() {
+            own_scope
+        } else {
+            AccessScope::for_tenant(winner_tenant_id)
+        };
+
+        // 6. Read the model: cache under winner's tenant, then DB.
+        let model_key = cache_key(&winner_tenant_id, "model", canonical_id);
+        let model = if let Some(model) = self.cache.get::<crate::ModelV1>(&model_key).await {
+            model
+        } else {
+            match self
+                .model_repo
+                .find_by_canonical(conn, &model_scope, canonical_id)
+                .await
+            {
+                Ok(model) => {
+                    let ttl =
+                        cache_ttl_seconds(inheritance.classify(winner_tenant_id), &self.config);
+                    self.cache.set(&model_key, &model, ttl).await;
+                    model
+                }
+                Err(DomainError::ModelNotFound { .. }) => {
+                    return Err(DomainError::model_not_found(canonical_id));
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        // 7. Apply gates in order (C2, C4).
+        //    Gate 1: provider_id must match the winning provider.
+        if model.provider_id != winner.id {
+            // Stale cache row or inconsistent data — do not serve.
+            self.cache.delete(&model_key).await;
+            return Err(DomainError::model_not_found(canonical_id));
+        }
+
+        //    Gate 2: terminal lifecycle → ModelDeprecated.
         if matches!(
             model.lifecycle_status,
             crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
         ) {
+            self.cache.delete(&model_key).await;
             return Err(DomainError::model_deprecated(canonical_id));
         }
 
-        // 6. Cache under the owning tenant, with the TTL its ownership implies.
-        let key = cache_key(&owner_tenant_id, "model", canonical_id);
-        let ttl = cache_ttl_seconds(inheritance.classify(owner_tenant_id), &self.config);
-        self.cache.set(&key, &model, ttl).await;
+        //    Gate 3: disabled winning provider → ProviderDisabled.
+        if !matches!(winner.status, crate::ProviderStatus::Active) {
+            self.cache.delete(&model_key).await;
+            return Err(DomainError::provider_disabled(winner.id));
+        }
 
+        // 8. Approval is reported, not enforced (see doc comment).
         Ok(model)
     }
 
@@ -1649,11 +1708,13 @@ mod tests {
         let err = service
             .get_tenant_model(&ctx, "nonexistent::model")
             .await
-            .expect_err("should return ModelNotFound");
+            .expect_err("nonexistent slug should fail");
 
+        // With the rewritten slug-resolution path a canonical_id with an
+        // unresolvable slug yields ProviderNotFoundBySlug (still 404 on the wire).
         assert!(
-            matches!(&err, DomainError::ModelNotFound { canonical_id } if canonical_id == "nonexistent::model"),
-            "expected ModelNotFound, got: {err:?}"
+            matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "nonexistent"),
+            "expected ProviderNotFoundBySlug('nonexistent'), got: {err:?}"
         );
     }
 
@@ -1717,16 +1778,24 @@ mod tests {
     #[tokio::test]
     async fn test_get_tenant_model_deprecated_in_cache_returns_error() {
         let db = setup_db().await;
+        let conn = db.conn().expect("conn");
 
         let tenant_id = test_tenant();
         let cache = InMemoryCache::new();
 
-        // Build a deprecated ModelV1 directly via struct literal. The SDK
-        // entity/info structs are not `#[non_exhaustive]`, so no JSON
-        // round-trip is needed.
+        // Create a real provider so the slug resolution succeeds and the model
+        // can be found in cache. The cached model's provider_id must match the
+        // winner to reach the lifecycle gate (C2).
+        let provider_repo = ProviderRepositoryImpl;
+        let scope = scope_for(tenant_id);
+        let (provider_id, _slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Build a deprecated ModelV1 directly via struct literal with the
+        // real provider_id so the gate check passes.
         let deprecated_model: crate::ModelV1 = crate::ModelV1 {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
-            provider_id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            provider_id,
             canonical_id: "openai::gpt-4o-old".to_owned(),
             lifecycle_status: crate::LifecycleStatus::Deprecated,
             approval_status: crate::ApprovalStatus::Pending,
@@ -2352,9 +2421,459 @@ mod tests {
             .await
             .expect_err("cross-tenant should be not found");
 
+        // With the rewritten slug-resolution path, a tenant with no provider
+        // for the slug yields ProviderNotFoundBySlug (still 404 on the wire).
+        assert!(
+            matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "openai"),
+            "expected ProviderNotFoundBySlug('openai'), got: {err:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // get_tenant_model — slug resolution gates (Task 7)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_get_tenant_model_malformed_canonical_id() {
+        // A canonical_id without `::` should yield ModelNotFound (C5).
+        let db = setup_db().await;
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "no-separator")
+            .await
+            .expect_err("malformed id should fail");
+
+        assert!(
+            matches!(&err, DomainError::ModelNotFound { canonical_id } if canonical_id == "no-separator"),
+            "expected ModelNotFound for malformed id, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_stale_cache_provider_id_mismatch() {
+        // A stale cached row whose provider_id no longer matches the winning
+        // provider should yield ModelNotFound (C2), not the row.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let tenant_id = test_tenant();
+        let cache = InMemoryCache::new();
+
+        // Create a provider.
+        let provider_repo = ProviderRepositoryImpl;
+        let scope = scope_for(tenant_id);
+        let (_provider_id, _slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // Pre-populate the model cache with a row whose provider_id does NOT
+        // match the winning provider (simulate a stale entry).
+        let stale_model: crate::ModelV1 = crate::ModelV1 {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            provider_id: Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap(), // wrong!
+            canonical_id: "openai::gpt-4o".to_owned(),
+            lifecycle_status: crate::LifecycleStatus::Production,
+            approval_status: crate::ApprovalStatus::Pending,
+            info: make_deprecated_info("gpt-4o"),
+        };
+        let model_key = cache_key(&tenant_id, "model", "openai::gpt-4o");
+        cache.set(&model_key, &stale_model, 1800).await;
+
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("stale cached row should fail gate C2");
+
         assert!(
             matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound for cross-tenant, got: {err:?}"
+            "expected ModelNotFound for stale provider_id, got: {err:?}"
+        );
+
+        // The stale cache entry should have been deleted.
+        assert!(
+            cache.get::<crate::ModelV1>(&model_key).await.is_none(),
+            "stale cache entry should have been deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_disabled_winner_provider() {
+        // A winning provider that is disabled should yield ProviderDisabled (C4).
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let tenant_id = test_tenant();
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let scope = scope_for(tenant_id);
+
+        // Create a provider and model, then disable the provider.
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        // Disable the provider via update.
+        crate::domain::repo::ProviderRepository::update(
+            &provider_repo,
+            &conn,
+            &scope,
+            provider_id,
+            &crate::UpdateProviderRequestV1 {
+                status: Some(crate::ProviderStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable provider");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("disabled provider should fail");
+
+        assert!(
+            matches!(&err, DomainError::ProviderDisabled { .. }),
+            "expected ProviderDisabled for disabled winner, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_gate_order_lifecycle_before_provider_status() {
+        // Gate order (C4): terminal lifecycle check comes before provider
+        // status check. A deprecated model on a disabled provider should yield
+        // ModelDeprecated, not ProviderDisabled.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let tenant_id = test_tenant();
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let scope = scope_for(tenant_id);
+
+        // Create a provider and model.
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        // Soft-delete the model (sets lifecycle to Deprecated).
+        crate::domain::repo::ModelRepository::soft_delete(
+            &model_repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o",
+        )
+        .await
+        .expect("soft delete model");
+
+        // Disable the provider.
+        crate::domain::repo::ProviderRepository::update(
+            &provider_repo,
+            &conn,
+            &scope,
+            provider_id,
+            &crate::UpdateProviderRequestV1 {
+                status: Some(crate::ProviderStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable provider");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("should fail at lifecycle gate before provider status");
+
+        // Must be ModelDeprecated (gate 2 checked before gate 3).
+        assert!(
+            matches!(&err, DomainError::ModelDeprecated { canonical_id } if canonical_id == "openai::gpt-4o"),
+            "expected ModelDeprecated (lifecycle gate fires before provider status), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_unresolved_slug() {
+        // When no tenant in the chain owns the slug, return ProviderNotFoundBySlug (C3).
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        // Create a provider with slug "other-slug" so there IS a DB hit but
+        // the slug "unknown" won't match.
+        let provider_repo = ProviderRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        create_test_provider(&provider_repo, &conn, &scope, tenant_id, "other-slug").await;
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "unknown::model")
+            .await
+            .expect_err("unresolvable slug should fail");
+
+        assert!(
+            matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "unknown"),
+            "expected ProviderNotFoundBySlug('unknown'), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_slug_resolved_from_parent() {
+        // NoAncestorsResolver provided by the child test tenant, but slug
+        // resolves in the single-tenant case — this tests the normal path
+        // where slug resolution and model read work together.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let parent_tid = parent_id();
+        let child_tid = child_tenant();
+
+        // Create provider and model in parent tenant.
+        let parent_scope = scope_for(parent_tid);
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let result = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("inherited model from parent should be found");
+
+        assert_eq!(result.canonical_id, "openai::gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_child_shadows_slug() {
+        // When both child and parent own the slug, the child wins and the
+        // model is read from the child tenant only.
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let child_tid = child_tenant();
+        let parent_tid = parent_id();
+        let child_scope = scope_for(child_tid);
+        let parent_scope = scope_for(parent_tid);
+
+        // Both child and parent have a provider with slug "openai".
+        let (child_provider_id, child_slug) =
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
+        let (_parent_provider_id, parent_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+
+        // Child has a model, parent also has a model with the same canonical_id.
+        create_test_model(
+            &model_repo,
+            &conn,
+            &child_scope,
+            child_tid,
+            &child_slug,
+            "gpt-4o",
+        )
+        .await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let result = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("child's model should be found (child wins slug)");
+
+        // The returned model should belong to the child's provider.
+        assert_eq!(result.canonical_id, "openai::gpt-4o");
+        assert_eq!(
+            result.provider_id, child_provider_id,
+            "child's model must be returned, not the parent's"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tenant_model_fail_closed_on_slug_query_error() {
+        // A non-not-found error during slug resolution must propagate (B5).
+        use std::sync::atomic::AtomicUsize;
+
+        #[domain_model]
+        struct FailingSlugRepo {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ProviderRepository for FailingSlugRepo {
+            async fn find_by_id(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn find_by_slug(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _slug: &str,
+            ) -> Result<ProviderV1, DomainError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(DomainError::internal("slug resolution unavailable"))
+            }
+            async fn list(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _query: &ODataQuery,
+            ) -> Result<Page<ProviderV1>, DomainError> {
+                unimplemented!()
+            }
+            async fn list_all_for_tenant(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+            ) -> Result<Vec<ProviderV1>, DomainError> {
+                unimplemented!()
+            }
+            async fn create(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _tenant_id: Uuid,
+                _req: &CreateProviderRequestV1,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn update(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+                _req: &UpdateProviderRequestV1,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn delete(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let provider_repo = Arc::new(FailingSlugRepo {
+            call_count: Arc::clone(&call_count),
+        });
+        let model_repo = Arc::new(PanicModelRepo);
+        let cache = Arc::new(InMemoryCache::new());
+        let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
+
+        let service: Service<FailingSlugRepo, PanicModelRepo, InMemoryCache> = Service {
+            db: Arc::new(setup_db().await),
+            provider_repo,
+            model_repo,
+            cache,
+            tenant_resolver: Arc::new(NoAncestorsResolver),
+            policy_enforcer: enforcer,
+            config: ModelRegistryConfig::default(),
+        };
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(test_tenant())
+            .build()
+            .expect("ctx");
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("slug resolution error must propagate");
+
+        assert!(
+            matches!(&err, DomainError::Internal { detail, .. } if detail.contains("slug resolution unavailable")),
+            "expected Internal error from slug resolution, got: {err:?}"
         );
     }
 

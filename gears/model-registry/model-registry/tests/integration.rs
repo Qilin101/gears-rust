@@ -586,14 +586,16 @@ async fn tenant_isolation() {
         "tenant B should see no models"
     );
 
-    // Tenant B should not be able to get the model.
+    // Tenant B should not be able to get the model. With the rewritten
+    // slug-resolution path, an unresolvable slug yields ProviderNotFoundBySlug
+    // (still 404 on the wire).
     let get_err = service
         .get_tenant_model(&ctx_b, "openai::gpt-4o")
         .await
         .expect_err("tenant B get model should fail");
     assert!(
-        matches!(get_err, DomainError::ModelNotFound { .. }),
-        "expected ModelNotFound, got {get_err:?}"
+        matches!(get_err, DomainError::ProviderNotFoundBySlug { .. }),
+        "expected ProviderNotFoundBySlug, got {get_err:?}"
     );
 
     // Tenant B should not be able to get the provider.
@@ -1402,5 +1404,219 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
         refetched.info.capabilities.vision.supported_mime_types,
         vec!["image/jpeg".to_owned()],
         "vision.supported_mime_types must survive re-read via capabilities_full"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. Shadowed provider: child shadows parent's slug, cached ancestor model
+//    must NOT be served (Task 7 - C1's headline case)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+    let model_repo = ModelRepositoryImpl::new();
+
+    // Step 1: Create provider + model in the parent tenant.
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // Step 2: Child gets the inherited model (populates cache).
+    let inherited = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("child should inherit model before shadow");
+    assert_eq!(inherited.canonical_id, "openai::gpt-4o");
+
+    // Step 3: Child creates their OWN provider with the SAME slug "openai",
+    // shadowing the parent's provider. This invalidates the child's cache.
+    let child_provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "Child OpenAI"))
+        .await
+        .expect("child creates own openai provider");
+
+    // Step 4: Child's get_tenant_model should fail with ModelNotFound
+    // (child owns the slug but has NO model for "gpt-4o"). The parent's model
+    // must NOT be served even though it was cached from Step 2.
+    let err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("child slug winner has no model");
+
+    assert!(
+        matches!(&err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound (child wins slug but has no model), got: {err:?}"
+    );
+
+    // Step 5: Create a model under the child's provider with the same
+    // canonical_id and verify the child's model IS returned.
+    service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("child creates own model");
+
+    let childs_model = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("child's own model should now be found");
+    assert_eq!(childs_model.canonical_id, "openai::gpt-4o");
+    assert_eq!(
+        childs_model.provider_id, child_provider.id,
+        "child's model must reference child's provider, not the parent's"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. Provider create drops slug tombstone (Task 7 - G5, deferred from Task 6)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn create_provider_drops_slug_tombstone() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+
+    // Create a provider in the parent tenant.
+    create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // Step 1: Try getting a model — child has no provider or model,
+    // so slug resolution for "openai" hits the parent. No model exists.
+    let child_can_get = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
+    assert!(
+        matches!(&child_can_get, Err(DomainError::ModelNotFound { .. })),
+        "expected ModelNotFound (no model yet), got: {child_can_get:?}"
+    );
+
+    // Step 2: Child creates their own provider with slug "openai".
+    // This invalidates the child's tenant cache (dropping any tombstone).
+    let _child_provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "Child OpenAI"))
+        .await
+        .expect("child creates own openai provider");
+
+    // Step 3: Create a model under the child's provider.
+    service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("child creates model");
+
+    // Step 4: The new slug resolution should find child's provider and
+    // serve the child's model.
+    let model = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("child's model should be found after create");
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 9. Disabled winning provider (Task 7 - G4, gate-ordering disclosure rule)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn disabled_provider_hides_model_on_get() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    // Create provider and model.
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    service
+        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model");
+
+    // Verify the model is accessible.
+    let model = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("model should be found before disabling provider");
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+
+    // Disable the provider.
+    service
+        .update_provider(
+            &ctx,
+            provider.id,
+            &UpdateProviderRequestV1 {
+                status: Some(model_registry::ProviderStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("disable provider");
+
+    // A resolvable canonical_id on a disabled provider should yield ProviderDisabled.
+    let err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("disabled provider should block model get");
+
+    assert!(
+        matches!(&err, DomainError::ProviderDisabled { .. }),
+        "expected ProviderDisabled for model on disabled provider, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn disabled_provider_hides_model_when_no_model_exists() {
+    // When the winning provider is disabled and the model does not exist,
+    // the system should resolve the slug and then report ModelNotFound
+    // (the model read happens before the provider status gate, per C4 ordering).
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::new();
+
+    // Create a provider directly, then disable it via update.
+    let scope = scope_for(tenant_a());
+    let p = ProviderRepository::create(
+        &provider_repo,
+        &conn,
+        &scope,
+        tenant_a(),
+        &CreateProviderRequestV1::builder("openai", "OpenAI", make_provider_gts()).build(),
+    )
+    .await
+    .expect("create provider");
+
+    // Disable the provider via repository update.
+    ProviderRepository::update(
+        &provider_repo,
+        &conn,
+        &scope,
+        p.id,
+        &UpdateProviderRequestV1 {
+            status: Some(model_registry::ProviderStatus::Disabled),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("disable provider");
+
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    // A canonical_id whose slug resolves to a disabled provider, but no
+    // matching model exists → ModelNotFound.
+    let err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("non-existent model with disabled provider");
+
+    assert!(
+        matches!(&err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound for non-existent model behind disabled provider, got: {err:?}"
     );
 }

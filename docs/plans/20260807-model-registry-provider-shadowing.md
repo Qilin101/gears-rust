@@ -525,35 +525,35 @@ the rest of the TTL, with no DB query on that path to catch it.
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 - Modify: `gears/model-registry/model-registry/tests/integration.rs`
 
-- [ ] split `canonical_id` on the **first** `::`; a malformed id (no `::`) yields `ModelNotFound` (C5)
-- [ ] resolve the slug closest-first via the Task 6 helper, stopping at the first owner; **fail closed**
+- [x] split `canonical_id` on the **first** `::`; a malformed id (no `::`) yields `ModelNotFound` (C5)
+- [x] resolve the slug closest-first via the Task 6 helper, stopping at the first owner; **fail closed**
       on any non-not-found query error at any hop
-- [ ] return `ProviderNotFoundBySlug` when no tenant in the chain owns the slug (C3)
-- [ ] replace the chain-wide cache probe with a single probe under the winner's tenant, and the
+- [x] return `ProviderNotFoundBySlug` when no tenant in the chain owns the slug (C3)
+- [x] replace the chain-wide cache probe with a single probe under the winner's tenant, and the
       `find_in_chain` DB fallback with a lookup scoped to the winner's tenant only (C1)
-- [ ] scope the model read correctly: winner == T0 → the PDP-derived `own_scope` (preserving the
+- [x] scope the model read correctly: winner == T0 → the PDP-derived `own_scope` (preserving the
       PDP's compiled constraints); winner is an ancestor → a constructed `AccessScope::for_tenant`.
       Do not use `for_tenant` uniformly — that silently drops the PDP constraints on own-tenant reads
-- [ ] apply the gates **in order** (C2, C4): `provider_id != winner.id` → `ModelNotFound`; then
+- [x] apply the gates **in order** (C2, C4): `provider_id != winner.id` → `ModelNotFound`; then
       terminal lifecycle → drop key, `ModelDeprecated`; then `winner.status == disabled` → drop key,
       `ProviderDisabled`
-- [ ] keep approval **reported, not enforced** — `ModelNotApproved` stays unreachable from this path
-- [ ] ⚠️ update three existing tests whose outcome legitimately changes — a fixture with no provider
+- [x] keep approval **reported, not enforced** — `ModelNotApproved` stays unreachable from this path
+- [x] ⚠️ update three existing tests whose outcome legitimately changes — a fixture with no provider
       row now yields `ProviderNotFoundBySlug` (still 404 `not_found` on the wire) instead of
       `ModelNotFound`/`ModelDeprecated`: `test_get_tenant_model_not_found` (`service.rs:1320`),
       `test_get_tenant_model_deprecated_in_cache_returns_error` (`:1398` — its cached `ModelV1` also
       needs a `provider_id` matching the winner to reach the lifecycle gate), and
       `test_get_tenant_model_cross_tenant_not_found` (`:2000`). Not listed in `impl-gaps.md` group G
-- [ ] write unit tests for each gate and its ordering, including the malformed-`canonical_id` case
-- [ ] write a unit test asserting a stale row whose `provider_id` no longer matches the winner yields
+- [x] write unit tests for each gate and its ordering, including the malformed-`canonical_id` case
+- [x] write a unit test asserting a stale row whose `provider_id` no longer matches the winner yields
       `ModelNotFound`, not the row
-- [ ] write an integration test: an ancestor model is cached, the child then shadows the provider slug,
+- [x] write an integration test: an ancestor model is cached, the child then shadows the provider slug,
       and the next `get_tenant_model` must **not** serve the cached ancestor row (C1's headline case)
-- [ ] write an integration test asserting the provider create that installs a shadow drops the
+- [x] write an integration test asserting the provider create that installs a shadow drops the
       tombstone, so the next resolution finds the new owner (G5, deferred from Task 6)
-- [ ] write an integration test asserting a disabled winning provider yields `ProviderDisabled` for a
+- [x] write an integration test asserting a disabled winning provider yields `ProviderDisabled` for a
       resolvable id, and `ModelNotFound` for an unresolvable one (G4, gate-ordering disclosure rule)
-- [ ] run tests - must pass before task 8
+- [x] run tests - must pass before task 8
 
 ### Task 8: Rewrite `list_tenant_models` around the allow-list (B1–B3, G2, G3, G4-list)
 
