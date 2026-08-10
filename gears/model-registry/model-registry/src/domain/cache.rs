@@ -4,7 +4,7 @@
 //! (DESIGN §2.1). Ships the [`InMemoryCache`] backend.
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,24 @@ pub fn cache_key(tenant_id: &Uuid, entity: &str, id: &str) -> String {
 #[must_use]
 pub fn tenant_prefix(tenant_id: &Uuid) -> String {
     format!("mr:{tenant_id}:")
+}
+
+// ---------------------------------------------------------------------------
+// SlugOwnership — cache entity with tombstones
+// ---------------------------------------------------------------------------
+
+/// The result of resolving a `(tenant_id, slug)` pair via cache or DB.
+///
+/// A tombstone carries `None` so the caller can distinguish "no one owns this
+/// slug in this tenant" (a cache hit) from "we don't know yet" (a cache miss),
+/// saving a DB round-trip on the next lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[domain_model]
+pub enum SlugOwnership {
+    /// The tenant owns a provider with this slug.
+    Owned(crate::ProviderV1),
+    /// No provider with this slug exists in the tenant.
+    None,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,5 +268,108 @@ mod tests {
         // Trying to deserialize a u32 as TestValue should fail → None
         let got: Option<TestValue> = cache.get(key).await;
         assert!(got.is_none(), "type mismatch should return None");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // SlugOwnership — cache entity with tombstones (Task 6)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    fn make_test_provider() -> crate::ProviderV1 {
+        use chrono::Utc;
+        use gts::GtsTypeId;
+        crate::ProviderV1 {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+            slug: "test-provider".to_owned(),
+            name: "Test Provider".to_owned(),
+            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            status: crate::ProviderStatus::Active,
+            managed: false,
+            metadata: None,
+            discovery_enabled: false,
+            discovery_interval_seconds: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slug_ownership_positive_hit() {
+        let cache = InMemoryCache::new();
+        let tenant_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let key = cache_key(&tenant_id, "provider_slug", "test-provider");
+
+        let owned = SlugOwnership::Owned(make_test_provider());
+        cache.set(&key, &owned, 60).await;
+
+        let got: Option<SlugOwnership> = cache.get(&key).await;
+        assert!(got.is_some(), "positive ownership should be cached");
+
+        match got.unwrap() {
+            SlugOwnership::Owned(p) => assert_eq!(p.slug, "test-provider"),
+            SlugOwnership::None => panic!("expected Owned variant, got None"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slug_ownership_tombstone_hit() {
+        let cache = InMemoryCache::new();
+        let tenant_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let key = cache_key(&tenant_id, "provider_slug", "nonexistent");
+
+        // A tombstone is a cache hit — the key exists and deserializes to None.
+        cache.set(&key, &SlugOwnership::None, 60).await;
+
+        let got: Option<SlugOwnership> = cache.get(&key).await;
+        assert!(got.is_some(), "tombstone should be a cache hit, not a miss");
+
+        match got.unwrap() {
+            SlugOwnership::Owned(_) => panic!("expected None tombstone, got Owned"),
+            SlugOwnership::None => { /* expected */ }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slug_ownership_distinguished_from_miss() {
+        let cache = InMemoryCache::new();
+        let tenant_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let key = cache_key(&tenant_id, "provider_slug", "never-set");
+
+        // A key that was never set is a miss (Option::None), not a tombstone hit.
+        let got: Option<SlugOwnership> = cache.get(&key).await;
+        assert!(got.is_none(), "unset key should be a cache miss");
+    }
+
+    #[tokio::test]
+    async fn test_slug_ownership_ttl_expiry() {
+        let cache = InMemoryCache::new();
+        let tenant_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let key = cache_key(&tenant_id, "provider_slug", "expiring");
+
+        // TTL=0 means immediate expiry — the tombstone disappears.
+        cache.set(&key, &SlugOwnership::None, 0).await;
+
+        // Should have expired immediately.
+        let got: Option<SlugOwnership> = cache.get(&key).await;
+        assert!(got.is_none(), "entry with TTL=0 should be expired");
+    }
+
+    #[tokio::test]
+    async fn test_slug_ownership_tenant_invalidation() {
+        let cache = InMemoryCache::new();
+        let t1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let t2 = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        let owned = SlugOwnership::Owned(make_test_provider());
+        let key_t1 = cache_key(&t1, "provider_slug", "test-provider");
+        let key_t2 = cache_key(&t2, "provider_slug", "test-provider");
+
+        cache.set(&key_t1, &owned, 60).await;
+        cache.set(&key_t2, &owned, 60).await;
+
+        // Invalidate tenant t1 — should remove only t1's slug entries.
+        cache.invalidate_tenant(t1).await;
+
+        assert!(cache.get::<SlugOwnership>(&key_t1).await.is_none());
+        assert!(cache.get::<SlugOwnership>(&key_t2).await.is_some());
     }
 }

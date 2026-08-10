@@ -500,20 +500,20 @@ carrying the `<10ms P99` NFR.
 - Modify: `gears/model-registry/model-registry/src/domain/cache.rs`
 - Modify: `gears/model-registry/model-registry/src/domain/service.rs`
 
-- [ ] add a `SlugOwnership` enum (`Owned(ProviderV1)` / `None`) serializable through `CacheService`,
+- [x] add a `SlugOwnership` enum (`Owned(ProviderV1)` / `None`) serializable through `CacheService`,
       so a tombstone is a cache **hit** carrying "no owner" rather than a miss
-- [ ] use the existing `cache_key(&tenant_id, "provider_slug", slug)` — it already produces
+- [x] use the existing `cache_key(&tenant_id, "provider_slug", slug)` — it already produces
       `mr:{tenant}:provider_slug:{slug}`; no new key helper is needed
-- [ ] add a service helper that resolves one `(tenant, slug)` hop cache-first, writing **both**
+- [x] add a service helper that resolves one `(tenant, slug)` hop cache-first, writing **both**
       polarities on a DB miss with the TTL of that tenant's ownership class
-- [ ] confirm no new invalidation code is needed — the key sits under the owning tenant's prefix and
+- [x] confirm no new invalidation code is needed — the key sits under the owning tenant's prefix and
       is swept by the existing `invalidate_tenant`
-- [ ] write cache tests: positive hit, tombstone hit (distinguished from a miss), TTL expiry
-- [ ] write a `service.rs` in-module test asserting a tombstone is written on a DB miss and consulted
+- [x] write cache tests: positive hit, tombstone hit (distinguished from a miss), TTL expiry
+- [x] write a `service.rs` in-module test asserting a tombstone is written on a DB miss and consulted
       on the next call (no second DB query). Keep it at service level: the helper is private and
       `get_tenant_model` does not call it until Task 7, so there is no end-to-end path yet — the
       shadow-install/invalidation assertion (G5) lands in Task 7's integration tests
-- [ ] run tests - must pass before task 7
+- [x] run tests - must pass before task 7
 
 ### Task 7: Rewrite `get_tenant_model` around slug resolution (C1–C5, G4-get)
 

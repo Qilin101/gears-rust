@@ -26,7 +26,7 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
-use super::cache::{CacheService, cache_key};
+use super::cache::{CacheService, SlugOwnership, cache_key};
 use super::error::DomainError;
 use super::inheritance::{
     AncestorFailure, InheritanceContext, cache_ttl_seconds, find_in_chain, merge_inherited_page,
@@ -390,6 +390,51 @@ impl<R, M, C> Service<R, M, C> {
 // ── Model read operations (Task 12) ────────────────────────────────────
 
 impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C> {
+    /// Resolve a single `(tenant_id, slug)` hop, cache-first with tombstones.
+    ///
+    /// Returns:
+    /// - `Ok(SlugOwnership::Owned(p))` when the tenant owns a provider with this slug
+    /// - `Ok(SlugOwnership::None)` when the tenant has no provider with this slug
+    ///   (a tombstone from a prior DB miss, so the caller skips a round-trip)
+    /// - `Err(e)` on any non-not-found query error (fail-closed — a skipped
+    ///   ancestor hop would un-shadow an earlier ancestor, B5)
+    ///
+    /// The `ownership` parameter selects the TTL for both polarities (positive
+    /// and tombstone).
+    #[allow(dead_code)]
+    async fn resolve_slug_ownership(
+        &self,
+        conn: &impl toolkit_db::secure::DBRunner,
+        tenant_id: Uuid,
+        slug: &str,
+        ownership: crate::domain::inheritance::Ownership,
+    ) -> Result<SlugOwnership, DomainError> {
+        let key = cache_key(&tenant_id, "provider_slug", slug);
+
+        // Cache-first.
+        if let Some(result) = self.cache.get::<SlugOwnership>(&key).await {
+            return Ok(result);
+        }
+
+        // Cache miss — query DB.
+        let scope = AccessScope::for_tenant(tenant_id);
+        match self.provider_repo.find_by_slug(conn, &scope, slug).await {
+            Ok(provider) => {
+                let ttl = cache_ttl_seconds(ownership, &self.config);
+                let result = SlugOwnership::Owned(provider);
+                self.cache.set(&key, &result, ttl).await;
+                Ok(result)
+            }
+            Err(DomainError::ProviderNotFoundBySlug { .. }) => {
+                // Write a tombstone so the next lookup skips the DB round-trip.
+                let ttl = cache_ttl_seconds(ownership, &self.config);
+                self.cache.set(&key, &SlugOwnership::None, ttl).await;
+                Ok(SlugOwnership::None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Get a model by canonical ID (cache-first, inheritance, approval resolve).
     ///
     /// Returns the model with `approval_status` populated (never fail-closed on
@@ -716,7 +761,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::cache::InMemoryCache;
+    use crate::domain::cache::{InMemoryCache, SlugOwnership};
+    use crate::domain::inheritance::Ownership;
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::model_repo::ModelRepositoryImpl;
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
@@ -2309,6 +2355,282 @@ mod tests {
         assert!(
             matches!(&err, DomainError::ModelNotFound { .. }),
             "expected ModelNotFound for cross-tenant, got: {err:?}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // resolve_slug_ownership — cache-first slug resolution with tombstones
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Create a `ProviderV1` struct literal for test cache pre-population.
+    fn make_test_provider(slug: &str) -> ProviderV1 {
+        use chrono::Utc;
+        use gts::GtsTypeId;
+        ProviderV1 {
+            id: Uuid::new_v4(),
+            slug: slug.to_owned(),
+            name: slug.to_owned(),
+            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            status: crate::ProviderStatus::Active,
+            managed: false,
+            metadata: None,
+            discovery_enabled: false,
+            discovery_interval_seconds: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_slug_ownership_cache_hit_owned() {
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(
+            setup_db().await,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
+
+        let tenant_id = test_tenant();
+        let slug = "openai";
+
+        // Pre-populate cache with a slug ownership.
+        let provider = make_test_provider(slug);
+        let key = cache_key(&tenant_id, "provider_slug", slug);
+        cache.set(&key, &SlugOwnership::Owned(provider), 60).await;
+
+        let conn = service.db.conn().expect("conn");
+        let result = service
+            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("cache hit should succeed");
+
+        match result {
+            SlugOwnership::Owned(p) => assert_eq!(p.slug, slug),
+            SlugOwnership::None => panic!("expected Owned, got None tombstone"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_slug_ownership_cache_hit_tombstone() {
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(
+            setup_db().await,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
+
+        let tenant_id = test_tenant();
+        let slug = "nonexistent";
+
+        // Pre-populate cache with a tombstone.
+        let key = cache_key(&tenant_id, "provider_slug", slug);
+        cache.set(&key, &SlugOwnership::None, 60).await;
+
+        let conn = service.db.conn().expect("conn");
+        let result = service
+            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("tombstone hit should succeed");
+
+        // The tombstone means we skip the DB and get None back.
+        match result {
+            SlugOwnership::Owned(_) => panic!("expected None tombstone, got Owned"),
+            SlugOwnership::None => { /* expected - no DB query was made */ }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_slug_ownership_db_miss_writes_tombstone() {
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(
+            setup_db().await,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
+
+        let tenant_id = test_tenant();
+        let slug = "nonexistent";
+
+        // First call: cache miss → DB miss → tombstone written.
+        let conn = service.db.conn().expect("conn");
+        let result = service
+            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("DB miss should succeed");
+
+        match result {
+            SlugOwnership::Owned(_) => panic!("expected None for nonexistent slug"),
+            SlugOwnership::None => { /* expected — no provider exists */ }
+        }
+
+        // Verify tombstone was written.
+        let key = cache_key(&tenant_id, "provider_slug", slug);
+        let cached: Option<SlugOwnership> = cache.get(&key).await;
+        match cached {
+            Some(SlugOwnership::None) => { /* tombstone confirmed */ }
+            other => panic!("expected tombstone (SlugOwnership::None) in cache, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_slug_ownership_db_hit_populates_cache() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        // Create a provider in the DB.
+        let provider_repo = ProviderRepositoryImpl;
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+        let slug = "openai";
+        create_test_provider(&provider_repo, &conn, &scope, tenant_id, slug).await;
+
+        let cache = InMemoryCache::new();
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            cache.clone(),
+        );
+
+        // First call: cache miss → DB hit → cache populated.
+        let svc_conn = service.db.conn().expect("conn");
+        let result = service
+            .resolve_slug_ownership(&svc_conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("DB hit should succeed");
+
+        match result {
+            SlugOwnership::Owned(p) => assert_eq!(p.slug, slug),
+            SlugOwnership::None => panic!("expected Owned for existing provider"),
+        }
+
+        // Verify cache was populated.
+        let key = cache_key(&tenant_id, "provider_slug", slug);
+        let cached: Option<SlugOwnership> = cache.get(&key).await;
+        match cached {
+            Some(SlugOwnership::Owned(p)) => assert_eq!(p.slug, slug),
+            other => panic!("expected Owned in cache, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_slug_ownership_tombstone_avoids_second_db_query() {
+        // Use a mock provider repo that counts calls.
+        use std::sync::atomic::AtomicUsize;
+
+        #[domain_model]
+        struct CountingProviderRepo {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ProviderRepository for CountingProviderRepo {
+            async fn find_by_id(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn find_by_slug(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _slug: &str,
+            ) -> Result<ProviderV1, DomainError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(DomainError::provider_not_found_by_slug("stub"))
+            }
+            async fn list(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _query: &ODataQuery,
+            ) -> Result<Page<ProviderV1>, DomainError> {
+                unimplemented!()
+            }
+            async fn list_all_for_tenant(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+            ) -> Result<Vec<ProviderV1>, DomainError> {
+                unimplemented!()
+            }
+            async fn create(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _tenant_id: Uuid,
+                _req: &CreateProviderRequestV1,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn update(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+                _req: &UpdateProviderRequestV1,
+            ) -> Result<ProviderV1, DomainError> {
+                unimplemented!()
+            }
+            async fn delete(
+                &self,
+                _conn: &impl DBRunner,
+                _scope: &AccessScope,
+                _id: Uuid,
+            ) -> Result<(), DomainError> {
+                unimplemented!()
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let provider_repo = Arc::new(CountingProviderRepo {
+            call_count: Arc::clone(&call_count),
+        });
+
+        let cache = Arc::new(InMemoryCache::new());
+        let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
+        let model_repo = Arc::new(PanicModelRepo);
+
+        let service: Service<CountingProviderRepo, PanicModelRepo, InMemoryCache> = Service {
+            db: Arc::new(setup_db().await),
+            provider_repo,
+            model_repo,
+            cache: Arc::clone(&cache),
+            tenant_resolver: Arc::new(NoAncestorsResolver),
+            policy_enforcer: enforcer,
+            config: ModelRegistryConfig::default(),
+        };
+
+        let tenant_id = test_tenant();
+        let slug = "no-such-slug";
+        let conn = service.db.conn().expect("conn");
+
+        // First call: cache miss → DB miss → tombstone written.
+        service
+            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("first call should succeed");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "first call should hit the DB once"
+        );
+
+        // Second call: cache hit (tombstone) — no DB query.
+        service
+            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .await
+            .expect("second call should succeed");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "second call should NOT hit the DB - tombstone is a cache hit"
         );
     }
 
