@@ -638,32 +638,32 @@ The eleventh P1 trait method, on the same `ModelRegistryClientV1` trait — not 
 - Modify: `gears/model-registry/model-registry/src/domain/local_client.rs`
 - Modify: `gears/llm-gateway/llm-gateway-demo/src/mock_registry.rs` (implement the 11th method)
 
-- [ ] add `ModelManagementV1<P>` to the SDK: `ModelV1` plus `shadowed`, `provider_disabled`,
+- [x] add `ModelManagementV1<P>` to the SDK: `ModelV1` plus `shadowed`, `provider_disabled`,
       `available_for_eval`; re-export from `models/mod.rs`
-- [ ] add `actions::LIST_MANAGEMENT = "list_management"` and use it for this method's `access_scope`
+- [x] add `actions::LIST_MANAGEMENT = "list_management"` and use it for this method's `access_scope`
       call, so the admin grant is a first-class PDP subject
-- [ ] implement `Service::list_tenant_models_management`: build `ChainProviders` fail-closed, query
+- [x] implement `Service::list_tenant_models_management`: build `ChainProviders` fail-closed, query
       every chain tenant with `ListVisibility::Management { include_deprecated }`, merge in chain
       order **without** `canonical_id` dedupe, truncate to the page size
-- [ ] suppress the dedupe by passing `key_fn = |m| m.id` to `merge_inherited_page` — model ids are
+- [x] suppress the dedupe by passing `key_fn = |m| m.id` to `merge_inherited_page` — model ids are
       unique, so `apply_additive_visibility` collapses nothing while chain ordering is preserved.
       Reuses the one helper rather than adding a no-dedupe mode. Two chain tenants owning the same
       slug is exactly what this endpoint exists to display
-- [ ] `AncestorFailure::Skip` applies here too — this path keeps §3.4's partial-results rule for
+- [x] `AncestorFailure::Skip` applies here too — this path keeps §3.4's partial-results rule for
       ancestor *model* queries; only the `ChainProviders` build is fail-closed
-- [ ] implement the new trait method on `MockModelRegistry` in `llm-gateway-demo` — the trait has no
+- [x] implement the new trait method on `MockModelRegistry` in `llm-gateway-demo` — the trait has no
       default bodies, so omitting it is a workspace compile error
-- [ ] compute the three flags per row from the same `ChainProviders`; include the approval conjunct in
+- [x] compute the three flags per row from the same `ChainProviders`; include the approval conjunct in
       `available_for_eval` even though eval does not enforce it yet (the flag deliberately leads the
       implementation)
-- [ ] add `list_tenant_models_management` to `ModelRegistryClientV1` and implement it on `LocalClient`
-- [ ] write a test asserting a shadowed ancestor row comes back with `shadowed = true` and
+- [x] add `list_tenant_models_management` to `ModelRegistryClientV1` and implement it on `LocalClient`
+- [x] write a test asserting a shadowed ancestor row comes back with `shadowed = true` and
       `available_for_eval = false`, while the eval listing omits it entirely
-- [ ] write a test asserting a disabled provider's rows come back with `provider_disabled = true`
-- [ ] write a test asserting a non-approved model on a winning active provider reports
+- [x] write a test asserting a disabled provider's rows come back with `provider_disabled = true`
+- [x] write a test asserting a non-approved model on a winning active provider reports
       `available_for_eval = false` while `list_tenant_models` still returns it
-- [ ] write a test asserting `include_deprecated` gates terminal-lifecycle rows and defaults to `false`
-- [ ] run tests - must pass before task 11
+- [x] write a test asserting `include_deprecated` gates terminal-lifecycle rows and defaults to `false`
+- [x] run tests - must pass before task 11
 
 ### Task 11: Register `GET /v1/admin/models` (F1, F3-REST, F4, G4-management)
 

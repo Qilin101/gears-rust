@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use model_registry_sdk::odata::ModelFilterField;
 use model_registry_sdk::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryClientV1, ModelRegistryError,
-    ModelV1, ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
+    CreateModelRequestV1, CreateProviderRequestV1, ModelManagementV1, ModelRegistryClientV1,
+    ModelRegistryError, ModelV1, ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 use toolkit_odata::ast::{CompareOperator, Expr, Value};
 use toolkit_odata::filter::FilterField as _;
@@ -169,6 +169,15 @@ impl ModelRegistryClientV1 for MockModelRegistry {
         _ctx: &SecurityContext,
         _id: Uuid,
     ) -> Result<(), ModelRegistryError> {
+        Err(unsupported())
+    }
+
+    async fn list_tenant_models_management(
+        &self,
+        _ctx: &SecurityContext,
+        _query: &ODataQuery,
+        _include_deprecated: bool,
+    ) -> Result<Page<ModelManagementV1>, ModelRegistryError> {
         Err(unsupported())
     }
 }

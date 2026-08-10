@@ -75,6 +75,7 @@ pub use models::{
     ModelCapabilities,
     // info / entities
     ModelInfoV1,
+    ModelManagementV1,
     ModelPerformance,
     ModelV1,
     // tagged-object form of `ToolChoice` (`{"type":"function","name":"…"}`)

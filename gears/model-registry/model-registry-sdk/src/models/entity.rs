@@ -75,6 +75,41 @@ impl ModelV1<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
+// ModelManagementV1<P>
+// ---------------------------------------------------------------------------
+
+/// A model row as returned by the `list_tenant_models_management` endpoint.
+///
+/// Augments [`ModelV1<P>`] with three management-only flags computed from
+/// [`ChainProviders`](crate::domain::inheritance::ChainProviders):
+///
+/// - `shadowed` — the provider slug is owned by a closer tenant (the model is
+///   hidden from eval listings by a shadow provider).
+/// - `provider_disabled` — the provider's status is `disabled`; the model
+///   is hidden from eval listings.
+/// - `available_for_eval` — the model would be returned by
+///   `list_tenant_models` (visible, active provider, approved, non-terminal
+///   lifecycle).
+///
+/// Generic over `P` with the same semantics as [`ModelV1<P>`].
+///
+/// Three bool flags inline is intentional — these map one-to-one to an admin
+/// UI's three labelled columns. A two-variant enum per flag would add
+/// ceremony without clarity.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelManagementV1<P: gts::GtsSchema = serde_json::Value> {
+    /// The underlying model data.
+    pub model: ModelV1<P>,
+    /// The provider slug is shadowed by a closer tenant.
+    pub shadowed: bool,
+    /// The provider is disabled.
+    pub provider_disabled: bool,
+    /// The model would be visible in the eval (`list_tenant_models`) result.
+    pub available_for_eval: bool,
+}
+
+// ---------------------------------------------------------------------------
 // ProviderV1
 // ---------------------------------------------------------------------------
 

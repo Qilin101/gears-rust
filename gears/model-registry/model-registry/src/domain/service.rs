@@ -35,7 +35,10 @@ use super::inheritance::{
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
 use crate::config::ModelRegistryConfig;
-use crate::{CreateProviderRequestV1, LifecycleStatus, ProviderV1, UpdateProviderRequestV1};
+use crate::{
+    ApprovalStatus, CreateProviderRequestV1, LifecycleStatus, ModelManagementV1, ProviderStatus,
+    ProviderV1, UpdateProviderRequestV1,
+};
 
 // ---------------------------------------------------------------------------
 // Authorization resource type constants
@@ -82,6 +85,8 @@ pub(crate) mod actions {
     pub const UPDATE: &str = "update";
     /// Delete a resource.
     pub const DELETE: &str = "delete";
+    /// List / search resources with management flags (admin endpoint).
+    pub const LIST_MANAGEMENT: &str = "list_management";
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +666,107 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             },
         )
         .await
+    }
+
+    /// List models with management flags for the admin endpoint.
+    ///
+    /// Builds `ChainProviders(T0)` (fail-closed), then queries every chain tenant
+    /// with `ListVisibility::Management` and merges in chain order **without**
+    /// `canonical_id` dedupe — two chain tenants owning the same slug is the
+    /// exact case this endpoint exists to display.
+    ///
+    /// Each returned row carries `shadowed`, `provider_disabled`, and
+    /// `available_for_eval` flags computed from the same `ChainProviders`.
+    pub async fn list_tenant_models_management(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+        include_deprecated: bool,
+    ) -> Result<Page<crate::ModelManagementV1>, DomainError> {
+        reject_select(query)?;
+
+        // 1. Derive access scope (authorization check + DB scope).
+        let own_scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST_MANAGEMENT)
+            .await?;
+
+        // 2. Resolve ancestor chain.
+        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let conn = self.db.conn().map_err(DomainError::from)?;
+
+        // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
+        //    query error.
+        let conn = &conn;
+        let chain = build_chain_providers(&inheritance, |scope| async move {
+            self.provider_repo.list_all_for_tenant(conn, &scope).await
+        })
+        .await?;
+
+        // 4. Get own-tenant models with ListVisibility::Management.
+        let own_page = self
+            .model_repo
+            .list(
+                conn,
+                &own_scope,
+                query,
+                ListVisibility::Management { include_deprecated },
+            )
+            .await?;
+
+        // 5. Merge inherited models in chain order WITHOUT canonical_id dedupe.
+        //    Pass key_fn = |m| m.id so that apply_additive_visibility collapses
+        //    nothing (model ids are unique) while chain ordering is preserved.
+        let merged = merge_inherited_page(
+            &inheritance,
+            own_page,
+            query,
+            |m| m.id,
+            AncestorFailure::Skip,
+            |_tenant_id, scope, ancestor_query| async move {
+                Some(
+                    self.model_repo
+                        .list(
+                            conn,
+                            &scope,
+                            &ancestor_query,
+                            ListVisibility::Management { include_deprecated },
+                        )
+                        .await,
+                )
+            },
+        )
+        .await?;
+
+        // 6. Annotate each row with management flags from ChainProviders.
+        let items: Vec<crate::ModelManagementV1> = merged
+            .items
+            .into_iter()
+            .map(|model| {
+                let provider = chain.get(model.provider_id);
+                let shadowed = provider.is_some_and(|p| !p.winner);
+                let provider_disabled =
+                    provider.is_some_and(|p| p.status != ProviderStatus::Active);
+                let available_for_eval = provider
+                    .is_some_and(|p| p.winner && p.status == ProviderStatus::Active)
+                    && !matches!(
+                        model.lifecycle_status,
+                        LifecycleStatus::Deprecated | LifecycleStatus::Sunset
+                    )
+                    && matches!(model.approval_status, ApprovalStatus::Approved);
+
+                ModelManagementV1 {
+                    model,
+                    shadowed,
+                    provider_disabled,
+                    available_for_eval,
+                }
+            })
+            .collect();
+
+        Ok(Page {
+            items,
+            page_info: merged.page_info,
+        })
     }
 
     /// Create a new model.
@@ -1397,6 +1503,22 @@ mod tests {
         crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &req)
             .await
             .expect("create test model")
+    }
+
+    /// Create a test model with `Approved` approval status.
+    async fn create_test_approved_model(
+        repo: &ModelRepositoryImpl,
+        conn: &impl toolkit_db::secure::DBRunner,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        provider_slug: &str,
+        provider_model_id: &str,
+    ) -> crate::ModelV1 {
+        let mut req = make_create_model_req(provider_slug, provider_model_id);
+        req.approval_status = Some(crate::ApprovalStatus::Approved);
+        crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &req)
+            .await
+            .expect("create test approved model")
     }
 
     /// Build a full `Service` instance for testing.
@@ -2461,6 +2583,316 @@ mod tests {
         assert!(
             page.items.is_empty(),
             "tenant B should see no models (no ancestor relationship)"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // list_tenant_models_management — management endpoint tests
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_list_tenant_models_management_shadowed_ancestor() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let child_tid = child_tenant();
+        let parent_tid = parent_id();
+
+        // Create provider "openai" in parent and child (child shadows parent).
+        let child_scope = scope_for(child_tid);
+        let parent_scope = scope_for(parent_tid);
+
+        let (_child_provider_id, child_slug) =
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
+        let (_parent_provider_id, parent_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+
+        // Create a model in each tenant with DIFFERENT canonical IDs,
+        // both approved so available_for_eval reflects the provider/winner state.
+        create_test_approved_model(
+            &model_repo,
+            &conn,
+            &child_scope,
+            child_tid,
+            &child_slug,
+            "gpt-4o-child",
+        )
+        .await;
+        create_test_approved_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_slug,
+            "gpt-4o-parent",
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+
+        // 1. Management listing shows both models with correct flags.
+        let mgmt = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+
+        assert_eq!(mgmt.items.len(), 2, "management should return both models");
+
+        let parent_row = mgmt
+            .items
+            .iter()
+            .find(|r| r.model.canonical_id.as_str() == "openai::gpt-4o-parent")
+            .expect("parent model should be in management listing");
+        assert!(parent_row.shadowed, "parent model should be shadowed");
+        assert!(
+            !parent_row.available_for_eval,
+            "shadowed model should not be available for eval"
+        );
+        assert!(!parent_row.provider_disabled, "parent provider is active");
+
+        let child_row = mgmt
+            .items
+            .iter()
+            .find(|r| r.model.canonical_id.as_str() == "openai::gpt-4o-child")
+            .expect("child model should be in management listing");
+        assert!(!child_row.shadowed, "child model should not be shadowed");
+        assert!(
+            child_row.available_for_eval,
+            "child model should be available for eval"
+        );
+        assert!(!child_row.provider_disabled, "child provider is active");
+
+        // 2. Eval listing shows only the child model.
+        let eval = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("eval list should succeed");
+
+        assert_eq!(eval.items.len(), 1, "eval should only show child model");
+        assert_eq!(eval.items[0].canonical_id, "openai::gpt-4o-child");
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_management_disabled_provider() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tid = test_tenant();
+        let scope = scope_for(tid);
+
+        // Create an active provider.
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tid, "openai").await;
+        // Create a model under this provider.
+        create_test_model(&model_repo, &conn, &scope, tid, &provider_slug, "gpt-4o").await;
+
+        // Disable the provider via direct repo call.
+        let _ = provider_repo
+            .update(
+                &conn,
+                &scope,
+                provider_id,
+                &UpdateProviderRequestV1 {
+                    name: None,
+                    status: Some(ProviderStatus::Disabled),
+                    managed: None,
+                    metadata: None,
+                    discovery_enabled: None,
+                    discovery_interval_seconds: None,
+                },
+            )
+            .await
+            .expect("disable provider");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tid)
+            .build()
+            .expect("ctx");
+
+        // 1. Management listing shows the model with provider_disabled=true.
+        let mgmt = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+
+        assert_eq!(
+            mgmt.items.len(),
+            1,
+            "management should still show the model"
+        );
+        assert!(
+            mgmt.items[0].provider_disabled,
+            "model should be marked provider_disabled"
+        );
+        assert!(
+            !mgmt.items[0].available_for_eval,
+            "model should not be available for eval"
+        );
+        assert!(!mgmt.items[0].shadowed, "own-tenant model is not shadowed");
+
+        // 2. Eval listing should NOT show the model (provider is disabled).
+        let eval = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("eval list should succeed");
+
+        assert!(
+            eval.items.is_empty(),
+            "eval should not show models from disabled provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_management_non_approved_model() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tid = test_tenant();
+        let scope = scope_for(tid);
+
+        // Create an active provider.
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tid, "openai").await;
+
+        // Create a model with Pending approval status.
+        let req = {
+            let mut r = make_create_model_req(&provider_slug, "gpt-4o");
+            r.approval_status = Some(ApprovalStatus::Pending);
+            r
+        };
+        let _ = model_repo
+            .create(&conn, &scope, tid, &req)
+            .await
+            .expect("create model");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tid)
+            .build()
+            .expect("ctx");
+
+        // 1. Management listing shows the model with available_for_eval=false.
+        let mgmt = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+
+        assert_eq!(mgmt.items.len(), 1, "management should show the model");
+        assert!(
+            !mgmt.items[0].available_for_eval,
+            "pending model should not be available for eval"
+        );
+        assert!(!mgmt.items[0].shadowed, "own-tenant model is not shadowed");
+        assert!(
+            !mgmt.items[0].provider_disabled,
+            "provider is active, not disabled"
+        );
+
+        // 2. Eval listing also shows the model (approval is reported, not enforced).
+        let eval = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("eval list should succeed");
+
+        assert_eq!(
+            eval.items.len(),
+            1,
+            "eval should still show non-approved model (approval is reported, not enforced)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_management_include_deprecated() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl;
+        let model_repo = ModelRepositoryImpl;
+        let tid = test_tenant();
+        let scope = scope_for(tid);
+
+        // Create an active provider.
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tid, "openai").await;
+
+        // Create a model in production lifecycle.
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tid,
+            &provider_slug,
+            "gpt-4o-active",
+        )
+        .await;
+
+        // Create a model with Deprecated lifecycle.
+        let req = {
+            let mut r = make_create_model_req(&provider_slug, "gpt-4o-deprecated");
+            r.lifecycle_status = LifecycleStatus::Deprecated;
+            r
+        };
+        let _ = model_repo
+            .create(&conn, &scope, tid, &req)
+            .await
+            .expect("create deprecated model");
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tid)
+            .build()
+            .expect("ctx");
+
+        // 1. With include_deprecated=false (default): only the active model appears.
+        let mgmt = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+
+        assert_eq!(mgmt.items.len(), 1, "default should hide deprecated");
+        assert_eq!(
+            mgmt.items[0].model.canonical_id, "openai::gpt-4o-active",
+            "only the active model should appear"
+        );
+
+        // 2. With include_deprecated=true: both models appear.
+        let mgmt_with_dep = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), true)
+            .await
+            .expect("management list should succeed");
+
+        assert_eq!(
+            mgmt_with_dep.items.len(),
+            2,
+            "include_deprecated=true should include deprecated model"
+        );
+        let deprecated_row = mgmt_with_dep
+            .items
+            .iter()
+            .find(|r| r.model.canonical_id.as_str() == "openai::gpt-4o-deprecated")
+            .expect("deprecated model should be included");
+        assert!(
+            !deprecated_row.available_for_eval,
+            "deprecated model should not be available for eval"
         );
     }
 

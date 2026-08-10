@@ -14,8 +14,8 @@ use toolkit_odata::{ODataQuery, Page};
 
 use crate::errors::ModelRegistryError;
 use crate::models::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelV1, ProviderV1, UpdateModelRequestV1,
-    UpdateProviderRequestV1,
+    CreateModelRequestV1, CreateProviderRequestV1, ModelManagementV1, ModelV1, ProviderV1,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 /// Public API trait for the Model Registry (Version 1).
@@ -69,6 +69,22 @@ pub trait ModelRegistryClientV1: Send + Sync {
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<ModelV1>, ModelRegistryError>;
+
+    /// List models with management flags (admin endpoint).
+    ///
+    /// Like [`Self::list_tenant_models`], but:
+    /// - Returns [`ModelManagementV1`] rows that include `shadowed`,
+    ///   `provider_disabled`, and `available_for_eval` flags.
+    /// - Merges ancestor rows **without** `canonical_id` dedupe — two chain
+    ///   tenants owning the same slug is the exact case this endpoint exists
+    ///   to display.
+    /// - Supports `include_deprecated` to include terminal-lifecycle models.
+    async fn list_tenant_models_management(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+        include_deprecated: bool,
+    ) -> Result<Page<ModelManagementV1>, ModelRegistryError>;
 
     // ==================== Models — manual management (P1) ====================
     //

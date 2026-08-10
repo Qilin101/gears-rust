@@ -16,8 +16,8 @@ use super::cache::CacheService;
 use super::repo::{ModelRepository, ProviderRepository};
 use super::service::Service;
 use crate::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelRegistryClientV1, ModelRegistryError,
-    ModelV1, ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
+    CreateModelRequestV1, CreateProviderRequestV1, ModelManagementV1, ModelRegistryClientV1,
+    ModelRegistryError, ModelV1, ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 /// Local client implementing [`ModelRegistryClientV1`].
@@ -62,6 +62,18 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync, C: C
     ) -> Result<Page<ModelV1>, ModelRegistryError> {
         self.service
             .list_tenant_models(ctx, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_tenant_models_management(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+        include_deprecated: bool,
+    ) -> Result<Page<ModelManagementV1>, ModelRegistryError> {
+        self.service
+            .list_tenant_models_management(ctx, query, include_deprecated)
             .await
             .map_err(Into::into)
     }
