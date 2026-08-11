@@ -786,7 +786,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         Self::validate_slug(&req.provider_slug)?;
 
         // 1b. Reject models created directly in a terminal lifecycle state.
-        if matches!(req.lifecycle_status, crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset) {
+        if matches!(
+            req.lifecycle_status,
+            crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
+        ) {
             return Err(DomainError::validation(format!(
                 "cannot create a model with terminal lifecycle status `{:?}`",
                 req.lifecycle_status,
