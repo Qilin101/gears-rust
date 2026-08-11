@@ -387,15 +387,26 @@ fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
 ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+    build_service_with_config(db, tenant_resolver, ModelRegistryConfig::default())
+}
+
+/// Build a `Service` whose repositories carry `cfg`'s pagination bounds, wired
+/// the same way `gear.rs` does.
+fn build_service_with_config<R: TenantResolverClient + Send + Sync + 'static>(
+    db: DBProvider<DbError>,
+    tenant_resolver: R,
+    cfg: ModelRegistryConfig,
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
     let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
+    let limits = cfg.page_limits();
     Service::new(
         Arc::new(db),
-        Arc::new(ProviderRepositoryImpl::new()),
-        Arc::new(ModelRepositoryImpl::new()),
+        Arc::new(ProviderRepositoryImpl::new(limits)),
+        Arc::new(ModelRepositoryImpl::new(limits)),
         Arc::new(InMemoryCache::new()),
         Arc::new(tenant_resolver),
         enforcer,
-        ModelRegistryConfig::default(),
+        cfg,
     )
 }
 
@@ -644,8 +655,8 @@ async fn tenant_isolation() {
 async fn child_inherits_provider_and_model_from_parent() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Create provider and model in the parent tenant (via direct repo calls
     // to isolate from service-layer cache interactions).
@@ -714,6 +725,60 @@ async fn child_inherits_provider_and_model_from_parent() {
     assert_eq!(inherited_provider.slug, "openai");
 }
 
+/// Seed a parent tenant with one provider and three models, then assert the
+/// child's `$top`-less listing comes back bounded to two rows by `cfg`.
+///
+/// The child owns no providers, so its own page is synthesized empty and every
+/// row arrives from the unpaginated ancestor query — the configured bound has to
+/// hold there too.
+async fn assert_inherited_listing_bounded_to_two(cfg: ModelRegistryConfig) {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
+
+    let (_provider_id, provider_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    for i in 0..3 {
+        create_model_direct(
+            &model_repo,
+            &conn,
+            parent_tenant(),
+            &provider_slug,
+            &format!("gpt-{i}"),
+        )
+        .await;
+    }
+
+    let service = build_service_with_config(db, OneAncestorResolver, cfg);
+    let ctx = security_context(child_tenant());
+
+    let page = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("child list inherited models");
+    assert_eq!(page.items.len(), 2, "merged page must be bounded by config");
+    assert_eq!(page.page_info.limit, 2);
+}
+
+#[tokio::test]
+async fn configured_max_page_size_bounds_inherited_listing() {
+    assert_inherited_listing_bounded_to_two(ModelRegistryConfig {
+        max_page_size: 2,
+        ..Default::default()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn configured_default_page_size_bounds_inherited_listing() {
+    assert_inherited_listing_bounded_to_two(ModelRegistryConfig {
+        default_page_size: 2,
+        ..Default::default()
+    })
+    .await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 4. Child shadows parent: child creates model with same canonical_id as parent
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -722,8 +787,8 @@ async fn child_inherits_provider_and_model_from_parent() {
 async fn child_shadows_parent_by_same_canonical_id() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Create provider and model in the parent tenant.
     let (_parent_provider_id, parent_slug) =
@@ -763,8 +828,8 @@ async fn child_shadows_parent_by_same_canonical_id() {
 async fn child_shadows_slug_no_colliding_model_hides_ancestor_model() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Create provider and model in the parent tenant.
     let (_parent_provider_id, parent_slug) =
@@ -801,8 +866,8 @@ async fn child_shadows_slug_no_colliding_model_hides_ancestor_model() {
 async fn disabled_provider_hides_models_from_eval_listing() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
     let tenant_id = tenant_a();
 
     // Create provider and model.
@@ -858,8 +923,8 @@ async fn cache_first_get_returns_cached_model() {
     // mutations after the service is built (Arc<Db> behind the scenes).
     let db = setup_db().await;
     let db2 = db.clone();
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Create data directly via repo connection.
     {
@@ -1510,8 +1575,8 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
 async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Step 1: Create provider + model in the parent tenant.
     let (_parent_provider_id, parent_slug) =
@@ -1574,7 +1639,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
 async fn create_provider_drops_slug_tombstone() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
 
     // Create a provider in the parent tenant.
     create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
@@ -1671,7 +1736,7 @@ async fn disabled_provider_hides_model_when_no_model_exists() {
     // (the model read happens before the provider status gate, per C4 ordering).
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
 
     // Create a provider directly, then disable it via update.
     let scope = scope_for(tenant_a());
@@ -1774,8 +1839,8 @@ fn build_service_with_enforcer<R: TenantResolverClient + Send + Sync + 'static>(
 ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
     Service::new(
         Arc::new(db),
-        Arc::new(ProviderRepositoryImpl::new()),
-        Arc::new(ModelRepositoryImpl::new()),
+        Arc::new(ProviderRepositoryImpl::default()),
+        Arc::new(ModelRepositoryImpl::default()),
         Arc::new(InMemoryCache::new()),
         Arc::new(tenant_resolver),
         enforcer,
@@ -1810,8 +1875,8 @@ async fn list_management_denied_without_grant() {
 async fn management_listing_shows_shadowed_rows_from_ancestor() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
 
     // Parent: provider "openai", model "openai::gpt-4o".
     let (_parent_provider_id, parent_slug) =
@@ -1905,8 +1970,8 @@ async fn management_listing_shows_shadowed_rows_from_ancestor() {
 async fn management_listing_shows_disabled_provider_rows() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
-    let provider_repo = ProviderRepositoryImpl::new();
-    let model_repo = ModelRepositoryImpl::new();
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
     let tenant_id = tenant_a();
     let _scope = scope_for(tenant_id);
 

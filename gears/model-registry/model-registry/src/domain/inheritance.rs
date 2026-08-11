@@ -420,7 +420,8 @@ pub enum AncestorFailure {
 /// ancestor with an [`AccessScope`] narrowed to that ancestor and a copy of the
 /// caller's query with pagination removed — shadowing must be computed over the
 /// ancestor's complete matching set, not its first page. The merged result is
-/// then truncated back to the caller's limit.
+/// then truncated back to the effective limit of `own_page`
+/// (`PageInfo::limit` — `$top` already clamped to the configured maximum).
 ///
 /// `ancestor_failure` controls the error-propagation policy:
 /// - [`AncestorFailure::Skip`]: log and skip a failing ancestor, yielding
@@ -520,9 +521,13 @@ where
 
     let mut merged = merged;
 
-    if let Some(limit) = query.limit {
-        merged.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    }
+    // Truncate to the limit the own-tenant query actually resolved (`$top`
+    // clamped to the gear's configured `max_page_size`, or the default page size
+    // when `$top` is absent) rather than the raw `$top`. Ancestor queries run
+    // unpaginated, so keying off `query.limit` would let the merge hand back a
+    // page above the configured maximum — and no page bound at all when the
+    // caller omits `$top`.
+    merged.truncate(usize::try_from(page_info.limit).unwrap_or(usize::MAX));
 
     Ok(Page {
         items: merged,
@@ -1018,12 +1023,18 @@ mod tests {
     // ── Tests: merge_inherited_page ────────────────────────────────────────
 
     fn page_of(items: &[&str]) -> Page<String> {
+        page_limited(items, 50)
+    }
+
+    /// A page whose `page_info.limit` is the effective limit the repository
+    /// resolved — `$top` already clamped to the configured `max_page_size`.
+    fn page_limited(items: &[&str], limit: u64) -> Page<String> {
         Page {
             items: items.iter().map(|s| (*s).to_owned()).collect(),
             page_info: toolkit_odata::PageInfo {
                 next_cursor: None,
                 prev_cursor: None,
-                limit: 50,
+                limit,
             },
         }
     }
@@ -1225,7 +1236,7 @@ mod tests {
 
         let result = merge_inherited_page(
             &ctx,
-            page_of(&["a", "b"]),
+            page_limited(&["a", "b"], 3),
             &query,
             |s: &String| s.clone(),
             AncestorFailure::Skip,
@@ -1242,6 +1253,50 @@ mod tests {
         .expect("merge should succeed");
 
         // 2 own + 2 from each of 2 ancestors, deduped to 4, truncated to 3.
+        assert_eq!(result.items, ["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_truncates_to_default_limit_without_top() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+
+        // No `$top`: the own page still carries the repository's default limit,
+        // and the unpaginated ancestor fan-out must not escape it.
+        let result = merge_inherited_page(
+            &ctx,
+            page_limited(&["a", "b"], 3),
+            &ODataQuery::default(),
+            |s: &String| s.clone(),
+            AncestorFailure::Skip,
+            |_tenant_id, _scope, _q| async move { Some(Ok(page_of(&["c", "d"]))) },
+        )
+        .await
+        .expect("merge should succeed");
+
+        assert_eq!(result.items, ["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn test_merge_inherited_page_truncates_to_clamped_limit_not_requested_top() {
+        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        // `$top=100` above the configured maximum: the repository clamped the own
+        // page to 3, so the merged page must not exceed 3 either.
+        let query = ODataQuery {
+            limit: Some(100),
+            ..ODataQuery::default()
+        };
+
+        let result = merge_inherited_page(
+            &ctx,
+            page_limited(&["a", "b"], 3),
+            &query,
+            |s: &String| s.clone(),
+            AncestorFailure::Skip,
+            |_tenant_id, _scope, _q| async move { Some(Ok(page_of(&["c", "d"]))) },
+        )
+        .await
+        .expect("merge should succeed");
+
         assert_eq!(result.items, ["a", "b", "c"]);
     }
 
@@ -1294,7 +1349,7 @@ mod tests {
         let config = ModelRegistryConfig {
             own_ttl_seconds: 1800,
             inherited_ttl_seconds: 300,
-            max_page_size: 100,
+            ..Default::default()
         };
         assert_eq!(cache_ttl_seconds(Ownership::Own, &config), 1800);
     }
@@ -1304,7 +1359,7 @@ mod tests {
         let config = ModelRegistryConfig {
             own_ttl_seconds: 1800,
             inherited_ttl_seconds: 300,
-            max_page_size: 100,
+            ..Default::default()
         };
         assert_eq!(cache_ttl_seconds(Ownership::Inherited, &config), 300);
     }
@@ -1314,7 +1369,7 @@ mod tests {
         let config = ModelRegistryConfig {
             own_ttl_seconds: 3600,
             inherited_ttl_seconds: 600,
-            max_page_size: 50,
+            ..Default::default()
         };
         assert_eq!(cache_ttl_seconds(Ownership::Own, &config), 3600);
         assert_eq!(cache_ttl_seconds(Ownership::Inherited, &config), 600);

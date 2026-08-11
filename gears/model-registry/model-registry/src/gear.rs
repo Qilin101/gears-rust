@@ -56,9 +56,12 @@ impl Gear for ModelRegistryGear {
 
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 
-        // Repository is stateless — uses &impl DBRunner per-method
-        let provider_repo = Arc::new(ProviderRepositoryImpl::new());
-        let model_repo = Arc::new(ModelRepositoryImpl::new());
+        // Repositories hold only the configured pagination bounds — the DB
+        // connection is passed per-method as &impl DBRunner.
+        let limits = cfg.page_limits();
+        info!(page_limits = ?limits, "model-registry OData pagination limits");
+        let provider_repo = Arc::new(ProviderRepositoryImpl::new(limits));
+        let model_repo = Arc::new(ModelRepositoryImpl::new(limits));
 
         // In-memory cache (Redis is a feature-gated follow-up)
         let cache = Arc::new(InMemoryCache::new());

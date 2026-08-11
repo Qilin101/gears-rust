@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait};
-use toolkit_db::odata::sea_orm_filter::{LimitCfg, PaginateOdataTryError, paginate_odata_try};
+use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, secure_update_with_scope,
 };
@@ -13,6 +13,7 @@ use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
+use crate::config::{ModelRegistryConfig, PageLimits};
 use crate::domain::error::DomainError;
 use crate::domain::repo::ProviderRepository;
 use crate::{CreateProviderRequestV1, ProviderV1, UpdateProviderRequestV1};
@@ -24,20 +25,30 @@ use super::odata_mapper::ProviderODataMapper;
 use model_registry_sdk::odata::ProviderFilterField;
 
 // =============================================================================
-// ProviderRepositoryImpl — holds no per-instance state
+// ProviderRepositoryImpl — holds the configured pagination bounds
 // =============================================================================
 
 /// `SeaORM`-backed [`ProviderRepository`] implementation.
 ///
-/// Stateless: all database interactions go through the [`DBRunner`] connection
-/// passed per-call, ensuring transactional boundaries are caller-controlled.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProviderRepositoryImpl;
+/// Carries only the pagination bounds from [`ModelRegistryConfig`]; all database
+/// interactions go through the [`DBRunner`] connection passed per-call, ensuring
+/// transactional boundaries are caller-controlled.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderRepositoryImpl {
+    limits: PageLimits,
+}
 
 impl ProviderRepositoryImpl {
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(limits: PageLimits) -> Self {
+        Self { limits }
+    }
+}
+
+impl Default for ProviderRepositoryImpl {
+    /// Pagination bounds from [`ModelRegistryConfig::default`].
+    fn default() -> Self {
+        Self::new(ModelRegistryConfig::default().page_limits())
     }
 }
 
@@ -104,10 +115,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             conn,
             query,
             ("slug", SortDir::Asc),
-            LimitCfg {
-                default: 20,
-                max: 100,
-            },
+            self.limits.limit_cfg(),
             mapper::provider_entity_to_v1,
         )
         .await
@@ -307,7 +315,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -335,7 +343,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
         let err = ProviderRepository::find_by_id(&repo, &conn, &scope, Uuid::nil())
@@ -353,7 +361,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
@@ -387,7 +395,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -415,7 +423,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -445,7 +453,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -480,7 +488,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
@@ -517,7 +525,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -556,7 +564,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
         let err = ProviderRepository::update(
@@ -583,7 +591,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
@@ -626,7 +634,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -660,7 +668,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
         let err = ProviderRepository::delete(&repo, &conn, &scope, Uuid::nil())
@@ -678,7 +686,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
@@ -719,7 +727,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -757,7 +765,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
@@ -785,7 +793,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -833,7 +841,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -862,6 +870,103 @@ mod tests {
         assert_eq!(page.items.len(), 2);
     }
 
+    #[tokio::test]
+    async fn list_clamps_to_configured_max_page_size() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let cfg = ModelRegistryConfig {
+            max_page_size: 2,
+            ..Default::default()
+        };
+        let repo = ProviderRepositoryImpl::new(cfg.page_limits());
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        for i in 0..4 {
+            ProviderRepository::create(
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
+                &make_create_req(&format!("provider-{i}"), &format!("Provider {i}")),
+            )
+            .await
+            .expect("create provider");
+        }
+
+        // A `$top` above the configured maximum is clamped down to it.
+        let page = ProviderRepository::list(
+            &repo,
+            &conn,
+            &scope,
+            &ODataQuery {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list should succeed");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.page_info.limit, 2);
+
+        // No `$top`: the default page size (20) is clamped to the maximum too.
+        let page = ProviderRepository::list(&repo, &conn, &scope, &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.page_info.limit, 2);
+    }
+
+    #[tokio::test]
+    async fn list_uses_configured_default_page_size() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let cfg = ModelRegistryConfig {
+            default_page_size: 2,
+            max_page_size: 100,
+            ..Default::default()
+        };
+        let repo = ProviderRepositoryImpl::new(cfg.page_limits());
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        for i in 0..4 {
+            ProviderRepository::create(
+                &repo,
+                &conn,
+                &scope,
+                tenant_id,
+                &make_create_req(&format!("provider-{i}"), &format!("Provider {i}")),
+            )
+            .await
+            .expect("create provider");
+        }
+
+        // No `$top`: the configured default page size applies.
+        let page = ProviderRepository::list(&repo, &conn, &scope, &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.page_info.limit, 2);
+
+        // An explicit `$top` under the maximum still wins over the default.
+        let page = ProviderRepository::list(
+            &repo,
+            &conn,
+            &scope,
+            &ODataQuery {
+                limit: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list should succeed");
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.page_info.limit, 3);
+    }
+
     // =========================================================================
     // list_all_for_tenant
     // =========================================================================
@@ -871,7 +976,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
@@ -913,7 +1018,7 @@ mod tests {
         let provider = setup_provider().await;
         #[allow(clippy::expect_used)]
         let conn = provider.conn().expect("conn");
-        let repo = ProviderRepositoryImpl;
+        let repo = ProviderRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 

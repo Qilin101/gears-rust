@@ -619,9 +619,12 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             Page {
                 items: vec![],
                 page_info: toolkit_odata::PageInfo {
+                    // The same effective limit the repository would have
+                    // resolved — `merge_inherited_page` truncates the inherited
+                    // rows to it, so reporting 0 here would empty the page.
+                    limit: self.config.page_limits().clamp(query.limit),
                     next_cursor: None,
                     prev_cursor: None,
-                    limit: query.limit.unwrap_or(0),
                 },
             }
         } else {
@@ -1552,8 +1555,8 @@ mod tests {
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
         Service {
             db: Arc::new(db),
-            provider_repo: Arc::new(ProviderRepositoryImpl),
-            model_repo: Arc::new(ModelRepositoryImpl),
+            provider_repo: Arc::new(ProviderRepositoryImpl::default()),
+            model_repo: Arc::new(ModelRepositoryImpl::default()),
             cache: Arc::new(cache),
             tenant_resolver: Arc::new(tenant_resolver),
             policy_enforcer: enforcer,
@@ -1718,8 +1721,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let child_scope = scope_for(child_tid);
 
@@ -1761,8 +1764,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
 
         // Parent has a provider and model that the child WOULD inherit,
         // but the child shadows the slug with no provider of its own.
@@ -1812,8 +1815,8 @@ mod tests {
         let conn = db.conn().expect("conn");
 
         // Create a model in the test tenant.
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -1862,8 +1865,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -1944,8 +1947,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2003,7 +2006,7 @@ mod tests {
         // Create a real provider so the slug resolution succeeds and the model
         // can be found in cache. The cached model's provider_id must match the
         // winner to reach the lifecycle gate (C2).
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let scope = scope_for(tenant_id);
         let (provider_id, _slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
@@ -2054,8 +2057,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2098,8 +2101,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2144,8 +2147,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
@@ -2167,7 +2170,7 @@ mod tests {
         let config = ModelRegistryConfig {
             own_ttl_seconds: 1800,
             inherited_ttl_seconds: 300,
-            max_page_size: 100,
+            ..Default::default()
         };
         let service = build_service(db, TwoAncestorsResolver, config);
 
@@ -2196,8 +2199,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2248,8 +2251,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2308,8 +2311,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
@@ -2352,8 +2355,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
@@ -2415,8 +2418,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
         let grandparent_tid = grandparent_id();
@@ -2479,8 +2482,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -2562,8 +2565,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
         let scope_a = scope_for(tenant_a);
@@ -2608,8 +2611,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
@@ -2698,8 +2701,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tid = test_tenant();
         let scope = scope_for(tid);
 
@@ -2773,8 +2776,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tid = test_tenant();
         let scope = scope_for(tid);
 
@@ -2836,8 +2839,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tid = test_tenant();
         let scope = scope_for(tid);
 
@@ -2918,8 +2921,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
         let scope_a = scope_for(tenant_a);
@@ -2993,7 +2996,7 @@ mod tests {
         let cache = InMemoryCache::new();
 
         // Create a provider.
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let scope = scope_for(tenant_id);
         let (_provider_id, _slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
@@ -3047,8 +3050,8 @@ mod tests {
         let conn = db.conn().expect("conn");
 
         let tenant_id = test_tenant();
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let scope = scope_for(tenant_id);
 
         // Create a provider and model, then disable the provider.
@@ -3105,8 +3108,8 @@ mod tests {
         let conn = db.conn().expect("conn");
 
         let tenant_id = test_tenant();
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let scope = scope_for(tenant_id);
 
         // Create a provider and model.
@@ -3173,7 +3176,7 @@ mod tests {
 
         // Create a provider with slug "other-slug" so there IS a DB hit but
         // the slug "unknown" won't match.
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         create_test_provider(&provider_repo, &conn, &scope, tenant_id, "other-slug").await;
@@ -3204,8 +3207,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let parent_tid = parent_id();
         let child_tid = child_tenant();
 
@@ -3245,8 +3248,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let child_tid = child_tenant();
         let parent_tid = parent_id();
         let child_scope = scope_for(child_tid);
@@ -3527,7 +3530,7 @@ mod tests {
         let conn = db.conn().expect("conn");
 
         // Create a provider in the DB.
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let slug = "openai";
@@ -3689,7 +3692,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -3718,7 +3721,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -3746,7 +3749,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (provider_id, provider_slug) =
@@ -3786,7 +3789,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -3829,7 +3832,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let parent_tid = parent_id();
         let child_tid = child_tenant();
 
@@ -3886,7 +3889,7 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -3947,8 +3950,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -3991,8 +3994,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -4063,8 +4066,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -4137,8 +4140,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -4193,8 +4196,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -4269,8 +4272,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
@@ -4336,8 +4339,8 @@ mod tests {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let provider_repo = ProviderRepositoryImpl;
-        let model_repo = ModelRepositoryImpl;
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
