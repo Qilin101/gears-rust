@@ -18,8 +18,8 @@ use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1}
 
 use super::entity::{self, model, provider};
 use super::error_mapping::map_scope_error;
-use super::mapper;
-use super::odata_mapper::ModelODataMapper;
+use super::model_mapper;
+use super::model_odata_mapper::ModelODataMapper;
 use model_registry_sdk::odata::ModelFilterField;
 
 // =============================================================================
@@ -67,7 +67,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::model_not_found(canonical_id))?;
 
-        mapper::model_entity_to_v1(entity)
+        model_mapper::model_entity_to_v1(entity)
     }
 
     async fn list(
@@ -122,7 +122,7 @@ impl ModelRepository for ModelRepositoryImpl {
             query,
             ("canonical_id", SortDir::Asc),
             self.limits.limit_cfg(),
-            mapper::model_entity_to_v1,
+            model_mapper::model_entity_to_v1,
         )
         .await
         .map_err(|e| match e {
@@ -182,14 +182,18 @@ impl ModelRepository for ModelRepositoryImpl {
         // it does not implement.
 
         let initial_approval = req.approval_status.unwrap_or(ApprovalStatus::Pending);
-        let am =
-            mapper::model_create_active_model(tenant_id, provider_entity.id, req, initial_approval);
+        let am = model_mapper::model_create_active_model(
+            tenant_id,
+            provider_entity.id,
+            req,
+            initial_approval,
+        );
 
         let entity = toolkit_db::secure::secure_insert::<model::Entity>(am, scope, conn)
             .await
             .map_err(map_scope_error)?;
 
-        mapper::model_entity_to_v1(entity)
+        model_mapper::model_entity_to_v1(entity)
     }
 
     async fn update(
@@ -210,7 +214,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .ok_or(DomainError::model_not_found(canonical_id))?;
 
         // Build the patched ActiveModel via the mapper (PATCH semantics).
-        let am = mapper::model_update_active_model(&existing, req)?;
+        let am = model_mapper::model_update_active_model(&existing, req)?;
 
         let model_id = existing.id;
 
@@ -219,7 +223,7 @@ impl ModelRepository for ModelRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::model_entity_to_v1(updated)
+        model_mapper::model_entity_to_v1(updated)
     }
 
     async fn soft_delete(

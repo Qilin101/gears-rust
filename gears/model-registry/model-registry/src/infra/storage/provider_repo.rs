@@ -20,8 +20,8 @@ use crate::{CreateProviderRequestV1, ProviderV1, UpdateProviderRequestV1};
 
 use super::entity::{model, provider};
 use super::error_mapping::{is_fk_violation, map_scope_error};
-use super::mapper;
-use super::odata_mapper::ProviderODataMapper;
+use super::provider_mapper;
+use super::provider_odata_mapper::ProviderODataMapper;
 use model_registry_sdk::odata::ProviderFilterField;
 
 // =============================================================================
@@ -70,7 +70,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found(id))?;
 
-        mapper::provider_entity_to_v1(entity)
+        provider_mapper::provider_entity_to_v1(entity)
     }
 
     async fn find_by_slug(
@@ -88,7 +88,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .map_err(map_scope_error)?
             .ok_or(DomainError::provider_not_found_by_slug(slug))?;
 
-        mapper::provider_entity_to_v1(entity)
+        provider_mapper::provider_entity_to_v1(entity)
     }
 
     async fn list(
@@ -116,7 +116,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             query,
             ("slug", SortDir::Asc),
             self.limits.limit_cfg(),
-            mapper::provider_entity_to_v1,
+            provider_mapper::provider_entity_to_v1,
         )
         .await
         .map_err(|e| match e {
@@ -143,7 +143,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
 
         entities
             .into_iter()
-            .map(mapper::provider_entity_to_v1)
+            .map(provider_mapper::provider_entity_to_v1)
             .collect()
     }
 
@@ -167,13 +167,13 @@ impl ProviderRepository for ProviderRepositoryImpl {
             return Err(DomainError::provider_conflict(req.slug()));
         }
 
-        let am = mapper::provider_create_active_model(tenant_id, req);
+        let am = provider_mapper::provider_create_active_model(tenant_id, req);
 
         let entity = toolkit_db::secure::secure_insert::<provider::Entity>(am, scope, conn)
             .await
             .map_err(map_scope_error)?;
 
-        mapper::provider_entity_to_v1(entity)
+        provider_mapper::provider_entity_to_v1(entity)
     }
 
     async fn update(
@@ -195,7 +195,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .ok_or(DomainError::provider_not_found(id))?;
 
         // Build the patched ActiveModel via the mapper (PATCH semantics).
-        let am = mapper::provider_update_active_model(&existing, req);
+        let am = provider_mapper::provider_update_active_model(&existing, req);
 
         // Execute update using the toolkit-db helper which validates the scope,
         // ensures tenant_id immutability, and routes to the correct DB runner.
@@ -203,7 +203,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             .await
             .map_err(map_scope_error)?;
 
-        mapper::provider_entity_to_v1(updated)
+        provider_mapper::provider_entity_to_v1(updated)
     }
 
     async fn delete(

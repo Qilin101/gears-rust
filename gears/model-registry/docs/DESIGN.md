@@ -564,7 +564,7 @@ graph TB
         subgraph Infra["infra/storage"]
             PROV_IMPL[ProviderRepositoryImpl]
             MODEL_IMPL[ModelRepositoryImpl]
-            ENTITIES[SeaORM Entities + mapper + odata_mapper]
+            ENTITIES[SeaORM Entities + per-entity mappers]
             MIGRATIONS[Migrations]
         end
     end
@@ -635,7 +635,7 @@ Cache abstraction. Handles cache key generation with tenant prefix, TTL manageme
 
 **ID**: `cpt-cf-model-registry-component-repository`
 
-SeaORM-based persistence, split one implementation type per trait (Parnas information hiding): `ProviderRepositoryImpl` (`provider_repo.rs`) and `ModelRepositoryImpl` (`model_repo.rs`). Both are zero-state unit structs that take the connection and `AccessScope` per call, so transaction boundaries stay caller-controlled. Shared helpers (`is_fk_violation`, `map_scope_error`) live in `error_mapping.rs` and are `pub(super)` — scoped to `infra::storage`. Entity ↔ SDK conversion lives in `mapper.rs`; the `OData` field→column bindings in `odata_mapper.rs`. Each impl reads the other's table where a referential check requires it (provider delete pre-checks `models`; model create resolves the provider by slug); both reads stay inside the storage layer.
+SeaORM-based persistence, split one implementation type per trait (Parnas information hiding): `ProviderRepositoryImpl` (`provider_repo.rs`) and `ModelRepositoryImpl` (`model_repo.rs`). Both are zero-state unit structs that take the connection and `AccessScope` per call, so transaction boundaries stay caller-controlled. Shared helpers (`is_fk_violation`, `map_scope_error`) live in `error_mapping.rs` and are `pub(super)` — scoped to `infra::storage`. The mappers follow the same per-entity split: entity ↔ SDK conversion in `provider_mapper.rs` / `model_mapper.rs`, and the `OData` field→column bindings in `provider_odata_mapper.rs` / `model_odata_mapper.rs`, so each repository imports only the mapper for its own entity. The split needs no shared mapper module — the JSONB and CSV column codecs are used solely by the model write/read projection, while `providers.metadata` is carried through as an opaque `Option<Value>`. Each impl reads the other's table where a referential check requires it (provider delete pre-checks `models`; model create resolves the provider by slug); both reads stay inside the storage layer.
 
 **Interface**: `ProviderRepositoryImpl` implements `ProviderRepository`; `ModelRepositoryImpl` implements `ModelRepository`.
 
@@ -1677,7 +1677,6 @@ Carried out of the P1 implementation:
 - **Whole-tenant cache invalidation**: every write drops the tenant's entire cache prefix (§4 Cache Invalidation Strategy). Correct and cheap to reason about, wasteful under write bursts; narrowing it needs per-entity key computation on the write paths.
 - **Whole-row re-projection on PATCH**: any PATCH touching an `info.*` field rewrites all scalar and JSONB columns (§3.6). Keeps shadows consistent by construction; produces verbose SQL.
 - **A new shadow does not invalidate descendants**: creating a provider that shadows an inherited slug invalidates only the writer tenant's cache prefix (§4 Cache Invalidation Strategy item 1). Descendants keep serving the ancestor's models — and, once the slug cache lands, keep serving the tombstone that says the writer owns nothing under the slug — until their inherited-data TTL expires. For an ordinary catalog edit that window is a convenience trade-off; for a shadow it is a compliance-isolation lever taking up to five minutes to bite. Narrowing it means either a targeted subtree invalidation on provider create or a shorter TTL on the slug entity specifically.
-- **Mixed mappers**: `mapper.rs` and `odata_mapper.rs` each still carry both provider and model concerns, unlike the repositories, which were split per trait. Splitting them is a mechanical follow-up.
 - **Layering deviation — `toolkit-db` types in the domain layer**: `domain/repo.rs` takes `&impl DBRunner` and `DomainError` wraps `toolkit_db::DbError`, so the domain module depends on an infrastructure crate. The architectural lint that catches this (`DE0301`) is explicitly allowed at the top of `domain/mod.rs` with a TODO. Removing the deviation means re-parameterizing the repository traits over an abstract connection handle and giving `DomainError` its own storage-failure variant — deliberately deferred, and the reason the allow is annotated rather than silent.
 - **No measured performance**: the `<10ms P99` NFR has no benchmark and no load test behind it (§1.2).
 
