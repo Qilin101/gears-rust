@@ -81,31 +81,12 @@ anyhow = { workspace = true }
 authz-resolver-sdk = { workspace = true }
 authz-resolver = { workspace = true }
 
-[features]
-# Gates the Postgres-backed real-DB integration tests. Disabled by
-# default because they spin up a `testcontainers` Docker container
-# per test; enable with `--features integration` when Docker is
-# available locally or in CI.
-integration = []
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 types-registry-sdk = { workspace = true, features = ["test-util"] }
-# In-process `Router::oneshot` HTTP harness for the REST integration
-# suite (`tests/api_*_test.rs`). Mirrors the resource-group gear's
-# wiring.
-tower = { workspace = true }
-http-body-util = { workspace = true }
-proptest = "1.5"
+proptest = { workspace = true }
 # `no-env-filter` accepts events with `target: "am.*"` (otherwise the
 # default `{crate}=trace` filter rejects custom targets, hiding the
 # very `am.retention` events the redaction tests need to inspect).
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-# Postgres bring-up for the integration suite. Pulled in
-# unconditionally because `[dev-dependencies]` cannot be made
-# `optional`, but every reference to these crates is gated behind
-# `#[cfg(feature = "integration")]` so a default `cargo test` does
-# not require Docker.
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }

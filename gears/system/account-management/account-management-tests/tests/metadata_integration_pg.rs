@@ -12,7 +12,7 @@
 //!
 //! Gated behind `#[cfg(feature = "integration")]` so the default
 //! `cargo test` run does not require Docker. Enable explicitly:
-//! `cargo test -p cf-account-management --features integration
+//! `cargo test -p cf-gears-account-management-tests --features integration
 //!  --test metadata_integration_pg`.
 
 #![cfg(feature = "integration")]

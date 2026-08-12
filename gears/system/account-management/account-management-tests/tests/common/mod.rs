@@ -1420,7 +1420,7 @@ pub async fn seed_active_child(
 // Gated behind `#[cfg(feature = "integration")]` because pulling up a
 // container per test requires Docker on the host and is therefore not
 // part of the default test run. Enable explicitly with
-// `cargo test -p cf-gears-account-management --features integration ...`.
+// `cargo test -p cf-gears-account-management-tests --features integration ...`.
 
 #[cfg(feature = "integration")]
 pub mod pg {
