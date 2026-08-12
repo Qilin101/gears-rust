@@ -60,8 +60,6 @@ members = [
     "gears/file-storage/file-storage",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",
-    "gears/system/account-management/account-management-tests",
-    "gears/system/account-management/plugins/static-idp-plugin",
     "gears/system/api-gateway",
     "gears/system/cluster/cluster",
     "gears/system/cluster/cluster-sdk",
