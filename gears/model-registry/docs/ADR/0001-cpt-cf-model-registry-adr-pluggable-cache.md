@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-02-18
+amended: 2026-08-13
 ---
 
 # Pluggable Cache Backend with TTL Strategy
@@ -70,11 +71,9 @@ Cache abstraction with compiled-in implementations selected via Cargo feature fl
 - `RedisCache` — default for production, horizontal scaling
 - `InMemoryCache` — for lightweight deployments and testing (also valid for moderate-scale production where DB query caching suffices)
 
-TTL Strategy (common across backends):
-- Own data (tenant created): 30 minutes
-- Inherited data (from parent tenant): 5 minutes
+Cache key format: `mr:{tenant_id}:{entity}:{id}`, where `tenant_id` is the tenant that **owns** the row — not the tenant reading it.
 
-Cache key format: `mr:{tenant_id}:{entity}:{id}`
+TTL Strategy (common across backends): a single `cache_ttl_seconds`, default 10 minutes, applied to every entry.
 
 * Good, because deployment flexibility (single-node → cluster)
 * Good, because vendor customization supported
@@ -119,8 +118,7 @@ Configuration example:
 model_registry:
   cache:
     backend: redis | memory | custom
-    ttl_own_minutes: 30
-    ttl_inherited_minutes: 5
+    cache_ttl_seconds: 600
     # Redis-specific
     redis:
       url: redis://localhost:6379

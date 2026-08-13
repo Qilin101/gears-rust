@@ -58,33 +58,7 @@ pub trait CacheService: Send + Sync {
     /// Retrieve a deserialized value from cache.
     ///
     /// Returns `None` when the key is absent or the cached entry has expired.
-    ///
-    /// Callers whose tolerance for staleness depends on *who is reading* must
-    /// use [`CacheService::get_max_age`] instead — see its docs.
     async fn get<T: DeserializeOwned + Send>(&self, key: &str) -> Option<T>;
-
-    /// Retrieve a value only if it was stored less than `max_age_seconds` ago.
-    ///
-    /// Every key is scoped to the tenant that **owns** the row, but any tenant
-    /// in that tenant's subtree may read it, and the two do not tolerate the
-    /// same staleness: the owner accepts `own_ttl_seconds`, a descendant
-    /// reading the row as inherited data accepts only `inherited_ttl_seconds`.
-    /// Since a single entry is shared by both, the TTL fixed at write time
-    /// cannot express both bounds — whichever tenant populated the key first
-    /// would impose its own tolerance on everyone else.
-    ///
-    /// So the write-time TTL is the entry's hard upper bound, and each reader
-    /// additionally applies its own bound here. An entry that is too old for
-    /// *this* reader is reported as a miss but **left in place**, since a
-    /// reader with a longer bound may still legitimately use it.
-    ///
-    /// A `max_age_seconds` of 0 means "tolerate no staleness" and always
-    /// misses, mirroring the way [`CacheService::set`] treats a TTL of 0.
-    async fn get_max_age<T: DeserializeOwned + Send>(
-        &self,
-        key: &str,
-        max_age_seconds: u64,
-    ) -> Option<T>;
 
     /// Store a serializable value with the given TTL (in seconds).
     ///
@@ -106,9 +80,6 @@ pub trait CacheService: Send + Sync {
 #[domain_model]
 struct CacheEntry {
     data: Vec<u8>,
-    /// When the entry was written. Read by [`CacheService::get_max_age`] to
-    /// apply a reader-specific staleness bound tighter than `expires_at`.
-    stored_at: Instant,
     expires_at: Instant,
 }
 
@@ -152,51 +123,19 @@ impl CacheService for InMemoryCache {
         serde_json::from_slice(&entry.data).ok()
     }
 
-    async fn get_max_age<T: DeserializeOwned + Send>(
-        &self,
-        key: &str,
-        max_age_seconds: u64,
-    ) -> Option<T> {
-        let map = self.data.read().await;
-        let entry = map.get(key)?;
-        let now = Instant::now();
-        if now >= entry.expires_at {
-            drop(map);
-            self.delete(key).await;
-            return None;
-        }
-        // Too old for this reader, but still within its hard expiry: report a
-        // miss without evicting, so a reader with a longer bound keeps its hit.
-        // `max_age_seconds == 0` tolerates no staleness at all and always
-        // misses, rather than depending on how many nanoseconds have elapsed.
-        if max_age_seconds == 0
-            || now.duration_since(entry.stored_at) > Duration::from_secs(max_age_seconds)
-        {
-            return None;
-        }
-        serde_json::from_slice(&entry.data).ok()
-    }
-
     async fn set<T: Serialize + Send + Sync>(&self, key: &str, value: &T, ttl_seconds: u64) {
         let Ok(data) = serde_json::to_vec(value) else {
             tracing::warn!("InMemoryCache::set: serialization failed, skipping cache write");
             return;
         };
-        let stored_at = Instant::now();
+        let now = Instant::now();
         let expires_at = if ttl_seconds == 0 {
-            stored_at
+            now
         } else {
-            stored_at + Duration::from_secs(ttl_seconds)
+            now + Duration::from_secs(ttl_seconds)
         };
         let mut map = self.data.write().await;
-        map.insert(
-            key.to_owned(),
-            CacheEntry {
-                data,
-                stored_at,
-                expires_at,
-            },
-        );
+        map.insert(key.to_owned(), CacheEntry { data, expires_at });
     }
 
     async fn delete(&self, key: &str) {
@@ -274,59 +213,6 @@ mod tests {
 
         let got: Option<TestValue> = cache.get(key).await;
         assert!(got.is_none(), "entry should have expired after 1 second");
-    }
-
-    #[tokio::test]
-    async fn test_get_max_age_within_bound_is_a_hit() {
-        let cache = InMemoryCache::new();
-        let key = "mr:t1:model:m1";
-        cache.set(key, &test_value(), 1800).await;
-
-        let got: Option<TestValue> = cache.get_max_age(key, 300).await;
-        assert_eq!(
-            got,
-            Some(test_value()),
-            "a freshly stored entry is within any positive bound"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_max_age_beyond_bound_is_a_miss_without_evicting() {
-        let cache = InMemoryCache::new();
-        let key = "mr:t1:model:m1";
-        // Stored with a long TTL, as the owning tenant would.
-        cache.set(key, &test_value(), 1800).await;
-
-        // A reader tolerating no staleness misses...
-        let strict: Option<TestValue> = cache.get_max_age(key, 0).await;
-        assert!(
-            strict.is_none(),
-            "entry older than the reader's bound must be a miss"
-        );
-
-        // ...without evicting it: a reader with a longer bound still hits.
-        let lenient: Option<TestValue> = cache.get_max_age(key, 1800).await;
-        assert_eq!(
-            lenient,
-            Some(test_value()),
-            "a stricter reader's miss must not evict the entry for others"
-        );
-        let plain: Option<TestValue> = cache.get(key).await;
-        assert!(plain.is_some(), "unbounded get still hits");
-    }
-
-    #[tokio::test]
-    async fn test_get_max_age_respects_hard_expiry() {
-        let cache = InMemoryCache::new();
-        let key = "mr:t1:model:m1";
-        // TTL=0 expires immediately; no max_age is generous enough to revive it.
-        cache.set(key, &test_value(), 0).await;
-
-        let got: Option<TestValue> = cache.get_max_age(key, 1800).await;
-        assert!(
-            got.is_none(),
-            "the write-time TTL remains a hard upper bound"
-        );
     }
 
     #[tokio::test]

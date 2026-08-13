@@ -45,7 +45,7 @@ Deprecated models are excluded from the default management listing; pass `includ
 
 ## Key Features
 
-- **Cache-first reads**: In-memory cache with TTL (30min own, 5min inherited), tenant-prefixed keys
+- **Cache-first reads**: In-memory cache with a single TTL (`cache_ttl_seconds`, default 10min), tenant-prefixed keys
 - **Tenant inheritance**: Additive inheritance with child-shadowing by slug/canonical_id
 - **Approval management**: Direct approval status writes via `PATCH /models/{canonical_id}` (P1)
 - **Tenant isolation**: `AccessScope`-enforced queries at the repository layer

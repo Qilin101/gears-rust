@@ -5,11 +5,6 @@
 //! When a parent and child both have a resource with the same key (provider
 //! slug or model `canonical_id`), the child's version **shadows** the parent's.
 //!
-//! Ownership classification drives cache TTL selection — own entries are
-//! cached longer (`own_ttl_seconds`, default 30 min) because they change
-//! less frequently than inherited entries, which may change at any time
-//! in the ancestor tenant (`inherited_ttl_seconds`, default 5 min).
-//!
 //! [`merge_inherited_page`] applies the same rule to paged list reads, so
 //! every list endpoint shares one implementation of the merge.
 
@@ -27,7 +22,6 @@ use uuid::Uuid;
 
 use super::error::DomainError;
 use crate::ProviderV1;
-use crate::config::ModelRegistryConfig;
 use model_registry_sdk::models::ProviderStatus;
 
 // ---------------------------------------------------------------------------
@@ -36,8 +30,10 @@ use model_registry_sdk::models::ProviderStatus;
 
 /// Classification of a resource's ownership relative to the requesting tenant.
 ///
-/// Used to select the cache TTL for a cached entry (own entries have a longer
-/// TTL because they change less frequently from the requestor's perspective).
+/// Carried by [`InheritanceContext::apply_additive_visibility`] so callers can
+/// tell an own row from an inherited one. Cache TTL does **not** depend on it —
+/// one entry is shared by the owning tenant and its whole subtree, so a single
+/// TTL governs all readers (`ModelRegistryConfig::cache_ttl_seconds`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[domain_model]
 pub enum Ownership {
@@ -569,23 +565,6 @@ pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
         .map_err(|e| DomainError::internal_from("tenant-resolver ancestors call failed", e))?;
 
     Ok(InheritanceContext::new(tenant_id, response.ancestors))
-}
-
-// ---------------------------------------------------------------------------
-// cache_ttl_seconds
-// ---------------------------------------------------------------------------
-
-/// Select the appropriate cache TTL based on ownership.
-///
-/// Own entries use the config's `own_ttl_seconds` (default 30 min);
-/// inherited entries use `inherited_ttl_seconds` (default 5 min) because
-/// they can change at any time in the ancestor tenant.
-#[must_use]
-pub fn cache_ttl_seconds(ownership: Ownership, config: &ModelRegistryConfig) -> u64 {
-    match ownership {
-        Ownership::Own => config.own_ttl_seconds,
-        Ownership::Inherited => config.inherited_ttl_seconds,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,39 +1319,6 @@ mod tests {
         let inheritance = result.unwrap();
         assert!(inheritance.ancestors.is_empty());
         assert_eq!(inheritance.chain_ids.len(), 1);
-    }
-
-    // ── Tests: cache_ttl_seconds ──────────────────────────────────────────
-
-    #[test]
-    fn test_cache_ttl_own_uses_config() {
-        let config = ModelRegistryConfig {
-            own_ttl_seconds: 1800,
-            inherited_ttl_seconds: 300,
-            ..Default::default()
-        };
-        assert_eq!(cache_ttl_seconds(Ownership::Own, &config), 1800);
-    }
-
-    #[test]
-    fn test_cache_ttl_inherited_uses_config() {
-        let config = ModelRegistryConfig {
-            own_ttl_seconds: 1800,
-            inherited_ttl_seconds: 300,
-            ..Default::default()
-        };
-        assert_eq!(cache_ttl_seconds(Ownership::Inherited, &config), 300);
-    }
-
-    #[test]
-    fn test_cache_ttl_custom_config_values() {
-        let config = ModelRegistryConfig {
-            own_ttl_seconds: 3600,
-            inherited_ttl_seconds: 600,
-            ..Default::default()
-        };
-        assert_eq!(cache_ttl_seconds(Ownership::Own, &config), 3600);
-        assert_eq!(cache_ttl_seconds(Ownership::Inherited, &config), 600);
     }
 
     // ── Tests: Error path (resolver failure) ───────────────────────────────

@@ -29,8 +29,7 @@ use uuid::Uuid;
 use super::cache::{CacheService, SlugOwnership, cache_key};
 use super::error::DomainError;
 use super::inheritance::{
-    AncestorFailure, build_chain_providers, cache_ttl_seconds, find_in_chain, merge_inherited_page,
-    resolve_ancestors,
+    AncestorFailure, build_chain_providers, find_in_chain, merge_inherited_page, resolve_ancestors,
 };
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
@@ -188,14 +187,12 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 2. Resolve ancestor chain
         let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
 
-        // 3. Try cache for each tenant in chain (closest first), bounding each
-        //    probe by the staleness *this* caller tolerates for that tenant's
-        //    data — the entry may have been written by the owning tenant, which
-        //    tolerates more (see `CacheService::get_max_age`).
+        // 3. Try cache for each tenant in chain (closest first). Provider ids
+        //    are globally unique and entries are keyed under the owning tenant,
+        //    so at most one of these keys can exist.
         for tenant_id in inheritance.chain_ids() {
             let key = cache_key(tenant_id, "provider", &id.to_string());
-            let max_age = cache_ttl_seconds(inheritance.classify(*tenant_id), &self.config);
-            if let Some(provider) = self.cache.get_max_age::<ProviderV1>(&key, max_age).await {
+            if let Some(provider) = self.cache.get::<ProviderV1>(&key).await {
                 return Ok(provider);
             }
         }
@@ -215,10 +212,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             return Err(DomainError::provider_not_found(id));
         };
 
-        // 5. Cache under the owning tenant, with the TTL its ownership implies.
+        // 5. Cache under the owning tenant.
         let key = cache_key(&owner_tenant_id, "provider", &id.to_string());
-        let ttl = cache_ttl_seconds(inheritance.classify(owner_tenant_id), &self.config);
-        self.cache.set(&key, &provider, ttl).await;
+        self.cache
+            .set(&key, &provider, self.config.cache_ttl_seconds)
+            .await;
 
         Ok(provider)
     }
@@ -410,20 +408,18 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// - `Err(e)` on any non-not-found query error (fail-closed — a skipped
     ///   ancestor hop would un-shadow an earlier ancestor, B5)
     ///
-    /// The `ownership` parameter selects the TTL for both polarities (positive
-    /// and tombstone).
+    /// Both polarities take the same TTL.
     async fn resolve_slug_ownership(
         &self,
         conn: &impl toolkit_db::secure::DBRunner,
         tenant_id: Uuid,
         slug: &str,
-        ownership: crate::domain::inheritance::Ownership,
     ) -> Result<SlugOwnership, DomainError> {
         let key = cache_key(&tenant_id, "provider_slug", slug);
-        let ttl = cache_ttl_seconds(ownership, &self.config);
+        let ttl = self.config.cache_ttl_seconds;
 
-        // Cache-first, bounded by this caller's tolerance for the hop's data.
-        if let Some(result) = self.cache.get_max_age::<SlugOwnership>(&key, ttl).await {
+        // Cache-first.
+        if let Some(result) = self.cache.get::<SlugOwnership>(&key).await {
             return Ok(result);
         }
 
@@ -490,11 +486,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let mut winner_provider: Option<crate::ProviderV1> = None;
 
         for tenant_id in inheritance.chain_ids() {
-            let ownership = inheritance.classify(*tenant_id);
-            match self
-                .resolve_slug_ownership(conn, *tenant_id, slug, ownership)
-                .await
-            {
+            match self.resolve_slug_ownership(conn, *tenant_id, slug).await {
                 Ok(SlugOwnership::Owned(provider)) => {
                     winner_tenant = Some(*tenant_id);
                     winner_provider = Some(provider);
@@ -528,16 +520,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             AccessScope::for_tenant(winner_tenant_id)
         };
 
-        // 6. Read the model: cache under winner's tenant, then DB. The probe is
-        //    bounded by what this caller tolerates for the winner's data, which
-        //    may be tighter than the TTL the entry was written with.
+        // 6. Read the model: cache under winner's tenant, then DB.
         let model_key = cache_key(&winner_tenant_id, "model", canonical_id);
-        let ttl = cache_ttl_seconds(inheritance.classify(winner_tenant_id), &self.config);
-        let model = if let Some(model) = self
-            .cache
-            .get_max_age::<crate::ModelV1>(&model_key, ttl)
-            .await
-        {
+        let model = if let Some(model) = self.cache.get::<crate::ModelV1>(&model_key).await {
             model
         } else {
             match self
@@ -546,7 +531,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 .await
             {
                 Ok(model) => {
-                    self.cache.set(&model_key, &model, ttl).await;
+                    self.cache
+                        .set(&model_key, &model, self.config.cache_ttl_seconds)
+                        .await;
                     model
                 }
                 Err(DomainError::ModelNotFound { .. }) => {
@@ -984,7 +971,6 @@ mod tests {
 
     use super::*;
     use crate::domain::cache::{InMemoryCache, SlugOwnership};
-    use crate::domain::inheritance::Ownership;
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::model_repo::ModelRepositoryImpl;
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
@@ -2234,8 +2220,7 @@ mod tests {
 
         // Child tenant should inherit parent's model.
         let config = ModelRegistryConfig {
-            own_ttl_seconds: 1800,
-            inherited_ttl_seconds: 300,
+            cache_ttl_seconds: 600,
             ..Default::default()
         };
         let service = build_service(db, TwoAncestorsResolver, config);
@@ -3518,7 +3503,7 @@ mod tests {
 
         let conn = service.db.conn().expect("conn");
         let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&conn, tenant_id, slug)
             .await
             .expect("cache hit should succeed");
 
@@ -3547,7 +3532,7 @@ mod tests {
 
         let conn = service.db.conn().expect("conn");
         let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&conn, tenant_id, slug)
             .await
             .expect("tombstone hit should succeed");
 
@@ -3574,7 +3559,7 @@ mod tests {
         // First call: cache miss → DB miss → tombstone written.
         let conn = service.db.conn().expect("conn");
         let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&conn, tenant_id, slug)
             .await
             .expect("DB miss should succeed");
 
@@ -3615,7 +3600,7 @@ mod tests {
         // First call: cache miss → DB hit → cache populated.
         let svc_conn = service.db.conn().expect("conn");
         let result = service
-            .resolve_slug_ownership(&svc_conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&svc_conn, tenant_id, slug)
             .await
             .expect("DB hit should succeed");
 
@@ -3730,7 +3715,7 @@ mod tests {
 
         // First call: cache miss → DB miss → tombstone written.
         service
-            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&conn, tenant_id, slug)
             .await
             .expect("first call should succeed");
         assert_eq!(
@@ -3741,7 +3726,7 @@ mod tests {
 
         // Second call: cache hit (tombstone) — no DB query.
         service
-            .resolve_slug_ownership(&conn, tenant_id, slug, Ownership::Own)
+            .resolve_slug_ownership(&conn, tenant_id, slug)
             .await
             .expect("second call should succeed");
         assert_eq!(
@@ -4608,89 +4593,6 @@ mod tests {
         assert!(
             cache.get::<ProviderV1>(&caller_key).await.is_some(),
             "the caller's unrelated entries must survive"
-        );
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Inherited reads are bounded by the inherited TTL, whoever populated the key
-    //
-    // Cache keys are owned-tenant-scoped and therefore shared across the owner's
-    // whole subtree, so the TTL fixed at write time is set by whichever tenant
-    // read first. If the owner reads first it writes `own_ttl_seconds`, and a
-    // descendant reading that same key must still not see data older than
-    // `inherited_ttl_seconds`.
-    // ═════════════════════════════════════════════════════════════════════════
-
-    #[tokio::test]
-    async fn test_inherited_read_bounded_by_inherited_ttl_not_owner_ttl() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-        // `TwoAncestorsResolver` puts `parent_id()` in the caller's chain.
-        let owner_tenant = parent_id();
-        let caller_tenant = test_tenant();
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let (provider_id, _slug) = create_test_provider(
-            &provider_repo,
-            &conn,
-            &scope_for(owner_tenant),
-            owner_tenant,
-            "openai",
-        )
-        .await;
-
-        // Simulate the owning tenant having read first: the entry is written
-        // under the owner's key with the *own* TTL. Give it a distinguishable
-        // name so that serving it later is visible in the assertion.
-        let cache = InMemoryCache::new();
-        let owner_key = cache_key(&owner_tenant, "provider", &provider_id.to_string());
-        let mut owner_cached = make_test_provider(owner_tenant, "openai");
-        owner_cached.id = provider_id;
-        owner_cached.name = "FROM-CACHE".to_owned();
-        cache.set(&owner_key, &owner_cached, 1800).await;
-
-        // `inherited_ttl_seconds: 0` expresses "a descendant tolerates no
-        // staleness" without the test having to wait for a clock to advance.
-        let config = ModelRegistryConfig {
-            own_ttl_seconds: 1800,
-            inherited_ttl_seconds: 0,
-            ..Default::default()
-        };
-        let service = build_service_with_cache(db, TwoAncestorsResolver, config, cache.clone());
-
-        // The owning tenant reads first: its own bound is the full 30 minutes,
-        // so the shared entry is served. This also proves the entry is present
-        // and serveable, so the descendant's miss below is the bound at work
-        // and not an empty cache.
-        let owner_ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(owner_tenant)
-            .build()
-            .expect("owner ctx");
-        let owner_view = service
-            .get_provider(&owner_ctx, provider_id)
-            .await
-            .expect("owner should resolve its own provider");
-        assert_eq!(
-            owner_view.name, "FROM-CACHE",
-            "the owning tenant's bound admits its own entry"
-        );
-
-        // The descendant reads the very same key and must not ride the owner's
-        // longer TTL: it falls through to the DB and sees the real row.
-        let caller_ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(caller_tenant)
-            .build()
-            .expect("caller ctx");
-        let inherited_view = service
-            .get_provider(&caller_ctx, provider_id)
-            .await
-            .expect("inherited provider should resolve");
-        assert_eq!(
-            inherited_view.name, "openai",
-            "a descendant must re-read from the DB rather than ride the TTL the \
-             owning tenant wrote onto the shared key"
         );
     }
 }
