@@ -53,6 +53,7 @@ pub fn provider_entity_to_v1(e: entity::provider::Model) -> Result<ProviderV1, D
 
     Ok(ProviderV1 {
         id: e.id,
+        tenant_id: e.tenant_id,
         slug: e.slug,
         name: e.name,
         gts_type: gts::GtsTypeId::new(&e.gts_type),

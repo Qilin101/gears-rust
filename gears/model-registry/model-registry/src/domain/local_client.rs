@@ -256,7 +256,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
-        ) -> Result<(), DomainError> {
+        ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
     }
@@ -306,7 +306,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
-        ) -> Result<(), DomainError> {
+        ) -> Result<ModelV1, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
     }

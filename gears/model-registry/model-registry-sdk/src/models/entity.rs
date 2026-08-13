@@ -22,6 +22,10 @@ use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub id: Uuid,
+    /// Tenant that owns this model. Always equal to the owning provider's
+    /// tenant — a model is never created against an ancestor's provider (§2.1).
+    /// For an inherited model this is an ancestor tenant, not the reader's.
+    pub tenant_id: Uuid,
     /// Foreign key to the provider that owns this model.
     /// The visibility key (§3.6): a model is visible in eval listings only
     /// when `provider_id` is in the tenant's allow-list.
@@ -65,6 +69,7 @@ impl ModelV1<serde_json::Value> {
     {
         Ok(ModelV1 {
             id: self.id,
+            tenant_id: self.tenant_id,
             provider_id: self.provider_id,
             canonical_id: self.canonical_id,
             lifecycle_status: self.lifecycle_status,
@@ -117,6 +122,10 @@ pub struct ModelManagementV1<P: gts::GtsSchema = serde_json::Value> {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderV1 {
     pub id: Uuid,
+    /// Tenant that owns this provider. For an inherited provider this is an
+    /// ancestor tenant, not the reader's — it is the tenant whose cache prefix
+    /// and write scope govern the row.
+    pub tenant_id: Uuid,
     /// Human-readable identifier (immutable after creation).
     /// Format: 1-64 chars, lowercase alphanumeric + hyphen.
     pub slug: String,
@@ -183,6 +192,7 @@ mod tests {
     fn raw_model(gts_type: &str, provider_settings_json: serde_json::Value) -> ModelV1 {
         ModelV1 {
             id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
             provider_id: Uuid::nil(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: LifecycleStatus::Production,

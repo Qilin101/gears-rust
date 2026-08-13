@@ -421,6 +421,7 @@ mod provider_from_v1 {
     fn sample_v1(status: ProviderStatus) -> ProviderV1 {
         ProviderV1 {
             id: Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
+            tenant_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
             slug: "openai".into(),
             name: "OpenAI".into(),
             gts_type: gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"),
@@ -550,6 +551,7 @@ mod model_from_v1 {
     ) -> ModelV1 {
         ModelV1 {
             id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
+            tenant_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
             provider_id: Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: lifecycle,

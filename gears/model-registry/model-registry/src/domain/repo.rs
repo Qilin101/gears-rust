@@ -113,12 +113,17 @@ pub trait ProviderRepository: Send + Sync {
     ) -> Result<ProviderV1, DomainError>;
 
     /// Delete a provider by ID.
+    ///
+    /// Returns the provider as it was immediately before deletion. The service
+    /// layer needs its `tenant_id` to invalidate the right cache prefix: the
+    /// caller's `AccessScope` may permit writes outside the caller's own
+    /// tenant, so `ctx.subject_tenant_id()` is not a safe substitute.
     async fn delete(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
-    ) -> Result<(), DomainError>;
+    ) -> Result<ProviderV1, DomainError>;
 }
 
 /// Repository trait for model persistence.
@@ -182,10 +187,14 @@ pub trait ModelRepository: Send + Sync {
     ) -> Result<ModelV1, DomainError>;
 
     /// Soft-delete a model by setting `lifecycle_status` to `Deprecated`.
+    ///
+    /// Returns the model in its post-deprecation state. The service layer needs
+    /// its `tenant_id` to invalidate the right cache prefix — see
+    /// [`ProviderRepository::delete`] for why the caller's tenant is not enough.
     async fn soft_delete(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
-    ) -> Result<(), DomainError>;
+    ) -> Result<ModelV1, DomainError>;
 }

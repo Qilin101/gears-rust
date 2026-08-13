@@ -211,7 +211,20 @@ impl ProviderRepository for ProviderRepositoryImpl {
         conn: &impl DBRunner,
         scope: &AccessScope,
         id: Uuid,
-    ) -> Result<(), DomainError> {
+    ) -> Result<ProviderV1, DomainError> {
+        // Load the row before deleting: the service needs its `tenant_id` to
+        // invalidate the right cache prefix, and the DELETE itself cannot
+        // report it.
+        let existing = provider::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .and_id(id)
+            .map_err(map_scope_error)?
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::provider_not_found(id))?;
+
         // Pre-check: refuse deletion if models still reference this provider.
         let models = model::Entity::find()
             .secure()
@@ -244,7 +257,7 @@ impl ProviderRepository for ProviderRepositoryImpl {
             return Err(DomainError::provider_not_found(id));
         }
 
-        Ok(())
+        provider_mapper::provider_entity_to_v1(existing)
     }
 }
 

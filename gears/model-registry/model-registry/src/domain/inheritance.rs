@@ -1467,10 +1467,15 @@ mod tests {
     use chrono::Utc;
     use gts::GtsTypeId;
 
+    /// `tenant_id` is left nil: these tests pair each provider with its owning
+    /// tenant externally (the `(Uuid, ProviderV1)` tuples fed to
+    /// `apply_additive_visibility`, and the per-tenant closures in
+    /// `build_chain_providers`), so the field itself is never read here.
     fn make_provider(id: Uuid, slug: &str, status: ProviderStatus) -> ProviderV1 {
         let now = Utc::now();
         ProviderV1 {
             id,
+            tenant_id: Uuid::nil(),
             slug: slug.to_owned(),
             name: slug.to_owned(),
             gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
