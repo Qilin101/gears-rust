@@ -41,7 +41,7 @@ hero:
       </svg>
   actions:
     - text: Get started
-      link: ./get-started/
+      link: ./build-with-gears/
       icon: right-arrow
       variant: primary
     - text: Core concepts
@@ -53,20 +53,20 @@ hero:
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid>
-  <Card title="Build a gear" icon="puzzle">
-    Define an SDK, implement a domain service, and wire it into the runtime.
-    See [Getting Started](./get-started/).
+  <Card title="Introduction" icon="open-book">
+    Start here to understand what Gears is, why it exists, and how it helps you build secure, composable SaaS.
+    See [Introduction](./introduction/).
   </Card>
-  <Card title="Runtime model" icon="setting">
-    Ordered lifecycle phases, explicit dependencies, one runtime across many
-    deployment shapes. See [Concepts](./concepts/).
+  <Card title="Capabilities" icon="seti:default">
+    Explore the main capabilities, toolkit, service gears, and the features available out of the box.
+    See [Capabilities](./capabilities/).
   </Card>
-  <Card title="Architecture" icon="seti:default">
-    The three-tier gear hierarchy, gateway, and safety contracts.
-    See [Architecture](./architecture/).
+  <Card title="Build with Gears" icon="puzzle">
+    Follow practical guides to install the stack, build services, and wire your code into the runtime.
+    See [Build with Gears](./build-with-gears/).
   </Card>
-  <Card title="Reference" icon="open-book">
-    Crates, gears, traits, configuration, and the canonical error model.
-    See [Reference](./reference/).
+  <Card title="Concepts" icon="setting">
+    Learn the core ideas behind composition, request flow, security boundaries, types, and deployment shapes.
+    See [Concepts](./concepts/).
   </Card>
 </CardGrid>

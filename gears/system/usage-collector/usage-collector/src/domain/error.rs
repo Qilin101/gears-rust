@@ -98,10 +98,10 @@ pub enum DomainError {
     /// `idempotency_key` is already bound to a different usage submission
     /// (sdk-trait.md §"`DedupOutcome`"). Carries the UUID of the previously
     /// persisted record bound to the key.
-    #[error("idempotency conflict: key {idempotency_key} already bound to record {existing_uuid}")]
+    #[error("idempotency conflict: key {idempotency_key} already bound to record {existing_id}")]
     IdempotencyConflict {
         idempotency_key: String,
-        existing_uuid: Uuid,
+        existing_id: Uuid,
     },
 
     /// `deactivate_usage_record` referenced an `id` that does not exist
@@ -236,10 +236,10 @@ impl From<UsageCollectorPluginError> for DomainError {
             },
             UsageCollectorPluginError::IdempotencyConflict {
                 idempotency_key,
-                existing_uuid,
+                existing_id,
             } => Self::IdempotencyConflict {
                 idempotency_key,
-                existing_uuid,
+                existing_id,
             },
             UsageCollectorPluginError::UsageRecordNotFound { id } => {
                 Self::UsageRecordNotFound { id }
@@ -301,8 +301,8 @@ impl From<DomainError> for UsageCollectorError {
             } => Self::usage_type_referenced(&gts_id, sample_ref_count),
             DomainError::IdempotencyConflict {
                 idempotency_key,
-                existing_uuid,
-            } => Self::idempotency_conflict(&idempotency_key, existing_uuid),
+                existing_id,
+            } => Self::idempotency_conflict(&idempotency_key, existing_id),
             DomainError::UsageRecordNotFound { id } => Self::usage_record_not_found(id),
             DomainError::UsageRecordAlreadyInactive { id } => Self::already_inactive(id),
             DomainError::InvalidPluginInstance { gts_id, reason } => {

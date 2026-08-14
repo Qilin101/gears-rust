@@ -115,7 +115,7 @@ capabilities at the persistence boundary:
 
 - Durable persistence of single and batched `UsageRecord` submissions
   with caller-supplied idempotency keys, including dedup-on-conflict
-  enforcement on the composite `(tenant_id, gts_id, idempotency_key)`
+  enforcement on the composite `(tenant_id, gts_id, idempotency_key, created_at)`
   (`cpt-cf-usage-collector-fr-pluggable-storage`,
   `cpt-cf-usage-collector-fr-ingestion`,
   `cpt-cf-usage-collector-fr-idempotency`,
@@ -175,7 +175,7 @@ structurally validated by the core (`cpt-cf-usage-collector-component-ingestion-
 `cpt-cf-usage-collector-component-deactivation-handler`, and
 `cpt-cf-usage-collector-component-usage-type-catalog`), each of which
 performs PDP enforcement inside its own service via the shared
-`authz_scope` helper (calling `PolicyEnforcer::access_scope_with`).
+`access_scope_with` helper (calling `PolicyEnforcer::access_scope_with`).
 
 The SPI does not own REST wire shapes, OpenAPI generation, RFC-9457
 `Problem` mapping, CORS, TLS termination, or output encoding; those
@@ -239,7 +239,7 @@ authoring team.
   none of which carry a `TraceContext` parameter).
 - The SPI does not accept a `SecurityContext` either, because
   authorization is already enforced upstream inside each domain
-  component's `authz_scope` helper call.
+  component's `access_scope_with` helper call.
 - Methods return a `Result` whose `Err` variant is the
   `UsageCollectorPluginError` enum declared in
   `usage-collector-sdk/src/error.rs` (see §"Error Taxonomy"); the
@@ -372,7 +372,7 @@ round-trip happens only on the cold path (first call after bootstrap).
 When no matching instance is registered, the host returns the
 `plugin-unavailable` outcome documented in §"Error Taxonomy"; the
 same structural fact (selector cached AND `try_get_scoped is Some`)
-governs whether dispatch proceeds. A `usage_collector.plugin.ready`
+governs whether dispatch proceeds. A `uc_plugin_ready`
 gauge surfacing this fact via OTLP is specified by the foundation
 feature but is **not yet wired** in gear source.
 
@@ -421,7 +421,7 @@ transport-agnostic):
 - Core ingestion: `UsageRecord` (§2.1), `ResourceRef` (§2.2), `SubjectRef` (§2.3),
   `UsageType` (§2.4), `IdempotencyKey` (§2.5), `RecordMetadata` (§2.6),
   `UsageRecordStatus` (§2.8).
-- Query: `AggregationResult` (§3.3), and the SDK-side aggregation surface — `TimeWindow`, `AggregationOp`, `AggregationDimension`, `AggregationSpec`, `AggregationBucket` (declared in `usage-collector-sdk/src/models.rs`). `AggregationBucket.key` is `Vec<String>`; plugins MUST emit each entry as the canonical string form of the corresponding `AggregationDimension`: `TenantId` as `Uuid::to_string()` (lowercase, hyphenated), and every other dimension verbatim from the record (record metadata values are already strings per the `metadata_fields` closed-shape rule). Dimension *kind* is recoverable by position from the caller-supplied `group_by`; the wire shape carries no per-element discriminator.
+- Query: `AggregationResult` (§3.3), and the SDK-side aggregation surface — `AggregationOp`, `AggregationDimension`, `AggregationSpec`, `AggregationBucket` (declared in `usage-collector-sdk/src/models.rs`). `AggregationBucket.key` is `Vec<String>`; plugins MUST emit each entry as the canonical string form of the corresponding `AggregationDimension`: `TenantId` as `Uuid::to_string()` (lowercase, hyphenated), and every other dimension verbatim from the record (record metadata values are already strings per the `metadata_fields` closed-shape rule). Dimension *kind* is recoverable by position from the caller-supplied `group_by`; the wire shape carries no per-element discriminator.
 - Filter / pagination: `UsageRecordQuery` (filterable-field schema, fed to `#[derive(ODataFilterable)]`), `UsageRecordFilterField` (macro-generated, §2.9), `MetadataFilter` (typed side channel for dynamic JSON-key filtering), `Keyset` (§2.10).
 
 `SecurityContext` is **not** passed to the SPI — authorization is enforced
@@ -431,8 +431,18 @@ upstream.
 
 SPI-specific aspects of the canonical types:
 
-- `UsageRecord.uuid` is **caller-supplied**, persisted verbatim, and returned on
-  every subsequent read; the plugin MUST NOT mint or rewrite it. The
+- `UsageRecord.id` is **gateway-derived** (deterministic UUIDv5 of the dedup key
+  `(tenant_id, gts_id, idempotency_key, created_at)`), persisted verbatim, and returned on
+  every subsequent read; the plugin MUST NOT mint or rewrite it.
+  The gateway derives it as
+  `id = UUIDv5(NS, tenant_id ⟨0x1F⟩ gts_id ⟨0x1F⟩ created_at_micros ⟨0x1F⟩ idempotency_key)`
+  (`created_at_micros` = the event timestamp as integer microseconds-since-epoch;
+  see [ADR-0014](./ADR/0014-created-at-in-dedup-identity.md)) where `NS`
+  is the fixed namespace `56313026-863b-4de8-b32b-1f96b67306ed`, `tenant_id` is
+  its canonical lowercase-hyphenated form, the fields are joined by a single
+  `0x1F` byte, and `idempotency_key` is the final field (so the encoding is
+  injective). Clients MAY reproduce the value with
+  `usage_collector_sdk::derive_usage_record_id`. The
   accepted row is immutable except for the one-way `Active → Inactive` status
   transition issued through Method 5 (`deactivate_usage_record`).
 - Per `cpt-cf-usage-collector-adr-usage-compensation`, the SPI accepts both
@@ -463,7 +473,7 @@ SPI-specific aspects of the canonical types:
 
 SPI-specific aspects of the canonical query types:
 
-- The aggregation-query inputs (`TimeWindow`, `&ODataQuery`, `&[MetadataFilter]`,
+- The aggregation-query inputs (`&ODataQuery`, `&[MetadataFilter]`,
   `AggregationSpec`) reach the SPI **already PDP-constrained**: PDP-returned
   `PdpConstraint` filters have been intersected with user-supplied filters in
   `cpt-cf-usage-collector-component-query-gateway` before plugin dispatch (the
@@ -475,14 +485,14 @@ SPI-specific aspects of the canonical query types:
   dispatching to Method 4. The `ODataQuery` carries the PDP-constrained
   `$filter` AST over `UsageRecordFilterField` (the macro-generated enum
   declared next to `UsageRecordQuery` in the SDK), canonical
-  `created_at asc, uuid asc` order, decoded `Option<CursorV1>`, and
+  `created_at asc, id asc` order, decoded `Option<CursorV1>`, and
   gateway-clamped `limit`; `&[MetadataFilter]` carries the dynamic
   per-metadata-key filters that the OData grammar cannot express. The
   plugin consumes the parsed filter `ast::Expr` on `ODataQuery` and
   follows the per-field operator allowances in `domain-model.md` §2.10;
   metadata filters are lowered to the plugin's JSON-path facility (e.g.
   `metadata->>'key' = ANY($values)` on Postgres).
-- Keyset pagination uses the canonical `(created_at, uuid)` tuple, carried in
+- Keyset pagination uses the canonical `(created_at, id)` tuple, carried in
   wire form as `toolkit_odata::CursorV1`. Plugins receive the decoded
   `Option<CursorV1>` on `ODataQuery::cursor` and emit the next-page keyset via
   `CursorV1::encode` into `Page::page_info::next_cursor`. Cursor decoding and
@@ -499,12 +509,17 @@ dedicated outcome enums; failures use error variants instead.
   plugin returns either the newly written row (fresh insert) or the
   previously stored row when an exact-equality idempotency retry is
   silently absorbed. The dedup-key tuple is
-  `(tenant_id, gts_id, idempotency_key)`; on a key collision the plugin
+  `(tenant_id, gts_id, idempotency_key, created_at)`; on a key collision the plugin
   compares the incoming record's canonical fields — `value`,
-  `created_at`, `resource_ref`, `subject_ref`,
+  `resource_ref`, `subject_ref`,
   `corrects_id`, and `metadata` — against the stored record. The
   dedup-key tuple itself is excluded (it is the match key) and the
-  server-owned fields (`uuid`, `status`) are excluded. ALL compared
+  server-managed `status` is excluded; the server-owned `id`, though not a
+  caller-supplied comparison input, is a deterministic UUIDv5 projection of the
+  dedup key (ADR-0013/0014) and thus equal by construction once the key has
+  matched, so a plugin MAY defensively verify the stored `id` against the derived
+  value (surfacing a corrupted stored row as `IdempotencyConflict` rather than a
+  silent absorb) without changing the outcome for well-formed data. ALL compared
   fields equal → silent absorb (return the stored record on `Ok`);
   ANY compared field differs — including a metadata-only difference —
   → `IdempotencyConflict` error variant (the Plugin Host lifts this to
@@ -512,7 +527,11 @@ dedicated outcome enums; failures use error variants instead.
   fail-closed `idempotency_conflict` rejection, AIP-193 AlreadyExists /
   `409`, DESIGN §3.3; the second write
   is never silently dropped). Duplicates MUST NOT accumulate the
-  counter total.
+  counter total. Per [ADR-0014](./ADR/0014-created-at-in-dedup-identity.md),
+  `created_at` is part of the dedup key rather than a compared canonical
+  field: a same-key submission with a different `created_at` is a
+  distinct record (a distinct dedup-key tuple, hence a distinct derived
+  `id`), not an `IdempotencyConflict`.
 - **Create batch output**: a list of per-record `Result<UsageRecord,
 UsageCollectorPluginError>` in the same length and order as the input
   batch. Per-record errors do not cause the batch call as a whole to
@@ -569,7 +588,7 @@ UsageCollectorPluginError>` in the same length and order as the input
 - Tracing is propagated via the ambient `tracing::Span` /
   OpenTelemetry context — no explicit `TraceContext` parameter is
   declared on any SPI method. The W3C Trace Context propagation values
-  required by DESIGN §3.11.5 Distributed Tracing (`traceparent`,
+  required by DESIGN §3.11.4 Observability Architecture (`traceparent`,
   required, and `tracestate`, optional, per
   [W3C Trace Context Level 1](https://www.w3.org/TR/trace-context/))
   are carried by the active span / OpenTelemetry context that the
@@ -592,7 +611,7 @@ UsageCollectorPluginError>` in the same length and order as the input
 ### Cross-entity invariants honored by the Plugin SPI
 
 - Records persisted through the SPI honour the
-  `(tenant_id, gts_id, idempotency_key)` UNIQUE constraint (the reference
+  `(tenant_id, gts_id, idempotency_key, created_at)` UNIQUE constraint (the reference
   column carries the GTS identifier string `gts_id`;
   the in-plugin column type and index choice are the plugin author's
   choice and out of SPI scope). On a key
@@ -604,20 +623,24 @@ UsageCollectorPluginError>` in the same length and order as the input
   `IdempotencyConflict` error variant, which the Plugin Host lifts to
   the SDK-side `IdempotencyConflict` and the core then surfaces as a
   fail-closed `idempotency_conflict` rejection (AlreadyExists / `409`)
-  rather than a silent absorb.
+  rather than a silent absorb. Per [ADR-0014](./ADR/0014-created-at-in-dedup-identity.md),
+  `created_at` is part of the dedup key rather than a compared canonical
+  field: a same-key submission with a different `created_at` is a
+  distinct record (a distinct dedup-key tuple, hence a distinct derived
+  `id`), not an `IdempotencyConflict`.
 - **Strict dedup-key preservation (normative).** The idempotency window
   is unbounded: the
-  `(tenant_id, gts_id, idempotency_key)` dedup key never
+  `(tenant_id, gts_id, idempotency_key, created_at)` dedup key never
   expires, has no TTL, and is never intentionally reusable, so the
   UNIQUE constraint is permanent. A storage plugin MUST preserve the
-  `(tenant_id, gts_id, idempotency_key)` tuple permanently —
+  `(tenant_id, gts_id, idempotency_key, created_at)` tuple permanently —
   even when the corresponding record bodies are purged or archived by
   the plugin's own retention policy. Retention, purge, and archival
   remain plugin-owned (`cpt-cf-usage-collector-adr-pluggable-storage`;
   see also §"Exclusions/Non-goals"), and this obligation refines, not
   contradicts, that ownership: the plugin still owns retention but
   MUST NOT free a dedup key. Retention / purge / archival MUST NOT
-  release a `(tenant_id, gts_id, idempotency_key)` tuple, so
+  release a `(tenant_id, gts_id, idempotency_key, created_at)` tuple, so
   a replayed key always resolves to a silently-absorbed exact-equality
   retry (the previously persisted `UsageRecord` is returned on the `Ok`
   arm) or an `IdempotencyConflict` error (canonical-field mismatch),
@@ -678,14 +701,16 @@ UsageCollectorPluginError>` in the same length and order as the input
   computing**. A negative `SUM(value)` is an ordinary aggregation
   outcome — the plugin MUST NOT emit a negative-net detection signal,
   per `cpt-cf-usage-collector-adr-usage-compensation`.
-- The plugin is the authority for `id` allocation on accepted
-  records. Cursor decode and structural validation
+- The plugin does NOT allocate `id`: it is gateway-derived (a
+  deterministic UUIDv5 of the dedup key
+  `(tenant_id, gts_id, idempotency_key, created_at)`) and the plugin persists it
+  verbatim. Cursor decode and structural validation
   (`toolkit_odata::CursorV1::decode` plus `validate_cursor_against`)
   are gateway-owned; the plugin receives an already-decoded
   `Option<CursorV1>` carried on the `ODataQuery` and emits the
   next-page cursor token via `CursorV1::encode` into
   `Page::page_info::next_cursor`. Plugins are the authority for
-  keyset-pagination ordering over the canonical `(created_at, uuid)`
+  keyset-pagination ordering over the canonical `(created_at, id)`
   sort keys.
 - The plugin MUST classify backend errors into the
   `UsageCollectorPluginError` taxonomy below so the Plugin Host can
@@ -710,11 +735,11 @@ capability:
 
 | Method (logical)           | Realizes                                                                                                                                | Inputs                                                                                                                                                                                                                                                                                                                                                                           | Output (Ok variant)                                                                                                                                                                                                                                                            |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Create single record       | `fr-pluggable-storage`, `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `UsageRecord` (caller-supplied fields; `id` is plugin-allocated). Carries signed `value` and optional `corrects_id` (present marks a counter-compensation row; absent marks an ordinary usage row).                                                                                                                                                                          | `UsageRecord` — the newly persisted row on first acceptance, or the previously persisted row on a silently-absorbed exact-equality idempotency retry. A same-key canonical-field mismatch surfaces as the `IdempotencyConflict` error variant.                                  |
+| Create single record       | `fr-pluggable-storage`, `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `UsageRecord` (caller-supplied fields; `id` is gateway-derived, persisted verbatim). Carries signed `value` and optional `corrects_id` (present marks a counter-compensation row; absent marks an ordinary usage row).                                                                                                                                                                          | `UsageRecord` — the newly persisted row on first acceptance, or the previously persisted row on a silently-absorbed exact-equality idempotency retry. A same-key canonical-field mismatch surfaces as the `IdempotencyConflict` error variant.                                  |
 | Create batched records     | `fr-pluggable-storage`, `fr-usage-compensation`, `nfr-throughput`, `nfr-batch-and-report-timing`, `seq-emit-usage`                      | Non-empty list of `UsageRecord`. Per-record fields carry signed `value` and optional `corrects_id` as in Method 1.                                                                                                                                                                                                                                                               | `Vec<Result<UsageRecord, UsageCollectorPluginError>>` — per-record results in input order; each `Ok` carries the persisted (or silently-absorbed) `UsageRecord` and each `Err` is the per-record plugin error (e.g., `IdempotencyConflict`).                                    |
-| Aggregated query           | `fr-pluggable-storage`, `fr-query-aggregation`, `nfr-query-latency`, `seq-query-aggregated`                                             | `TimeWindow` (`[from, to)` UTC); `&ODataQuery` (parsed PDP-constrained filter over `UsageRecordFilterField`; pagination/order fields ignored on this method); `&[MetadataFilter]` (typed JSON-key side channel); `AggregationSpec` (`op` ∈ SUM / COUNT / MIN / MAX / AVG, plus ordered `group_by` over `AggregationDimension`).                                                  | `AggregationResult` — `Vec<AggregationBucket>`; each bucket carries `key: Vec<String>` (in `group_by` order; empty for the no-grouping case) and `value: Option<Decimal>` (wire-encoded as a JSON string, `AVG` may carry a plugin-chosen rounding scale on non-terminating quotients). Dimension values follow the canonical encoding rule above (TenantId → `Uuid::to_string()`, lowercase hyphenated; all others verbatim).                                                                                                  |
-| Raw keyset-paginated query | `fr-pluggable-storage`, `fr-query-raw`, `nfr-batch-and-report-timing`, `seq-query-raw`                                                  | `TimeWindow` (`[from, to)` UTC; replaces any `created_at` filter clause); `&ODataQuery` (`toolkit_odata`) carrying the parsed PDP-constrained filter, the canonical raw-query order (`created_at asc, uuid asc`), the optional decoded `CursorV1`, and the gateway-clamped `limit`; `&[MetadataFilter]` (typed JSON-key side channel).                                              | `toolkit_odata::Page<UsageRecord>` — page rows plus the last-row keyset wrapped as a `page_info` block; the plugin mints `page_info.next_cursor` via `CursorV1::encode`.                                                                                                         |
-| Deactivate usage event     | `fr-event-deactivation`, `fr-usage-compensation`, `adr-monotonic-deactivation`, `adr-usage-compensation`, `seq-deactivate-event`        | `id` (`UsageRecord.uuid`); accepts any active row regardless of whether `corrects_id` is set.                                                                                                                                                                                                                                                                                      | `()` on successful transition (depth-1 atomic set flip; the primary row plus every active referencing compensation are flipped together when the primary is a usage row). Rejections surface as error variants: `UsageRecordNotFound { id }` or `UsageRecordAlreadyInactive { id }`. |
+| Aggregated query           | `fr-pluggable-storage`, `fr-query-aggregation`, `nfr-query-latency`, `seq-query-aggregated`                                             | `&ODataQuery` (parsed PDP-constrained filter over `UsageRecordFilterField`, carrying the mandatory bounded `created_at` `[from, to)` window as `created_at ge … and created_at lt …` conjuncts; pagination/order fields ignored on this method); `&[MetadataFilter]` (typed JSON-key side channel); `AggregationSpec` (`op` ∈ SUM / COUNT / MIN / MAX / AVG, plus ordered `group_by` over `AggregationDimension`).                                                  | `AggregationResult` — `Vec<AggregationBucket>`; each bucket carries `key: Vec<String>` (in `group_by` order; empty for the no-grouping case) and `value: Option<BigDecimal>` (arbitrary precision; wire-encoded as a JSON string, `AVG` may carry a plugin-chosen rounding scale on non-terminating quotients). Dimension values follow the canonical encoding rule above (TenantId → `Uuid::to_string()`, lowercase hyphenated; all others verbatim).                                                                                                  |
+| Raw keyset-paginated query | `fr-pluggable-storage`, `fr-query-raw`, `nfr-batch-and-report-timing`, `seq-query-raw`                                                  | `&ODataQuery` (`toolkit_odata`) carrying the parsed PDP-constrained filter (including the mandatory bounded `created_at` `[from, to)` window as `created_at ge … and created_at lt …` conjuncts), the gateway-normalized keyset order (the caller's `$orderby` — or the default when omitted — with the canonical unique `(created_at, id)` suffix appended in the caller's sort direction), the optional decoded `CursorV1`, and the gateway-clamped `limit`; `&[MetadataFilter]` (typed JSON-key side channel).                                              | `toolkit_odata::Page<UsageRecord>` — page rows plus the last-row keyset wrapped as a `page_info` block; the plugin mints `page_info.next_cursor` via `CursorV1::encode`.                                                                                                         |
+| Deactivate usage event     | `fr-event-deactivation`, `fr-usage-compensation`, `adr-monotonic-deactivation`, `adr-usage-compensation`, `seq-deactivate-event`        | `id` (`UsageRecord.id`); accepts any active row regardless of whether `corrects_id` is set.                                                                                                                                                                                                                                                                                      | `()` on successful transition (depth-1 atomic set flip; the primary row plus every active referencing compensation are flipped together when the primary is a usage row). Rejections surface as error variants: `UsageRecordNotFound { id }` or `UsageRecordAlreadyInactive { id }`. |
 | Create usage type        | `fr-usage-type-registration`, `fr-pluggable-storage`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`, `seq-register-usage-type` | `UsageType`: `gts_id` (GTS identifier string; catalog PK and the reference value on every usage record; MUST derive from the reserved abstract base `gts.cf.core.uc.usage_record.v1~` with at least one further `~`-separated segment), `kind: UsageKind` (closed enum, counter / gauge), `metadata_fields: Vec<String>` (the closed, declared list of allowed metadata key names for this usage type; all values typed as String end-to-end). | `CatalogRow` (the stored row keyed by `gts_id`).                                                                                                                                                                                                                               |
 | Get usage type            | `fr-usage-type-existence-and-semantics`, `fr-pluggable-storage`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                 | `gts_id: String`.                                                                                                                                                                                                                                                                                                                                                                | `CatalogRow` on a hit; a miss surfaces as the `UsageTypeNotFound { gts_id }` error variant.                                                                                                                                                                                    |
 | List usage types           | `fr-pluggable-storage`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                                                          | One `&ODataQuery` (`toolkit_odata`) carrying the optional `limit` and `cursor`. The foundation surface declares no filterable usage-type fields and any filter expression carried on the query is currently ignored — counter / gauge selection is performed client-side by reading `UsageType.kind` on the catalog row.                                                       | `toolkit_odata::Page<UsageType>` — page rows plus the last-row keyset wrapped as a `page_info` block.                                                                                                                                                                            |
@@ -741,7 +766,7 @@ paths. The two-method form (single + batched) mirrors the SDK trait's
 two ingestion methods and matches the per-record acceptance
 acknowledgement promise of `cpt-cf-usage-collector-component-ingestion-gateway`.
 
-Note on trace-context propagation: DESIGN §3.11.5 requires
+Note on trace-context propagation: DESIGN §3.11.4 requires
 trace-context propagation on every SPI call so end-to-end traces span
 gateway → core → plugin → backend. Propagation is carried by the
 ambient `tracing::Span` / OpenTelemetry context opened by the Plugin
@@ -763,7 +788,7 @@ Taxonomy".
 - Identifier: `create_usage_record`.
 - Realizes: `cpt-cf-usage-collector-fr-pluggable-storage`, `cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-idempotency`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-seq-emit-usage`.
 - Full input/output/error contract: see [`sdk-trait.md` §"Method 1 — Create single usage record"](./sdk-trait.md#method-1--create-single-usage-record). This SPI method is the durable persistence target dispatched by `UsageCollectorClientV1::create_usage_record` after gateway PDP, attribution validation, UsageType-existence lookup, closed-shape metadata validation, and L1 `corrects_id` referential checks.
-- Structural inputs reaching the SPI: a `UsageRecord` value with all caller-supplied fields populated, including the caller-supplied `uuid`, which the plugin persists verbatim.
+- Structural inputs reaching the SPI: a `UsageRecord` value with all caller-supplied fields populated, plus the gateway-derived `id`, which the plugin persists verbatim.
 - **Caller/plugin validation split.** The gateway enforces PDP attribution, idempotency-key presence, UsageType existence and counter/gauge semantics (via per-record `get_usage_type` SPI dispatch and `gts_id`-prefix derivation), closed-shape metadata-key membership, and the four `corrects_id` preconditions (existence, not-a-compensation, same `(tenant_id, gts_id)`, active) BEFORE invoking this method. The plugin MUST NOT re-execute those checks; a malformed or unauthorized call reaching the SPI is a Plugin Host contract breach surfaced as `Internal(detail)` (non-retryable).
 - **Value-sign matrix (structural; enforced at the persistence boundary).**
 
@@ -776,11 +801,11 @@ Taxonomy".
 
   The plugin records the caller-supplied signed delta; it does NOT compute the delta.
 - Plugin invariants:
-  1. UNIQUE `(tenant_id, gts_id, idempotency_key)`. On collision, compare the incoming record's caller-supplied canonical fields (`value`, `created_at`, `resource_ref`, `subject_ref`, `metadata`, `corrects_id`) against the stored row (the dedup tuple itself and server-owned `uuid`/`status` are excluded). ALL-equal → silently absorb and return the stored row on `Ok`; ANY-differ — including metadata-only or divergent `corrects_id` — → `IdempotencyConflict`.
+  1. UNIQUE `(tenant_id, gts_id, idempotency_key, created_at)`. On collision, compare the incoming record's caller-supplied canonical fields (`value`, `resource_ref`, `subject_ref`, `metadata`, `corrects_id`) against the stored row (the dedup tuple itself — including `created_at` — and the server-managed `status` are excluded; the server-owned `id` is a deterministic UUIDv5 projection of the dedup key per ADR-0013/0014, hence equal by construction once the key has matched, so a plugin MAY defensively verify it against the derived value — surfacing a corrupted stored row as `IdempotencyConflict` rather than a silent absorb — without changing the outcome for well-formed data). ALL-equal → silently absorb and return the stored row on `Ok`; ANY-differ — including metadata-only or divergent `corrects_id` — → `IdempotencyConflict`. Per [ADR-0014](./ADR/0014-created-at-in-dedup-identity.md), `created_at` is part of the dedup key, not a compared canonical field: a same-key submission with a different `created_at` is a distinct record, not an `IdempotencyConflict`.
   2. Persist `metadata` byte-for-byte; the size cap is enforced upstream and the SPI MUST NOT silently truncate.
   3. Persist `status = Active` on first acceptance.
   4. Persist `corrects_id` exactly as supplied; the value-sign matrix above is a structural precondition (no row inserted on rejection).
-  5. **Permanent dedup-key preservation.** The `(tenant_id, gts_id, idempotency_key)` UNIQUE constraint is unbounded: the key never expires, has no TTL, and is never intentionally reusable. Even after a record body is purged or archived, a replayed key MUST still resolve to a silently-absorbed exact-equality retry or `IdempotencyConflict` — never a fresh insertion. See §"Cross-entity invariants honored by the Plugin SPI".
+  5. **Permanent dedup-key preservation.** The `(tenant_id, gts_id, idempotency_key, created_at)` UNIQUE constraint is unbounded: the key never expires, has no TTL, and is never intentionally reusable. Even after a record body is purged or archived, a replayed key MUST still resolve to a silently-absorbed exact-equality retry or `IdempotencyConflict` — never a fresh insertion. See §"Cross-entity invariants honored by the Plugin SPI".
 - **Single ingestion path (no dedicated `compensate` SPI call).** Per `cpt-cf-usage-collector-adr-usage-compensation`, this same persist accepts both ordinary usage payloads (`corrects_id IS NULL`) and counter-compensation payloads (`corrects_id` set).
 - Error variants the plugin may surface: `Transient`, `Internal`, `IdempotencyConflict`. Host-contract breaches the plugin happens to detect (value-sign matrix violation, …) lift through `Internal(detail)` (non-retryable). Upstream-enforced categories (typed validation variants, `UsageTypeNotFound`, `UnknownMetadataKey`, `Authorization`, `GaugeCompensationRejected`, `CorrectsId*`) are not raised by the SPI. "Not ready" is detected structurally by the Plugin Host before dispatch (no scoped client under `ClientScope::gts_id(instance_id)`); the SPI has no `Unready` variant.
 - Latency budget: 75 ms p95 of the 200 ms total ingestion p95 per DESIGN §3.11.2.
@@ -808,7 +833,6 @@ Taxonomy".
   async fn query_aggregated_usage_records(
       &self,
       gts_id: UsageTypeGtsId,
-      window: TimeWindow,
       query: &ODataQuery,
       metadata_filter: &[MetadataFilter],
       aggregation: AggregationSpec,
@@ -817,21 +841,30 @@ Taxonomy".
 
   Trace context is ambient (active `tracing::Span` / OpenTelemetry context); no explicit context parameter.
 - Structural inputs reaching the SPI:
-  - `gts_id: UsageTypeGtsId` — the typed usage-type key. The gateway has already validated usage-type existence and resolved the declared `metadata_fields`; the plugin lowers this to its `gts_id` column filter (`WHERE gts_id = $1`). The `gts_id` field on the OData filter surface is reserved and is guaranteed by the gateway to be absent from `query`.
-  - `window: TimeWindow` — validated `[from, to)` UTC range.
-  - `query: &ODataQuery` — parsed PDP-constrained filter over `UsageRecordFilterField` (minus the reserved `gts_id` field); pagination/order/cursor fields are ignored on this method (aggregation results are not paginated).
+  - `gts_id: UsageTypeGtsId` — the typed usage-type key. The gateway has already validated usage-type existence AND resolved its `kind` via a pre-dispatch `get_usage_type`, and has rejected any `(op, kind)` pair the kind does not admit; the plugin lowers `gts_id` to its `gts_id` column filter (`WHERE gts_id = $1`). The `gts_id` field on the OData filter surface is reserved and is guaranteed by the gateway to be absent from `query`.
+  - `query: &ODataQuery` — parsed PDP-constrained filter over `UsageRecordFilterField` (minus the reserved `gts_id` field), carrying the mandatory bounded `created_at` `[from, to)` window as `created_at ge … and created_at lt …` conjuncts (the gateway rejects an unbounded window before dispatch); pagination/order/cursor fields are ignored on this method (aggregation results are not paginated).
   - `metadata_filter: &[MetadataFilter]` — validated `(key, values)` entries for dynamic JSON-key filtering. Same lowering rule as Method 4 (`metadata->>'key' = ANY($values)` on Postgres, ANDed onto the OData-derived `WHERE`).
   - `aggregation: AggregationSpec` — `op` and `group_by`.
 
   Filters have already been intersected with PDP `PdpConstraint` filters by `cpt-cf-usage-collector-component-query-gateway`; the plugin MUST treat every filter as authoritative and MUST NOT widen the result set.
 - **Pushdown obligation.** The plugin executes the chosen `aggregation` (SUM, COUNT, MIN, MAX, AVG) and any `group_by` dimensions server-side using its native acceleration structures (pre-aggregated materialized views, columnar indexes, etc.) per the NFR row for `cpt-cf-usage-collector-nfr-query-latency`. Fanning out per-row reads is forbidden — the SPI exposes aggregation as a single call so the core never iterates rows itself.
+- **Op-per-kind restriction (normative; gateway-enforced).** Each aggregation op is valid only for the usage `kind` for which it is semantically meaningful. The gateway resolves the queried usage type's `kind` (via a pre-dispatch `get_usage_type`, Method 7) and rejects a mismatched `(op, kind)` pair with a typed `InvalidArgument` (`400`, `field_violations[0].reason="OP_NOT_ALLOWED_FOR_KIND"`) BEFORE dispatching to this method, so the plugin only ever receives an allowed pair and stays pure-persistence.
+
+  | Op | Counter | Gauge |
+  | --- | --- | --- |
+  | `SUM` | ✅ | ❌ |
+  | `MIN` / `MAX` / `AVG` | ❌ | ✅ |
+  | `COUNT` | ✅ | ✅ |
+
+  Counter allows `{SUM, COUNT}`; gauge allows `{MIN, MAX, AVG, COUNT}`.
 - **Aggregation contract (`corrects_id`-driven; normative).** Across every accepted filter scope, on rows where `status = Active`:
   - `SUM` MUST net across rows regardless of `corrects_id`, treating `value` as a signed quantity (counter compensation entries reduce the running total).
-  - `COUNT`, `MIN`, `MAX`, `AVG` MUST operate over rows where `corrects_id IS NULL` only — compensation entries adjust `SUM`; they are not events, so including them would double-count or corrupt extremes/means.
-  - Inactive rows (any `corrects_id`) are excluded from all five aggregations BEFORE the `corrects_id` partition. The status filter and the `corrects_id` partition are orthogonal.
+  - Every other op (`COUNT`, `MIN`, `MAX`, `AVG`) MUST operate over rows where `corrects_id IS NULL` only — compensation entries adjust `SUM`; they are not events, so including them would double-count or corrupt extremes/means. Under the op-per-kind restriction this partition is load-bearing only for `COUNT`-on-counter; `MIN`/`MAX`/`AVG` are gauge-only and gauges never carry compensations, so the filter is a structural no-op for them.
+  - Inactive rows (any `corrects_id`) are excluded from all aggregations BEFORE the `corrects_id` partition. The status filter and the `corrects_id` partition are orthogonal.
   - A negative `SUM(value)` is an ordinary outcome — the plugin MUST NOT validate non-negative net per the un-policed-net stance (`cpt-cf-usage-collector-adr-usage-compensation`).
-- Success output: `AggregationResult` bounded at the wire boundary by the caps declared in `usage-collector-v1.yaml` (≤ 100,000 rows over a 90-day single-tenant window with ≤ 2 groupings). An empty result returns empty `buckets`, not an error.
-- Error variants: `Transient`, `Internal` (host-contract breaches lift through `Internal(detail)`).
+  - The plugin MAY implement this universal rule ("`SUM` nets; every other op filters `corrects_id IS NULL`") uniformly as defence-in-depth; under the restricted contract it is only ever dispatched allowed `(op, kind)` pairs.
+- Success output: `AggregationResult`. The gateway-enforced bounded `created_at` window caps the rows scanned but **not** the distinct groups a `group_by` produces, so a high-cardinality dimension (e.g. an `AggregationDimension::Metadata` key with near-unique values) could otherwise materialize an unbounded bucket set into memory. The plugin therefore MUST bound its own result to `MAX_AGGREGATION_BUCKETS + 1` buckets (≤ 100,001 — e.g. a `LIMIT` on the grouped query); the `+ 1` lets the gateway distinguish a result exactly at the cap from one over it. The gateway rejects a result exceeding `MAX_AGGREGATION_BUCKETS` (100,000) with a `400` (`field_violations[0].reason="AGGREGATION_RESULT_TOO_LARGE"`) before returning it. An empty result returns empty `buckets`, not an error. Wire caps (≤ 100,000 rows over a 90-day single-tenant window with ≤ 2 groupings) are declared in `usage-collector-v1.yaml`.
+- Error variants: `Transient`, `Internal` (host-contract breaches lift through `Internal(detail)`). The over-cap rejection is gateway-side (a `400`), not a plugin error.
 - Latency budget: 425 ms p95 of the 500 ms total query p95 per DESIGN §3.11.2.
 
 ### Method 4 — Raw keyset-paginated query
@@ -845,7 +878,6 @@ Taxonomy".
   async fn list_usage_records(
       &self,
       gts_id: UsageTypeGtsId,
-      window: TimeWindow,
       query: &ODataQuery,
       metadata_filter: &[MetadataFilter],
   ) -> Result<Page<UsageRecord>, PluginError>;
@@ -854,12 +886,12 @@ Taxonomy".
   Trace context is ambient (active `tracing::Span` / OpenTelemetry context); no explicit context parameter.
 - Structural inputs reaching the SPI:
   - `gts_id: UsageTypeGtsId` — the typed usage-type key. The gateway has already validated usage-type existence and resolved the declared `metadata_fields`; the plugin lowers this to its `gts_id` column filter (`WHERE gts_id = $1`). The `gts_id` field on the OData filter surface is reserved and is guaranteed by the gateway to be absent from `query`.
-  - `window: TimeWindow` — validated `[from, to)` UTC range. Replaces any `created_at` predicate (which the SDK's `UsageRecordQuery` deliberately does not expose as a filterable field).
-  - `query: &ODataQuery` carrying the parsed PDP-constrained `filter` over `UsageRecordFilterField` minus the reserved `gts_id` field (operator allowances per `domain-model.md` §2.9–§2.10), the parsed `order` (the gateway rejects anything other than canonical `created_at asc, uuid asc` upstream), `cursor: Option<CursorV1>` (decoded by the gateway and validated against order/filter via `toolkit_odata::validate_cursor_against` — plugins MAY treat it as a structural assertion), and gateway-clamped `limit: Option<u64>` bounded by the wire-level cap declared in `usage-collector-v1.yaml` (≤ 1,000 records over a 24-hour window).
+  - The mandatory bounded `[from, to)` time window rides `query` as `created_at ge … and created_at lt …` conjuncts — `created_at` is a first-class `UsageRecordFilterField`. The gateway rejects an unbounded window (missing lower or upper `created_at` bound) before dispatch, so the plugin always receives a bounded scan.
+  - `query: &ODataQuery` carrying the parsed PDP-constrained `filter` over `UsageRecordFilterField` minus the reserved `gts_id` field (operator allowances per `domain-model.md` §2.9–§2.10), the parsed `order` (the gateway normalizes it upstream so it always ends in the canonical unique `(created_at, id)` suffix — appended in the caller's sort direction — giving the plugin a gap-free, uniform-direction keyset for any caller `$orderby`; every ordering key is guaranteed non-nullable — the gateway rejects a caller `$orderby` on a domain-optional field, `subject_id` / `subject_type` / `corrects_id`, with `400 InvalidArgument` so the row-value tuple keyset never compares a NULL leading key), `cursor: Option<CursorV1>` (decoded by the gateway and validated against order/filter via `toolkit_odata::validate_cursor_against` — plugins MAY treat it as a structural assertion), and gateway-clamped `limit: Option<u64>` bounded by the wire-level cap declared in `usage-collector-v1.yaml` (≤ 1,000 records over a 24-hour window).
   - `metadata_filter: &[MetadataFilter]` carrying validated `(key, values)` entries for filtering on the dynamic `UsageRecord.metadata` JSON map. Semantics: AND across distinct entries, OR within `MetadataFilter::values`; an empty slice imposes no metadata filter. Plugins lower this to their JSON-path facility (e.g. `metadata->>'key' = ANY($values)` on Postgres) and MUST AND the result with the `ODataQuery`-derived `WHERE`.
 
   The plugin MUST treat every filter as authoritative and MUST NOT widen the result set.
-- **Keyset pagination obligation.** Plugins MUST implement keyset pagination over `(created_at, uuid)` so the combined order is total and stable across plugins. Offset/limit scans are forbidden. Plugins resume strictly after the cursor's `(created_at, uuid)` tuple and emit the next-row keyset as `Page::page_info::next_cursor` via `CursorV1::encode`.
+- **Keyset pagination obligation.** Plugins MUST implement keyset pagination over `(created_at, id)` so the combined order is total and stable across plugins. Offset/limit scans are forbidden. Plugins resume strictly after the cursor's `(created_at, id)` tuple and emit the next-row keyset as `Page::page_info::next_cursor` via `CursorV1::encode`.
 - Cursor lifecycle: decode, structural validation, and order/filter-binding checks are gateway-owned. No plugin-error category exists for cursor validity (`INVALID_CURSOR`, `ORDER_MISMATCH`, `FILTER_MISMATCH` are gateway-surfaced canonical `InvalidArgument` `Problem`s with a `field_violations[0]` on `cursor`, via `toolkit-odata`).
 - Success output: `toolkit_odata::Page<UsageRecord>` (`items` plus `page_info { next_cursor, prev_cursor, limit }`; `next_cursor: None` on the last page). An empty match inside the authorized scope returns an empty page, not an error.
 - Error variants: `Transient`, `Internal` (host-contract breaches lift through `Internal(detail)`).
@@ -870,7 +902,7 @@ Taxonomy".
 - Identifier: `deactivate_usage_record`.
 - Realizes: `cpt-cf-usage-collector-fr-event-deactivation`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-seq-deactivate-event`, `cpt-cf-usage-collector-adr-monotonic-deactivation`, `cpt-cf-usage-collector-adr-usage-compensation`, `cpt-cf-usage-collector-principle-monotonic-deactivation`.
 - Full input/output/error contract: see [`sdk-trait.md` §"Method 5 — Deactivate usage event"](./sdk-trait.md#method-5--deactivate-usage-event).
-- Structural inputs reaching the SPI: the target `UsageRecord.uuid` (any active row, regardless of `corrects_id`).
+- Structural inputs reaching the SPI: the target `UsageRecord.id` (any active row, regardless of `corrects_id`).
 - **Outcome shape (depth-1 atomic set flip; normative).** The capability returns `()` on success. The transition is a depth-1 atomic set flip, NOT a single-row flip:
   - When the primary row has `corrects_id IS NULL` (a usage row): the plugin MUST flip the primary row's `status` from `Active` to `Inactive` AND every currently-active row where `corrects_id = primary_id` AND `(tenant_id, gts_id) = primary.(tenant_id, gts_id)` in the **same atomic transition**. The set of cascade-flipped ids is NOT in the return shape; operators issue a follow-up `list_usage_records` against `status` and `corrects_id`.
   - When the primary row has `corrects_id IS NOT NULL` (a compensation row): single-row flip, no cascade evaluation — no row may reference a compensation.
@@ -934,8 +966,8 @@ Taxonomy".
 - Identifier: `get_usage_record`.
 - Realizes: `cpt-cf-usage-collector-fr-pluggable-storage`, `cpt-cf-usage-collector-fr-event-deactivation` (attribution prefetch).
 - Full input/output/error contract: see [`sdk-trait.md` §"Method 10 — Get single usage record"](./sdk-trait.md#method-10--get-single-usage-record).
-- Structural inputs reaching the SPI: `uuid: Uuid` — the caller-supplied `UsageRecord.uuid`.
-- Behaviour: verbatim read of the `usage_records` row whose primary key matches `uuid`. The plugin MUST NOT filter by `status` (both `active` and `inactive` rows are returned verbatim) and MUST NOT post-process the row content; the gateway needs the full attribution tuple (`tenant_id`, `gts_id`, `resource_ref`, optional `subject_ref`, `corrects_id`, `status`, …) for PDP enforcement and lifecycle gating on the deactivation flow (`cpt-cf-usage-collector-algo-event-deactivation-operator-pdp-authorization`).
+- Structural inputs reaching the SPI: `id: Uuid` — the gateway-derived `UsageRecord.id`.
+- Behaviour: verbatim read of the `usage_records` row whose primary key matches `id`. The plugin MUST NOT filter by `status` (both `active` and `inactive` rows are returned verbatim) and MUST NOT post-process the row content; the gateway needs the full attribution tuple (`tenant_id`, `gts_id`, `resource_ref`, optional `subject_ref`, `corrects_id`, `status`, …) for PDP enforcement and lifecycle gating on the deactivation flow (`cpt-cf-usage-collector-algo-event-deactivation-operator-pdp-authorization`).
 - Plugin invariants:
   1. Reject with `UsageRecordNotFound { id }` if no row has that primary key (absence surfaced as a typed error, not silent success).
   2. The returned `UsageRecord` is byte-identical to the row originally persisted by Method 1 / Method 2 (modulo any subsequent monotonic `status` transition through Method 5).
@@ -1125,7 +1157,7 @@ when / then (each row independent):
 
 Acceptance assertion: rejections MUST be deterministic and no row
 MUST be inserted on a rejected call. Accepted cells MUST return
-`Ok(UsageRecord)` carrying a fresh plugin-allocated `id`.
+`Ok(UsageRecord)` carrying the gateway-derived `id`.
 
 ### `spi-contract-test-aggregation-sum-nets-and-usage-only-others`
 
@@ -1166,6 +1198,14 @@ usage rows); `MIN`, `MAX`, `AVG` MUST be computed over `{U[i].value}`
 only and MUST NOT include any `X[j].value`. Compensation entries
 adjust SUM; they are not events.
 
+Note: the gateway restricts `MIN` / `MAX` / `AVG` to gauges and `SUM` to
+counters (see Method 3 "Op-per-kind restriction"), so it never dispatches
+`MIN` / `MAX` / `AVG` against a counter in production. This plugin-level test
+exercises the universal rule directly as defence-in-depth: the plugin computes
+every op over `corrects_id IS NULL` (except `SUM`) correctly regardless of the
+`(op, kind)` pair, so a backend remains correct even for pairs the gateway
+would reject upstream.
+
 ## Error Taxonomy
 
 All Plugin SPI methods return `Result<…, UsageCollectorPluginError>`.
@@ -1189,7 +1229,7 @@ and per-variant:
 | `UsageTypeAlreadyExists { gts_id }`                      | `UsageTypeAlreadyExists { gts_id }`                        |
 | `UsageTypeNotFound { gts_id }`                           | `UsageTypeNotFound { gts_id }`                             |
 | `UsageTypeReferenced { gts_id, sample_ref_count }`       | `UsageTypeReferenced { gts_id, sample_ref_count }`         |
-| `IdempotencyConflict { idempotency_key, existing_uuid }` | `IdempotencyConflict { idempotency_key, existing_uuid }`  |
+| `IdempotencyConflict { idempotency_key, existing_id }`   | `IdempotencyConflict { idempotency_key, existing_id }`    |
 | `UsageRecordNotFound { id }`                             | `UsageRecordNotFound { id }`                               |
 | `UsageRecordAlreadyInactive { id }`                      | `AlreadyInactive { id }`                                   |
 
@@ -1231,7 +1271,7 @@ UsageType Catalog is the sole usage-type catalog.
 
 The Plugin Host also projects each variant onto the operational-metric
 `error_category` label set documented for
-`usage_collector.plugin.accept_errors` in DESIGN §3.11.6 (`unready`,
+`uc_plugin_accept_errors_total` in DESIGN §3.11.5 (`unready`,
 `backend_error`, `timeout`). The mapping is host-side and lives in
 `usage-collector/src/domain/service.rs`: `Transient` projects onto
 `backend_error` (with `timeout` reserved for the host-side dispatch
@@ -1261,7 +1301,7 @@ Variant catalog:
   plugin happens to detect (for example an empty batch, an
   `AggregationQuery` with an `aggregation` the plugin does not
   support, a Method 4 invocation that contradicts the canonical
-  `(created_at, uuid)` keyset, or a value-sign matrix violation). The
+  `(created_at, id)` keyset, or a value-sign matrix violation). The
   SPI does not carve out a separate variant for host-contract
   breaches: the gateway validates inputs upstream (§"Caller/plugin
   validation split"), so a breach reaching the SPI is observationally
@@ -1272,10 +1312,10 @@ Variant catalog:
   reported through this channel — they are gateway-only failures
   surfaced as `UsageCollectorError::InvalidArgument`
   (`ValidationReason::Validation`) before any plugin dispatch.
-- `IdempotencyConflict { idempotency_key, existing_uuid }` — Methods
+- `IdempotencyConflict { idempotency_key, existing_id }` — Methods
   1 / 2 (`create_usage_record` / `create_usage_records`) found the
   caller-supplied `idempotency_key` already bound to a different
-  stored record. Carries the UUID of the previously persisted row so
+  stored record. Carries the `id` of the previously persisted row so
   the gateway / caller can `get_usage_record` and reconcile. Lifts to
   `UsageCollectorError::Conflict` (`ConflictReason::IdempotencyConflict`).
   Exact-equality retries are silently absorbed on the `Ok` arm and MUST
@@ -1350,6 +1390,10 @@ Behavioural notes:
   SDK-side `IdempotencyConflict`, which the core surfaces to the
   caller as a `UsageCollectorError` (the `idempotency_conflict`
   rejection, AlreadyExists / `409`, DESIGN §3.3) — NOT an `Ok` ack.
+  Per [ADR-0014](./ADR/0014-created-at-in-dedup-identity.md), `created_at`
+  is part of the dedup key rather than a compared canonical field, so a
+  same-key submission with a different `created_at` is a distinct record
+  (a distinct `id`), not a trigger for `IdempotencyConflict`.
   Repeat deactivation against an already-inactive record is reported
   as the `UsageRecordAlreadyInactive` error variant; a missing target
   row is reported as the `UsageRecordNotFound` error variant — neither
@@ -1368,7 +1412,7 @@ Behavioural notes:
   `cpt-cf-usage-collector-component-query-gateway`,
   `cpt-cf-usage-collector-component-deactivation-handler`, and
   `cpt-cf-usage-collector-component-usage-type-catalog` (each performing
-  PDP enforcement inline via the `authz_scope` helper) before any SPI
+  PDP enforcement inline via the `access_scope_with` helper) before any SPI
   call. A plugin that observed such a failure has, by definition,
   observed a host-contract breach and SHOULD return `Internal(detail)`
   rather than inventing a new error class.
@@ -1383,7 +1427,7 @@ Behavioural notes:
   add per-variant context fields (such as a stable error code or
   operational trace pointer) as long as the public taxonomy
   preserves the domain classification above and the
-  `usage_collector.plugin.accept_errors` label mapping.
+  `uc_plugin_accept_errors_total` label mapping.
 
 ## Consistency profile
 
@@ -1403,7 +1447,7 @@ relaxes or strengthens it.
   `create_usage_records` return the persisted `UsageRecord` on the
   `Ok` arm (whether on first acceptance or on a silently-absorbed
   exact-equality retry), the record is durable; the
-  `(tenant_id, gts_id, idempotency_key)` dedup tuple is
+  `(tenant_id, gts_id, idempotency_key, created_at)` dedup tuple is
   permanently visible to subsequent persistence attempts on the
   ingestion path per §"Cross-entity invariants honored by the Plugin
   SPI" (strict dedup-key preservation, refining plugin-owned
@@ -1566,7 +1610,7 @@ The Plugin SPI does not expose REST-handling concerns:
 - CORS, TLS termination, output encoding, and HTTP-level rate
   limiting are platform API gateway responsibilities per DESIGN
   §3.9.3.
-- Platform liveness and readiness probes are handled by the ToolKit host above the gear boundary; the collector exposes no gear-local health endpoints. Operational telemetry is pushed via OTLP from ToolKit's global `SdkMeterProvider` (no in-gear `/metrics` scrape endpoint exists). The SPI contributes no `ready` or `flush` operation; the structural readiness fact (selector cached AND `ClientHub::try_get_scoped` returns `Some`) is composed by the Plugin Host and surfaced via the `usage_collector.plugin.ready` gauge.
+- Platform liveness and readiness probes are handled by the ToolKit host above the gear boundary; the collector exposes no gear-local health endpoints. Operational telemetry is pushed via OTLP from ToolKit's global `SdkMeterProvider` (no in-gear `/metrics` scrape endpoint exists). The SPI contributes no `ready` or `flush` operation; the structural readiness fact (selector cached AND `ClientHub::try_get_scoped` returns `Some`) is composed by the Plugin Host and surfaced via the `uc_plugin_ready` gauge.
 
 ### Gear non-goals reaffirmed on the Plugin SPI
 
@@ -1612,7 +1656,7 @@ The Plugin SPI does not expose REST-handling concerns:
   contradicted, by the strict dedup-key-preservation obligation in
   §"Cross-entity invariants honored by the Plugin SPI": the plugin
   still owns retention but MUST NOT free a
-  `(tenant_id, gts_id, idempotency_key)` dedup key when it purges
+  `(tenant_id, gts_id, idempotency_key, created_at)` dedup key when it purges
   or archives the corresponding record bodies.
 - Dead-letter queue, poison-message handling, and compensation-saga
   patterns are out of scope for the SPI; persistence is a single
@@ -1697,7 +1741,7 @@ Vec<String>` (the closed, declared list of allowed metadata key
   [`./ADR/0012-unified-plugin-catalog-and-gts-id-reference.md`](./ADR/0012-unified-plugin-catalog-and-gts-id-reference.md).
 - Readiness and graceful shutdown:
   `cpt-cf-usage-collector-nfr-availability`. Source: DESIGN
-  §3.11.6 `usage_collector.plugin.ready` gauge (the structural
+  §3.11.5 `uc_plugin_ready` gauge (the structural
   readiness fact pushed via OTLP).
 
 ### Domain entities
@@ -1743,7 +1787,7 @@ plugin-internal and live in each plugin's own DESIGN document.
 
 - **Usage records store** — durable rows emitted by Methods 1 / 2
   and read by Methods 3 / 4; status updated by Method 5. The plugin
-  enforces the dedup composite `(tenant_id, gts_id, idempotency_key)`
+  enforces the dedup composite `(tenant_id, gts_id, idempotency_key, created_at)`
   permanently (see §"Cross-entity invariants honored by the Plugin
   SPI") and the `ON DELETE RESTRICT` reference to the usage-type
   catalog.
@@ -1852,7 +1896,7 @@ the conservative default this reference adopts.
   host outside the gear surface (the collector exposes no
   gear-local liveness endpoint). Plugins MAY expose
   backend-internal liveness through backend-specific metrics under
-  their own `usage_collector_*` prefix per §3.11.6.
+  their own prefix (for example `uc_clickhouse_*`) per §3.11.5.
 - OQ-5 — Whether `flush` accepts a deadline parameter or relies on
   the Plugin Host's operator-tuned drain timeout. **Resolved (no
   flush)**: this reference exposes no plugin-side flush hook;
@@ -1870,7 +1914,7 @@ the conservative default this reference adopts.
   `#[tracing::instrument(...)]` on its own `Service::*` methods before
   dispatching to the trait method; the SPI implementation runs inside
   that ambient span and continues it over the backend dispatch so the
-  DESIGN §3.11.5 propagation invariant is satisfied without a
+  DESIGN §3.11.4 propagation invariant is satisfied without a
   syntactic parameter.
 - OQ-7 — Whether DESIGN §3.11.2 should carve formal Plugin-SPI
   sub-allocations for the batched-ingestion (Method 2) and
@@ -1884,6 +1928,29 @@ the conservative default this reference adopts.
 
 ## Document Changelog
 
+- **2026-07-17 (amendment)** — Aligned with ADR-0014
+  ([`./ADR/0014-created-at-in-dedup-identity.md`](./ADR/0014-created-at-in-dedup-identity.md)).
+  `created_at` is now part of the dedup identity: the dedup key is the 4-tuple
+  `(tenant_id, gts_id, idempotency_key, created_at)`, the derived `id` folds it
+  in (`id = UUIDv5(NS, tenant_id ⟨0x1F⟩ gts_id ⟨0x1F⟩ created_at_micros ⟨0x1F⟩ idempotency_key)`),
+  and `created_at` is removed from the canonical-field conflict comparison. A
+  same-key submission with a different `created_at` is a distinct record, not an
+  `IdempotencyConflict`. Does not change the SPI method set or plugin logic.
+- **2026-07-07 (amendment)** — Aligned with ADR-0013
+  ([`./ADR/0013-deterministic-usage-record-id.md`](./ADR/0013-deterministic-usage-record-id.md)).
+  The usage-record identity is now gateway-derived rather
+  than a client input: `id = UUIDv5(NS, tenant_id ⟨0x1F⟩ gts_id ⟨0x1F⟩
+  idempotency_key)` under the fixed namespace
+  `56313026-863b-4de8-b32b-1f96b67306ed`
+  (`usage_collector_sdk::derive_usage_record_id`), and the plugin
+  persists it verbatim (MUST NOT mint or rewrite it). Renamed the
+  record-identity field `uuid → id` throughout (including the
+  `(created_at, id)` keyset tuple, the `IdempotencyConflict {
+  idempotency_key, existing_id }` variant, and the `get_usage_record` /
+  `deactivate_usage_record` input `id`). Guarantees identity uniqueness
+  by construction and eliminates false idempotency conflicts on exact
+  retries. Does not change the SPI method set, the dedup tuple, or any
+  plugin logic.
 - **2026-06-08 (amendment)** — Aligned with the ADR-0012 2026-06-08
   amendment. Kind moves from the `gts_id` prefix to a closed
   `UsageKind` enum on the catalog row: the SPI's `UsageType` /

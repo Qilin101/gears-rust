@@ -13,17 +13,18 @@ use std::sync::Arc;
 use toolkit::{
     ClientHub, Gear,
     api::OperationBuilder,
-    api::operation_builder::LicenseFeature,
+    api::operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature},
     config::ConfigProvider,
     context::GearCtx,
     contracts::{ApiGatewayCapability, OpenApiRegistry, RestApiCapability},
 };
 use toolkit_canonical_errors::Problem;
+use toolkit_gts::gts_uri;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const PERMISSION_DENIED_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.permission_denied.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.permission_denied.v1~");
 const PROBLEM_JSON: &str = "application/problem+json";
 
 struct TestConfigProvider {
@@ -85,7 +86,7 @@ struct BaseFeature;
 
 impl AsRef<str> for BaseFeature {
     fn as_ref(&self) -> &'static str {
-        "gts.cf.core.lic.feat.v1~cf.core.global.base.v1"
+        CORE_GLOBAL_BASE_LICENSE_FEATURE
     }
 }
 
@@ -156,7 +157,11 @@ async fn rejects_non_base_feature_requirement() {
         .expect("Failed to register routes");
 
     router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     let response = router
@@ -213,7 +218,11 @@ async fn rejects_non_base_feature_requirement_with_prefix() {
         .expect("Failed to register routes");
 
     router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     let response = router
@@ -268,7 +277,11 @@ async fn allows_base_feature_requirement() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     let response = router
@@ -311,7 +324,11 @@ async fn allows_base_feature_requirement_with_prefix() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     let response = router
@@ -353,7 +370,11 @@ async fn allows_no_license_requirement() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     let response = router

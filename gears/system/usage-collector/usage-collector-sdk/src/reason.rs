@@ -28,6 +28,9 @@ pub const METADATA_VALIDATION: &str = "METADATA_VALIDATION";
 pub const UNKNOWN_METADATA_KEY: &str = "UNKNOWN_METADATA_KEY";
 /// Compensation submitted against a gauge usage type (gauges have no `SUM`).
 pub const GAUGE_COMPENSATION_REJECTED: &str = "GAUGE_COMPENSATION_REJECTED";
+/// Aggregation op requested against a usage kind that does not admit it
+/// (`SUM` on a gauge, or `MIN`/`MAX`/`AVG` on a counter).
+pub const OP_NOT_ALLOWED_FOR_KIND: &str = "OP_NOT_ALLOWED_FOR_KIND";
 /// A raw / aggregated query omitted the mandatory bounded `created_at`
 /// window (a lower **and** an upper bound on `created_at` as top-level
 /// `$filter` conjuncts), which would force an unbounded full-table scan.
@@ -40,6 +43,11 @@ pub const INVALID_METADATA_FIELDS_EMPTY_STRING: &str = "INVALID_METADATA_FIELDS_
 pub const INVALID_METADATA_FIELDS_INVALID_KEY: &str = "INVALID_METADATA_FIELDS_INVALID_KEY";
 /// Duplicate `metadata_fields[i]` entry.
 pub const INVALID_METADATA_FIELDS_DUPLICATE: &str = "INVALID_METADATA_FIELDS_DUPLICATE";
+/// An aggregated query produced more distinct groups than
+/// [`crate::MAX_AGGREGATION_BUCKETS`] — typically a high-cardinality `group_by`
+/// (e.g. a per-record metadata key) over a wide window. Narrow the `created_at`
+/// window or drop the high-cardinality dimension.
+pub const AGGREGATION_RESULT_TOO_LARGE: &str = "AGGREGATION_RESULT_TOO_LARGE";
 
 /// Typed view of the `field_violations[].reason` codes carried by
 /// [`crate::UsageCollectorError::InvalidArgument`].
@@ -56,6 +64,8 @@ pub enum ValidationReason {
     UnknownMetadataKey,
     /// See [`GAUGE_COMPENSATION_REJECTED`].
     GaugeCompensationRejected,
+    /// See [`OP_NOT_ALLOWED_FOR_KIND`].
+    OpNotAllowedForKind,
     /// See [`MISSING_TIME_WINDOW`].
     MissingTimeWindow,
     /// See [`INVALID_BASE_GTS_ID`].
@@ -66,6 +76,8 @@ pub enum ValidationReason {
     MetadataFieldInvalidKey,
     /// See [`INVALID_METADATA_FIELDS_DUPLICATE`].
     MetadataFieldDuplicate,
+    /// See [`AGGREGATION_RESULT_TOO_LARGE`].
+    AggregationResultTooLarge,
     /// Unmodeled / future reason — preserves the raw wire string.
     Unknown(String),
 }
@@ -81,11 +93,13 @@ impl ValidationReason {
             METADATA_VALIDATION => Self::MetadataValidation,
             UNKNOWN_METADATA_KEY => Self::UnknownMetadataKey,
             GAUGE_COMPENSATION_REJECTED => Self::GaugeCompensationRejected,
+            OP_NOT_ALLOWED_FOR_KIND => Self::OpNotAllowedForKind,
             MISSING_TIME_WINDOW => Self::MissingTimeWindow,
             INVALID_BASE_GTS_ID => Self::InvalidBaseGtsId,
             INVALID_METADATA_FIELDS_EMPTY_STRING => Self::MetadataFieldEmptyString,
             INVALID_METADATA_FIELDS_INVALID_KEY => Self::MetadataFieldInvalidKey,
             INVALID_METADATA_FIELDS_DUPLICATE => Self::MetadataFieldDuplicate,
+            AGGREGATION_RESULT_TOO_LARGE => Self::AggregationResultTooLarge,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -100,11 +114,13 @@ impl ValidationReason {
             Self::MetadataValidation => METADATA_VALIDATION,
             Self::UnknownMetadataKey => UNKNOWN_METADATA_KEY,
             Self::GaugeCompensationRejected => GAUGE_COMPENSATION_REJECTED,
+            Self::OpNotAllowedForKind => OP_NOT_ALLOWED_FOR_KIND,
             Self::MissingTimeWindow => MISSING_TIME_WINDOW,
             Self::InvalidBaseGtsId => INVALID_BASE_GTS_ID,
             Self::MetadataFieldEmptyString => INVALID_METADATA_FIELDS_EMPTY_STRING,
             Self::MetadataFieldInvalidKey => INVALID_METADATA_FIELDS_INVALID_KEY,
             Self::MetadataFieldDuplicate => INVALID_METADATA_FIELDS_DUPLICATE,
+            Self::AggregationResultTooLarge => AGGREGATION_RESULT_TOO_LARGE,
             Self::Unknown(s) => s.as_str(),
         }
     }

@@ -1,4 +1,4 @@
-error: deps must be an array, e.g. deps = ["db", "auth"]
+error: deps must be an array, e.g. deps = [authn_resolver, types_registry]
  --> tests/ui/fail/deps_not_array.rs:3:23
   |
 3 | #[gear(name="x", deps="db")]

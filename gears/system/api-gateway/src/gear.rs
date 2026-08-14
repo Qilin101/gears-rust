@@ -3,7 +3,7 @@
 //! Contains the `ApiGateway` gear struct and its trait implementations.
 
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -12,7 +12,7 @@ use anyhow::Result;
 use axum::error_handling::HandleErrorLayer;
 use axum::http::Method;
 use axum::middleware::from_fn_with_state;
-use axum::{Router, extract::DefaultBodyLimit, middleware::from_fn, routing::get};
+use axum::{Extension, Router, extract::DefaultBodyLimit, middleware::from_fn, routing::get};
 use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -49,7 +49,9 @@ async fn timeout_to_canonical(err: BoxError) -> axum::response::Response {
 
 use authn_resolver_sdk::AuthNResolverClient;
 
-use crate::config::ApiGatewayConfig;
+use cf_system_sdks::directory::{DirectoryClient, DirectoryGrpcClient};
+
+use crate::config::{ApiGatewayConfig, GatewayProxyConfig, HealthServeMode};
 use crate::middleware::auth;
 use toolkit_security::SecurityContext;
 use toolkit_security::constants::{DEFAULT_SUBJECT_ID, DEFAULT_TENANT_ID};
@@ -63,7 +65,7 @@ use crate::web;
 #[toolkit::gear(
 	name = "api-gateway",
 	capabilities = [rest_host, rest, stateful],
-    deps = ["grpc-hub", "authn-resolver"],
+    deps = [grpc_hub, authn_resolver],
 	lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct ApiGateway {
@@ -77,10 +79,21 @@ pub struct ApiGateway {
     pub(crate) final_router: Mutex<Option<axum::Router>>,
     // AuthN Resolver client (resolved during init, None when auth_disabled)
     pub(crate) authn_client: Mutex<Option<Arc<dyn AuthNResolverClient>>>,
+    // Readiness registry, set once from `rest_prepare`; `OnceLock` = lock-free reads.
+    pub(crate) healthcheck_registry: OnceLock<Arc<toolkit::RestHealthcheckRegistry>>,
+    // Built-once standalone health router. Served on the separate health listener in
+    // `separate`/`both` mode and merged onto the main router in `main`/`both` mode. Cached
+    // so repeat `health_router()`/`build_health_router()` calls are cheap.
+    pub(crate) health_router: OnceLock<axum::Router>,
 
     // Duplicate detection (per (method, path) and per handler id)
     pub(crate) registered_routes: DashMap<(Method, String), ()>,
     pub(crate) registered_handlers: DashMap<String, ()>,
+
+    // Reverse-proxy route table (embedded edge). Populated by the directory-sync
+    // task and read by the Forwarder fallback; empty/unused when
+    // `gateway_proxy` is disabled.
+    pub(crate) proxy_registry: Arc<toolkit_gateway::ProxyRegistry>,
 }
 
 impl Default for ApiGateway {
@@ -92,24 +105,85 @@ impl Default for ApiGateway {
             router_cache: RouterCache::new(default_router),
             final_router: Mutex::new(None),
             authn_client: Mutex::new(None),
+            healthcheck_registry: OnceLock::new(),
+            health_router: OnceLock::new(),
             registered_routes: DashMap::new(),
             registered_handlers: DashMap::new(),
+            proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
         }
     }
 }
 
+// Built-in health-probe paths, shared by route registration and auth policy so they can't drift.
+const HEALTH_DETAIL_PATH: &str = "/health";
+const HEALTHZ_PATH: &str = "/healthz";
+const READYZ_PATH: &str = "/readyz";
+
 impl ApiGateway {
-    fn apply_prefix_nesting(mut router: Router, prefix: &str) -> Router {
+    /// Nest `router` under `prefix`. Returns `router` unchanged when `prefix` is empty.
+    ///
+    /// Auth matching is keyed on unprefixed `OperationBuilder` paths, so the caller must
+    /// apply `router`'s middleware before this strips/adds the prefix via `nest()`.
+    fn apply_prefix(router: Router, prefix: &str) -> Router {
         if prefix.is_empty() {
-            return router;
+            router
+        } else {
+            Router::new().nest(prefix, router)
         }
+    }
 
-        let top = Router::new()
-            .route("/health", get(web::health_check))
-            .route("/healthz", get(|| async { "ok" }));
+    /// Standalone health-probe router (`/health`, `/healthz`, `/readyz`): all public, no
+    /// gateway middleware, no auth, and NOT part of the `OpenAPI` document. In `separate`/`both`
+    /// mode the framework binds this on the separate health listener (`health.bind_addr`) from
+    /// [`serve`](Self::serve); it is also exposed for embedders that want to serve it themselves.
+    ///
+    /// # Errors
+    /// Returns an error if [`rest_prepare`](toolkit::contracts::ApiGatewayCapability::rest_prepare)
+    /// has not run yet (the healthcheck registry is unset).
+    pub fn health_router(&self) -> Result<Router> {
+        let hc_registry = self.healthcheck_registry.get().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "healthcheck_registry not set; call rest_prepare before health_router()"
+            )
+        })?;
+        let config = self.get_cached_config();
+        Ok(self.build_health_router(
+            hc_registry,
+            Duration::from_millis(config.healthcheck_timeout_ms),
+        ))
+    }
 
-        router = Router::new().nest(prefix, router);
-        top.merge(router)
+    /// Build (or return the cached) standalone health router. Deps (`hc_registry`,
+    /// `healthcheck_timeout`) are fixed after `rest_prepare`, so the first build is
+    /// authoritative; later calls reuse the clone.
+    fn build_health_router(
+        &self,
+        hc_registry: Arc<toolkit::RestHealthcheckRegistry>,
+        healthcheck_timeout: Duration,
+    ) -> Router {
+        if let Some(cached) = self.health_router.get() {
+            return cached.clone();
+        }
+        let built = Self::health_routes(hc_registry, healthcheck_timeout);
+        // First build wins; a concurrent racer's `set` is a no-op (builds are sequential
+        // during lifecycle setup, so this is a belt-and-braces guard).
+        drop(self.health_router.set(built.clone()));
+        built
+    }
+
+    /// Health-probe routes as plain Axum routes (no `OperationBuilder`, so they never enter
+    /// the `OpenAPI` registry). All three are public; deps injected via `Extension`. Merged
+    /// onto the main router in `main`/`both` mode and used standalone on the separate listener.
+    fn health_routes(
+        hc_registry: Arc<toolkit::RestHealthcheckRegistry>,
+        healthcheck_timeout: Duration,
+    ) -> Router {
+        Router::new()
+            .route(HEALTH_DETAIL_PATH, get(web::health_detail))
+            .route(HEALTHZ_PATH, get(|| async { "ok" }))
+            .route(READYZ_PATH, get(web::readyz_check))
+            .layer(Extension(hc_registry))
+            .layer(Extension(web::HealthcheckTimeout(healthcheck_timeout)))
     }
 
     /// Create a new `ApiGateway` instance with the given configuration
@@ -122,8 +196,11 @@ impl ApiGateway {
             router_cache: RouterCache::new(default_router),
             final_router: Mutex::new(None),
             authn_client: Mutex::new(None),
+            healthcheck_registry: OnceLock::new(),
+            health_router: OnceLock::new(),
             registered_routes: DashMap::new(),
             registered_handlers: DashMap::new(),
+            proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
         }
     }
 
@@ -155,40 +232,69 @@ impl ApiGateway {
     /// Build route policy from operation specs.
     fn build_route_policy_from_specs(&self) -> Result<auth::GatewayRoutePolicy> {
         let mut authenticated_routes = std::collections::HashSet::new();
-        let mut public_routes = std::collections::HashSet::new();
+        // Anonymous (no-auth) routes. This is the *auth* axis: routes here skip
+        // bearer-token enforcement. It is NOT external visibility (`exposed`);
+        // an anonymous route may still be externally exposed or not.
+        let mut anonymous_routes = std::collections::HashSet::new();
 
-        // Always mark built-in health check routes as public
-        public_routes.insert((Method::GET, "/health".to_owned()));
-        public_routes.insert((Method::GET, "/healthz".to_owned()));
+        anonymous_routes.insert((Method::GET, "/docs".to_owned()));
+        anonymous_routes.insert((Method::GET, "/openapi.json".to_owned()));
 
-        public_routes.insert((Method::GET, "/docs".to_owned()));
-        public_routes.insert((Method::GET, "/openapi.json".to_owned()));
+        // In main/both mode the health probes are merged onto the main router *before* the
+        // middleware stack (see `rest_finalize`), so the auth layer resolves them: mark them
+        // explicitly anonymous so no bearer token is ever required. Auth matches on the unprefixed
+        // path, so these keys stay unprefixed even when `prefix_path` is set.
+        let config = self.get_cached_config();
+        if matches!(
+            config.health.serve,
+            HealthServeMode::Main | HealthServeMode::Both
+        ) {
+            for path in [HEALTHZ_PATH, READYZ_PATH, HEALTH_DETAIL_PATH] {
+                anonymous_routes.insert((Method::GET, path.to_owned()));
+            }
+        }
 
         for spec in &self.openapi_registry.operation_specs {
             let spec = spec.value();
 
             let route_key = (spec.method.clone(), spec.path.clone());
 
+            // Auth axis: `authenticated` requires a JWT; `!authenticated` is
+            // anonymous (auth-skip). Visibility (`exposed`) is a *separate*
+            // axis (gateway registration) and does NOT affect the auth decision.
+            // The builder typestate forces an explicit choice, so every spec'd
+            // route lands in exactly one set; `require_auth_by_default` remains
+            // the fallback for paths with no matching spec.
             if spec.authenticated {
-                authenticated_routes.insert(route_key.clone());
-            }
-
-            if spec.is_public {
-                public_routes.insert(route_key);
+                authenticated_routes.insert(route_key);
+            } else {
+                anonymous_routes.insert(route_key);
             }
         }
 
-        let config = self.get_cached_config();
         let requirements_count = authenticated_routes.len();
-        let public_routes_count = public_routes.len();
+        let anonymous_routes_count = anonymous_routes.len();
 
-        let route_policy = auth::build_route_policy(&config, authenticated_routes, public_routes)?;
+        // When the embedded-edge reverse proxy is enabled, hand the auth policy the
+        // shared proxy registry so dynamically-registered proxy routes are enforced
+        // per-route (authenticated vs anonymous) instead of falling back to the
+        // `require_auth_by_default` global.
+        let proxy_registry = config
+            .gateway_proxy
+            .enabled
+            .then(|| Arc::clone(&self.proxy_registry));
+        let route_policy = auth::build_route_policy(
+            &config,
+            authenticated_routes,
+            anonymous_routes,
+            proxy_registry,
+        )?;
 
         tracing::info!(
             auth_disabled = config.auth_disabled,
             require_auth_by_default = config.require_auth_by_default,
             requirements_count = requirements_count,
-            public_routes_count = public_routes_count,
+            anonymous_routes_count = anonymous_routes_count,
             "Route policy built from operation specs"
         );
 
@@ -256,7 +362,11 @@ impl ApiGateway {
         // 14) Propagate MatchedPath to response extensions (route_layer — innermost).
         // This copies MatchedPath from the request (populated by Axum route matching)
         // into the response so outer layer() middleware (metrics) can read it.
-        router = router.route_layer(from_fn(middleware::http_metrics::propagate_matched_path));
+        // `route_layer` panics on a routeless router — reachable when no REST provider
+        // has registered anything yet.
+        if router.has_routes() {
+            router = router.route_layer(from_fn(middleware::http_metrics::propagate_matched_path));
+        }
 
         let config = self.get_cached_config();
 
@@ -484,19 +594,24 @@ impl ApiGateway {
         }
 
         tracing::debug!("Building new router (standalone/fallback mode)");
-        // In standalone mode (no REST pipeline), register both health endpoints here.
-        // In normal operation, rest_prepare() registers these instead.
-        let mut router = Router::new()
-            .route("/health", get(web::health_check))
-            .route("/healthz", get(|| async { "ok" }));
-
-        // Apply all middleware layers including auth, above the router
-        let authn_client = self.authn_client.lock().clone();
-        router = self.apply_middleware_stack(router, authn_client)?;
-
+        // No "main" routes here — the empty router is tolerated (`has_routes` guard).
+        // Health probes are not part of this router; see `health_router`.
         let config = self.get_cached_config();
+        let authn_client = self.authn_client.lock().clone();
+        let mut router = Router::new();
+
+        // Embedded-edge reverse proxy: mount the Forwarder as the fallback BEFORE the
+        // middleware stack (mirrors `rest_finalize`) so unmatched external requests are
+        // proxied to the owning OoP gear pod instead of returning 404. Required on this
+        // default/fallback path too, for when `rest_finalize` produced no stored router.
+        if config.gateway_proxy.enabled {
+            router = self.mount_proxy_fallback(router)?;
+        }
+
+        let router = self.apply_middleware_stack(router, authn_client)?;
+
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
-        router = Self::apply_prefix_nesting(router, &prefix);
+        let router = Self::apply_prefix(router, &prefix);
 
         // Cache the built router for future use
         self.router_cache.store(router.clone());
@@ -527,6 +642,29 @@ impl ApiGateway {
             .map_err(|e| anyhow::anyhow!("Invalid bind address '{bind_addr}': {e}"))
     }
 
+    /// Resolve the separate health listener address, if the config demands one.
+    ///
+    /// `Ok(None)` for `serve = main`. For `separate`/`both`, `health.bind_addr` must be present
+    /// and parseable — used both to fail fast at `init` and to bind at `serve`.
+    ///
+    /// # Errors
+    /// Returns an error if `serve` needs a separate listener but `health.bind_addr` is missing
+    /// or not a valid socket address.
+    fn health_bind_addr(cfg: &ApiGatewayConfig) -> anyhow::Result<Option<SocketAddr>> {
+        match cfg.health.serve {
+            HealthServeMode::Main => Ok(None),
+            HealthServeMode::Separate | HealthServeMode::Both => {
+                let raw = cfg.health.bind_addr.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "health.serve = {:?} requires health.bind_addr to be set",
+                        cfg.health.serve
+                    )
+                })?;
+                Ok(Some(Self::parse_bind_address(raw)?))
+            }
+        }
+    }
+
     /// Get the finalized router or build a default one.
     fn get_or_build_router(self: &Arc<Self>) -> anyhow::Result<Router> {
         let stored = { self.final_router.lock().take() };
@@ -553,27 +691,187 @@ impl ApiGateway {
         let addr = Self::parse_bind_address(&cfg.bind_addr)?;
         let router = self.get_or_build_router()?;
 
-        // Bind the socket, only now consider the service "ready"
+        // Bind the main socket.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("HTTP server bound on {}", addr);
+
+        // Bind the separate health listener (if `serve` = separate|both) BEFORE signalling
+        // ready, so readiness reflects every listener the pod must accept traffic on.
+        let health_bound = self.bind_health_listener(&cfg).await?;
+
+        // Embedded-edge reverse proxy: start the directory-sync task that keeps the
+        // proxy route table current. Non-fatal — the gateway still serves native routes
+        // if the directory is unavailable, and startup does not block on the first
+        // successful directory connection.
+        if cfg.gateway_proxy.enabled {
+            self.start_proxy_sync(&cfg, cancel.clone());
+        }
+
         ready.notify(); // Starting -> Running
 
-        // Graceful shutdown on cancel
-        let shutdown = {
-            let cancel = cancel.clone();
-            async move {
-                cancel.cancelled().await;
-                tracing::info!("HTTP server shutting down gracefully (cancellation)");
-            }
-        };
-
-        axum::serve(
+        let main_server = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
+        .with_graceful_shutdown(Self::shutdown_signal(cancel.clone(), "HTTP server"));
+
+        // Both listeners share the runtime cancellation token, so shutdown fans out to both.
+        if let Some((health_listener, health_router)) = health_bound {
+            let health_server = axum::serve(health_listener, health_router.into_make_service())
+                .with_graceful_shutdown(Self::shutdown_signal(cancel, "health server"));
+            tokio::try_join!(
+                async { main_server.await.map_err(|e| anyhow::anyhow!(e)) },
+                async { health_server.await.map_err(|e| anyhow::anyhow!(e)) },
+            )?;
+            Ok(())
+        } else {
+            main_server.await.map_err(|e| anyhow::anyhow!(e))
+        }
+    }
+
+    /// Start the embedded-edge reverse-proxy directory-sync task in the
+    /// background. Returns immediately; connecting to the `DirectoryService` is
+    /// retried with backoff until it succeeds or the runtime shuts down, so a
+    /// transient directory outage at startup no longer permanently disables the
+    /// reverse proxy. Non-fatal: the gateway keeps serving its native routes
+    /// throughout, and startup does not block on the first connection.
+    fn start_proxy_sync(&self, cfg: &ApiGatewayConfig, cancel: CancellationToken) {
+        let proxy_cfg = cfg.gateway_proxy.clone();
+        let registry = Arc::clone(&self.proxy_registry);
+        tokio::spawn(Self::proxy_sync_supervisor(proxy_cfg, registry, cancel));
+    }
+
+    /// Retry the `DirectoryService` connection with exponential backoff until it
+    /// succeeds — then hand off to the directory-sync loop — or `cancel` fires.
+    /// A missing `directory_endpoint` is a permanent misconfiguration, not a
+    /// transient failure, so it is reported once and the task exits without
+    /// spinning.
+    async fn proxy_sync_supervisor(
+        cfg: GatewayProxyConfig,
+        registry: Arc<toolkit_gateway::ProxyRegistry>,
+        cancel: CancellationToken,
+    ) {
+        if cfg.directory_endpoint.is_none() {
+            tracing::warn!(
+                "reverse proxy inactive: gateway_proxy.enabled but directory_endpoint is unset"
+            );
+            return;
+        }
+
+        let interval = Duration::from_secs(cfg.sync_interval_secs);
+        if let Some(directory) = Self::connect_with_backoff(&cfg, &cancel).await {
+            // Drive the sync loop through the `GatewayProvider` trait so the
+            // edge is pluggable (built-in reverse proxy here; a Kong/Tyk adapter
+            // for Mode B). The built-in provider writes into the shared registry
+            // the `Forwarder` reads.
+            let provider: Arc<dyn toolkit_gateway::GatewayProvider> =
+                Arc::new(toolkit_gateway::ToolKitGatewayProvider::new(registry));
+            crate::proxy::spawn_directory_sync(provider, directory, interval, cancel);
+            tracing::info!("reverse-proxy directory-sync started");
+        }
+    }
+
+    /// Retry [`connect_directory`](Self::connect_directory) with exponential
+    /// backoff until it succeeds (returning the client) or `cancel` fires
+    /// (returning `None`).
+    async fn connect_with_backoff(
+        cfg: &GatewayProxyConfig,
+        cancel: &CancellationToken,
+    ) -> Option<Arc<dyn DirectoryClient>> {
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+        const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+        let mut backoff = INITIAL_BACKOFF;
+        loop {
+            match Self::connect_directory(cfg).await {
+                Ok(directory) => return Some(directory),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    retry_in = ?backoff,
+                    "reverse proxy: directory connect failed, retrying",
+                ),
+            }
+
+            if Self::backoff_or_cancel(backoff, cancel).await {
+                tracing::info!("reverse proxy: shutdown before directory connect succeeded");
+                return None;
+            }
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
+    }
+
+    /// Sleep for `backoff`, returning `true` early if `cancel` fires first.
+    async fn backoff_or_cancel(backoff: Duration, cancel: &CancellationToken) -> bool {
+        tokio::select! {
+            () = cancel.cancelled() => true,
+            () = tokio::time::sleep(backoff) => false,
+        }
+    }
+
+    /// Connect to the `DirectoryService`, attaching the platform-plane
+    /// credential when configured.
+    ///
+    /// # Errors
+    /// Returns an error if `directory_endpoint` is unset or the connection fails.
+    async fn connect_directory(
+        cfg: &GatewayProxyConfig,
+    ) -> anyhow::Result<Arc<dyn DirectoryClient>> {
+        let endpoint = cfg.directory_endpoint.clone().ok_or_else(|| {
+            anyhow::anyhow!("gateway_proxy.enabled but directory_endpoint is unset")
+        })?;
+
+        let client = if let Some(internal_auth) = &cfg.internal_auth {
+            let interceptor =
+                toolkit_transport_grpc::build_internal_auth_interceptor(internal_auth).await?;
+            tracing::info!("attaching platform-plane credential to edge DirectoryService polls");
+            DirectoryGrpcClient::connect_with_interceptor(endpoint.clone(), interceptor).await?
+        } else {
+            DirectoryGrpcClient::connect(endpoint.clone()).await?
+        };
+        Ok(Arc::new(client))
+    }
+
+    /// Mount the reverse-proxy [`Forwarder`](toolkit_gateway::Forwarder) as the
+    /// router fallback, so any request not matched by a gateway-owned route is
+    /// proxied to the owning out-of-process gear pod.
+    ///
+    /// # Errors
+    /// Returns an error if the outbound HTTP client cannot be constructed.
+    fn mount_proxy_fallback(&self, router: Router) -> Result<Router> {
+        // Use the dedicated reverse-proxy client profile rather than the
+        // general-purpose defaults: no retries (the edge must not re-send or
+        // amplify load), no client-side concurrency limit (no gateway-wide 503
+        // Overloaded), no response body cap (large downloads stream through),
+        // and no 30s request timeout (SSE / streaming upstreams stay open).
+        let client =
+            toolkit_http::HttpClientBuilder::with_config(toolkit_http::HttpClientConfig::proxy())
+                .build()?;
+        let forwarder = toolkit_gateway::Forwarder::new(Arc::clone(&self.proxy_registry), client);
+        let router = router.fallback(move |req: axum::extract::Request| {
+            let forwarder = forwarder.clone();
+            async move { forwarder.forward(req).await }
+        });
+        tracing::info!("reverse-proxy fallback mounted (gateway_proxy enabled)");
+        Ok(router)
+    }
+
+    /// Bind the separate health listener when `serve` = separate|both, else `None`.
+    async fn bind_health_listener(
+        &self,
+        cfg: &ApiGatewayConfig,
+    ) -> anyhow::Result<Option<(tokio::net::TcpListener, Router)>> {
+        let Some(health_addr) = Self::health_bind_addr(cfg)? else {
+            return Ok(None);
+        };
+        let health_listener = tokio::net::TcpListener::bind(health_addr).await?;
+        tracing::info!("health server bound on {}", health_addr);
+        Ok(Some((health_listener, self.health_router()?)))
+    }
+
+    /// Future that resolves when `cancel` fires, logging the graceful-shutdown of `name`.
+    async fn shutdown_signal(cancel: CancellationToken, name: &'static str) {
+        cancel.cancelled().await;
+        tracing::info!("{name} shutting down gracefully (cancellation)");
     }
 
     /// Check if `handler_id` is already registered (returns true if duplicate)
@@ -679,6 +977,19 @@ impl ApiGateway {
 impl toolkit::Gear for ApiGateway {
     async fn init(&self, ctx: &toolkit::context::GearCtx) -> anyhow::Result<()> {
         let cfg = ctx.config_or_default::<crate::config::ApiGatewayConfig>()?;
+        // Fail init on invalid CORS combinations (wildcard+credentials):
+        // tower-http would otherwise assert-panic during eager router
+        // layering — a startup crash-loop with no pointer at the config.
+        crate::cors::validate_cors_config(&cfg).map_err(|e| anyhow::anyhow!(e))?;
+        // Fail fast when health.serve needs a separate listener but health.bind_addr is
+        // missing or unparseable, rather than crashing later in serve() after other gears
+        // have started.
+        Self::health_bind_addr(&cfg)?;
+        // Fail fast on an enabled reverse proxy with no directory_endpoint, rather than
+        // starting a proxy that silently serves 404 for every out-of-process route.
+        cfg.gateway_proxy
+            .validate()
+            .map_err(|e| anyhow::anyhow!(e))?;
         self.config.store(Arc::new(cfg.clone()));
 
         debug!(
@@ -708,16 +1019,15 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
         &self,
         _ctx: &toolkit::context::GearCtx,
         router: axum::Router,
+        hc_registry: Arc<toolkit::RestHealthcheckRegistry>,
     ) -> anyhow::Result<axum::Router> {
-        // Add health check endpoints:
-        // - /health: detailed JSON response with status and timestamp
-        // - /healthz: simple "ok" liveness probe (Kubernetes-style)
-        let router = router
-            .route("/health", get(web::health_check))
-            .route("/healthz", get(|| async { "ok" }));
+        // Store for use when health routes are added in rest_finalize. A second set
+        // means rest_prepare ran twice — a lifecycle bug; fail fast rather than mask it.
+        if self.healthcheck_registry.set(hc_registry).is_err() {
+            anyhow::bail!("healthcheck_registry already set; rest_prepare called more than once");
+        }
 
-        // You may attach global middlewares here (trace, compression, cors), but do not start server.
-        tracing::debug!("REST host prepared base router with health check endpoints");
+        tracing::debug!("REST host prepared base router");
         Ok(router)
     }
 
@@ -725,6 +1035,7 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
         &self,
         _ctx: &toolkit::context::GearCtx,
         mut router: axum::Router,
+        hc_registry: Arc<toolkit::RestHealthcheckRegistry>,
     ) -> anyhow::Result<axum::Router> {
         let config = self.get_cached_config();
 
@@ -732,15 +1043,42 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
             router = self.add_openapi_routes(router)?;
         }
 
-        // Apply middleware stack (including auth) to the final router
+        // Health probes (`main`/`both` mode): merge them onto the main router BEFORE the
+        // middleware stack, so they share the gateway's unified surface (request id, tracing,
+        // metrics, error mapping, ...). They are marked public in the route policy (see
+        // `build_route_policy_from_specs`), so the auth layer lets them through without a bearer
+        // token. Like every other route they inherit `prefix_path` via the nesting below.
+        // `separate` mode omits them here; `serve()` binds them on the dedicated health listener.
+        if matches!(
+            config.health.serve,
+            HealthServeMode::Main | HealthServeMode::Both
+        ) {
+            let health = Self::health_routes(
+                hc_registry,
+                Duration::from_millis(config.healthcheck_timeout_ms),
+            );
+            router = router.merge(health);
+        }
+
+        // Embedded-edge reverse proxy: mount the Forwarder as the router fallback so any
+        // request that doesn't match a gateway-owned route is proxied to the owning OoP
+        // gear pod. The route table is kept current by the directory-sync task started in
+        // `serve()`. Mounted BEFORE the middleware stack so proxied requests traverse the
+        // same auth / tracing / error-mapping layers as native routes.
+        if config.gateway_proxy.enabled {
+            router = self.mount_proxy_fallback(router)?;
+        }
+
+        // Middleware on the main router before nesting (auth matching keyed on
+        // unprefixed OperationBuilder paths; layers run before nest() strips the prefix).
         tracing::debug!("Applying middleware stack to finalized router");
         let authn_client = self.authn_client.lock().clone();
         router = self.apply_middleware_stack(router, authn_client)?;
 
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
-        router = Self::apply_prefix_nesting(router, &prefix);
+        router = Self::apply_prefix(router, &prefix);
 
-        // Keep the finalized router to be used by `serve()`
+        // Keep the finalized router to be used by `serve()`.
         *self.final_router.lock() = Some(router.clone());
 
         tracing::info!("REST host finalized router with OpenAPI endpoints and auth middleware");
@@ -982,7 +1320,7 @@ mod problem_openapi_tests {
 
         // Build a route with a problem+json response
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/problem-demo")
-            .public()
+            .anonymous()
             .summary("Problem demo")
             .problem_response(&api, http::StatusCode::BAD_REQUEST, "Bad Request") // <-- registers Problem + sets content type
             .handler(dummy_handler)
@@ -1055,7 +1393,7 @@ mod sse_openapi_tests {
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/demo/sse")
             .summary("Demo SSE")
             .handler(sse_handler)
-            .public()
+            .anonymous()
             .sse_json::<UserEvent>(&api, "SSE of UserEvent")
             .register(router, &api);
 
@@ -1087,7 +1425,7 @@ mod sse_openapi_tests {
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/demo/mixed")
             .summary("Mixed responses")
-            .public()
+            .anonymous()
             .handler(mixed_handler)
             .json_response(http::StatusCode::OK, "Success response")
             .sse_json::<UserEvent>(&api, "Additional SSE stream")
@@ -1127,7 +1465,7 @@ mod sse_openapi_tests {
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/users/{id}")
             .summary("Get user by ID")
-            .public()
+            .anonymous()
             .path_param("id", "User ID")
             .handler(user_handler)
             .json_response(http::StatusCode::OK, "User details")
@@ -1167,7 +1505,7 @@ mod sse_openapi_tests {
             "/tests/v1/projects/{project_id}/items/{item_id}",
         )
         .summary("Get project item")
-        .public()
+        .anonymous()
         .path_param("project_id", "Project ID")
         .path_param("item_id", "Item ID")
         .handler(item_handler)
@@ -1208,7 +1546,7 @@ mod sse_openapi_tests {
         // Axum 0.8 uses {*path} for wildcards
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/static/{*path}")
             .summary("Serve static files")
-            .public()
+            .anonymous()
             .handler(static_handler)
             .json_response(http::StatusCode::OK, "File content")
             .register(router, &api);
@@ -1247,7 +1585,7 @@ mod sse_openapi_tests {
 
         let _router = OperationBuilder::<Missing, Missing, ()>::post("/tests/v1/files/upload")
             .operation_id("upload_file")
-            .public()
+            .anonymous()
             .summary("Upload a file")
             .multipart_file_request("file", Some("File to upload"))
             .handler(upload_handler)

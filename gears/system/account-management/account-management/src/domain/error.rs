@@ -97,6 +97,47 @@ pub enum DomainError {
         field: Option<String>,
     },
 
+    /// The `IdP` rejected the supplied password against its configured
+    /// password policy. Distinct from [`Self::Validation`]
+    /// so the canonical envelope carries the structured
+    /// `password` / `PASSWORD_POLICY` field-violation tokens instead
+    /// of the generic `request` / `VALIDATION` pair — clients can
+    /// attribute the failure to the password input. The raw policy
+    /// text is redacted upstream (digest in `am.idp` logs); `detail`
+    /// is the curated public summary. Surfaces as HTTP 400
+    /// `invalid_argument`.
+    #[error("password rejected by IdP policy: {detail}")]
+    IdpPasswordPolicy { detail: String },
+
+    /// The `IdP` refused to write one or more patched attributes because
+    /// they are provider-managed and not overridable through AM
+    /// (federated from a read-only mapper, or marked non-writable in the
+    /// provider's user-profile configuration). Distinct from
+    /// [`Self::UnsupportedOperation`] (the provider implements no
+    /// `update_user` at all, HTTP 501) and from [`Self::Validation`]
+    /// (the *value* was rejected, not the field).
+    ///
+    /// Carries the typed attributes only — the boundary mapping derives
+    /// both each `field_violations[].field` token and the curated public
+    /// detail from them, so the wording lives in exactly one place and no
+    /// caller can pair an inconsistent detail/field. Surfaces as HTTP
+    /// 400 `invalid_argument` with `reason = "IDP_MANAGED_FIELD"`, one
+    /// violation per refused attribute, so a client learns the whole
+    /// refused set from a single round-trip.
+    ///
+    /// `fields` is non-empty by contract; the canonical mapping degrades
+    /// an empty set to the generic `request` / `VALIDATION` pair rather
+    /// than emitting a 400 that attributes the refusal to nothing.
+    ///
+    /// Deliberately NOT 403: writability is a property of the provider's
+    /// schema, identical for every caller, so no grant would make the
+    /// write succeed. Modelling it as a permission denial would make a
+    /// configuration fact look like a privilege problem.
+    #[error("IdP-managed fields not writable ({})", fields.iter().map(|f| f.as_field_token()).collect::<Vec<_>>().join(", "))]
+    IdpFieldNotWritable {
+        fields: Vec<account_management_sdk::IdpUserAttribute>,
+    },
+
     // ---- NotFound (HTTP 404) ----
     // For every variant in this group, `resource` is the stable id
     // surfaced through the AIP-193 `NotFound` envelope's `with_resource`,
@@ -150,6 +191,23 @@ pub enum DomainError {
     /// `sea_orm` / `toolkit_db` references.
     #[error("already exists: {detail}")]
     AlreadyExists { detail: String },
+
+    /// The `IdP` reported a uniqueness collision on a user attribute
+    /// during a user operation (duplicate username in the
+    /// realm, duplicate email realm-wide, or KC's combined
+    /// "username or email" constant). Distinct from
+    /// [`Self::AlreadyExists`] (tenant-flavoured, DB-classifier
+    /// produced) so the canonical envelope rides the `user` resource
+    /// type. Carries the typed colliding field — the boundary mapping
+    /// derives both the stable `resource_name` token and the curated
+    /// public detail from it, so the wording lives in exactly one
+    /// place and no caller can pair an inconsistent detail/resource.
+    /// The caller-supplied value is never echoed (redaction posture of
+    /// the `IdP` boundary). Surfaces as HTTP 409 `already_exists`.
+    #[error("user already exists ({})", field.as_field_token())]
+    UserAlreadyExists {
+        field: account_management_sdk::IdpUserDuplicateField,
+    },
 
     // ---- Aborted (HTTP 409) ----
     /// Retry-budget-exhausted serialization failure surfaced by

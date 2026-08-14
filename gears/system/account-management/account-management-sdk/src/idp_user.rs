@@ -638,6 +638,138 @@ impl IdpDeprovisionUserRequest {
     }
 }
 
+/// Partial-update payload for [`crate::idp::IdpPluginClient::update_user`].
+///
+/// JSON Merge Patch (RFC 7396) tri-state, lowered from the REST DTO by
+/// the AM service layer:
+///
+/// * `username`: `None` leaves the login identifier unchanged; `Some(v)`
+///   renames it. The login identifier is REQUIRED per the published
+///   `gts.cf.core.am.user.v1~` schema, so it can never be cleared — the
+///   REST boundary rejects an explicit `null`.
+/// * nullable profile fields (`email` / `display_name` / `first_name` /
+///   `last_name`): `None` = leave unchanged, `Some(None)` = clear the
+///   field, `Some(Some(v))` = set it.
+/// * `password`: `None` = unchanged; `Some(pw)` sets a new credential.
+///   Not part of the user projection; the `IdP` enforces its own
+///   password policy. Redacted in `Debug` via [`NewUserPassword`].
+///
+/// The AM service rejects an all-`None` patch as a validation error
+/// before the plugin is invoked (see [`Self::is_empty`]).
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::option_option)]
+#[non_exhaustive]
+pub struct IdpUserPatch {
+    /// Rename the login identifier. `None` = unchanged.
+    pub username: Option<String>,
+    /// `Some(None)` clears the email, `Some(Some(v))` sets it.
+    pub email: Option<Option<String>>,
+    /// `Some(None)` clears the display name, `Some(Some(v))` sets it.
+    pub display_name: Option<Option<String>>,
+    /// `Some(None)` clears the given name, `Some(Some(v))` sets it.
+    pub first_name: Option<Option<String>>,
+    /// `Some(None)` clears the family name, `Some(Some(v))` sets it.
+    pub last_name: Option<Option<String>>,
+    /// `Some(pw)` sets a new credential; `None` leaves it unchanged.
+    pub password: Option<NewUserPassword>,
+}
+
+impl IdpUserPatch {
+    /// An empty patch (every field `None`). Populate via field
+    /// assignment or the `with_*` builders.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` when the patch carries no field. The AM service maps this
+    /// to a validation error rather than issuing a no-op `IdP` call.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.username.is_none()
+            && self.email.is_none()
+            && self.display_name.is_none()
+            && self.first_name.is_none()
+            && self.last_name.is_none()
+            && self.password.is_none()
+    }
+
+    /// Builder: rename the login identifier.
+    #[must_use]
+    pub fn with_username(mut self, username: impl Into<String>) -> Self {
+        self.username = Some(username.into());
+        self
+    }
+
+    /// Builder: set (`Some`) or clear (`None`) the email.
+    #[must_use]
+    pub fn with_email(mut self, email: Option<String>) -> Self {
+        self.email = Some(email);
+        self
+    }
+
+    /// Builder: set (`Some`) or clear (`None`) the display name.
+    #[must_use]
+    pub fn with_display_name(mut self, display_name: Option<String>) -> Self {
+        self.display_name = Some(display_name);
+        self
+    }
+
+    /// Builder: set (`Some`) or clear (`None`) the given name.
+    #[must_use]
+    pub fn with_first_name(mut self, first_name: Option<String>) -> Self {
+        self.first_name = Some(first_name);
+        self
+    }
+
+    /// Builder: set (`Some`) or clear (`None`) the family name.
+    #[must_use]
+    pub fn with_last_name(mut self, last_name: Option<String>) -> Self {
+        self.last_name = Some(last_name);
+        self
+    }
+
+    /// Builder: attach a new password credential. Pass `temporary=true`
+    /// to force `UPDATE_PASSWORD` on the user's next interactive sign-in.
+    #[must_use]
+    pub fn with_password(mut self, value: impl Into<String>, temporary: bool) -> Self {
+        self.password = Some(NewUserPassword {
+            value: value.into(),
+            temporary,
+        });
+        self
+    }
+}
+
+/// Request shape for [`crate::idp::IdpPluginClient::update_user`].
+///
+/// `tenant_context.tenant_id` is the tenant scope; see
+/// [`IdpProvisionUserRequest`] for the duplication-removal rationale.
+/// The resolved tenant context is forwarded on every contract method
+/// per `cpt-cf-account-management-algo-idp-user-operations-contract-idp-contract-invocation`
+/// step `package-request`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IdpUpdateUserRequest {
+    /// Resolved tenant context (id, name, optional chained type).
+    pub tenant_context: IdpTenantContext,
+    /// `IdP`-issued identifier of the user being patched.
+    pub user_id: Uuid,
+    /// JSON Merge Patch over the user's mutable attributes.
+    pub patch: IdpUserPatch,
+}
+
+impl IdpUpdateUserRequest {
+    #[must_use]
+    pub const fn new(tenant_context: IdpTenantContext, user_id: Uuid, patch: IdpUserPatch) -> Self {
+        Self {
+            tenant_context,
+            user_id,
+            patch,
+        }
+    }
+}
+
 /// Request shape for [`crate::idp::IdpPluginClient::list_users`].
 ///
 /// `filter` and `order` carry the validated `OData` translation handed
@@ -711,11 +843,172 @@ pub enum IdpUserOperationFailure {
     /// `idp_unsupported_operation`. Providers MUST NOT silently no-op
     /// a mutating call.
     UnsupportedOperation { detail: String },
-    /// Provider returned a payload-rejection category (e.g. duplicate
-    /// username, validation failure on email format). AM maps this to
-    /// the canonical validation envelope; the catalog refinement is
-    /// owned by `feature-errors-observability`.
+    /// Provider returned a payload-rejection the plugin could NOT
+    /// classify further. AM maps this to the canonical validation
+    /// envelope with the generic `request`/`VALIDATION` tokens.
+    /// Providers SHOULD emit the classified variants below
+    /// ([`Self::DuplicateUser`], [`Self::PasswordPolicy`]) whenever
+    /// the vendor response identifies the cause — this catch-all is
+    /// the fallback for genuinely unattributable rejections.
     Rejected { detail: String },
+    /// Provider rejected the operation because a uniqueness invariant
+    /// on `field` is already taken (duplicate username in
+    /// the realm, duplicate email realm-wide). AM maps this to the
+    /// canonical `already_exists` envelope (HTTP 409) — the create
+    /// contract already declares a Conflict response and documents
+    /// idempotency keyed by `(tenant_id, username)`.
+    DuplicateUser {
+        field: IdpUserDuplicateField,
+        detail: String,
+    },
+    /// Provider rejected the supplied password against its configured
+    /// password policy (length / complexity / history). AM maps this
+    /// to the canonical validation envelope with the structured
+    /// `password` / `PASSWORD_POLICY` field-violation tokens so
+    /// clients can attribute the failure to the password field
+    ///; the raw policy text stays provider-side.
+    PasswordPolicy { detail: String },
+    /// Provider reported the target user does not exist in this tenant
+    /// scope. Unlike `deprovision_user` — which folds a vendor-side
+    /// "user does not exist" response into `Ok(())` for idempotency —
+    /// `update_user` MUST surface absence: a PATCH against a missing
+    /// user is a `404`, not a silent no-op. AM maps this to the
+    /// canonical `not_found` envelope.
+    NotFound { detail: String },
+    /// Provider refused to write every attribute in `fields` because
+    /// they are IdP-managed and not overridable through AM -- e.g. the
+    /// realm federates them from a read-only LDAP mapper, or the
+    /// provider's user-profile configuration marks them non-writable.
+    ///
+    /// Distinct from [`Self::UnsupportedOperation`] (the provider does
+    /// not implement `update_user` *at all*, HTTP 501) and from
+    /// [`Self::Rejected`] (the value was bad, not the field). This is a
+    /// per-field capability fact, identical for every caller, so it is
+    /// NOT a permission decision -- AM maps it to the canonical
+    /// validation envelope carrying one structured
+    /// `<field>` / `IDP_MANAGED_FIELD` field-violation per entry (HTTP
+    /// 400) so a client can attribute the refusal to the exact inputs
+    /// and disable them.
+    ///
+    /// `fields` is a *set*, not a single attribute: a merge patch can
+    /// touch five attributes at once and a read-only federated realm
+    /// typically locks several of them, so a provider MUST report every
+    /// refused attribute the patch touched in one failure rather than
+    /// making the client discover them one round-trip at a time.
+    /// Providers MUST NOT emit an empty `fields` -- a refusal with
+    /// nothing to attribute it to is an unclassified rejection and
+    /// belongs in [`Self::Rejected`]; AM degrades an empty set to the
+    /// generic validation envelope.
+    FieldNotWritable {
+        /// The refused attributes. Non-empty; order is not significant
+        /// and duplicates are ignored by AM's boundary.
+        fields: Vec<IdpUserAttribute>,
+        detail: String,
+    },
+}
+
+/// A writable user profile attribute, used to attribute an
+/// [`IdpUserOperationFailure::FieldNotWritable`] refusal to the exact
+/// request field. `#[non_exhaustive]`: the writable surface grows with
+/// [`crate::IdpUserPatch`] without a breaking SDK release.
+///
+/// `password` is deliberately absent: a provider refusing a credential
+/// write reports it through [`IdpUserOperationFailure::PasswordPolicy`],
+/// which already owns the `password` / `PASSWORD_POLICY` tokens.
+///
+/// `Hash` is part of the contract: providers hold their non-writable
+/// attributes as a set, so a `HashSet<IdpUserAttribute>` is the natural
+/// shape on the implementing side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum IdpUserAttribute {
+    /// The login identifier (`username`).
+    Username,
+    /// The email address (`email`).
+    Email,
+    /// The display name (`display_name`).
+    DisplayName,
+    /// The given name (`first_name`).
+    FirstName,
+    /// The family name (`last_name`).
+    LastName,
+}
+
+impl IdpUserAttribute {
+    /// Stable wire token for canonical `field_violations[].field`.
+    /// MUST match the corresponding `UserUpdateRequest` JSON property
+    /// name -- clients key form-field attribution off this string.
+    #[must_use]
+    pub const fn as_field_token(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Email => "email",
+            Self::DisplayName => "display_name",
+            Self::FirstName => "first_name",
+            Self::LastName => "last_name",
+        }
+    }
+
+    /// Human phrase for curated public error details ("the {phrase} is
+    /// managed by the identity provider..."). Centralised here so AM's
+    /// canonical boundary and its tests cannot drift.
+    #[must_use]
+    pub const fn as_human_phrase(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Email => "email address",
+            Self::DisplayName => "display name",
+            Self::FirstName => "first name",
+            Self::LastName => "last name",
+        }
+    }
+}
+
+/// Which unique user attribute an [`IdpUserOperationFailure::DuplicateUser`]
+/// rejection collided on. `#[non_exhaustive]`: providers may learn to
+/// classify further unique attributes without a breaking SDK release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IdpUserDuplicateField {
+    /// Realm-scoped username collision.
+    Username,
+    /// Realm-wide email collision.
+    Email,
+    /// The provider reported a uniqueness conflict without an
+    /// attributable single field. Keycloak's `ModelDuplicateException`
+    /// path emits the combined constant "User exists with same
+    /// username or email" — on KC 26 that is the ONLY 409 shape
+    /// `createUser` produces directly — and a conflict body the plugin
+    /// cannot parse lands here too: on the user-create endpoint a 409
+    /// has no other cause than a uniqueness collision, so the status
+    /// alone justifies the conflict classification even when the field
+    /// stays unknown.
+    UsernameOrEmail,
+}
+
+impl IdpUserDuplicateField {
+    /// Stable wire/field token for canonical `field_violations.field`
+    /// / `resource_name` and metric labels.
+    #[must_use]
+    pub const fn as_field_token(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Email => "email",
+            Self::UsernameOrEmail => "username_or_email",
+        }
+    }
+
+    /// Human phrase for curated public error details ("a user with
+    /// this {phrase} already exists"). Centralised here so AM's
+    /// canonical boundary and its tests cannot drift.
+    #[must_use]
+    pub const fn as_human_phrase(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Email => "email",
+            Self::UsernameOrEmail => "username or email",
+        }
+    }
 }
 
 impl IdpUserOperationFailure {
@@ -731,6 +1024,10 @@ impl IdpUserOperationFailure {
             Self::Unavailable { .. } => "unavailable",
             Self::UnsupportedOperation { .. } => "unsupported_operation",
             Self::Rejected { .. } => "rejected",
+            Self::DuplicateUser { .. } => "duplicate_user",
+            Self::PasswordPolicy { .. } => "password_policy",
+            Self::NotFound { .. } => "not_found",
+            Self::FieldNotWritable { .. } => "field_not_writable",
         }
     }
 
@@ -743,7 +1040,11 @@ impl IdpUserOperationFailure {
         match self {
             Self::Unavailable { detail }
             | Self::UnsupportedOperation { detail }
-            | Self::Rejected { detail } => detail,
+            | Self::Rejected { detail }
+            | Self::DuplicateUser { detail, .. }
+            | Self::PasswordPolicy { detail }
+            | Self::NotFound { detail }
+            | Self::FieldNotWritable { detail, .. } => detail,
         }
     }
 }

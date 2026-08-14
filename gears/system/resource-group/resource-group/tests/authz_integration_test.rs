@@ -10,6 +10,7 @@
 //!    (`GroupService.list_groups` / `get_group` call enforcer internally)
 
 use std::sync::Arc;
+use toolkit_gts::gts_id;
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -25,7 +26,7 @@ use toolkit_security::{SecurityContext, pep_properties};
 // ── Resource type descriptor (mirrors what RG handlers will declare) ────
 
 const RG_GROUP: ResourceType = ResourceType::from_static(
-    "gts.cf.core.rg.group.v1~",
+    gts_id!("cf.core.rg.group.v1~"),
     &[pep_properties::OWNER_TENANT_ID],
 );
 
@@ -341,7 +342,7 @@ async fn enforcer_works_for_all_crud_actions() {
 // Scenario: L2-AuthZ-08 - Full chain list_groups calls enforcer with correct params
 #[tokio::test]
 async fn full_chain_list_groups_calls_enforcer_with_correct_params() {
-    use cf_gears_resource_group::domain::group_service::RG_GROUP_RESOURCE;
+    use resource_group::domain::group_service::RG_GROUP_RESOURCE;
     use std::sync::Mutex;
 
     /// Mock that captures requests and returns tenant-scoped allow.
@@ -431,7 +432,7 @@ async fn full_chain_list_groups_calls_enforcer_with_correct_params() {
 // Scenario: L2-AuthZ-09 - Full chain deny-all blocks list_groups
 #[tokio::test]
 async fn full_chain_deny_all_blocks_list_groups() {
-    use cf_gears_resource_group::domain::group_service::RG_GROUP_RESOURCE;
+    use resource_group::domain::group_service::RG_GROUP_RESOURCE;
 
     let authz: Arc<dyn AuthZResolverClient> = Arc::new(DenyAllAuthZ);
     let enforcer = PolicyEnforcer::new(authz);

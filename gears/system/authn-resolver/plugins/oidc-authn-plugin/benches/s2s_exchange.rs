@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use toolkit_gts::gts_id;
 
 use authn_resolver_sdk::{AuthNResolverPluginClient, ClientCredentialsRequest};
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -38,7 +39,7 @@ const REALM_PATH: &str = "/realms/platform";
 const DISCOVERY_PATH: &str = "/realms/platform/.well-known/openid-configuration";
 const JWKS_PATH: &str = "/realms/platform/protocol/openid-connect/certs";
 const TOKEN_PATH: &str = "/realms/platform/protocol/openid-connect/token";
-const BENCH_S2S_DEFAULT_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_user.v1~";
+const BENCH_S2S_DEFAULT_SUBJECT_TYPE: &str = gts_id!("cf.core.security.subject_user.v1~");
 
 struct MockOidcServer {
     server: MockServer,
@@ -141,9 +142,10 @@ fn exact_issuer_trust(issuer: String) -> anyhow::Result<IssuerTrustConfig> {
 
 fn retry_policy() -> RetryPolicyConfig {
     RetryPolicyConfig {
-        max_attempts: 3,
-        initial_backoff_ms: 100,
-        max_backoff_ms: 2_000,
+        max_retries: 3,
+        backoff_base_ms: 2,
+        backoff_factor: 50,
+        max_backoff: std::time::Duration::from_secs(2),
         jitter: true,
     }
 }

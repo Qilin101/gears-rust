@@ -2,8 +2,9 @@
 //! and the metric-label constants on the failure enums.
 
 use super::*;
+use toolkit_gts::gts_id;
 
-use crate::{IdpNewUser, IdpTenantContext, IdpUserPagination};
+use crate::{IdpNewUser, IdpTenantContext, IdpUpdateUserRequest, IdpUserPagination, IdpUserPatch};
 use async_trait::async_trait;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -20,7 +21,7 @@ fn sample_tenant_context() -> IdpTenantContext {
     IdpTenantContext::new(
         Uuid::nil(),
         "t",
-        gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~")),
         None,
     )
 }
@@ -49,7 +50,7 @@ async fn provision_tenant_default_impl_returns_unsupported_operation() {
     let req = IdpProvisionTenantRequest::for_root(
         Uuid::nil(),
         "t",
-        gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~")),
     );
     let err = s
         .provision_tenant(&sample_security_context(), &req)
@@ -106,9 +107,49 @@ async fn list_users_default_impl_returns_unsupported_operation() {
     ));
 }
 
+#[tokio::test]
+async fn update_user_default_impl_returns_unsupported_operation() {
+    let s = Stub;
+    let patch = IdpUserPatch::new().with_email(Some("x@example.com".to_owned()));
+    let req = IdpUpdateUserRequest::new(sample_tenant_context(), Uuid::nil(), patch);
+    let err = s
+        .update_user(&sample_security_context(), &req)
+        .await
+        .expect_err("default impl must err");
+    assert!(matches!(
+        err,
+        IdpUserOperationFailure::UnsupportedOperation { .. }
+    ));
+}
+
+#[test]
+fn user_operation_failure_not_found_metric_label_is_stable() {
+    assert_eq!(
+        IdpUserOperationFailure::NotFound {
+            detail: String::new()
+        }
+        .as_metric_label(),
+        "not_found"
+    );
+}
+
+#[test]
+fn user_patch_is_empty_and_builders() {
+    assert!(IdpUserPatch::new().is_empty(), "fresh patch is empty");
+    assert!(
+        !IdpUserPatch::new().with_username("x").is_empty(),
+        "username rename is non-empty"
+    );
+    // `Some(None)` (clear) counts as a present field.
+    assert!(
+        !IdpUserPatch::new().with_email(None).is_empty(),
+        "explicit clear is a present field"
+    );
+}
+
 #[test]
 fn parent_context_defaults_none_and_builder_sets_it() {
-    let tt = gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~");
+    let tt = gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"));
     let req = IdpProvisionTenantRequest::new(Uuid::nil(), Uuid::nil(), "t", tt.clone());
     assert!(
         req.parent_context.is_none(),

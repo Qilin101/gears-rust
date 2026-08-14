@@ -74,8 +74,21 @@ use static_idp_plugin as _;
 #[cfg(feature = "account-management")]
 use account_management as _;
 
+#[cfg(feature = "bss-rate-provider")]
+use bss_rate_provider as _;
+#[cfg(feature = "bss-rate-provider")]
+use bss_rate_provider_ecb_plugin as _;
+#[cfg(feature = "bss-rate-provider")]
+use bss_rate_provider_http_json_plugin as _;
+
 #[cfg(feature = "bss-ledger")]
 use bss_ledger as _;
 
 #[cfg(feature = "model-registry")]
 use model_registry as _;
+
+#[cfg(feature = "usage-collector")]
+use usage_collector as _;
+
+#[cfg(feature = "timescaledb-usage-collector")]
+use timescaledb_usage_collector_plugin as _;

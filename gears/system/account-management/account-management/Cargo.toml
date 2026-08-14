@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-account-management"
-version = "0.2.0"
+version = "0.5.4"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -43,8 +43,11 @@ axum = { workspace = true, features = ["macros"] }
 http = { workspace = true }
 utoipa = { workspace = true, features = ["time"] }
 resource-group-sdk = { workspace = true }
+resource-group = { workspace = true }
 tenant-resolver-sdk = { workspace = true }
+tenant-resolver = { workspace = true }
 types-registry-sdk = { workspace = true }
+types-registry = { workspace = true }
 gts = { workspace = true }
 
 uuid = { workspace = true, features = ["v4", "serde"] }
@@ -76,13 +79,14 @@ tokio-util = { workspace = true }
 anyhow = { workspace = true }
 
 authz-resolver-sdk = { workspace = true }
+authz-resolver = { workspace = true }
 
 [features]
 # Gates the Postgres-backed real-DB integration tests. Disabled by
 # default because they spin up a `testcontainers` Docker container
-# per test; enable with `--features postgres` when Docker is
+# per test; enable with `--features integration` when Docker is
 # available locally or in CI.
-postgres = []
+integration = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
@@ -101,7 +105,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # Postgres bring-up for the integration suite. Pulled in
 # unconditionally because `[dev-dependencies]` cannot be made
 # `optional`, but every reference to these crates is gated behind
-# `#[cfg(feature = "postgres")]` so a default `cargo test` does
+# `#[cfg(feature = "integration")]` so a default `cargo test` does
 # not require Docker.
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }

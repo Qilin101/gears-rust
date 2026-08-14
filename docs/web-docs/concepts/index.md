@@ -6,21 +6,35 @@ sidebar:
   order: 1
 ---
 
-These pages are the mental model you need before building. They are grouped into four
-areas; read them in order, or jump to what you need.
+These pages are the mental model behind Gears — the "why" behind the how-to pages in [Build with Gears](../build-with-gears/). Read them in order, or jump to what you need.
 
-- **[Gears & composition](./gears-and-composition/)** — what a gear is, the
-  three-tier hierarchy, the SDK facade+backend pattern, and how gears find each other
-  through `ClientHub`.
-- **[Runtime & lifecycle](./runtime-and-lifecycle/)** — capabilities, the ordered
-  lifecycle the runtime drives every gear through, async boundaries, and the (planned)
-  cluster plane.
-- **[Security & multi-tenancy](./security-and-tenancy/)** — the secure-by-default
-  data path: `SecurityContext`, PDP/PEP authorization, `AccessScope`, `SecureConn`, and the
-  tenant tree.
-- **[Errors & the type system](./errors-and-types/)** — the canonical error model
-  (RFC-9457) and the Global Type System (GTS).
+## Composition and runtime
 
-When you're ready to apply them, the [first-gear walkthrough](../get-started/your-first-gear/)
-ties everything together against real code, and the [Guides](../guides/) go deep on individual
-features.
+- **[Gears and composition](./gears-and-composition/)** — what a gear is, the three-tier hierarchy, and in-process vs out-of-process.
+- **[SDK contracts and ClientHub](./sdk-and-clienthub/)** — the facade-trait pattern and how gears resolve each other.
+- **[Runtime and lifecycle](./runtime-and-lifecycle/)** — capabilities and the ordered lifecycle the runtime drives every gear through.
+
+## The request path
+
+- **[Request path](./request-path/)** — how a request flows from client to data and back.
+- **[API Gateway and OpenAPI](./api-gateway-openapi/)** — ingress, code-first contracts, and generated docs.
+
+## Security, tenancy, and governance
+
+- **[Security and multi-tenancy](./security-and-tenancy/)** — `SecurityContext`, PDP/PEP authorization, `AccessScope`, and the tenant tree.
+- **[Licensing, usage, and quotas](./licensing-usage-quotas/)** — entitlement checks and usage metering.
+- **[Compliance and FIPS](./compliance-and-fips/)** — the security baseline and validated crypto.
+- **[Secure data path](./secure-data-path/)** — the end-to-end defense-in-depth layering.
+
+## Evolvability
+
+- **[Error model](./error-model/)** — the canonical 16-category model rendered as RFC-9457 problems.
+- **[Type system (GTS)](./type-system-gts/)** — versioned, schema-validated type identity.
+- **[Plugins and extension points](./plugins-and-extension-points/)** — extending the domain model without forking.
+
+## Deployment and testing
+
+- **[Deployment shapes](./deployment-shapes/)** — one codebase, three shapes, chosen by configuration.
+- **[Testing model](./testing-model/)** — the layered testing strategy.
+
+When you're ready to apply them, the [first-gear walkthrough](../build-with-gears/your-first-gear/) ties everything together against real code.

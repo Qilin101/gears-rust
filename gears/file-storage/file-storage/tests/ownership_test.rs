@@ -24,6 +24,7 @@ use bytes::Bytes;
 use sea_orm_migration::MigratorTrait;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
+use toolkit_gts::gts_id;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -38,7 +39,7 @@ use file_storage::infra::storage::Store;
 use file_storage::infra::storage::migrations::Migrator;
 use file_storage_sdk::{NewFile, OwnerKind};
 
-const GTS: &str = "gts.cf.fstorage.file.type.v1~x.test.v1~";
+const GTS: &str = gts_id!("cf.fstorage.file.type.v1~x.test.file.type.v1~");
 
 async fn build_db() -> Arc<DBProvider<DbError>> {
     let mut path = std::env::temp_dir();
@@ -403,5 +404,75 @@ async fn transfer_ownership_no_row_means_no_audit_and_no_event() {
     assert!(
         event_rows.is_empty(),
         "no event rows must be written for a phantom file"
+    );
+}
+
+// ── 9. transfer_ownership rejects a malformed (nil) target owner ───────────────
+
+/// `file-storage` has no principal directory wired in (no account-management
+/// SDK), so it cannot verify `new_owner_id` names a real, same-tenant
+/// principal. The minimal guard it can enforce is rejecting the nil UUID as
+/// an obviously malformed target owner.
+///
+/// @cpt-cf-file-storage-fr-ownership-transfer
+#[tokio::test]
+async fn transfer_to_malformed_owner_is_rejected() {
+    let (svc, _dp, _store) = build_service().await;
+    let tenant = Uuid::now_v7();
+    let ctx = ctx(tenant);
+    let original_owner = Uuid::now_v7();
+
+    let ticket = svc
+        .create_file(&ctx, new_file_for(original_owner), None)
+        .await
+        .unwrap();
+    let file_id = ticket.file_id;
+
+    let err = svc
+        .transfer_ownership(&ctx, file_id, OwnerKind::App, Uuid::nil())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DomainError::Validation { ref field, .. } if field == "new_owner_id"),
+        "expected a new_owner_id validation error, got: {err:?}"
+    );
+
+    // The file must be untouched: owner_kind/owner_id unchanged.
+    let file = svc.get_file(&ctx, file_id).await.unwrap();
+    assert_eq!(file.owner_id, original_owner);
+    assert_eq!(file.owner_kind.as_str(), "user");
+}
+
+// ── 10. transfer_ownership succeeds for a well-formed target owner ─────────────
+
+/// Positive control: a well-formed `new_owner_id` — which, on this endpoint,
+/// is always recorded under the caller's own tenant since `tenant_id` comes
+/// from the existing file/`ctx`, never from the request — is accepted.
+///
+/// @cpt-cf-file-storage-fr-ownership-transfer
+#[tokio::test]
+async fn transfer_to_same_tenant_member_succeeds() {
+    let (svc, _dp, _store) = build_service().await;
+    let tenant = Uuid::now_v7();
+    let ctx = ctx(tenant);
+    let original_owner = Uuid::now_v7();
+    let new_owner = Uuid::now_v7();
+
+    let ticket = svc
+        .create_file(&ctx, new_file_for(original_owner), None)
+        .await
+        .unwrap();
+    let file_id = ticket.file_id;
+
+    let updated = svc
+        .transfer_ownership(&ctx, file_id, OwnerKind::User, new_owner)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.owner_id, new_owner);
+    assert_eq!(
+        updated.tenant_id, tenant,
+        "the transferred file stays in the caller's tenant"
     );
 }

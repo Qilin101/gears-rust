@@ -48,6 +48,19 @@ pub struct ServiceInstanceInfo {
     pub endpoint: ServiceEndpoint,
     /// Optional version string
     pub version: Option<String>,
+    /// Optional REST endpoint (HTTP base URL) for this instance.
+    /// Not all gears expose a REST API.
+    pub rest_endpoint: Option<ServiceEndpoint>,
+    /// Optional `OpenAPI` spec (JSON) this instance published, if any.
+    pub openapi_spec: Option<String>,
+    /// Stable content token for the published `OpenAPI` spec, if any.
+    pub openapi_spec_hash: Option<String>,
+    /// Map of gRPC service name to endpoint published by this instance.
+    ///
+    /// Carried back by `list_instances` so a subsequent `register_instance`
+    /// (which replaces the entry wholesale) can augment — rather than clobber —
+    /// the previously-registered gRPC services when adding a REST endpoint.
+    pub grpc_services: Vec<(String, ServiceEndpoint)>,
 }
 
 /// Information for registering a new gear instance
@@ -61,7 +74,82 @@ pub struct RegisterInstanceInfo {
     pub grpc_services: Vec<(String, ServiceEndpoint)>,
     /// Optional version string
     pub version: Option<String>,
+    /// Optional REST endpoint (HTTP base URL) exposed by the gear.
+    pub rest_endpoint: Option<ServiceEndpoint>,
+    /// Optional `OpenAPI` spec (JSON) published by the gear.
+    pub openapi_spec: Option<String>,
 }
+
+/// A resolved gRPC service and the endpoint it is reachable at.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GrpcServiceInfo {
+    /// Fully-qualified gRPC service name (e.g. `payment.v1.PaymentApi`).
+    pub service_name: String,
+    /// Endpoint the service is reachable at.
+    pub endpoint: ServiceEndpoint,
+}
+
+impl GrpcServiceInfo {
+    pub fn new(service_name: impl Into<String>, endpoint: ServiceEndpoint) -> Self {
+        Self {
+            service_name: service_name.into(),
+            endpoint,
+        }
+    }
+}
+
+/// Sentinel error wrapped via `anyhow::Error` to signal "the requested gear or
+/// service is not registered (or has no live instance)" through the
+/// [`DirectoryClient`] trait. Consumers downcast to this type to distinguish a
+/// not-ready provider (eventual readiness) from a directory-backend failure —
+/// see `toolkit::discovery::DirectoryEndpointResolver`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryNotFound {
+    /// What was being looked up — e.g. `"gear foo"` or `"service foo.Bar"`.
+    pub resource: String,
+}
+
+impl DirectoryNotFound {
+    pub fn new(resource: impl Into<String>) -> Self {
+        Self {
+            resource: resource.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DirectoryNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "directory: not found: {}", self.resource)
+    }
+}
+
+impl std::error::Error for DirectoryNotFound {}
+
+/// Sentinel error wrapped via `anyhow::Error` to signal "client-supplied
+/// argument is malformed" (e.g. invalid UUID) through the [`DirectoryClient`]
+/// trait. Allows the gRPC server boundary to return `Status::invalid_argument`
+/// instead of mislabeling a client bug as an internal failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryInvalidArgument {
+    /// Human-readable description of what was invalid.
+    pub message: String,
+}
+
+impl DirectoryInvalidArgument {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DirectoryInvalidArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "directory: invalid argument: {}", self.message)
+    }
+}
+
+impl std::error::Error for DirectoryInvalidArgument {}
 
 /// Directory API trait for service discovery and instance management
 ///
@@ -74,8 +162,27 @@ pub trait DirectoryClient: Send + Sync {
     /// Resolve a gRPC service by its logical name to an endpoint
     async fn resolve_grpc_service(&self, service_name: &str) -> Result<ServiceEndpoint>;
 
+    /// Resolve a REST endpoint (HTTP base URL) for a gear by its name.
+    ///
+    /// Returns the base URL (e.g. `http://billing:8080`) that callers use to
+    /// make REST requests to the resolved gear.
+    async fn resolve_rest_service(&self, gear_name: &str) -> Result<ServiceEndpoint>;
+
+    /// Retrieve the `OpenAPI` spec (JSON) published by a gear.
+    async fn get_openapi_spec(&self, gear_name: &str) -> Result<String>;
+
     /// List all service instances for a given gear
     async fn list_instances(&self, gear: &str) -> Result<Vec<ServiceInstanceInfo>>;
+
+    /// List every service instance across all registered gears.
+    ///
+    /// Used by the edge gateway to discover which gears (and their REST
+    /// endpoints) to reverse-proxy. This is a lightweight discovery snapshot:
+    /// the returned instances do **not** carry `openapi_spec` — even when the
+    /// backing store holds a stored specification. The edge fetches a gear's
+    /// document once, on first discovery, via
+    /// [`get_openapi_spec`](Self::get_openapi_spec).
+    async fn list_all_instances(&self) -> Result<Vec<ServiceInstanceInfo>>;
 
     /// Register a new gear instance with the directory
     async fn register_instance(&self, info: RegisterInstanceInfo) -> Result<()>;
@@ -118,10 +225,33 @@ mod tests {
                 ServiceEndpoint::http("127.0.0.1", 8001),
             )],
             version: Some("1.0.0".to_owned()),
+            rest_endpoint: None,
+            openapi_spec: None,
         };
 
         assert_eq!(info.gear, "test_gear");
         assert_eq!(info.instance_id, "instance1");
         assert_eq!(info.grpc_services.len(), 1);
+        assert!(info.rest_endpoint.is_none());
+        assert!(info.openapi_spec.is_none());
+    }
+
+    #[test]
+    fn test_register_instance_info_with_rest() {
+        let info = RegisterInstanceInfo {
+            gear: "billing".to_owned(),
+            instance_id: "instance1".to_owned(),
+            grpc_services: vec![],
+            version: Some("2.0.0".to_owned()),
+            rest_endpoint: Some(ServiceEndpoint::http("billing", 8080)),
+            openapi_spec: Some("{\"openapi\":\"3.1.0\"}".to_owned()),
+        };
+
+        assert_eq!(info.gear, "billing");
+        assert_eq!(
+            info.rest_endpoint.as_ref().unwrap().uri,
+            concat!("http", "://billing:8080")
+        );
+        assert!(info.openapi_spec.is_some());
     }
 }

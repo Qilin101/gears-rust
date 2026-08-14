@@ -2,14 +2,38 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::runtime::{Endpoint, GearInstance, GearManager};
 
+/// Compute a content token for an `OpenAPI` document, used to detect changes.
+///
+/// This is a change-detection token (like a k8s `resourceVersion`), **not** a
+/// security digest: the edge only ever compares it against the token from the
+/// previous poll of the *same* directory to decide whether the document
+/// changed. A non-cryptographic `std` hash is therefore sufficient and avoids a
+/// dependency.
+///
+/// Determinism is scoped to a single binary: `DefaultHasher::new()` uses fixed
+/// keys, so identical input yields the same token for the lifetime of one
+/// directory process. `std` does **not** guarantee the algorithm across Rust
+/// toolchain versions, so a rebuilt/upgraded directory may emit a different
+/// token for the same spec — which is benign here, because tokens are only ever
+/// compared within one directory's poll stream (at worst an upgrade triggers a
+/// single spurious refresh). The token must therefore not be persisted or
+/// compared across binaries.
+fn openapi_spec_hash(spec: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    spec.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 // Re-export all types from contracts - this is the single source of truth
 pub use cf_system_sdks::directory::{
-    DirectoryClient, RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
+    DirectoryClient, DirectoryInvalidArgument, DirectoryNotFound, GrpcServiceInfo,
+    RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
 };
 
 /// Local implementation of `DirectoryClient` that delegates to `GearManager`
@@ -29,12 +53,33 @@ impl LocalDirectoryClient {
 
 #[async_trait]
 impl DirectoryClient for LocalDirectoryClient {
+    // Every lookup below is an in-memory `GearManager` map read, so `None` can
+    // only ever mean "nothing registered under that name" — this client has no
+    // backend and therefore no failure mode. Returning the typed
+    // `DirectoryNotFound` sentinel rather than a bare `anyhow` is what lets
+    // `DirectoryEndpointResolver` report `Ok(None)` ("provider not up yet")
+    // instead of `Err` ("the directory is broken"); the difference decides
+    // whether a routine startup race is logged at `debug` or `warn`.
     async fn resolve_grpc_service(&self, service_name: &str) -> Result<ServiceEndpoint> {
         if let Some((_gear, _inst, ep)) = self.mgr.pick_service_round_robin(service_name) {
             return Ok(ServiceEndpoint::new(ep.uri));
         }
 
-        anyhow::bail!("Service not found or no healthy instances: {service_name}")
+        Err(DirectoryNotFound::new(format!("service {service_name}")).into())
+    }
+
+    async fn resolve_rest_service(&self, gear_name: &str) -> Result<ServiceEndpoint> {
+        if let Some(ep) = self.mgr.pick_rest_endpoint_round_robin(gear_name) {
+            return Ok(ServiceEndpoint::new(ep.uri));
+        }
+
+        Err(DirectoryNotFound::new(format!("gear {gear_name}")).into())
+    }
+
+    async fn get_openapi_spec(&self, gear_name: &str) -> Result<String> {
+        self.mgr.openapi_spec_of(gear_name).ok_or_else(|| {
+            DirectoryNotFound::new(format!("openapi spec for gear {gear_name}")).into()
+        })
     }
 
     async fn list_instances(&self, gear: &str) -> Result<Vec<ServiceInstanceInfo>> {
@@ -47,9 +92,73 @@ impl DirectoryClient for LocalDirectoryClient {
                     instance_id: inst.instance_id.to_string(),
                     endpoint: ServiceEndpoint::new(ep.uri.clone()),
                     version: inst.version.clone(),
+                    rest_endpoint: inst
+                        .rest_endpoint
+                        .as_ref()
+                        .map(|ep| ServiceEndpoint::new(ep.uri.clone())),
+                    openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
+                    openapi_spec: inst.openapi_spec.clone(),
+                    // Carry every published gRPC service back so the
+                    // directory-register phase can augment (not clobber) this
+                    // instance when it adds a REST endpoint.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
                 });
             }
         }
+
+        Ok(result)
+    }
+
+    async fn list_all_instances(&self) -> Result<Vec<ServiceInstanceInfo>> {
+        let result = self
+            .mgr
+            .all_instances()
+            .into_iter()
+            .map(|inst| {
+                // Prefer a gRPC endpoint for the primary `endpoint`; fall back to
+                // the REST endpoint (OoP gears often register REST-only).
+                let endpoint = inst
+                    .grpc_services
+                    .values()
+                    .next()
+                    .or(inst.rest_endpoint.as_ref())
+                    .map_or_else(
+                        || ServiceEndpoint::new(String::new()),
+                        |ep| ServiceEndpoint::new(ep.uri.clone()),
+                    );
+                ServiceInstanceInfo {
+                    gear: inst.gear.clone(),
+                    instance_id: inst.instance_id.to_string(),
+                    endpoint,
+                    version: inst.version.clone(),
+                    rest_endpoint: inst
+                        .rest_endpoint
+                        .as_ref()
+                        .map(|ep| ServiceEndpoint::new(ep.uri.clone())),
+                    // The document itself is deliberately omitted here: the
+                    // cross-gear discovery snapshot must stay small and bounded
+                    // (it is polled every sync interval). Consumers that need
+                    // the document fetch it per gear via `get_openapi_spec`.
+                    // The content hash *is* carried so the edge can detect spec
+                    // changes and skip the fetch + rebuild when unchanged.
+                    openapi_spec_hash: inst.openapi_spec.as_deref().map(openapi_spec_hash),
+                    openapi_spec: None,
+                    // Same rationale as `list_instances`: carry the published
+                    // gRPC services so a later register can augment rather than
+                    // clobber them. Available here because this reads the live
+                    // `GearInstance`.
+                    grpc_services: inst
+                        .grpc_services
+                        .iter()
+                        .map(|(name, e)| (name.clone(), ServiceEndpoint::new(e.uri.clone())))
+                        .collect(),
+                }
+            })
+            .collect();
 
         Ok(result)
     }
@@ -70,6 +179,16 @@ impl DirectoryClient for LocalDirectoryClient {
         // Add all gRPC services
         for (service_name, endpoint) in info.grpc_services {
             instance = instance.with_grpc_service(service_name, Endpoint::from_uri(endpoint.uri));
+        }
+
+        // Apply REST endpoint if provided
+        if let Some(rest) = info.rest_endpoint {
+            instance = instance.with_rest_endpoint(Endpoint::from_uri(rest.uri));
+        }
+
+        // Apply OpenAPI spec if provided
+        if let Some(spec) = info.openapi_spec {
+            instance = instance.with_openapi_spec(spec);
         }
 
         // Register the instance with the manager
@@ -104,8 +223,17 @@ mod tests {
         let dir = Arc::new(GearManager::new());
         let api = LocalDirectoryClient::new(dir);
 
-        let result = api.resolve_grpc_service("nonexistent.Service").await;
-        assert!(result.is_err());
+        let err = api
+            .resolve_grpc_service("nonexistent.Service")
+            .await
+            .unwrap_err();
+        // Asserting `is_err()` alone would pass for a bare `anyhow` too, which
+        // is what this client used to return — and which
+        // `DirectoryEndpointResolver` reads as "the directory is broken".
+        assert!(
+            err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -123,6 +251,8 @@ mod tests {
                 ServiceEndpoint::http("127.0.0.1", 8001),
             )],
             version: Some("1.0.0".to_owned()),
+            rest_endpoint: None,
+            openapi_spec: None,
         };
 
         api.register_instance(register_info).await.unwrap();
@@ -133,6 +263,52 @@ mod tests {
         assert_eq!(instances[0].instance_id, instance_id);
         assert_eq!(instances[0].version, Some("1.0.0".to_owned()));
         assert!(instances[0].grpc_services.contains_key("test.Service"));
+    }
+
+    #[tokio::test]
+    async fn test_register_and_resolve_rest_and_openapi() {
+        let dir = Arc::new(GearManager::new());
+        let api = LocalDirectoryClient::new(dir.clone());
+
+        let instance_id = Uuid::new_v4();
+        let register_info = RegisterInstanceInfo {
+            gear: "billing".to_owned(),
+            instance_id: instance_id.to_string(),
+            grpc_services: vec![],
+            version: Some("1.0.0".to_owned()),
+            rest_endpoint: Some(ServiceEndpoint::http("billing", 8080)),
+            openapi_spec: Some("{\"openapi\":\"3.1.0\"}".to_owned()),
+        };
+
+        api.register_instance(register_info).await.unwrap();
+
+        // REST endpoint resolves to the registered base URL.
+        let resolved = api.resolve_rest_service("billing").await.unwrap();
+        assert_eq!(resolved.uri, concat!("http", "://billing:8080"));
+
+        // OpenAPI spec can be retrieved.
+        let spec = api.get_openapi_spec("billing").await.unwrap();
+        assert!(spec.contains("openapi"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_rest_and_openapi_not_found() {
+        let dir = Arc::new(GearManager::new());
+        let api = LocalDirectoryClient::new(dir);
+
+        // The typed sentinel is what distinguishes "provider not up yet" from
+        // a directory failure — see `DirectoryEndpointResolver`.
+        let rest_err = api.resolve_rest_service("missing").await.unwrap_err();
+        assert!(
+            rest_err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {rest_err:?}"
+        );
+
+        let spec_err = api.get_openapi_spec("missing").await.unwrap_err();
+        assert!(
+            spec_err.downcast_ref::<DirectoryNotFound>().is_some(),
+            "expected the typed not-found sentinel, got: {spec_err:?}"
+        );
     }
 
     #[tokio::test]
@@ -181,5 +357,70 @@ mod tests {
         // Verify state transitioned to Healthy
         let instances = dir.instances_of("test_gear");
         assert_eq!(instances[0].state(), InstanceState::Healthy);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_instances_across_gears() {
+        let dir = Arc::new(GearManager::new());
+        let api = LocalDirectoryClient::new(Arc::clone(&dir));
+
+        // Two REST-only OoP gears (no gRPC services) + one gRPC-only gear.
+        for (gear, port) in [("billing", 8080u16), ("catalog", 8081u16)] {
+            api.register_instance(RegisterInstanceInfo {
+                gear: gear.to_owned(),
+                instance_id: Uuid::new_v4().to_string(),
+                grpc_services: vec![],
+                version: Some("1.0.0".to_owned()),
+                rest_endpoint: Some(ServiceEndpoint::http(gear, port)),
+                openapi_spec: Some(format!("{{\"openapi\":\"3.1.0\",\"x\":\"{gear}\"}}")),
+            })
+            .await
+            .unwrap();
+        }
+
+        // gRPC-only gear: gRPC service metadata and no REST endpoint / spec. This
+        // exercises gRPC endpoint selection in `list_all_instances` (which prefers
+        // a gRPC endpoint for the primary `endpoint`).
+        api.register_instance(RegisterInstanceInfo {
+            gear: "reporting".to_owned(),
+            instance_id: Uuid::new_v4().to_string(),
+            grpc_services: vec![(
+                "reporting.Service".to_owned(),
+                ServiceEndpoint::new("http://reporting:7000"),
+            )],
+            version: Some("1.0.0".to_owned()),
+            rest_endpoint: None,
+            openapi_spec: None,
+        })
+        .await
+        .unwrap();
+
+        let all = api.list_all_instances().await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        let billing = all.iter().find(|i| i.gear == "billing").expect("billing");
+        assert_eq!(
+            billing.rest_endpoint.as_ref().map(|e| e.uri.as_str()),
+            Some("http://billing:8080")
+        );
+        // The cross-gear snapshot never inlines the OpenAPI document; consumers
+        // fetch it per gear via `get_openapi_spec`.
+        assert!(billing.openapi_spec.is_none());
+        assert!(
+            api.get_openapi_spec("billing")
+                .await
+                .expect("billing spec")
+                .contains("billing")
+        );
+
+        // The gRPC-only gear resolves its primary endpoint from gRPC metadata and
+        // carries no REST endpoint or OpenAPI spec.
+        let reporting = all
+            .iter()
+            .find(|i| i.gear == "reporting")
+            .expect("reporting");
+        assert_eq!(reporting.endpoint.uri.as_str(), "http://reporting:7000");
+        assert!(reporting.rest_endpoint.is_none());
+        assert!(reporting.openapi_spec.is_none());
     }
 }

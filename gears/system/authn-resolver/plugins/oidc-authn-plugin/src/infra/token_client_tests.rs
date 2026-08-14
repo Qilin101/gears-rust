@@ -298,9 +298,10 @@ async fn token_endpoint_breaker_opens_after_retryable_failure_and_blocks_host() 
     let endpoint = token_endpoint.endpoint();
     let calls = token_endpoint.calls();
     let retry_policy = RetryPolicyConfig {
-        max_attempts: 0,
-        initial_backoff_ms: 1,
-        max_backoff_ms: 10,
+        max_retries: 0,
+        backoff_base_ms: 1,
+        backoff_factor: 1,
+        max_backoff: std::time::Duration::from_millis(10),
         jitter: false,
     };
     let client = reqwest::Client::new();
@@ -468,9 +469,10 @@ async fn retries_transient_5xx_then_succeeds() -> anyhow::Result<()> {
     let endpoint = token_endpoint.endpoint();
     let calls = token_endpoint.calls();
     let retry_policy = RetryPolicyConfig {
-        max_attempts: 2,
-        initial_backoff_ms: 1,
-        max_backoff_ms: 10,
+        max_retries: 1,
+        backoff_base_ms: 1,
+        backoff_factor: 1,
+        max_backoff: std::time::Duration::from_millis(10),
         jitter: false,
     };
     let client = reqwest::Client::new();
@@ -496,9 +498,10 @@ async fn retries_429_using_retry_after_capped_by_max_backoff() -> anyhow::Result
     let endpoint = token_endpoint.endpoint();
     let calls = token_endpoint.calls();
     let retry_policy = RetryPolicyConfig {
-        max_attempts: 1,
-        initial_backoff_ms: 1,
-        max_backoff_ms: 120,
+        max_retries: 1,
+        backoff_base_ms: 1,
+        backoff_factor: 1,
+        max_backoff: std::time::Duration::from_millis(120),
         jitter: false,
     };
     let client = reqwest::Client::new();
@@ -519,6 +522,14 @@ async fn retries_429_using_retry_after_capped_by_max_backoff() -> anyhow::Result
     assert!(
         elapsed >= Duration::from_millis(90),
         "expected Retry-After cap delay (~120ms), got {elapsed:?}"
+    );
+    // Upper bound: the `Retry-After: 1` (1s) header must be capped to
+    // `max_backoff` (~120ms), not honored in full. Tolerant of scheduling and
+    // the two round-trips to the mock endpoint, but well below the 1s an
+    // uncapped wait would take.
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "Retry-After (1s) should be capped to max_backoff (~120ms), not waited in full; got {elapsed:?}"
     );
 
     Ok(())

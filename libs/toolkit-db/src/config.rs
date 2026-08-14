@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+use toolkit_utils::SecretString;
 
 /// Global database configuration with server-based DBs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -56,6 +57,11 @@ pub struct GlobalDatabaseConfig {
 
 /// Reusable DB connection config for both global servers and gears.
 /// DSN must be a FULL, valid DSN if provided (dsn crate compliant).
+///
+/// Not `#[non_exhaustive]`: callers (including first-party tests) build it with struct-literal +
+/// `..Default::default()`, so that attribute would break them. Deserialization stays
+/// backward-compatible via `#[serde(default)]` on new fields, but adding a public field is a
+/// source-breaking change for exhaustive struct-literal callers — see the crate semver note.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DbConnConfig {
@@ -69,14 +75,22 @@ pub struct DbConnConfig {
     pub engine: Option<DbEngineCfg>,
 
     // DSN-style (full, valid). Optional: can be absent and rely on fields.
-    pub dsn: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "toolkit_utils::secret_string::serialize_option_exposed"
+    )]
+    pub dsn: Option<SecretString>,
 
     // Field-based style; any of these override DSN parts when present:
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
-    pub password: Option<String>, // literal password or ${VAR} for env expansion
-    pub dbname: Option<String>,   // MUST be present in final for server-based DBs
+    #[serde(
+        default,
+        serialize_with = "toolkit_utils::secret_string::serialize_option_exposed"
+    )]
+    pub password: Option<SecretString>, // literal password or ${VAR} for env expansion
+    pub dbname: Option<String>, // MUST be present in final for server-based DBs
     #[serde(default)]
     pub params: Option<HashMap<String, String>>,
 
@@ -87,6 +101,13 @@ pub struct DbConnConfig {
     // Connection pool overrides:
     #[serde(default)]
     pub pool: Option<PoolCfg>,
+
+    /// Keepalive ping interval for the dedicated advisory-lock session (PG/MySQL only).
+    ///
+    /// Defaults to [`crate::advisory_locks::DEFAULT_LOCK_KEEPALIVE`] when unset. Tune below any
+    /// proxy/database idle-connection cutoff so the single lock session is not reaped.
+    #[serde(with = "toolkit_utils::humantime_serde::option", default)]
+    pub lock_keepalive: Option<Duration>,
 
     // Gear-level only: reference to a global server by name.
     // If absent, this gear config must be fully self-sufficient (dsn or fields).

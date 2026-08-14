@@ -30,7 +30,7 @@ A **gear** is a vertically-sliced, self-contained capability. Each gear:
   there is no central switchboard to edit when you add a gear.
 - **Composes with other gears** through the typed `ClientHub` (in-process) or gRPC
   (out-of-process), behind the same SDK trait.
-- **Is extensible** through plugins and the Global Type System (GTS).
+- **Is extensible** through plugins and the [Global Type System (GTS)](https://github.com/GlobalTypeSystem/gts-rust).
 
 ## What you get out of the box
 
@@ -51,8 +51,7 @@ Gears ships a substantial substrate so you build features, not plumbing:
   workspaces, generating runnable servers, managing runtime config, building,
   deploying, and linting. See the [CLI documentation](/cli/).
 
-See [Components & features](../reference/) for the full catalog of toolkit libraries
-and ready-made system gears.
+See [Why Gears](./why-gears/) for the Rust and framework rationale, [Where Gears fits](./where-gears-fits/) for adoption scenarios, and [Capabilities](../capabilities/) for the full catalog of toolkit libraries and ready-made system gears.
 
 ## One codebase, three deployment shapes
 
@@ -75,14 +74,16 @@ over quick-start minimalism. From the framework's own non-goals:
 - It does **not aim to ship a comprehensive set of ready-made, end-user SaaS services** —
   it gives you the platform to build them.
 
+For the extended rationale, read [WHY_GEARS.md](https://github.com/constructorfabric/gears-rust/blob/main/docs/WHY_GEARS.md).
+
 ## The golden path
 
 A typical path from reading to a running application:
 
-1. [Install the toolchain and run the example server](../get-started/).
-2. [Build your first gear](../get-started/your-first-gear/) — an SDK, a domain service,
+1. [Install the toolchain and run the example server](../build-with-gears/).
+2. [Build your first gear](../build-with-gears/your-first-gear/) — an SDK, a domain service,
    a REST endpoint, wired into the runtime.
 3. Learn the [core concepts](../concepts/) — gears, the SDK pattern, `ClientHub`, the
    security model.
-4. Reach for [ready-made components & features](../reference/) as you need them.
-5. Understand [how the system is organized](../architecture/) when you scale up.
+4. Reach for [ready-made capabilities](../capabilities/) as you need them.
+5. See [Where Gears fits](./where-gears-fits/) to plan greenfield or existing-platform adoption.

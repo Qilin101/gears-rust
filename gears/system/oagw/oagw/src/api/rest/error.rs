@@ -83,27 +83,27 @@ const RETRY_AFTER_GUARD_SECS: u64 = 10;
 
 /// Errors attributable to the gateway data-plane / proxy as a resource.
 /// Used as the umbrella scope when no more specific resource applies.
-#[resource_error("gts.cf.core.oagw.proxy.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.proxy.v1~"))]
 pub struct OagwProxyError;
 
 /// Errors attributable to a specific upstream definition.
-#[resource_error("gts.cf.core.oagw.upstream.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.upstream.v1~"))]
 pub struct OagwUpstreamError;
 
 /// Errors attributable to a specific route definition.
-#[resource_error("gts.cf.core.oagw.route.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.route.v1~"))]
 pub struct OagwRouteError;
 
 /// Errors attributable to a specific authentication plugin instance.
-#[resource_error("gts.cf.core.oagw.auth_plugin.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.auth_plugin.v1~"))]
 pub struct OagwAuthPluginError;
 
 /// Errors raised by guard plugins during the proxy pipeline.
-#[resource_error("gts.cf.core.oagw.guard_plugin.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.guard_plugin.v1~"))]
 pub struct OagwGuardPluginError;
 
 /// Errors attributable to a specific transform plugin instance.
-#[resource_error("gts.cf.core.oagw.transform_plugin.v1~")]
+#[resource_error(gts_id!("cf.core.oagw.transform_plugin.v1~"))]
 pub struct OagwTransformPluginError;
 
 // ---------------------------------------------------------------------------
@@ -227,6 +227,17 @@ impl From<DomainError> for CanonicalError {
                 // surfaces it server-side via the `CanonicalError` extension
                 // (DESIGN.md §3.6), so no per-arm log is needed.
                 CanonicalError::internal(detail).create()
+            }
+
+            // A state precondition, not a malformed request: the referenced
+            // secret is not provisioned yet or not shared. Kept distinct from
+            // `Validation`/`invalid_argument` so in-process provisioning
+            // callers can classify it as retryable (HTTP status is 400 for
+            // both, but the canonical category differs).
+            DomainError::SecretRefNotAccessible { detail, .. } => {
+                OagwUpstreamError::failed_precondition()
+                    .with_precondition_violation("auth.config.secret_ref", detail, "STATE")
+                    .create()
             }
 
             DomainError::DownstreamError { detail, .. } => {
@@ -537,6 +548,7 @@ pub fn error_response(err: DomainError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toolkit_gts::{gts_id, gts_uri};
 
     /// Build the wire `Problem` the canonical error middleware would emit
     /// for a given `DomainError`. Tests run without the middleware in
@@ -555,13 +567,13 @@ mod tests {
         }
     }
 
-    const NOT_FOUND_TYPE: &str = "gts://gts.cf.core.errors.err.v1~cf.core.err.not_found.v1~";
+    const NOT_FOUND_TYPE: &str = gts_uri!("cf.core.errors.err.v1~cf.core.err.not_found.v1~");
     const INVALID_ARGUMENT_TYPE: &str =
-        "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~";
+        gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~");
     const ALREADY_EXISTS_TYPE: &str =
-        "gts://gts.cf.core.errors.err.v1~cf.core.err.already_exists.v1~";
+        gts_uri!("cf.core.errors.err.v1~cf.core.err.already_exists.v1~");
     const RESOURCE_EXHAUSTED_TYPE: &str =
-        "gts://gts.cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~";
+        gts_uri!("cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~");
 
     #[test]
     fn validation_with_field_emits_field_violation() {
@@ -666,7 +678,7 @@ mod tests {
     #[test]
     fn plugin_not_found_dispatches_on_gts_prefix() {
         let auth = DomainError::PluginNotFound {
-            gts_id: "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1".into(),
+            gts_id: gts_id!("cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1").into(),
             detail: "auth plugin not registered".into(),
         };
         let p: Problem = auth.into_test_problem();
@@ -674,18 +686,18 @@ mod tests {
         assert_eq!(p.context["resource_type"], gts::AUTH_PLUGIN_SCHEMA);
         assert_eq!(
             p.context["resource_name"],
-            "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1"
+            gts_id!("cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1")
         );
 
         let guard = DomainError::PluginNotFound {
-            gts_id: "gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1".into(),
+            gts_id: gts_id!("cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1").into(),
             detail: "guard plugin not registered".into(),
         };
         let p: Problem = guard.into_test_problem();
         assert_eq!(p.context["resource_type"], gts::GUARD_PLUGIN_SCHEMA);
 
         let xform = DomainError::PluginInUse {
-            gts_id: "gts.cf.core.oagw.transform_plugin.v1~cf.core.oagw.logging.v1".into(),
+            gts_id: gts_id!("cf.core.oagw.transform_plugin.v1~cf.core.oagw.logging.v1").into(),
             detail: "transform plugin in use".into(),
         };
         let p: Problem = xform.into_test_problem();
@@ -861,6 +873,10 @@ mod tests {
                 detail: "test".into(),
                 instance: "/test".into(),
             },
+            DomainError::SecretRefNotAccessible {
+                detail: "test".into(),
+                instance: "/test".into(),
+            },
             DomainError::DownstreamError {
                 detail: "test".into(),
                 instance: "/test".into(),
@@ -915,11 +931,11 @@ mod tests {
                 instance: "/test".into(),
             },
             DomainError::PluginNotFound {
-                gts_id: "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1".into(),
+                gts_id: gts_id!("cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1").into(),
                 detail: "test".into(),
             },
             DomainError::PluginInUse {
-                gts_id: "gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1".into(),
+                gts_id: gts_id!("cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1").into(),
                 detail: "test".into(),
             },
             DomainError::Forbidden {
@@ -1058,10 +1074,27 @@ mod tests {
         assert_eq!(p.status, 400);
         assert_eq!(
             p.problem_type,
-            "gts://gts.cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~"
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~")
         );
         // resource_name must be absent — guard didn't supply an id.
         assert!(p.context.get("resource_name").is_none());
+    }
+
+    #[test]
+    fn secret_ref_not_accessible_maps_to_failed_precondition_400() {
+        // A state precondition (the secret may be provisioned later), NOT
+        // invalid_argument: in-process provisioning callers rely on the
+        // canonical category to classify the failure as retryable.
+        let err = DomainError::SecretRefNotAccessible {
+            detail: "secret_ref 'cred://missing' is not accessible to this tenant".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into_test_problem();
+        assert_eq!(p.status, 400);
+        assert_eq!(
+            p.problem_type,
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~")
+        );
     }
 
     #[test]
@@ -1093,7 +1126,7 @@ mod tests {
         assert_eq!(p.status, 409);
         assert_eq!(
             p.problem_type,
-            "gts://gts.cf.core.errors.err.v1~cf.core.err.aborted.v1~"
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.aborted.v1~")
         );
         assert!(p.context.get("resource_name").is_none());
     }
@@ -1117,7 +1150,7 @@ mod tests {
             assert_eq!(p.status, 401);
             assert_eq!(
                 p.problem_type,
-                "gts://gts.cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~"
+                gts_uri!("cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~")
             );
             assert_eq!(
                 p.context["reason"], auth_reason,

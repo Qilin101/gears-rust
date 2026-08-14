@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use time::OffsetDateTime;
 use toolkit_canonical_errors::Problem;
@@ -145,12 +146,13 @@ impl TryFrom<SubjectRefDto> for SubjectRef {
 /// surfaces as the per-record `Problem` instead of axum's default
 /// `text/plain` 422 for the entire batch. per-record problem envelopes
 /// still surface for closed-shape membership, size-cap, and key
-/// validation.
+/// validation. Intentionally has no identity field: `id` is
+/// gateway-derived via `usage_collector_sdk::derive_usage_record_id`,
+/// mirroring the `UsageRecord::id` doc.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request)]
 #[serde(deny_unknown_fields)]
 pub struct CreateUsageRecordRequest {
-    pub uuid: Uuid,
     pub gts_id: String,
     pub tenant_id: Uuid,
     pub resource_ref: ResourceRefDto,
@@ -163,8 +165,8 @@ pub struct CreateUsageRecordRequest {
     /// Mandatory caller-supplied idempotency key per
     /// `cpt-cf-usage-collector-dod-usage-emission-fr-idempotency`. The
     /// plugin SPI dedups every persisted record on
-    /// `(tenant_id, usage_type_gts_id, idempotency_key)`; a missing key
-    /// surfaces as a request-deserialization failure.
+    /// `(tenant_id, gts_id, idempotency_key, created_at)` (ADR-0014); a
+    /// missing key surfaces as a request-deserialization failure.
     pub idempotency_key: String,
     /// When set, marks this submission as a counter compensation
     /// referencing a previously emitted ordinary usage row. Absent on
@@ -194,7 +196,7 @@ pub struct CreateUsageRecordsRequest {
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct UsageRecordDto {
-    pub uuid: Uuid,
+    pub id: Uuid,
     pub gts_id: String,
     pub tenant_id: Uuid,
     pub resource_ref: ResourceRefDto,
@@ -224,7 +226,7 @@ pub struct UsageRecordDto {
 impl From<UsageRecord> for UsageRecordDto {
     fn from(value: UsageRecord) -> Self {
         Self {
-            uuid: value.uuid,
+            id: value.id,
             gts_id: value.gts_id.to_string(),
             tenant_id: value.tenant_id,
             resource_ref: value.resource_ref.into(),
@@ -399,16 +401,22 @@ impl TryFrom<QueryAggregatedUsageRecordsRequest> for AggregationSpec {
 }
 
 /// Wire projection of [`usage_collector_sdk::AggregationBucket`]. `value`
-/// is carried as a string (matching the same `rust_decimal::serde::str`
-/// shape as `UsageRecord.value`); `None` materializes as `null` per the
-/// SDK contract for empty-set buckets.
+/// is an arbitrary-precision `bigdecimal::BigDecimal` carried as a JSON
+/// string via `usage_collector_sdk::serde_helpers::bigdecimal_str_option`
+/// (the same string-on-the-wire discipline as `UsageRecord.value`, but
+/// without `Decimal`'s magnitude ceiling); `None` materializes as `null`
+/// per the SDK contract for empty-set buckets.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct AggregationBucketDto {
     #[serde(default)]
     pub key: Vec<String>,
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    pub value: Option<Decimal>,
+    #[serde(
+        default,
+        with = "usage_collector_sdk::serde_helpers::bigdecimal_str_option"
+    )]
+    #[schema(value_type = Option<String>, example = "79228162514264337593543950400")]
+    pub value: Option<BigDecimal>,
 }
 
 impl From<AggregationBucket> for AggregationBucketDto {

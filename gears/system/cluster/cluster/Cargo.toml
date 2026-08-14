@@ -1,31 +1,65 @@
 [package]
 name = "cf-gears-cluster"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Cluster gear: wiring, lifecycle, and SDK-default backend implementations for the cluster coordination primitives"
+description = "The cluster gear: a RunnableCapability that reads operator config, registers per-profile, per-primitive coordination backends in the ClientHub, and owns the cluster lifecycle. Also exposes the wiring builder/handle as embeddable library API."
+readme = "README.md"
 keywords = ["constructorfabric", "cf-gears"]
 categories = ["development-tools"]
+metadata.docs.rs.all-features = true
 
 [lib]
 name = "cluster"
 
+# `testcontainers`/`testcontainers-modules` are declared as optional entries
+# under `[dependencies]` (Cargo does not allow optional `[dev-dependencies]`)
+# purely so the `integration` feature array can name them; every reference lives
+# in `tests/`, so the feature has no effect on this gear's compiled artifact.
+# cargo-shear's "misplaced optional dependency" heuristic flags that placement —
+# it is required here, not accidental.
+[package.metadata.cargo-shear]
+ignored = ["testcontainers", "testcontainers-modules"]
+
 [lints]
 workspace = true
 
+[features]
+# Gates the Docker-backed mixed-backend routing test
+# (`tests/mixed_backend_integration.rs`), mirroring the Postgres plugin's own
+# `integration` feature so a default `cargo test` never requires a Docker
+# daemon. Run with `cargo test -p cf-gears-cluster --features integration`.
+integration = ["dep:testcontainers", "dep:testcontainers-modules"]
+
 [dependencies]
-cf-gears-cluster-sdk = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
+cluster-sdk = { workspace = true }
+toolkit = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+tokio-util = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
+cf-gears-standalone-cluster-plugin = { path = "../plugins/standalone-cluster-plugin", version = "0.2.0" }
+cf-postgres-cluster-plugin = { path = "../plugins/postgres-cluster-plugin", version = "0.2.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Optional, test-only — see the `[features]` and `cargo-shear` notes above.
+testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+serde-saphyr = { workspace = true }
+uuid = { workspace = true }
 tracing-test = { workspace = true }
-toolkit = { workspace = true }
+parking_lot = { workspace = true }
+# The shared backend-agnostic conformance suite, run against this gear's real
+# cache-derived default backends in `tests/conformance.rs`.
+# Path-only, no version on purpose: cargo drops a path-only dev-dependency from the published
+# manifest, so publishing this gear never needs the conformance crate on crates.io.
+cf-gears-cluster-conformance = { path = "../cluster-conformance" }

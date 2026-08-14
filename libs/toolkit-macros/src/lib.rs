@@ -18,7 +18,7 @@ mod utils;
 /// Configuration parsed from #[gear(...)] attribute
 struct GearConfig {
     name: String,
-    deps: Vec<String>,
+    deps: Vec<Ident>,
     caps: Vec<Capability>,
     ctor: Option<Expr>,           // arbitrary constructor expression
     client: Option<Path>,         // trait path for client DX helpers
@@ -197,9 +197,10 @@ impl Default for LcGearCfg {
 }
 
 impl Parse for GearConfig {
+    #[allow(clippy::too_many_lines)]
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name: Option<String> = None;
-        let mut deps: Vec<String> = Vec::new();
+        let mut deps: Vec<Ident> = Vec::new();
         let mut caps: Vec<Capability> = Vec::new();
         let mut ctor: Option<Expr> = None;
         let mut client: Option<Path> = None;
@@ -304,15 +305,20 @@ impl Parse for GearConfig {
                         Expr::Array(arr) => {
                             for elem in arr.elems {
                                 match elem {
-                                    Expr::Lit(syn::ExprLit {
-                                        lit: Lit::Str(s), ..
-                                    }) => {
-                                        deps.push(s.value());
+                                    Expr::Path(ref path) => {
+                                        if let Some(ident) = path.path.get_ident() {
+                                            deps.push(ident.clone());
+                                        } else {
+                                            return Err(syn::Error::new_spanned(
+                                                path,
+                                                "deps must be crate identifiers, e.g. deps = [authn_resolver, types_registry]",
+                                            ));
+                                        }
                                     }
                                     other => {
                                         return Err(syn::Error::new_spanned(
                                             other,
-                                            "deps must be an array of string literals, e.g. deps = [\"db\", \"auth\"]",
+                                            "deps must be crate identifiers, e.g. deps = [authn_resolver, types_registry]",
                                         ));
                                     }
                                 }
@@ -321,7 +327,7 @@ impl Parse for GearConfig {
                         other => {
                             return Err(syn::Error::new_spanned(
                                 other,
-                                "deps must be an array, e.g. deps = [\"db\", \"auth\"]",
+                                "deps must be an array, e.g. deps = [authn_resolver, types_registry]",
                             ));
                         }
                     }
@@ -476,6 +482,22 @@ fn parse_lifecycle_list(list: &MetaList) -> syn::Result<LcGearCfg> {
 ///
 /// `ctor` must be a Rust expression that evaluates to the gear instance,
 /// e.g. `ctor = MyGear::new()` or `ctor = Default::default()`.
+///
+/// # Gear dependencies (`deps`)
+///
+/// `deps` lists the **crate identifiers** (`snake_case`) of gears that this gear
+/// depends on.  The runtime gear name is derived by replacing underscores with
+/// hyphens (`authn_resolver` → `"authn-resolver"`), which matches the universal
+/// convention that `lib-name == gear-name` across the workspace.
+///
+/// The macro generates hidden `pub use` re-exports so the linker keeps each
+/// dependency's `inventory::submit!` registration alive.  Because these
+/// re-exports only exist in macro-expanded code, `cargo-shear` cannot see
+/// them and will flag the dependency crates as unused.
+///
+/// **When adding a new gear dependency** you must also add the crate name to
+/// the `[workspace.metadata.cargo-shear] ignored` list in the workspace
+/// `Cargo.toml`, otherwise the `shear` CI job will fail.
 #[proc_macro_attribute]
 #[allow(clippy::too_many_lines)]
 pub fn gear(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -488,7 +510,7 @@ pub fn gear(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics_clone.split_for_impl();
 
     let name_owned: String = config.name.clone();
-    let deps_owned: Vec<String> = config.deps.clone();
+    let deps_idents: Vec<Ident> = config.deps.clone();
     let caps_for_asserts: Vec<Capability> = config.caps.clone();
     let caps_for_regs: Vec<Capability> = config.caps.clone();
     let ctor_expr_opt: Option<Expr> = config.ctor.clone();
@@ -497,9 +519,10 @@ pub fn gear(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Prepare string literals for name/deps
     let name_lit = LitStr::new(&name_owned, Span::call_site());
-    let deps_lits: Vec<LitStr> = deps_owned
+    // Derive runtime dep names from crate identifiers: authn_resolver -> "authn-resolver"
+    let deps_lits: Vec<LitStr> = deps_idents
         .iter()
-        .map(|s| LitStr::new(s, Span::call_site()))
+        .map(|ident| LitStr::new(&ident.to_string().replace('_', "-"), Span::call_site()))
         .collect();
 
     // Constructor expression (provided or Default::default())
@@ -768,12 +791,29 @@ pub fn gear(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate re-exports for gear dependencies so their `inventory::submit!`
+    // registrations survive linking when this gear is pulled in transitively.
+    let dep_reexports: Vec<_> = deps_idents
+        .iter()
+        .map(|crate_ident| {
+            let alias_ident = format_ident!("_gear_dep_{}", crate_ident);
+            quote! {
+                #[cfg(not(test))]
+                #[doc(hidden)]
+                pub use ::#crate_ident as #alias_ident;
+            }
+        })
+        .collect();
+
     // Final expansion:
     let expanded = quote! {
         #input
 
         // Compile-time capability assertions (better errors if trait impls are missing)
         #(#cap_asserts)*
+
+        // Re-export gear dependencies to force-link their inventory registrations
+        #(#dep_reexports)*
 
         // Registrator that targets the *builder*, not the final registry
         #[doc(hidden)]

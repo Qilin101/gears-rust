@@ -30,8 +30,18 @@ otel = ["toolkit/otel"]
 account-management = ["dep:account_management"]
 static-idp = ["dep:static-idp-plugin"]
 file-storage = ["dep:file_storage"]
+# The FX rate-provider subsystem: the core gear + its source plugins. Independent
+# of bss-ledger — the ledger discovers the composite lazily at runtime via the
+# types-registry, so neither feature requires the other.
+bss-rate-provider = [
+    "dep:bss_rate_provider",
+    "dep:bss_rate_provider_ecb_plugin",
+    "dep:bss_rate_provider_http_json_plugin",
+]
 bss-ledger = ["dep:bss_ledger"]
 model-registry = ["dep:model_registry"]
+usage-collector = ["dep:usage_collector"]
+timescaledb-usage-collector = ["dep:timescaledb_usage_collector_plugin"]
 
 [dependencies]
 mimalloc = { version = "0.1" }
@@ -64,7 +74,7 @@ static-credstore-plugin = { package = "cf-gears-static-credstore-plugin", path =
 resource_group = { package = "cf-gears-resource-group", path = "../../gears/system/resource-group/resource-group" }
 
 # user modules
-file_parser = { package = "cf-gears-file-parser", path = "../../gears/file-parser" }
+file_parser = { package = "cf-gears-file-parser", path = "../../gears/file-parser/file-parser" }
 file_storage = { package = "cf-gears-file-storage", path = "../../gears/file-storage/file-storage", optional = true }
 nodes_registry = { package = "cf-gears-nodes-registry", path = "../../gears/system/nodes-registry/nodes-registry" }
 simple_user_settings = { package = "cf-gears-simple-user-settings", path = "../../gears/simple-user-settings/simple-user-settings" }
@@ -86,6 +96,13 @@ static-idp-plugin = { package = "cf-gears-static-idp-plugin", path = "../../gear
 
 # Optional BSS Billing Ledger gear
 bss_ledger = { package = "bss-ledger", path = "../../gears/bss/ledger/ledger", optional = true }
+bss_rate_provider = { package = "bss-rate-provider", path = "../../gears/bss/rate-provider/rate-provider", optional = true }
+bss_rate_provider_ecb_plugin = { package = "bss-rate-provider-ecb-plugin", path = "../../gears/bss/rate-provider/plugins/ecb-plugin", optional = true }
+bss_rate_provider_http_json_plugin = { package = "bss-rate-provider-http-json-plugin", path = "../../gears/bss/rate-provider/plugins/http-json-plugin", optional = true }
+
+# Optional Usage Collector gear + its TimescaleDB storage plugin
+usage_collector = { package = "cf-gears-usage-collector", path = "../../gears/system/usage-collector/usage-collector", optional = true }
+timescaledb_usage_collector_plugin = { package = "cf-gears-timescaledb-usage-collector-plugin", path = "../../gears/system/usage-collector/plugins/timescaledb-usage-collector-plugin", optional = true }
 
 # Optional Model Registry gear
 model_registry = { package = "cf-gears-model-registry", path = "../../gears/model-registry/model-registry", optional = true }

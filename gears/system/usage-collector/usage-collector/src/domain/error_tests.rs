@@ -7,6 +7,7 @@
 //! error-envelope compaction — the public envelope is terminal — so these
 //! tests exercise the plugin->domain and domain->SDK directions only.
 
+use toolkit_gts::gts_id;
 use usage_collector_sdk::{
     ConflictReason, USAGE_RECORD_RESOURCE, USAGE_TYPE_RESOURCE, UsageCollectorError,
     UsageCollectorPluginError, UsageTypeGtsId, ValidationReason,
@@ -15,7 +16,7 @@ use usage_collector_sdk::{
 use super::*;
 
 const SAMPLE_USAGE_TYPE_ID: &str =
-    "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
 fn sample_gts_id() -> UsageTypeGtsId {
     UsageTypeGtsId::new(SAMPLE_USAGE_TYPE_ID).expect("valid usage_record-derived usage-type gts_id")
@@ -242,18 +243,18 @@ fn domain_unknown_metadata_key_lifts_to_invalid_argument() {
 }
 
 #[test]
-fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_uuid() {
-    let existing_uuid = uuid::Uuid::from_u128(0x1234_5678);
+fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_id() {
+    let existing_id = uuid::Uuid::from_u128(0x1234_5678);
     let key = "idem-1".to_owned();
     let domain: DomainError = UsageCollectorPluginError::IdempotencyConflict {
         idempotency_key: key.clone(),
-        existing_uuid,
+        existing_id,
     }
     .into();
     assert!(matches!(
         &domain,
-        DomainError::IdempotencyConflict { idempotency_key: ik, existing_uuid: u }
-            if ik == &key && *u == existing_uuid
+        DomainError::IdempotencyConflict { idempotency_key: ik, existing_id: u }
+            if ik == &key && *u == existing_id
     ));
     let sdk: UsageCollectorError = domain.into();
     match sdk {
@@ -264,7 +265,7 @@ fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_uuid() {
             ..
         } => {
             assert_eq!(resource_type, USAGE_RECORD_RESOURCE);
-            assert_eq!(name, existing_uuid.to_string());
+            assert_eq!(name, existing_id.to_string());
             assert_eq!(reason, ConflictReason::IdempotencyConflict);
         }
         other => panic!("expected Conflict, got {other:?}"),

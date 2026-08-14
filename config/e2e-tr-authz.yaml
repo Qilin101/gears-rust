@@ -177,6 +177,15 @@ gears:
     config:
       vendor: "constructorfabric"
 
+  credstore:
+    database:
+      server: "sqlite_users"
+      file: "credstore.db"
+    config:
+      # Gateway selects its value-store backend plugin by GTS vendor;
+      # must match static-credstore-plugin (default "constructorfabric").
+      vendor: "constructorfabric"
+
   static-credstore-plugin:
     config:
       secrets:
@@ -311,6 +320,8 @@ gears:
       storage_root: "./.file-storage-data"
       # Fixed Ed25519 seed (32-byte base64url) for deterministic signed URLs.
       signing_key_seed: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      # Shared-server e2e run — no non-deterministic background activity.
+      enable_background_sweep: false
 
   account-management:
     database:

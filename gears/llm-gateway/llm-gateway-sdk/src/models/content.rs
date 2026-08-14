@@ -5,7 +5,7 @@
 //! carry only the non-discriminator fields; the enum tag owns `type`. Size caps
 //! in the schemas are documented, not type-enforced.
 
-use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of};
+use crate::models::extension::Extension;
 
 // ---------------------------------------------------------------------------
 // InputContentPart
@@ -17,53 +17,27 @@ use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of}
 /// `type` the core does not own — a provider or plugin extension — is preserved
 /// verbatim in [`InputContentPart::Other`].
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum InputContentPart {
     /// Text content.
+    #[serde(rename = "input_text")]
     InputText(InputText),
     /// Image content.
+    #[serde(rename = "input_image")]
     InputImage(InputImage),
     /// Audio content.
+    #[serde(rename = "input_audio")]
     InputAudio(InputAudio),
     /// Video content.
+    #[serde(rename = "input_video")]
     InputVideo(InputVideo),
     /// File/document content.
+    #[serde(rename = "input_file")]
     InputFile(InputFile),
     /// A content-part `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for InputContentPart {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::InputText(v) => serialize_tagged(serializer, "input_text", v),
-            Self::InputImage(v) => serialize_tagged(serializer, "input_image", v),
-            Self::InputAudio(v) => serialize_tagged(serializer, "input_audio", v),
-            Self::InputVideo(v) => serialize_tagged(serializer, "input_video", v),
-            Self::InputFile(v) => serialize_tagged(serializer, "input_file", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for InputContentPart {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "input_text" => return from_tagged(&value).map(Self::InputText),
-                "input_image" => return from_tagged(&value).map(Self::InputImage),
-                "input_audio" => return from_tagged(&value).map(Self::InputAudio),
-                "input_video" => return from_tagged(&value).map(Self::InputVideo),
-                "input_file" => return from_tagged(&value).map(Self::InputFile),
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 /// Input text content.
@@ -178,41 +152,18 @@ pub enum AudioFormat {
 ///
 /// Any `type` the core does not own — a provider or plugin extension — is
 /// preserved verbatim in [`OutputContentPart::Other`].
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum OutputContentPart {
     /// Generated text with annotations.
+    #[serde(rename = "output_text")]
     OutputText(OutputText),
     /// Refusal to generate content.
+    #[serde(rename = "refusal")]
     Refusal(Refusal),
     /// A content-part `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for OutputContentPart {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::OutputText(v) => serialize_tagged(serializer, "output_text", v),
-            Self::Refusal(v) => serialize_tagged(serializer, "refusal", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for OutputContentPart {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "output_text" => return from_tagged(&value).map(Self::OutputText),
-                "refusal" => return from_tagged(&value).map(Self::Refusal),
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 /// Output text content.
@@ -240,34 +191,15 @@ pub struct Refusal {
 ///
 /// Any `type` the core does not own — a provider or plugin extension — is
 /// preserved verbatim in [`Annotation::Other`].
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum Annotation {
     /// A cited URL with the character span it annotates.
+    #[serde(rename = "url_citation")]
     UrlCitation(UrlCitation),
     /// An annotation `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for Annotation {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::UrlCitation(v) => serialize_tagged(serializer, "url_citation", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Annotation {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some("url_citation") = tag_of(&value) {
-            return from_tagged(&value).map(Self::UrlCitation);
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 /// A cited URL with the character span it annotates.

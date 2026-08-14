@@ -8,10 +8,12 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use toolkit_gts::gts_uri;
 
 use rust_decimal::Decimal;
 use time::OffsetDateTime;
 use toolkit_canonical_errors::Problem;
+use toolkit_gts::gts_id;
 use usage_collector_sdk::{
     IdempotencyKey, ResourceRef, UsageCollectorError, UsageRecord, UsageRecordStatus,
     UsageTypeGtsId, ValidationReason,
@@ -19,11 +21,12 @@ use usage_collector_sdk::{
 use uuid::Uuid;
 
 use super::{
-    CreateUsageRecordRequest, CreateUsageRecordResultDto, CreateUsageTypeRequest, UsageRecordDto,
+    AggregationBucketDto, CreateUsageRecordRequest, CreateUsageRecordResultDto,
+    CreateUsageTypeRequest, UsageRecordDto,
 };
 
 const SAMPLE_USAGE_TYPE_ID: &str =
-    "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
 const SAMPLE_RECORD_RFC3339: &str = "2026-06-11T12:34:56Z";
 const SAMPLE_RECORD_VALUE: &str = "42.5";
@@ -39,7 +42,7 @@ fn sample_tenant_uuid() -> Uuid {
 
 fn sample_persisted_record(status: UsageRecordStatus) -> UsageRecord {
     UsageRecord {
-        uuid: sample_record_uuid(),
+        id: sample_record_uuid(),
         gts_id: UsageTypeGtsId::new(SAMPLE_USAGE_TYPE_ID).expect("valid gts_id"),
         tenant_id: sample_tenant_uuid(),
         resource_ref: ResourceRef::new("rsc-dto", "compute.vm").expect("valid resource ref"),
@@ -123,7 +126,6 @@ fn register_request_body_is_permissive_at_deserialize() {
 
 fn minimal_create_record_json() -> serde_json::Value {
     serde_json::json!({
-        "uuid": sample_record_uuid().to_string(),
         "gts_id": SAMPLE_USAGE_TYPE_ID,
         "tenant_id": sample_tenant_uuid().to_string(),
         "resource_ref": {
@@ -151,6 +153,22 @@ fn create_usage_record_request_rejects_unknown_fields() {
         err.to_string().contains("extra"),
         "deserialize error MUST identify the unknown field (got `{err}`)",
     );
+}
+
+#[test]
+fn create_request_rejects_client_supplied_id() {
+    // `id` is server-derived; deny_unknown_fields must reject a client-sent id.
+    let json = serde_json::json!({
+        "id": "11111111-1111-1111-1111-111111111111",
+        "gts_id": SAMPLE_USAGE_TYPE_ID,
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "resource_ref": { "resource_id": "r1", "resource_type": "compute.vm" },
+        "value": "1",
+        "idempotency_key": "idem-1",
+        "created_at": "2026-07-07T00:00:00Z"
+    });
+    let err = serde_json::from_value::<super::CreateUsageRecordRequest>(json).unwrap_err();
+    assert!(err.to_string().contains("unknown field"), "got: {err}");
 }
 
 #[test]
@@ -362,9 +380,9 @@ fn create_usage_record_result_dto_serialises_accepted_with_lowercase_tag() {
         .and_then(serde_json::Value::as_object)
         .expect("Accepted MUST carry a `record` object sibling");
     assert_eq!(
-        record.get("uuid").and_then(serde_json::Value::as_str),
+        record.get("id").and_then(serde_json::Value::as_str),
         Some(sample_record_uuid().to_string().as_str()),
-        "Accepted.record.uuid MUST be the persisted record's uuid \
+        "Accepted.record.id MUST be the persisted record's id \
          - a regression that dropped the projection would surface here",
     );
 }
@@ -372,13 +390,15 @@ fn create_usage_record_result_dto_serialises_accepted_with_lowercase_tag() {
 #[test]
 fn create_usage_record_result_dto_serialises_rejected_with_lowercase_tag() {
     let problem = Problem {
-        problem_type: "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~".to_owned(),
+        problem_type: gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~").to_owned(),
         title: "Invalid argument".to_owned(),
         status: 400,
         detail: "test rejection".to_owned(),
         instance: None,
         trace_id: None,
         context: serde_json::json!({}),
+        error_code: None,
+        error_domain: None,
     };
     let dto = CreateUsageRecordResultDto::Rejected {
         index: 1,
@@ -406,4 +426,27 @@ fn create_usage_record_result_dto_serialises_rejected_with_lowercase_tag() {
         "Rejected.error.status MUST mirror the Problem's HTTP status \
          (a regression that flattened or shadowed the Problem fields would surface here)",
     );
+}
+
+#[test]
+fn aggregation_bucket_dto_serializes_above_ceiling_value_as_plain_string() {
+    use bigdecimal::BigDecimal;
+    // Beyond rust_decimal's ceiling — the whole point of the widening.
+    let big = "79228162514264337593543950400";
+    let dto = AggregationBucketDto {
+        key: vec!["eu".to_owned()],
+        value: Some(big.parse::<BigDecimal>().expect("bigdecimal parses")),
+    };
+    let wire = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(wire, serde_json::json!({ "key": ["eu"], "value": big }));
+}
+
+#[test]
+fn aggregation_bucket_dto_serializes_none_value_as_null() {
+    let dto = AggregationBucketDto {
+        key: Vec::new(),
+        value: None,
+    };
+    let wire = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(wire, serde_json::json!({ "key": [], "value": null }));
 }

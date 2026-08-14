@@ -5,7 +5,7 @@
 //! (`allow_parameter_override`, `allow_extra_params`), and the typed
 //! `provider_settings: P` payload.
 //!
-//! Declared as the GTS base schema via [`struct_to_gts_schema`]; concrete
+//! Declared as the GTS base schema via [`gts_type_schema`]; concrete
 //! provider-settings types (e.g. `OpenAiSettingsV1`, shipped in
 //! [`crate::models::providers`]) declare themselves as GTS leaves with
 //! `base = ModelInfoV1`. The set of provider leaves is open-ended.
@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use gts_macros::struct_to_gts_schema;
+use toolkit_gts::gts_type_schema;
 
 use crate::models::{
     ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, ModelCapabilities,
@@ -37,20 +37,19 @@ use crate::models::{
 ///
 /// # GTS schema
 ///
-/// - **`schema_id`**: `gts.cf.genai.model.info.v1~`
+/// - **`schema_id`**: `gts_id!("cf.genai.model.info.v1~")`
 /// - **base**: yes (root envelope; provider-specific leaves chain off it)
-#[struct_to_gts_schema(
+#[gts_type_schema(
     dir_path = "schemas",
     base = true,
-    type_id = "gts.cf.genai.model.info.v1~",
+    type_id = gts_id!("cf.genai.model.info.v1~"),
     description = "Generic model info envelope: provider-independent metadata + provider_settings JSON payload",
     properties = "gts_type,display_name,family,vendor,managed,architecture,format,supported_api,provider_model_id,capabilities,context_window,default_parameters"
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInfoV1<P: gts::GtsSchema = serde_json::Value> {
     // ── GTS schema identity ───────────────────────────────────────────
-    /// Full GTS schema chain identifying this model's settings shape — e.g.
-    /// `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`. Mirrors
+    /// Full GTS schema chain identifying this model's settings shape. Mirrors
     /// `ProviderV1.gts_type` and is the canonical key for resolving the
     /// concrete shape of `provider_settings` (which is a raw JSON blob —
     /// `serde_json::Value` — by default).
@@ -208,6 +207,7 @@ mod tests {
     use std::collections::HashSet;
 
     use gts::GtsSchema;
+    use toolkit_gts::gts_id;
 
     use crate::models::{
         ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, MediaCapability,
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn try_into_typed_fails_on_schema_id_mismatch() {
         let info = raw_info(
-            "gts.cf.genai.model.info.v1~cf.genai._.anthropic.v1~",
+            gts_id!("cf.genai.model.info.v1~cf.genai._.anthropic.v1~"),
             serde_json::json!({ "oagw_alias": "openai-prod" }),
         );
         let err = info

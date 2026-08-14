@@ -102,8 +102,16 @@ impl From<Error> for CanonicalError {
                 )
                 .create(),
 
+            // Keyed to the canonical `OData` spelling. `toolkit::api::odata`
+            // binds page size from either `$top` or `limit` (one slot, two
+            // accepted names), so the violation names `$top` and the
+            // description names both.
             InvalidLimit => OdataError::invalid_argument()
-                .with_field_violation("$top", "Invalid limit parameter", "INVALID_LIMIT")
+                .with_field_violation(
+                    "$top",
+                    "Invalid page size parameter ($top, alias limit)",
+                    "INVALID_LIMIT",
+                )
                 .create(),
 
             // Surface both halves of the conflict so a client filtering by
@@ -141,8 +149,9 @@ impl From<Error> for CanonicalError {
 mod tests {
     use super::*;
     use toolkit_canonical_errors::Problem;
+    use toolkit_gts::gts_id;
 
-    const ODATA_RESOURCE_TYPE: &str = "gts.cf.core.odata.query.v1~";
+    const ODATA_RESOURCE_TYPE: &str = gts_id!("cf.core.odata.query.v1~");
 
     fn wire(err: Error) -> Problem {
         Problem::from(CanonicalError::from(err))

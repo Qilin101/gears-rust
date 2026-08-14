@@ -23,23 +23,27 @@ use serde_json::json;
 use std::sync::Arc;
 use toolkit::{
     ClientHub, Gear,
-    api::{OperationBuilder, operation_builder::LicenseFeature},
+    api::{
+        OperationBuilder,
+        operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature},
+    },
     config::ConfigProvider,
     context::GearCtx,
     contracts::{ApiGatewayCapability, OpenApiRegistry, RestApiCapability},
 };
 use toolkit_canonical_errors::Problem;
+use toolkit_gts::gts_uri;
 use toolkit_security::SecurityContext;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const UNAUTHENTICATED_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~");
 const SERVICE_UNAVAILABLE_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~";
-const INTERNAL_TYPE: &str = "gts://gts.cf.core.errors.err.v1~cf.core.err.internal.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~");
+const INTERNAL_TYPE: &str = gts_uri!("cf.core.errors.err.v1~cf.core.err.internal.v1~");
 const PERMISSION_DENIED_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.permission_denied.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.permission_denied.v1~");
 const PROBLEM_JSON: &str = "application/problem+json";
 
 async fn problem_from(response: Response) -> Problem {
@@ -144,7 +148,7 @@ struct License;
 
 impl AsRef<str> for License {
     fn as_ref(&self) -> &'static str {
-        "gts.cf.core.lic.feat.v1~cf.core.global.base.v1"
+        CORE_GLOBAL_BASE_LICENSE_FEATURE
     }
 }
 
@@ -185,7 +189,7 @@ impl RestApiCapability for TestAuthGear {
         // Public route with explicit public marking
         let router = OperationBuilder::get("/tests/v1/api/public")
             .operation_id("test.public")
-            .public()
+            .anonymous()
             .summary("Public endpoint")
             .handler(public_handler)
             .json_response_with_schema::<TestResponse>(openapi, http::StatusCode::OK, "Success")
@@ -224,7 +228,11 @@ async fn test_auth_disabled_mode() {
 
     // Finalize router (applies middleware)
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     // Test protected route WITHOUT token (should work because auth is disabled)
@@ -286,7 +294,11 @@ async fn test_public_routes_accessible() {
     // First call rest_prepare to add built-in routes
     let router = Router::new();
     let router = api_gateway
-        .rest_prepare(&api_ctx, router)
+        .rest_prepare(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to prepare");
 
     // Then register test gear routes
@@ -297,28 +309,14 @@ async fn test_public_routes_accessible() {
 
     // Finally finalize
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
-    // Test built-in health endpoints
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .expect("Request failed");
-
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "Health endpoint should be accessible"
-    );
-
-    // Test OpenAPI endpoint
+    // Test OpenAPI endpoint (health probes are not served on the main gateway)
     let response = router
         .oneshot(
             Request::builder()
@@ -360,7 +358,11 @@ async fn test_public_routes_with_prefix_accessible() {
     // First call rest_prepare to add built-in routes
     let router = Router::new();
     let router = api_gateway
-        .rest_prepare(&api_ctx, router)
+        .rest_prepare(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to prepare");
 
     // Then register test gear routes
@@ -371,28 +373,14 @@ async fn test_public_routes_with_prefix_accessible() {
 
     // Finally finalize
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
-    // Test built-in health endpoints
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .expect("Request failed");
-
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "Health endpoint should be accessible"
-    );
-
-    // Test OpenAPI endpoint
+    // Test OpenAPI endpoint (health probes are not served on the main gateway)
     let response = router
         .clone()
         .oneshot(
@@ -455,7 +443,11 @@ async fn test_middleware_always_inserts_security_ctx() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     // Make request to protected handler that extracts SecurityContext
@@ -566,7 +558,11 @@ async fn test_route_pattern_matching_with_path_params() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     // Test that /tests/v1/api/users/123 is accessible (matches /tests/v1/api/users/{id})
@@ -634,7 +630,11 @@ async fn test_route_pattern_matching_with_prefix_path_params() {
         .expect("Failed to register routes");
 
     let router = api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize");
 
     // Test that /tests/v1/api/users/123 is accessible (matches /tests/v1/api/users/{id})
@@ -740,7 +740,7 @@ impl RestApiCapability for TestAuthEnabledGear {
         // Public route that extracts SecurityContext so tests can verify anonymous ctx
         let router = OperationBuilder::get("/tests/v1/api/public-ctx")
             .operation_id("test_auth.public_ctx")
-            .public()
+            .anonymous()
             .summary("Public endpoint with security context")
             .handler(protected_handler) // reuse: extracts SecurityContext
             .json_response_with_schema::<TestResponse>(openapi, http::StatusCode::OK, "Success")
@@ -773,7 +773,11 @@ async fn create_router(config: serde_json::Value, mock: MockAuthNResolverClient)
         .expect("Failed to register routes");
 
     api_gateway
-        .rest_finalize(&api_ctx, router)
+        .rest_finalize(
+            &api_ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize")
 }
 

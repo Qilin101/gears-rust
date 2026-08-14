@@ -68,6 +68,7 @@ toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 # schemas at `init()` (the crate RBAC uses for the same purpose). Depend on the
 # SDK contract crate — not the gear implementation — to preserve gear isolation.
 types-registry-sdk = { workspace = true }
+types-registry = { workspace = true }
 # `tokio::time::interval` drives the `serve` tick-loop; `macros`/`rt` for the
 # loop's `tokio::select!` / `tokio::spawn`.
 tokio = { workspace = true, features = ["time", "macros", "rt"] }
@@ -79,9 +80,11 @@ toolkit-macros = { workspace = true }
 toolkit-security = { workspace = true }
 # PEP (`PolicyEnforcer`, `ResourceType`, `AccessRequest`) for the authz gate.
 authz-resolver-sdk = { workspace = true }
+authz-resolver = { workspace = true }
 # AM client (`get_tenant` -> tenant_type) for the provisioning seller-type guard
 # (only a tenant whose type owns a billing ledger may be provisioned, §4.12).
 account-management-sdk = { workspace = true }
+account-management = { workspace = true }
 # `AuthzPermissionV1` + `gts_instance!` for the permission catalog.
 toolkit-gts = { workspace = true }
 # `gts_instance!`'s expansion references the `gts` crate directly (same as rbac).
@@ -110,6 +113,9 @@ toolkit-db = { workspace = true, features = ["pg", "sqlite"] }
 # crate as a direct dev-dep).
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 tokio = { workspace = true }
+# In-memory `MockTypesRegistryClient` for the rate-provider lazy-discovery test
+# (`module_tests.rs` exercising `resolve_rate_provider`).
+types-registry-sdk = { workspace = true, features = ["test-util"] }
 # Postgres testcontainers harness; tests reach `testcontainers` items through
 # the `testcontainers_modules::testcontainers` re-export, so the bare
 # `testcontainers` crate is not a direct dep. Raw SQL in tests goes through

@@ -9,8 +9,8 @@
 //! as input by re-serializing them into the matching [`InputItem`] variant.
 
 use crate::models::content::{InputContentPart, OutputContentPart};
-use crate::models::core::Role;
-use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of};
+use crate::models::extension::Extension;
+use crate::models::role::Role;
 
 // ---------------------------------------------------------------------------
 // InputItem
@@ -20,55 +20,27 @@ use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of}
 ///
 /// Any `type` the core does not own — a provider or plugin extension — is
 /// preserved verbatim in [`InputItem::Other`].
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum InputItem {
     /// A message from a participant.
+    #[serde(rename = "message")]
     Message(MessageItem),
     /// A function call (echoed back as context).
+    #[serde(rename = "function_call")]
     FunctionCall(FunctionCallItem),
     /// The result of a function call executed by the consumer.
+    #[serde(rename = "function_call_output")]
     FunctionCallOutput(FunctionCallOutputItem),
     /// A reference to an item from a previous response.
+    #[serde(rename = "item_reference")]
     ItemReference(ItemReference),
     /// Reasoning context from a previous response.
+    #[serde(rename = "reasoning")]
     Reasoning(ReasoningItem),
     /// An item `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for InputItem {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Message(v) => serialize_tagged(serializer, "message", v),
-            Self::FunctionCall(v) => serialize_tagged(serializer, "function_call", v),
-            Self::FunctionCallOutput(v) => serialize_tagged(serializer, "function_call_output", v),
-            Self::ItemReference(v) => serialize_tagged(serializer, "item_reference", v),
-            Self::Reasoning(v) => serialize_tagged(serializer, "reasoning", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for InputItem {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "message" => return from_tagged(&value).map(Self::Message),
-                "function_call" => return from_tagged(&value).map(Self::FunctionCall),
-                "function_call_output" => {
-                    return from_tagged(&value).map(Self::FunctionCallOutput);
-                }
-                "item_reference" => return from_tagged(&value).map(Self::ItemReference),
-                "reasoning" => return from_tagged(&value).map(Self::Reasoning),
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,50 +52,24 @@ impl<'de> serde::Deserialize<'de> for InputItem {
 /// Any `type` the core does not own — a provider or plugin extension (e.g.
 /// `openai:web_search_call`) — is preserved verbatim in [`OutputItem::Other`]
 /// and forwarded without interpretation.
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum OutputItem {
     /// The model's message response.
+    #[serde(rename = "message")]
     Message(MessageOutput),
     /// A function call issued by the model.
+    #[serde(rename = "function_call")]
     FunctionCall(FunctionCallItem),
     /// The model's reasoning trace.
+    #[serde(rename = "reasoning")]
     Reasoning(ReasoningOutput),
     /// Binary data output (Gears extension).
     #[serde(rename = "cf_gears:data")]
     Data(DataOutput),
     /// An item `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for OutputItem {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Message(v) => serialize_tagged(serializer, "message", v),
-            Self::FunctionCall(v) => serialize_tagged(serializer, "function_call", v),
-            Self::Reasoning(v) => serialize_tagged(serializer, "reasoning", v),
-            Self::Data(v) => serialize_tagged(serializer, "cf_gears:data", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for OutputItem {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "message" => return from_tagged(&value).map(Self::Message),
-                "function_call" => return from_tagged(&value).map(Self::FunctionCall),
-                "reasoning" => return from_tagged(&value).map(Self::Reasoning),
-                "cf_gears:data" => return from_tagged(&value).map(Self::Data),
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use toolkit_gts::gts_id;
 
 use authz_resolver_sdk::models::EvaluationRequest;
 use rust_decimal::Decimal;
@@ -30,9 +31,10 @@ use uuid::Uuid;
 use super::{
     AttributionTupleKey, authorize_attribution_tuple, authorize_usage_record, usage_record,
 };
+use crate::domain::ports::metrics::{NoopMetrics, PdpOp};
 use crate::domain::test_support::{CapturingTenantPermitResolver, enforcer_for};
 
-const SAMPLE_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+const SAMPLE_GTS_ID: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
 fn ctx() -> SecurityContext {
     SecurityContext::builder()
@@ -45,7 +47,7 @@ fn ctx() -> SecurityContext {
 
 fn record_with(subject: Option<SubjectRef>) -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::from_u128(0x0001),
+        id: Uuid::from_u128(0x0001),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         tenant_id: Uuid::from_u128(0xC330),
         resource_ref: ResourceRef::new("rsc-eq", "compute.vm").expect("valid resource ref"),
@@ -76,13 +78,20 @@ async fn captured_requests_for(record: &UsageRecord) -> (serde_json::Value, serd
     let enforcer =
         enforcer_for(Arc::clone(&resolver) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>);
 
-    authorize_usage_record(&enforcer, &ctx(), record, usage_record::actions::CREATE)
-        .await
-        .expect("permit");
+    authorize_usage_record(
+        &enforcer,
+        &NoopMetrics,
+        PdpOp::Ingest,
+        &ctx(),
+        record,
+        usage_record::actions::CREATE,
+    )
+    .await
+    .expect("permit");
     let from_record = resolver.take_last_request().expect("first call captured");
 
     let key = AttributionTupleKey::from_record(record, usage_record::actions::CREATE);
-    authorize_attribution_tuple(&enforcer, &ctx(), &key)
+    authorize_attribution_tuple(&enforcer, &NoopMetrics, PdpOp::Ingest, &ctx(), &key)
         .await
         .expect("permit");
     let from_key = resolver.take_last_request().expect("second call captured");
@@ -139,14 +148,14 @@ async fn key_and_record_compose_byte_identical_pdp_requests_with_full_subject() 
 
 /// Two records that hash-equal under `AttributionTupleKey` MUST always
 /// produce equal PDP requests -- even when their *non*-tuple fields
-/// (`uuid`, `gts_id`, `value`, `idempotency_key`, `metadata`,
+/// (`id`, `gts_id`, `value`, `idempotency_key`, `metadata`,
 /// `corrects_id`, `created_at`) differ wildly. This pins the
 /// projection-correctness premise of the dedup directly: "share the
 /// tuple => share the PDP payload".
 #[tokio::test]
 async fn equal_tuple_keys_produce_equal_pdp_requests_even_when_non_tuple_fields_differ() {
     let record_a = UsageRecord {
-        uuid: Uuid::from_u128(0xAAAA),
+        id: Uuid::from_u128(0xAAAA),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         tenant_id: Uuid::from_u128(0xDEAD),
         resource_ref: ResourceRef::new("rsc-shared", "compute.vm").expect("valid resource ref"),
@@ -164,7 +173,7 @@ async fn equal_tuple_keys_produce_equal_pdp_requests_even_when_non_tuple_fields_
         resource_ref: record_a.resource_ref.clone(),
         subject_ref: record_a.subject_ref.clone(),
         // … wildly different non-tuple fields:
-        uuid: Uuid::from_u128(0xBBBB),
+        id: Uuid::from_u128(0xBBBB),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         metadata: BTreeMap::new(),
         value: Decimal::from(-999),
@@ -185,14 +194,28 @@ async fn equal_tuple_keys_produce_equal_pdp_requests_even_when_non_tuple_fields_
     let enforcer =
         enforcer_for(Arc::clone(&resolver) as Arc<dyn authz_resolver_sdk::AuthZResolverClient>);
 
-    authorize_usage_record(&enforcer, &ctx(), &record_a, usage_record::actions::CREATE)
-        .await
-        .expect("permit");
+    authorize_usage_record(
+        &enforcer,
+        &NoopMetrics,
+        PdpOp::Ingest,
+        &ctx(),
+        &record_a,
+        usage_record::actions::CREATE,
+    )
+    .await
+    .expect("permit");
     let req_a = json(&resolver.take_last_request().expect("captured A"));
 
-    authorize_usage_record(&enforcer, &ctx(), &record_b, usage_record::actions::CREATE)
-        .await
-        .expect("permit");
+    authorize_usage_record(
+        &enforcer,
+        &NoopMetrics,
+        PdpOp::Ingest,
+        &ctx(),
+        &record_b,
+        usage_record::actions::CREATE,
+    )
+    .await
+    .expect("permit");
     let req_b = json(&resolver.take_last_request().expect("captured B"));
 
     assert_eq!(
@@ -248,7 +271,9 @@ async fn authorize_attribution_tuple_denies_record_outside_granted_tenant() {
         &record_with_tenant(foreign),
         usage_record::actions::CREATE,
     );
-    let denied = authorize_attribution_tuple(&enforcer, &ctx(), &foreign_key).await;
+    let denied =
+        authorize_attribution_tuple(&enforcer, &NoopMetrics, PdpOp::Ingest, &ctx(), &foreign_key)
+            .await;
     assert!(
         matches!(denied, Err(DomainError::AuthorizationDenied { .. })),
         "a record owned by a tenant outside the PDP-granted scope MUST be denied, got {denied:?}",
@@ -258,7 +283,7 @@ async fn authorize_attribution_tuple_denies_record_outside_granted_tenant() {
         &record_with_tenant(granted),
         usage_record::actions::CREATE,
     );
-    authorize_attribution_tuple(&enforcer, &ctx(), &granted_key)
+    authorize_attribution_tuple(&enforcer, &NoopMetrics, PdpOp::Ingest, &ctx(), &granted_key)
         .await
         .expect("a record owned by the granted tenant is permitted");
 }

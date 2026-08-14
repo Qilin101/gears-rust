@@ -754,6 +754,12 @@ pub enum RegistryError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("consumer proxy-wiring failed for gear '{gear}'")]
+    ProxyWiring {
+        gear: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(
         "REST phase requires an gateway host: gears with capability 'rest' found, but no gear with capability 'rest_host'"
     )]
@@ -1071,6 +1077,7 @@ mod tests {
             &self,
             _ctx: &crate::context::GearCtx,
             router: axum::Router,
+            _hc_registry: std::sync::Arc<crate::healthcheck::RestHealthcheckRegistry>,
         ) -> anyhow::Result<axum::Router> {
             Ok(router)
         }
@@ -1078,6 +1085,7 @@ mod tests {
             &self,
             _ctx: &crate::context::GearCtx,
             router: axum::Router,
+            _hc_registry: std::sync::Arc<crate::healthcheck::RestHealthcheckRegistry>,
         ) -> anyhow::Result<axum::Router> {
             Ok(router)
         }

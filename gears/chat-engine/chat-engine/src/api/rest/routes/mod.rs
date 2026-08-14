@@ -21,7 +21,9 @@ use std::sync::Arc;
 use axum::{Extension, Router};
 use http::StatusCode;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::{LicenseFeature, OperationBuilder};
+use toolkit::api::operation_builder::{
+    CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature, OperationBuilder,
+};
 
 use crate::api::rest::WebhookEmitter;
 use crate::api::rest::dto::{
@@ -44,13 +46,12 @@ const API_TAG: &str = "Chat Engine";
 
 /// License feature required by all `cf-chat-engine` endpoints.
 ///
-/// Mirrors the gating policy used by sibling modules
-/// (`gts.cf.core.lic.feat.v1~cf.core.global.base.v1`).
+/// Mirrors the gating policy used by sibling modules.
 pub(crate) struct ChatEngineLicense;
 
 impl AsRef<str> for ChatEngineLicense {
     fn as_ref(&self) -> &'static str {
-        "gts.cf.core.lic.feat.v1~cf.core.global.base.v1"
+        CORE_GLOBAL_BASE_LICENSE_FEATURE
     }
 }
 
@@ -77,7 +78,7 @@ pub struct ChatEngineServices {
 /// - `OperationBuilder::<verb>(path)` chain per endpoint.
 /// - `.authenticated()` + `.require_license_features([&ChatEngineLicense])`
 ///   on every protected route (the only public route is
-///   `POST /chat-engine/v1/shared/{share_token}` which uses `.public()`).
+///   `POST /chat-engine/v1/shared/{share_token}` which uses `.anonymous()`).
 /// - `.json_response_with_schema::<…>(openapi, status, desc)` for typed
 ///   responses; `.json_request::<…>(openapi, desc)` for typed bodies.
 /// - `.standard_errors(openapi)` registers the RFC-9457 error variants.
@@ -119,7 +120,7 @@ pub fn register_routes(
         .authenticated()
         .require_license_features([&ChatEngineLicense])
         .handler(handlers::session_types::list_session_types)
-        .json_response_with_schema::<Vec<SessionTypeDto>>(
+        .json_array_response_with_schema::<SessionTypeDto>(
             openapi,
             StatusCode::OK,
             "Session type list",
@@ -248,11 +249,15 @@ pub fn register_routes(
         .standard_errors(openapi)
         .register(router, openapi);
 
+    // @cpt-cf-chat-engine-seq-authz-shared-read
+    // Unauthenticated capability-URL route: no SecurityContext / PDP call; the
+    // opaque share token is the grant. See ExportService::access_shared, which
+    // reads under bypass::capability_read_scope() and 404s on miss/revoked.
     router = OperationBuilder::post("/chat-engine/v1/shared/{share_token}")
         .operation_id("chat_engine.session.access_shared")
         .summary("Access a session via a public share token")
         .tag(API_TAG)
-        .public()
+        .anonymous()
         .path_param("share_token", "Opaque share token (bearer secret)")
         .handler(handlers::export::access_shared)
         .json_response_with_schema::<SharedSessionDto>(

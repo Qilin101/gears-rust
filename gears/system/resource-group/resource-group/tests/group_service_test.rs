@@ -12,24 +12,26 @@
 mod common;
 
 use std::sync::Arc;
+use toolkit_gts::GTS_ID_PREFIX;
+use toolkit_gts::gts_id;
 
 use serde_json::json;
 use uuid::Uuid;
 
-use cf_gears_resource_group::domain::error::DomainError;
-use cf_gears_resource_group::domain::group_service::{GroupService, QueryProfile};
-use cf_gears_resource_group::domain::type_service::TypeService;
-use cf_gears_resource_group::infra::storage::entity::gts_type::{
+use resource_group::domain::error::DomainError;
+use resource_group::domain::group_service::{GroupService, QueryProfile};
+use resource_group::domain::type_service::TypeService;
+use resource_group::infra::storage::entity::gts_type::{
     Column as GtsTypeColumn, Entity as GtsTypeEntity,
 };
-use cf_gears_resource_group::infra::storage::entity::resource_group::{
+use resource_group::infra::storage::entity::resource_group::{
     Column as RgColumn, Entity as RgEntity,
 };
-use cf_gears_resource_group::infra::storage::entity::resource_group_membership::{
+use resource_group::infra::storage::entity::resource_group_membership::{
     self as membership_entity, Entity as MembershipEntity,
 };
-use cf_gears_resource_group::infra::storage::group_repo::GroupRepository;
-use cf_gears_resource_group::infra::storage::type_repo::TypeRepository;
+use resource_group::infra::storage::group_repo::GroupRepository;
+use resource_group::infra::storage::type_repo::TypeRepository;
 use resource_group_sdk::{CreateGroupRequest, CreateTypeRequest, UpdateGroupRequest};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use toolkit_db::secure::{SecureEntityExt, secure_insert};
@@ -237,7 +239,7 @@ async fn group_create_nonexistent_type() {
             &ctx,
             CreateGroupRequest {
                 id: None,
-                code: "gts.cf.core.rg.type.v1~x.test.nonexistent.v1~".to_owned(),
+                code: gts_id!("cf.core.rg.type.v1~x.test.nonexistent.type.v1~").to_owned(),
                 name: "Ghost".to_owned(),
                 parent_id: None,
                 metadata: None,
@@ -559,7 +561,7 @@ async fn group_move_child_to_root() {
     // Create a type that can be both root and child
     let root_type = common::create_root_type(&type_svc, "org").await;
     let child_code = format!(
-        "gts.cf.core.rg.type.v1~x.test.flexible{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.flexible{}.v1~",
         Uuid::now_v7().as_simple()
     );
     let _flexible_type = type_svc
@@ -681,7 +683,7 @@ async fn group_move_max_width_exceeded() {
 
     let root_type = common::create_root_type(&type_svc, "org").await;
     let child_code = format!(
-        "gts.cf.core.rg.type.v1~x.test.flex{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.flex{}.v1~",
         Uuid::now_v7().as_simple()
     );
     type_svc
@@ -1288,7 +1290,7 @@ async fn group_move_max_depth_exceeded() {
     let child_type = common::create_child_type(&type_svc, "dept", &[&root_type.code], &[]).await;
     // sub_type allows child_type as parent, can also be root
     let sub_code = format!(
-        "gts.cf.core.rg.type.v1~x.test.sub{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.sub{}.v1~",
         Uuid::now_v7().as_simple()
     );
     type_svc
@@ -1320,7 +1322,7 @@ async fn group_move_max_depth_exceeded() {
         common::create_root_group(&group_svc, &ctx, &sub_code, "Standalone", tenant_id).await;
     // sub needs a type that allows sub_code as parent -- create another type for that
     let subsub_code = format!(
-        "gts.cf.core.rg.type.v1~x.test.subsub{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.subsub{}.v1~",
         Uuid::now_v7().as_simple()
     );
     type_svc
@@ -1917,7 +1919,7 @@ async fn group_metadata_in_hierarchy_response() {
 /// Helper: build the ADR-001 type ecosystem.
 /// Returns (tenant_type, dept_type, branch_type, user_type, course_type).
 async fn create_adr_types(
-    type_svc: &cf_gears_resource_group::domain::type_service::TypeService<TypeRepository>,
+    type_svc: &resource_group::domain::type_service::TypeService<TypeRepository>,
 ) -> (
     resource_group_sdk::ResourceGroupType,
     resource_group_sdk::ResourceGroupType,
@@ -1929,7 +1931,7 @@ async fn create_adr_types(
     let course_type = common::create_root_type(type_svc, "adrcourse").await;
 
     let suffix_t = format!("adrtenant{}", uuid::Uuid::now_v7().as_simple());
-    let tenant_code = format!("gts.cf.core.rg.type.v1~x.test.{suffix_t}.v1~");
+    let tenant_code = format!("{}x.test.{suffix_t}.v1~", gts_id!("cf.core.rg.type.v1~"));
 
     // Tenant type: create first without self-reference, then update
     type_svc
@@ -1982,7 +1984,7 @@ async fn create_adr_types(
 #[tokio::test]
 async fn adr_full_hierarchy_reproduction() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2058,7 +2060,7 @@ async fn adr_full_hierarchy_reproduction() {
 #[tokio::test]
 async fn adr_tenant_self_nesting() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2079,7 +2081,7 @@ async fn adr_tenant_self_nesting() {
 #[tokio::test]
 async fn adr_department_cannot_be_root() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2114,7 +2116,7 @@ async fn adr_department_cannot_be_root() {
 #[tokio::test]
 async fn adr_branch_only_under_department() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2154,7 +2156,7 @@ async fn adr_branch_only_under_department() {
 #[tokio::test]
 async fn adr_branch_allows_users_and_courses() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2188,7 +2190,7 @@ async fn adr_branch_allows_users_and_courses() {
 #[tokio::test]
 async fn adr_tenant_rejects_course_membership() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2219,7 +2221,7 @@ async fn adr_tenant_rejects_course_membership() {
 #[tokio::test]
 async fn adr_same_user_in_multiple_groups() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2252,7 +2254,7 @@ async fn adr_same_user_in_multiple_groups() {
 #[tokio::test]
 async fn adr_same_resource_different_types() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2291,7 +2293,7 @@ async fn adr_same_resource_different_types() {
 #[tokio::test]
 async fn security_group_metadata_sql_injection() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2342,7 +2344,7 @@ async fn security_group_metadata_sql_injection() {
 #[tokio::test]
 async fn security_group_metadata_large_payload() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2688,7 +2690,7 @@ async fn tenant_root_self_update_allowed() {
 #[tokio::test]
 async fn get_group_unscoped_returns_group_without_ctx() {
     let db = common::test_db().await;
-    let type_svc = cf_gears_resource_group::domain::type_service::TypeService::new(
+    let type_svc = resource_group::domain::type_service::TypeService::new(
         db.clone(),
         Arc::new(TypeRepository),
     );
@@ -2722,5 +2724,96 @@ async fn get_group_unscoped_missing_is_not_found() {
     assert!(
         matches!(err, DomainError::GroupNotFound { .. }),
         "expected GroupNotFound, got: {err:?}"
+    );
+}
+
+/// Creating a group with an id that is already taken yields
+/// `GroupAlreadyExists`, not a generic database error. The second create runs
+/// in a different tenant, so this pins the group id as globally unique rather
+/// than unique per tenant.
+#[tokio::test]
+async fn group_create_duplicate_id_is_already_exists() {
+    let db = common::test_db().await;
+    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let group_svc = common::make_group_service(db.clone());
+
+    let tenant_a = Uuid::now_v7();
+    let tenant_b = Uuid::now_v7();
+    let ctx_a = common::make_ctx(tenant_a);
+    let ctx_b = common::make_ctx(tenant_b);
+    let root_type = common::create_root_type(&type_svc, "dupid").await;
+
+    let id = Uuid::now_v7();
+    let req = |name: &str| CreateGroupRequest {
+        id: Some(id),
+        code: root_type.code.clone(),
+        name: name.to_owned(),
+        parent_id: None,
+        metadata: None,
+    };
+
+    group_svc
+        .create_group(&ctx_a, req("First"), tenant_a)
+        .await
+        .expect("first create should succeed");
+
+    let err = group_svc
+        .create_group(&ctx_b, req("Second"), tenant_b)
+        .await
+        .expect_err("the id is taken globally, so another tenant cannot reuse it");
+
+    assert!(
+        matches!(err, DomainError::GroupAlreadyExists { id: got } if got == id),
+        "expected GroupAlreadyExists({id}), got: {err:?}"
+    );
+
+    // Verify entity state: the rejected insert left the first group untouched
+    let conn = db.conn().expect("conn");
+    let scope = AccessScope::allow_all();
+    let model = RgEntity::find()
+        .filter(RgColumn::Id.eq(id))
+        .secure()
+        .scope_with(&scope)
+        .one(&conn)
+        .await
+        .expect("query")
+        .expect("found");
+    assert_eq!(model.name, "First");
+    assert_eq!(model.tenant_id, tenant_a);
+}
+
+/// Duplicate id inside the caller's own tenant also yields `GroupAlreadyExists`.
+#[tokio::test]
+async fn group_create_duplicate_id_same_tenant_is_already_exists() {
+    let db = common::test_db().await;
+    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let group_svc = common::make_group_service(db.clone());
+
+    let tenant = Uuid::now_v7();
+    let ctx = common::make_ctx(tenant);
+    let root_type = common::create_root_type(&type_svc, "dupidsame").await;
+
+    let id = Uuid::now_v7();
+    let req = |name: &str| CreateGroupRequest {
+        id: Some(id),
+        code: root_type.code.clone(),
+        name: name.to_owned(),
+        parent_id: None,
+        metadata: None,
+    };
+
+    group_svc
+        .create_group(&ctx, req("First"), tenant)
+        .await
+        .expect("first create should succeed");
+
+    let err = group_svc
+        .create_group(&ctx, req("Second"), tenant)
+        .await
+        .expect_err("the id is already taken in this tenant");
+
+    assert!(
+        matches!(err, DomainError::GroupAlreadyExists { id: got } if got == id),
+        "expected GroupAlreadyExists({id}), got: {err:?}"
     );
 }

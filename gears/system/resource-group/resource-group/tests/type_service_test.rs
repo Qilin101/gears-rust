@@ -10,19 +10,20 @@
 mod common;
 
 use std::sync::Arc;
+use toolkit_gts::GTS_ID_PREFIX;
 
 use serde_json::json;
 use uuid::Uuid;
 
-use cf_gears_resource_group::domain::error::DomainError;
-use cf_gears_resource_group::domain::repo::TypeRepositoryTrait;
-use cf_gears_resource_group::domain::type_service::TypeService;
-use cf_gears_resource_group::infra::storage::entity::{
+use resource_group::domain::error::DomainError;
+use resource_group::domain::repo::TypeRepositoryTrait;
+use resource_group::domain::type_service::TypeService;
+use resource_group::infra::storage::entity::{
     gts_type::{self, Entity as GtsTypeEntity},
     gts_type_allowed_membership::{self, Entity as AllowedMembershipEntity},
     gts_type_allowed_parent::{self, Entity as AllowedParentEntity},
 };
-use cf_gears_resource_group::infra::storage::type_repo::TypeRepository;
+use resource_group::infra::storage::type_repo::TypeRepository;
 use resource_group_sdk::{CreateTypeRequest, UpdateTypeRequest};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use toolkit_db::secure::{SecureEntityExt, secure_insert};
@@ -31,7 +32,7 @@ use toolkit_security::AccessScope;
 /// Generate a unique GTS type code with the given suffix.
 fn type_code(suffix: &str) -> String {
     format!(
-        "gts.cf.core.rg.type.v1~x.test.{}{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.{}{}.v1~",
         suffix,
         Uuid::now_v7().as_simple()
     )

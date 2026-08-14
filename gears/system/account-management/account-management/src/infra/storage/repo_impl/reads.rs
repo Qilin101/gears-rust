@@ -9,15 +9,17 @@ use std::collections::HashMap;
 
 use account_management_sdk::TenantInfoFilterField;
 use bigdecimal::BigDecimal;
-use gts::GtsID;
+use gts::GtsId;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, FromQueryResult, Order, QuerySelect};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, FromQueryResult, Order, QuerySelect, QueryTrait,
+};
 use serde_json::Value;
 use toolkit_db::odata::sea_orm_filter::{
     FieldToColumn, LimitCfg, ODataFieldMapping, PaginateOdataTryError, paginate_odata_try,
 };
 use toolkit_db::secure::SecureEntityExt;
-use toolkit_odata::filter::{FilterOp, ODataValue};
+use toolkit_odata::filter::{FieldKind, FilterField as _, FilterOp, ODataValue};
 use toolkit_odata::{ODataQuery, Page, SortDir, ast};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
@@ -109,7 +111,7 @@ impl FieldToColumn<TenantInfoFilterField> for TenantODataMapper {
             }
             // Chained `gts.*` tenant-type string → its deterministic UUIDv5,
             // compared against the `tenant_type_uuid` column. Same derivation
-            // as `uuid_for_registered_schema` (`GtsID::new(s).to_uuid()`), so a
+            // as `uuid_for_registered_schema` (`GtsId::try_new(s).to_uuid()`), so a
             // value taken from the projection round-trips to the stored UUID.
             // Only membership operators are admissible — an ordered comparison
             // on a derived UUID has no honest meaning (mirrors `status`).
@@ -124,7 +126,7 @@ impl FieldToColumn<TenantInfoFilterField> for TenantODataMapper {
                         ));
                     }
                 }
-                let uuid = GtsID::new(s).map(|g| g.to_uuid()).map_err(|e| {
+                let uuid = GtsId::try_new(s).map(|g| g.to_uuid()).map_err(|e| {
                     format!(
                         "invalid `tenant_type` value '{s}'; expected a chained GTS \
                          type id (e.g. 'gts.cf.core.am.tenant_type.v1~…~'): {e}"
@@ -136,23 +138,20 @@ impl FieldToColumn<TenantInfoFilterField> for TenantODataMapper {
         }
     }
 
-    /// Reject `$orderby=status` and `status` cursor keys: the column
-    /// is exposed as a string contract on the wire while it is
-    /// `SMALLINT` in storage, and there is no consistent ordering
-    /// across the two shapes — alphabetical (`active < deleted <
-    /// suspended`) versus numeric (`Active = 1 < Suspended = 2 <
-    /// Deleted = 3`). The framework rejects the `$orderby` clause as
-    /// `InvalidOrderByField` before composing the effective order, so
-    /// the cursor codec never sees a translated-shape value.
+    /// `$orderby=status` sorts by the lifecycle ordinal (`Active = 1 <
+    /// Suspended = 2 < Deleted = 3`), NOT alphabetically by the wire
+    /// string — a deliberate categorical order (healthy first,
+    /// tombstones last, and inverted via `desc`) that operator UIs sort
+    /// their Status column by. Cursor pages are safe: both
+    /// the effective-order comparison and `extract_cursor_value` speak
+    /// the storage `SMALLINT`, so the codec never sees a
+    /// translated-shape value.
+    ///
+    /// `$orderby=tenant_type` stays rejected: it compares via a derived
+    /// `UUIDv5`, and an ordered comparison on a derived UUID has no
+    /// honest meaning.
     fn is_orderable(field: TenantInfoFilterField) -> bool {
-        // `status` and `tenant_type` are exposed as strings on the wire but
-        // compared via a translated storage shape (SMALLINT / derived
-        // UUIDv5); neither has a consistent wire-vs-storage order, so
-        // `$orderby` on them is rejected before the effective order composes.
-        !matches!(
-            field,
-            TenantInfoFilterField::Status | TenantInfoFilterField::TenantType
-        )
+        !matches!(field, TenantInfoFilterField::TenantType)
     }
 }
 
@@ -182,6 +181,17 @@ impl ODataFieldMapping<TenantInfoFilterField> for TenantODataMapper {
             TenantInfoFilterField::UpdatedAt => {
                 sea_orm::Value::TimeDateTimeWithTimeZone(Some(Box::new(model.updated_at)))
             }
+        }
+    }
+
+    /// `status` is a wire string but sorts (and therefore cursors) by
+    /// its storage lifecycle ordinal — encode/parse its cursor token as
+    /// an integer, not with the wire `String` kind. Every
+    /// other field's cursor shape matches its wire kind.
+    fn cursor_kind(field: TenantInfoFilterField) -> FieldKind {
+        match field {
+            TenantInfoFilterField::Status => FieldKind::I64,
+            other => other.kind(),
         }
     }
 }
@@ -447,18 +457,30 @@ pub(super) async fn count_children(
 /// different from [`count_children`], which is an internal
 /// delete-saga guard (`allow_all`, always counts `Provisioning`):
 ///
-/// * **Scope-filtered** — bounded by the caller's `scope` through
-///   `SecureORM`, so direct children behind a self-managed barrier the
-///   caller cannot penetrate collapse to `0`. This matches the
-///   visibility rule the rest of the public read surface obeys.
+/// * **Gated on the PARENT's Respect-reachability, then counts every
+///   direct child** — including a `self_managed` direct child. This is
+///   the direct-child carve-out (see `service::scope_util`): a
+///   `self_managed` tenant sits behind a `barrier = 1` closure edge
+///   even from its own parent, so clamping each *child* by the caller's
+///   barrier-respecting scope would silently drop a Respect-reachable
+///   parent's `self_managed` direct child from its `child_count` (while
+///   `list_children` still shows it — the two must agree). Instead we
+///   check which requested parents the caller can Respect-reach, then
+///   count all their direct children. The `parent_id` predicate keeps
+///   the count strictly depth-1, so nothing below a barrier leaks: a
+///   parent the caller can only reach via the identity-level carve-out
+///   (i.e. a `self_managed` tenant past the barrier) is NOT
+///   Respect-reachable, so its subtree count collapses to `0`.
 /// * **`Provisioning` excluded** — those rows have no public
 ///   representation anywhere on the SDK boundary. `Deleted` rows are
 ///   *included*, mirroring that they stay reachable via
 ///   `$filter=status eq 'deleted'`.
 ///
-/// One grouped `COUNT ... GROUP BY parent_id` for the whole batch — no
-/// N+1 across the page. Parents with no matching child are absent from
-/// the returned map; callers default those to `0`.
+/// One indexed statement for the whole batch (the Respect-scoped parent
+/// gate rides as a subquery inside the grouped
+/// `COUNT ... GROUP BY parent_id`) — no N+1 across the page. Parents
+/// with no matching child are absent from the returned map; callers
+/// default those to `0`.
 pub(super) async fn count_children_grouped(
     repo: &TenantRepoImpl,
     scope: &AccessScope,
@@ -475,12 +497,40 @@ pub(super) async fn count_children_grouped(
     }
     let connection = repo.db.conn()?;
 
-    let rows = tenants::Entity::find()
+    // The access-control boundary: of the requested parents, which can
+    // the caller Respect-reach? Only children of parents the caller can
+    // genuinely see are counted. A parent reachable to the caller only
+    // via the identity-level direct-child carve-out (a self_managed
+    // tenant past its barrier) is absent from this Respect-scoped set,
+    // so its children are never counted.
+    //
+    // Composed as a SUBQUERY of the count statement (not a separate
+    // read): the gate and the count must observe one database snapshot,
+    // otherwise a parent concurrently reparented or flipped behind a
+    // barrier between two statements could contribute a count the
+    // caller has just lost access to.
+    let reachable_parents = tenants::Entity::find()
         .secure()
         .scope_with(scope)
+        .filter(Condition::all().add(tenants::Column::Id.is_in(parent_ids.iter().copied())))
+        .into_inner()
+        .select_only()
+        .column(tenants::Column::Id)
+        .into_query();
+
+    // Count every direct child of each Respect-reachable parent,
+    // INCLUDING self_managed direct children. The parent subquery above
+    // is the access boundary and the `parent_id` predicate pins this to
+    // depth 1, so the outer count runs unclamped (`allow_all`) rather
+    // than re-applying the caller's barrier=0 subtree clamp — which
+    // would otherwise drop a self_managed direct child of a reachable
+    // parent. `Provisioning` is excluded; `Deleted` is included.
+    let rows = tenants::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
         .filter(
             Condition::all()
-                .add(tenants::Column::ParentId.is_in(parent_ids.iter().copied()))
+                .add(tenants::Column::ParentId.in_subquery(reachable_parents))
                 .add(tenants::Column::Status.ne(TenantStatus::Provisioning.as_smallint())),
         )
         .project_all(&connection, |q| {
@@ -588,11 +638,13 @@ pub(super) async fn is_descendant(
 #[cfg(test)]
 mod tenant_type_filter_tests {
     use super::*;
+    use toolkit_gts::gts_id;
 
     // A valid `cf`-vendor chained tenant-type id (the one `service_tests`
     // uses). de0901 validates GTS string literals via `GtsOps::parse_id`; a
     // valid `cf` id is accepted, so no lint suppression is needed.
-    const SAMPLE_TENANT_TYPE_GTS: &str = "gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~";
+    const SAMPLE_TENANT_TYPE_GTS: &str =
+        gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~");
 
     type Mapper = TenantODataMapper;
     type Field = TenantInfoFilterField;
@@ -600,10 +652,12 @@ mod tenant_type_filter_tests {
     /// `$filter=tenant_type eq '<gts>'` maps the chained string to the same
     /// deterministic `UUIDv5` the storage column holds, so a value
     /// taken from the projection round-trips. Pins the derivation against
-    /// `GtsID::to_uuid` so a future codec change is caught.
+    /// `GtsId::to_uuid` so a future codec change is caught.
     #[test]
     fn tenant_type_string_maps_to_derived_uuidv5() {
-        let expected = GtsID::new(SAMPLE_TENANT_TYPE_GTS).expect("gts").to_uuid();
+        let expected = GtsId::try_new(SAMPLE_TENANT_TYPE_GTS)
+            .expect("gts")
+            .to_uuid();
         let out = <Mapper as FieldToColumn<Field>>::map_value(
             Field::TenantType,
             FilterOp::Eq,
@@ -642,6 +696,17 @@ mod tenant_type_filter_tests {
     fn tenant_type_is_not_orderable() {
         assert!(!<Mapper as FieldToColumn<Field>>::is_orderable(
             Field::TenantType
+        ));
+    }
+
+    // Regression guard: the Tenants-page Status column sorts via
+    // `$orderby=status`; the field must be orderable (lifecycle-ordinal
+    // order — see `is_orderable` docs), not rejected with
+    // `InvalidOrderByField` → 400 as it used to be.
+    #[test]
+    fn status_is_orderable() {
+        assert!(<Mapper as FieldToColumn<Field>>::is_orderable(
+            Field::Status
         ));
     }
 }

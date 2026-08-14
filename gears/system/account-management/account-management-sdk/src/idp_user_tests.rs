@@ -9,11 +9,13 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, reason = "test helpers")]
 
 use super::*;
+use toolkit_gts::gts_id;
 
 #[test]
 fn tenant_context_new_carries_inputs_verbatim() {
     let id = Uuid::from_u128(0x42);
-    let tenant_type = gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~");
+    let tenant_type =
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"));
     let ctx = IdpTenantContext::new(id, "acme", tenant_type.clone(), None);
     assert_eq!(ctx.tenant_id, id);
     assert_eq!(ctx.tenant_name, "acme");
@@ -24,7 +26,8 @@ fn tenant_context_new_carries_inputs_verbatim() {
 #[test]
 fn tenant_context_new_with_metadata_populates_field() {
     let id = Uuid::from_u128(0x43);
-    let tenant_type = gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~");
+    let tenant_type =
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"));
     let metadata = serde_json::json!({"realm": "acme-prod"});
     let ctx = IdpTenantContext::new(id, "acme", tenant_type.clone(), Some(metadata.clone()));
     assert_eq!(ctx.tenant_type, tenant_type);
@@ -36,7 +39,7 @@ fn tenant_context_serde_skips_absent_metadata() {
     // `metadata = None` is the default-and-most-common shape for
     // plugins that bind via external configuration; the wire payload
     // stays minimal in that case.
-    let tenant_type = gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.x.v1~");
+    let tenant_type = gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.x.v1~"));
     let ctx = IdpTenantContext::new(Uuid::from_u128(0x44), "acme", tenant_type.clone(), None);
     let json = serde_json::to_value(&ctx).expect("serialise");
     let obj = json.as_object().expect("object");
@@ -75,6 +78,92 @@ fn user_operation_failure_metric_labels_are_stable() {
         IdpUserOperationFailure::Rejected { detail: "x".into() }.as_metric_label(),
         "rejected"
     );
+    assert_eq!(
+        IdpUserOperationFailure::FieldNotWritable {
+            fields: vec![IdpUserAttribute::Email],
+            detail: "x".into()
+        }
+        .as_metric_label(),
+        "field_not_writable"
+    );
+}
+
+/// The attribute tokens are a wire contract: they land in
+/// `field_violations[].field` and MUST equal the corresponding
+/// `UserUpdateRequest` JSON property name, because clients key
+/// form-field attribution off the string. A rename here silently
+/// breaks a consumer's field mapping, so the tokens are pinned.
+#[test]
+fn user_attribute_field_tokens_match_the_patch_property_names() {
+    for (attribute, expected) in [
+        (IdpUserAttribute::Username, "username"),
+        (IdpUserAttribute::Email, "email"),
+        (IdpUserAttribute::DisplayName, "display_name"),
+        (IdpUserAttribute::FirstName, "first_name"),
+        (IdpUserAttribute::LastName, "last_name"),
+    ] {
+        assert_eq!(attribute.as_field_token(), expected);
+        assert!(
+            !attribute.as_human_phrase().is_empty(),
+            "{expected}: every attribute needs a human phrase for the curated public detail"
+        );
+    }
+}
+
+/// `FieldNotWritable` carries its provider `detail` through the shared
+/// accessor like every other variant — AM's boundary digests it rather
+/// than echoing it, so the accessor MUST expose the raw string.
+#[test]
+fn field_not_writable_exposes_detail() {
+    let f = IdpUserOperationFailure::FieldNotWritable {
+        fields: vec![IdpUserAttribute::FirstName],
+        detail: "attribute is read-only (LDAP federated)".into(),
+    };
+    assert_eq!(f.detail(), "attribute is read-only (LDAP federated)");
+    assert_eq!(
+        f.to_string(),
+        "field_not_writable: attribute is read-only (LDAP federated)"
+    );
+}
+
+/// `FieldNotWritable` carries a *set*: a merge patch can touch several
+/// attributes and a read-only federated realm typically locks more than
+/// one, so the variant MUST be able to name them all in one failure
+/// rather than forcing a round-trip per attribute.
+#[test]
+fn field_not_writable_carries_every_refused_attribute() {
+    let f = IdpUserOperationFailure::FieldNotWritable {
+        fields: vec![
+            IdpUserAttribute::Email,
+            IdpUserAttribute::FirstName,
+            IdpUserAttribute::LastName,
+        ],
+        detail: "attributes are read-only (LDAP federated)".into(),
+    };
+    let IdpUserOperationFailure::FieldNotWritable { fields, .. } = &f else {
+        panic!("expected FieldNotWritable");
+    };
+    assert_eq!(
+        fields,
+        &[
+            IdpUserAttribute::Email,
+            IdpUserAttribute::FirstName,
+            IdpUserAttribute::LastName
+        ]
+    );
+    assert_eq!(f.as_metric_label(), "field_not_writable");
+}
+
+/// `IdpUserAttribute` is the key type providers use to hold their
+/// non-writable set, so it MUST be usable in a `HashSet` directly.
+#[test]
+fn user_attribute_is_hashable_for_provider_side_sets() {
+    let locked: std::collections::HashSet<IdpUserAttribute> =
+        [IdpUserAttribute::Email, IdpUserAttribute::Username]
+            .into_iter()
+            .collect();
+    assert!(locked.contains(&IdpUserAttribute::Email));
+    assert!(!locked.contains(&IdpUserAttribute::LastName));
 }
 
 #[test]
@@ -411,7 +500,7 @@ fn idp_list_users_request_carries_typed_filter_and_order() {
     let ctx = IdpTenantContext::new(
         Uuid::from_u128(1),
         "acme",
-        gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~")),
         None,
     );
     let pagination = IdpUserPagination::default();
@@ -445,7 +534,7 @@ fn idp_list_users_request_new_defaults_filter_and_order_to_none() {
     let ctx = IdpTenantContext::new(
         Uuid::from_u128(2),
         "acme",
-        gts::GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+        gts::GtsTypeId::new(gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~")),
         None,
     );
     let req = IdpListUsersRequest::new(ctx, IdpUserPagination::default());

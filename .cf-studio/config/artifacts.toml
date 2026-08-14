@@ -27,7 +27,7 @@ reason = "Ignore 'gears/system/authz-resolver' (not SDLC-documented yet: missing
 patterns = ["gears/system/authz-resolver/*"]
 
 [[ignore]]
-reason = "Ignore module 'cluster' traceability while the gear lands in stacked PRs: docs ship in the first PR but their code markers are split across the standalone-plugin and wiring/examples PRs. Removed in the final cluster PR once all code is present and full bidirectional traceability validates."
+reason = "Ignore module 'cluster' traceability pending a full bidirectional traceability audit now that standalone-plugin and wiring/examples code has landed."
 patterns = ["gears/system/cluster/*"]
 
 [[ignore]]
@@ -93,9 +93,10 @@ patterns = [
 ]
 
 [[ignore]]
-reason = "Ignore file-storage companion docs — api.md is a reference summary supplementary to DESIGN.md, not a standalone SDLC artifact."
+reason = "Ignore file-storage companion docs — api.md is a reference summary supplementary to DESIGN.md, and operations.md is an operator-facing config/runbook reference (P2 remediation item 3.8), not standalone SDLC artifacts."
 patterns = [
   "gears/file-storage/docs/api.md",
+  "gears/file-storage/docs/operations.md",
 ]
 
 [[ignore]]
@@ -122,8 +123,14 @@ pattern = "PRD.md"
 traceability = "FULL"
 required = true
 
+# Glob (not a literal name) so a gear may ship companion design documents
+# alongside DESIGN.md — DESIGN-<aspect>.md, for an aspect large enough to
+# carve out of the main design and own its own artifact. Each match is
+# validated as a full DESIGN artifact against the kit constraints.
+# Files that are NOT standalone SDLC artifacts must be listed in [[ignore]]
+# above; ignore takes precedence over this pattern.
 [systems.autodetect.artifacts.DESIGN]
-pattern = "DESIGN.md"
+pattern = "DESIGN*.md"
 traceability = "FULL"
 required = false
 
@@ -160,6 +167,34 @@ extensions = [".rs"]
 [[systems.autodetect.codebase]]
 name = "Tests"
 path = "{system_root}/tests"
+extensions = [".rs"]
+
+# Some gears/$system modules (e.g. file-storage) nest the crate a level deeper
+# (gears/file-storage/file-storage/src, plus a sibling *-sdk crate) instead of
+# putting the crate directly at gears/$system/src — mirrors the equivalent
+# "Nested Gears"/"Nested Tests"/"Nested SDK"/"Nested SDK Tests" entries already
+# used below for gears/system/$system. Without these, code under a nested
+# crate layout is never scanned for @cpt traceability markers, so any to_code
+# CDSL instruction there can never be satisfied regardless of the markers
+# actually present in the code.
+[[systems.autodetect.codebase]]
+name = "Nested Gears"
+path = "{system_root}/{system}/src"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "Nested Tests"
+path = "{system_root}/{system}/tests"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "Nested SDK"
+path = "{system_root}/{system}-sdk/src"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "Nested SDK Tests"
+path = "{system_root}/{system}-sdk/tests"
 extensions = [".rs"]
 
 [[systems.autodetect]]
@@ -247,6 +282,11 @@ name = "Nested SDK Tests"
 path = "{system_root}/{system}-sdk/tests"
 extensions = [".rs"]
 
+[[systems.autodetect.codebase]]
+name = "Nested SDK Examples"
+path = "{system_root}/{system}-sdk/examples"
+extensions = [".rs"]
+
 # Nested sub-plugin scope: account-management/docs/tr-plugin/ carries its own PRD/DESIGN/ADR.
 # Declared as a child of the `gears/system/$system` autodetect rule so the sub-plugin
 # artifacts are detected as belonging to tr-plugin, not to account-management.
@@ -291,6 +331,44 @@ fail_on_unmatched_markdown = true
 [[systems.autodetect.children]]
 kit = "gears"
 system_root = "{project_root}/gears/system/authn-resolver/plugins/oidc-authn-plugin/docs"
+artifacts_root = "{system_root}"
+
+[systems.autodetect.children.artifacts]
+[systems.autodetect.children.artifacts.PRD]
+pattern = "PRD.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.children.artifacts.DESIGN]
+pattern = "DESIGN.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.children.artifacts.ADR]
+pattern = "ADR/*.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.children.artifacts.DECOMPOSITION]
+pattern = "DECOMPOSITION.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.children.artifacts.FEATURE]
+pattern = "features/*.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.children.validation]
+require_kind_registered_in_kit = true
+require_md_extension = true
+fail_on_unmatched_markdown = true
+
+# Nested sub-plugin scope: TimescaleDB usage-collector storage plugin carries its own
+# PRD/DESIGN under gears/system/usage-collector/plugins/timescaledb-usage-collector-plugin/docs.
+[[systems.autodetect.children]]
+kit = "gears"
+system_root = "{project_root}/gears/system/usage-collector/plugins/timescaledb-usage-collector-plugin/docs"
 artifacts_root = "{system_root}"
 
 [systems.autodetect.children.artifacts]

@@ -615,8 +615,8 @@ The Provider Plugin interface is the realization of the `cpt-cf-llm-gateway-comp
 | Method | Invoked | Inputs | Output |
 |--------|---------|--------|--------|
 | `capabilities` | Local, no external call | `&self` only (provider-wide, static per plugin instance) | `ProviderPluginCapabilities` — integration-level capability report (see below) |
-| `create_response` | Sync `/responses` call, after provider resolution and capability check | `SecurityContext`, `ProviderCallCtx`, `gts.cf.llmgw.core.create_response_body.v1~` | `gts.cf.llmgw.core.response_resource.v1~` or `Err(LlmGatewayError)` |
-| `create_response_stream` | Streaming `/responses` call | `SecurityContext`, `ProviderCallCtx`, `gts.cf.llmgw.core.create_response_body.v1~` | `Stream` of `StreamingEvent`s in `sequence_number` order, or `Err(LlmGatewayError)` for pre-stream setup failures |
+| `create_response` | Sync `/responses` call, after provider resolution and capability check | `SecurityContext`, `ProviderCallCtx`, `CreateResponseBody` | `ResponseResource` or `Err(LlmGatewayError)` |
+| `create_response_stream` | Streaming `/responses` call | `SecurityContext`, `ProviderCallCtx`, `CreateResponseBody` | `Stream` of `StreamingEvent`s in `sequence_number` order, or `Err(LlmGatewayError)` for pre-stream setup failures |
 | `create_embedding` | `POST /embeddings` | `SecurityContext`, `ProviderCallCtx`, `EmbeddingRequest` | `EmbeddingResponse` or `Err(LlmGatewayError)` |
 
 `ProviderCallCtx` is a core-owned, per-call context passed to every method: the resolved model info as the GTS-typed `ModelInfoV1` envelope (default `serde_json::Value` provider settings) and the request correlation id. The plugin narrows the envelope to its own typed view via `ProviderCallCtx::typed_info::<Q>()` (delegating to Model Registry's `ModelInfoV1::try_into_typed`, keyed on `gts_type`), then reads `provider_model_id`, `provider_settings`, and its OAGW routing handle (e.g. an `oagw_alias`) from there. Carrying the same GTS type Model Registry produces lets the plugin validate its input through the registry SDK's own narrowing path, without its own Model Registry access.

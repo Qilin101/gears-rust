@@ -13,7 +13,7 @@
 //!   dangling closure rows) are reachable via plain `SecureORM`
 //!   inserts without DDL acrobatics.
 //! * [`pg::bring_up_postgres`] — real Postgres via `testcontainers`,
-//!   gated behind `#[cfg(feature = "postgres")]`. The Postgres schema
+//!   gated behind `#[cfg(feature = "integration")]`. The Postgres schema
 //!   enforces FKs, the `ux_tenants_single_root` partial unique index,
 //!   and `ck_tenants_root_depth`, so seeding deliberately-broken
 //!   shapes requires the DDL-bypass helpers in [`pg`]. The auxiliary
@@ -43,6 +43,7 @@
 )]
 
 use std::sync::Arc;
+use toolkit_gts::gts_id;
 
 use anyhow::Result;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, QueryFilter};
@@ -725,7 +726,8 @@ use account_management::infra::storage::repo_impl::{ConversionRepoImpl, Metadata
 use account_management_sdk::{
     IdpDeprovisionTenantRequest, IdpDeprovisionUserRequest, IdpListUsersRequest, IdpPluginClient,
     IdpProvisionFailure, IdpProvisionResult, IdpProvisionTenantRequest, IdpProvisionUserRequest,
-    IdpUser, IdpUserFilterField, IdpUserOperationFailure,
+    IdpUpdateUserRequest, IdpUser, IdpUserAttribute, IdpUserDuplicateField, IdpUserFilterField,
+    IdpUserOperationFailure,
 };
 use axum::Router;
 use axum::body::Body;
@@ -793,6 +795,14 @@ pub struct FakeIdpPlugin {
     users: parking_lot::Mutex<
         std::collections::HashMap<Uuid, std::collections::HashMap<Uuid, IdpUser>>,
     >,
+    /// Attributes this provider refuses to write, standing in for a
+    /// realm that federates them from a read-only LDAP mapper (or marks
+    /// them non-writable in its user-profile config). Empty by default
+    /// so every existing test sees a fully-writable provider; opt in via
+    /// [`Self::with_locked_attribute`]. A `HashSet` — the natural shape
+    /// for a provider's non-writable set, and what the `Hash` bound on
+    /// the public SDK enum exists for.
+    locked_attributes: std::collections::HashSet<IdpUserAttribute>,
 }
 
 impl FakeIdpPlugin {
@@ -800,7 +810,40 @@ impl FakeIdpPlugin {
     pub fn new() -> Self {
         Self {
             users: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            locked_attributes: std::collections::HashSet::new(),
         }
+    }
+
+    /// Mark `attribute` as IdP-managed: `update_user` then refuses any
+    /// patch touching it with
+    /// [`IdpUserOperationFailure::FieldNotWritable`].
+    #[must_use]
+    pub fn with_locked_attribute(mut self, attribute: IdpUserAttribute) -> Self {
+        self.locked_attributes.insert(attribute);
+        self
+    }
+
+    /// Every locked attribute the patch tries to write. Checked against
+    /// the *touched* fields (`Some(_)`, including an explicit clear) —
+    /// refusing a locked attribute does not depend on whether the caller
+    /// set or cleared it. Returns the full set (not the first hit) so a
+    /// patch touching several locked attributes is refused in one
+    /// round-trip, matching the `FieldNotWritable` contract.
+    fn locked_attributes_in(
+        &self,
+        patch: &account_management_sdk::IdpUserPatch,
+    ) -> Vec<IdpUserAttribute> {
+        [
+            (IdpUserAttribute::Username, patch.username.is_some()),
+            (IdpUserAttribute::Email, patch.email.is_some()),
+            (IdpUserAttribute::DisplayName, patch.display_name.is_some()),
+            (IdpUserAttribute::FirstName, patch.first_name.is_some()),
+            (IdpUserAttribute::LastName, patch.last_name.is_some()),
+        ]
+        .into_iter()
+        .filter(|(attribute, touched)| *touched && self.locked_attributes.contains(attribute))
+        .map(|(attribute, _)| attribute)
+        .collect()
     }
 
     fn build_user(tenant_id: Uuid, req: &IdpProvisionUserRequest) -> IdpUser {
@@ -878,6 +921,77 @@ impl IdpPluginClient for FakeIdpPlugin {
         Ok(())
     }
 
+    async fn update_user(
+        &self,
+        _ctx: &SecurityContext,
+        req: &IdpUpdateUserRequest,
+    ) -> Result<IdpUser, IdpUserOperationFailure> {
+        let tenant_id = req.tenant_context.tenant_id;
+        let mut guard = self.users.lock();
+        let Some(scope) = guard.get_mut(&tenant_id) else {
+            return Err(IdpUserOperationFailure::NotFound {
+                detail: format!("user {} not found in tenant {tenant_id}", req.user_id),
+            });
+        };
+        if !scope.contains_key(&req.user_id) {
+            return Err(IdpUserOperationFailure::NotFound {
+                detail: format!("user {} not found in tenant {tenant_id}", req.user_id),
+            });
+        }
+        // Refuse IdP-managed attributes before the uniqueness check: a
+        // locked field cannot be written whatever the new value is, so
+        // whether it would also collide is moot.
+        let locked = self.locked_attributes_in(&req.patch);
+        if !locked.is_empty() {
+            let detail = format!(
+                "attributes {} are read-only (federated from a read-only mapper)",
+                locked
+                    .iter()
+                    .map(|a| a.as_field_token())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Err(IdpUserOperationFailure::FieldNotWritable {
+                fields: locked,
+                detail,
+            });
+        }
+        // Username uniqueness on rename, checked against OTHER users.
+        if let Some(new_username) = &req.patch.username
+            && scope
+                .iter()
+                .any(|(id, u)| *id != req.user_id && &u.username == new_username)
+        {
+            return Err(IdpUserOperationFailure::DuplicateUser {
+                field: IdpUserDuplicateField::Username,
+                detail: "username already in use in this tenant scope".to_owned(),
+            });
+        }
+        let Some(user) = scope.get_mut(&req.user_id) else {
+            return Err(IdpUserOperationFailure::NotFound {
+                detail: format!("user {} not found in tenant {tenant_id}", req.user_id),
+            });
+        };
+        if let Some(username) = &req.patch.username {
+            user.username.clone_from(username);
+        }
+        if let Some(email) = &req.patch.email {
+            user.email.clone_from(email);
+        }
+        if let Some(display_name) = &req.patch.display_name {
+            user.display_name.clone_from(display_name);
+        }
+        if let Some(first_name) = &req.patch.first_name {
+            user.first_name.clone_from(first_name);
+        }
+        if let Some(last_name) = &req.patch.last_name {
+            user.last_name.clone_from(last_name);
+        }
+        // `password` is write-only and never projected; accepted and
+        // ignored by the in-memory store.
+        Ok(user.clone())
+    }
+
     async fn list_users(
         &self,
         _ctx: &SecurityContext,
@@ -935,6 +1049,28 @@ pub fn fake_idp() -> Arc<dyn IdpPluginClient> {
     Arc::new(FakeIdpPlugin::new())
 }
 
+/// [`fake_idp`] with `attribute` marked IdP-managed, so any patch
+/// touching it is refused with
+/// [`IdpUserOperationFailure::FieldNotWritable`].
+#[must_use]
+pub fn fake_idp_with_locked_attribute(attribute: IdpUserAttribute) -> Arc<dyn IdpPluginClient> {
+    Arc::new(FakeIdpPlugin::new().with_locked_attribute(attribute))
+}
+
+/// [`fake_idp`] with several attributes marked IdP-managed, standing in
+/// for a realm that federates a whole block of profile attributes from a
+/// read-only mapper. A patch touching more than one of them is refused
+/// once, naming every offender.
+#[must_use]
+pub fn fake_idp_with_locked_attributes(
+    attributes: impl IntoIterator<Item = IdpUserAttribute>,
+) -> Arc<dyn IdpPluginClient> {
+    let plugin = attributes
+        .into_iter()
+        .fold(FakeIdpPlugin::new(), FakeIdpPlugin::with_locked_attribute);
+    Arc::new(plugin)
+}
+
 // ── Inert collaborators (resource checker, types registry) ───────────
 
 /// Resource-ownership checker that always reports zero owned
@@ -950,7 +1086,8 @@ pub fn inert_resource_checker()
 /// Mirrors the in-source `domain::user::service_tests::TEST_TENANT_TYPE_ID`
 /// so the harness lines up byte-for-byte with the canonical AM unit-test
 /// shape.
-pub const HARNESS_TENANT_TYPE_ID: &str = "gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~";
+pub const HARNESS_TENANT_TYPE_ID: &str =
+    gts_id!("cf.core.am.tenant_type.v1~cf.core.am.customer.v1~");
 
 /// The deterministic UUIDv5 derived from [`HARNESS_TENANT_TYPE_ID`].
 /// Used as the `tenant_type_uuid` on every tenant row seeded for HTTP
@@ -958,14 +1095,14 @@ pub const HARNESS_TENANT_TYPE_ID: &str = "gts.cf.core.am.tenant_type.v1~cf.core.
 /// without a real catalog.
 #[must_use]
 pub fn harness_tenant_type_uuid() -> Uuid {
-    gts::GtsID::new(HARNESS_TENANT_TYPE_ID)
+    gts::GtsId::try_new(HARNESS_TENANT_TYPE_ID)
         .expect("HARNESS_TENANT_TYPE_ID is a valid chain")
         .to_uuid()
 }
 
 /// `MockTypesRegistryClient` pre-seeded with the schemas the AM REST
 /// surface needs to reach its happy-path branches: the
-/// `gts.cf.core.am.user.v1~` user-projection schema (required by
+/// AM user-projection schema (required by
 /// `create_user` per the fail-closed GTS validator) and a minimal
 /// tenant-type schema chain so `resolve_active_tenant` (which uses
 /// `tenant_type_uuid` to compute the chained id) does not fail closed.
@@ -986,7 +1123,7 @@ pub fn types_registry_for_users() -> Arc<dyn types_registry_sdk::TypesRegistryCl
         },
     });
     let user_schema = GtsTypeSchema::try_new(
-        GtsTypeId::new("gts.cf.core.am.user.v1~"),
+        GtsTypeId::new(gts_id!("cf.core.am.user.v1~")),
         user_body,
         None,
         None,
@@ -1031,12 +1168,12 @@ pub fn metadata_registry_with(
 /// integration suite and conforms to the GTS chain grammar
 /// (`vendor.package.namespace.type.vMAJOR[.MINOR]` on each segment).
 pub const REGISTERED_METADATA_SCHEMA: &str =
-    "gts.cf.core.am.tenant_metadata.v1~vendor.app.metadata.feature_flag.v1~";
+    gts_id!("cf.core.am.tenant_metadata.v1~vendor.app.metadata.feature_flag.v1~");
 
 /// Canonical "unregistered" metadata schema id — same chained shape,
 /// but the harness does NOT pre-seed it in [`metadata_registry_with`].
 pub const UNREGISTERED_METADATA_SCHEMA: &str =
-    "gts.cf.core.am.tenant_metadata.v1~vendor.app.metadata.unregistered.v1~";
+    gts_id!("cf.core.am.tenant_metadata.v1~vendor.app.metadata.unregistered.v1~");
 
 // ── Router builder ───────────────────────────────────────────────────
 
@@ -1280,12 +1417,12 @@ pub async fn seed_active_child(
 // Postgres bring-up (testcontainers).
 // ---------------------------------------------------------------------
 //
-// Gated behind `#[cfg(feature = "postgres")]` because pulling up a
+// Gated behind `#[cfg(feature = "integration")]` because pulling up a
 // container per test requires Docker on the host and is therefore not
 // part of the default test run. Enable explicitly with
-// `cargo test -p cf-gears-account-management --features postgres ...`.
+// `cargo test -p cf-gears-account-management --features integration ...`.
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "integration")]
 pub mod pg {
     //! Postgres `testcontainers` harness. Mirrors the in-memory
     //! `SQLite` shape (`provider`, `repo`) and adds an auxiliary

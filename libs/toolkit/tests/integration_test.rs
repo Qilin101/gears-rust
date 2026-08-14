@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::Mutex;
 use toolkit::api::{
     Missing, OpenApiRegistry, OperationBuilder, OperationSpec, ParamLocation,
-    operation_builder::LicenseFeature,
+    operation_builder::{CORE_GLOBAL_BASE_LICENSE_FEATURE, LicenseFeature},
 };
 
 #[allow(dead_code)]
@@ -21,7 +21,7 @@ enum TestLicenseFeatures {
 impl AsRef<str> for TestLicenseFeatures {
     fn as_ref(&self) -> &'static str {
         match self {
-            TestLicenseFeatures::Base => "gts.cf.core.lic.feat.v1~cf.core.global.base.v1",
+            TestLicenseFeatures::Base => CORE_GLOBAL_BASE_LICENSE_FEATURE,
         }
     }
 }
@@ -83,7 +83,7 @@ async fn test_complete_api_builder_flow() {
     // Test GET endpoint with all features
     router = OperationBuilder::<Missing, Missing, ()>::get("/users-info/v1/users")
         .operation_id("users.list")
-        .public()
+        .anonymous()
         .summary("List all users")
         .description("Returns a paginated list of users in the system")
         .tag("users")

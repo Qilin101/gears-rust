@@ -1,6 +1,9 @@
 # Created:  2026-04-19 by Virtuozzo
 # Updated:  2026-06-09 by Virtuozzo
 
+# NOTE: the aggregated, CI-verified schema for the whole platform is
+# docs/api/api.json (also served live by the api-gateway at {prefix}/docs).
+# Paths below are gear-relative: the gateway prepends its prefix_path (e.g. /cf).
 openapi: 3.1.0
 info:
   title: Account Management API
@@ -15,7 +18,7 @@ info:
     shapes, field semantics, and HTTP-level error mapping.
 
     Versioning: breaking changes increment the major version embedded in the URL
-    path (`/api/account-management/v1/` → `/v2/`) and are coordinated with a
+    path (`/account-management/v1/` → `/account-management/v2/`) and are coordinated with a
     migration window per the Compatibility NFR in DESIGN.md. Additive changes
     within v1 do not rev the path.
 
@@ -57,7 +60,7 @@ security:
   - bearerAuth: []
 
 paths:
-  /api/account-management/v1/me:
+  /account-management/v1/me:
     get:
       operationId: getMe
       tags: [Identity]
@@ -80,7 +83,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants:
+  /account-management/v1/tenants:
     post:
       operationId: createTenant
       tags: [tenants]
@@ -112,7 +115,7 @@ paths:
         '5XX':
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}:
+  /account-management/v1/tenants/{tenant_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     get:
@@ -183,7 +186,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/suspend:
+  /account-management/v1/tenants/{tenant_id}/suspend:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     post:
@@ -213,7 +216,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/unsuspend:
+  /account-management/v1/tenants/{tenant_id}/unsuspend:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     post:
@@ -236,7 +239,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/children:
+  /account-management/v1/tenants/{tenant_id}/children:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/Limit'
@@ -265,7 +268,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/users:
+  /account-management/v1/tenants/{tenant_id}/users:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     get:
@@ -274,16 +277,20 @@ paths:
       summary: List users provisioned in a tenant
       description: |
         Lists users provisioned in the tenant via the configured IdP plugin.
-        Supplying `user_id` turns the response into an authoritative existence
+        There is no per-user GET. A point lookup is
+        `?$filter=id eq <uuid>&limit=1`, which is an authoritative existence
         check — the page contains at most one element and an empty page is the
         canonical "user absent" signal (no 404). AM persists no local user
         state; every read is a pass-through to the IdP.
 
-        When `user_id` is supplied the server pins `top=1` and ignores any
-        client-provided `limit` / `cursor` — the filtered shape is an
-        existence check, not a paginated query.
+        With `id eq` the caller MUST supply `limit=1` and MUST NOT supply a
+        `cursor`; either violation is rejected with 400 rather than silently
+        corrected. `limit` is the page-size parameter — `$top` is not honoured
+        as a substitute. Filterable / sortable columns: `id`, `username`,
+        `email`, `display_name`, `first_name`, `last_name`.
       parameters:
-        - $ref: '#/components/parameters/UserIdFilter'
+        - $ref: '#/components/parameters/ODataFilter'
+        - $ref: '#/components/parameters/ODataOrderBy'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
       responses:
@@ -321,10 +328,61 @@ paths:
         '5XX':
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/users/{user_id}:
+  /account-management/v1/tenants/{tenant_id}/users/{user_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/UserId'
+    patch:
+      operationId: updateTenantUser
+      tags: [users]
+      summary: Update mutable attributes of a tenant user
+      description: |
+        Applies a JSON Merge Patch (RFC 7396) to a user's mutable attributes
+        via the configured IdP plugin. AM persists no local user state; the
+        update is a pass-through and the IdP remains the source of truth.
+
+        Merge semantics: an omitted field is left unchanged; an explicit
+        `null` clears a nullable profile field (`email`, `display_name`,
+        `first_name`, `last_name`); a value sets it. `username` may be renamed
+        (send a value) but NOT cleared — an explicit `null` on `username` is
+        rejected with `code=validation`. `password` sets a new credential and
+        is never echoed back in the response. An empty patch (`{}`) is
+        rejected with `code=validation`.
+
+        Unlike DELETE, a patch against a user the IdP reports absent returns
+        404 (`code=not_found`) — it is NOT folded into success. A username
+        rename that collides with an existing login returns 409
+        (`code=already_exists`). Unsupported by a legacy provider surfaces as
+        `code=idp_unsupported_operation` (501); IdP transport failure as
+        `code=idp_unavailable` (503).
+
+        An attribute the IdP manages and does not allow AM to override — e.g.
+        federated from a read-only LDAP mapper, or marked non-writable in the
+        provider's user-profile configuration — is refused with
+        `code=validation` (400) whose `context.field_violations[0]` carries
+        `field` = the refused request property (`username`, `email`,
+        `display_name`, `first_name`, or `last_name`) and
+        `reason=IDP_MANAGED_FIELD`. Clients key form-field attribution off
+        `field` and disable exactly that input. Deliberately NOT a 403:
+        writability is a property of the provider's schema, identical for
+        every caller, so no additional grant would let the write succeed. The
+        refusal is scoped to attributes the patch actually touches — a patch
+        that omits a locked attribute still applies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: Updated tenant user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        default:
+          $ref: '#/components/responses/Problem'
     delete:
       operationId: deleteTenantUser
       tags: [users]
@@ -342,7 +400,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/conversions:
+  /account-management/v1/tenants/{tenant_id}/conversions:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     post:
@@ -406,7 +464,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/conversions/{request_id}:
+  /account-management/v1/tenants/{tenant_id}/conversions/{request_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/RequestId'
@@ -461,7 +519,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/child-conversions:
+  /account-management/v1/tenants/{tenant_id}/child-conversions:
     parameters:
       - $ref: '#/components/parameters/TenantId'
     post:
@@ -525,7 +583,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/child-conversions/{request_id}:
+  /account-management/v1/tenants/{tenant_id}/child-conversions/{request_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/RequestId'
@@ -574,7 +632,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/metadata:
+  /account-management/v1/tenants/{tenant_id}/metadata:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/Limit'
@@ -595,7 +653,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/metadata/{type_id}:
+  /account-management/v1/tenants/{tenant_id}/metadata/{type_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/SchemaId'
@@ -649,7 +707,7 @@ paths:
         default:
           $ref: '#/components/responses/Problem'
 
-  /api/account-management/v1/tenants/{tenant_id}/metadata/{type_id}/resolved:
+  /account-management/v1/tenants/{tenant_id}/metadata/{type_id}/resolved:
     parameters:
       - $ref: '#/components/parameters/TenantId'
       - $ref: '#/components/parameters/SchemaId'
@@ -704,14 +762,6 @@ components:
       schema:
         type: string
         description: Full chained GTS schema identifier.
-    UserIdFilter:
-      name: user_id
-      in: query
-      required: false
-      schema:
-        type: string
-        format: uuid
-        description: Optional UUID user identifier filter for point lookup behavior.
     Limit:
       name: limit
       in: query
@@ -750,14 +800,18 @@ components:
         `SMALLINT` ordinal at the repo boundary. Examples:
         `status eq 'active'`, `status eq 'pending'`,
         `target_mode eq 'self_managed'`, `initiator_side eq 'child'`.
-        Only `eq`, `ne`, and `in` are admissible on these columns;
-        ordered comparisons (`gt`/`ge`/`lt`/`le`) and `$orderby` are
-        rejected with `400 INVALID_FILTER` because there is no
-        consistent ordering across the wire (alphabetical) and
-        storage (numeric) shapes. Response bodies
-        return the same field as a string (`"pending"`, `"active"`,
-        etc.) for human readability — the filter is the one place
-        the wire surface diverges from the response shape.
+        Only `eq`, `ne`, and `in` are admissible in `$filter` on these
+        columns; ordered comparisons (`gt`/`ge`/`lt`/`le`) are rejected
+        with `400 INVALID_FILTER` because the wire strings carry no
+        meaningful order. `$orderby` on the `conversion_requests`
+        enum columns is likewise rejected. `$orderby=status` on the
+        tenant children listing IS supported and sorts by the
+        lifecycle ordinal (`active` < `suspended` < `deleted`), not
+        alphabetically — operator UIs sort their Status column with
+        it. Filters and response bodies use the same public string
+        values (`"pending"`, `"active"`, etc.); the divergence is
+        between the wire contract (strings) and the `SMALLINT` storage
+        ordinal, not between the filter and the response shape.
       schema:
         type: string
     ODataOrderBy:
@@ -887,10 +941,16 @@ components:
           type: integer
           minimum: 0
           description: |
-            Number of direct children visible to the caller, resolved at
-            read time. Scope-filtered (direct children behind a
-            self-managed barrier the caller cannot penetrate are not
-            counted); excludes AM-internal `provisioning` rows; includes
+            Number of direct children of this tenant, resolved at read
+            time. Gated on the PARENT: when this tenant is reachable
+            under the caller's barrier-respecting scope, ALL of its
+            direct children are counted — including `self_managed` ones,
+            mirroring the direct-child carve-out of the `/children`
+            listing (the counter and the listing always agree). For a
+            tenant the caller can see only through that identity-level
+            carve-out (i.e. a `self_managed` tenant past its own
+            barrier), the count is `0` — nothing below a barrier leaks.
+            Excludes AM-internal `provisioning` rows; includes
             soft-`deleted` children. `0` for a leaf. Derived field — not
             available in `$filter` / `$orderby`.
         created_at:
@@ -1219,6 +1279,64 @@ components:
           type: [string, 'null']
           description: Optional display name surfaced through the projection.
 
+    NewUserPassword:
+      type: object
+      additionalProperties: false
+      required: [value]
+      description: |
+        Credential bundle. `value` is write-only and never returned in any
+        response body. Set `temporary: true` to force a password change on the
+        user's next interactive sign-in.
+      properties:
+        value:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Plaintext password (write-only; never echoed back).
+        temporary:
+          type: boolean
+          default: false
+
+    UserUpdateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |
+        JSON Merge Patch (RFC 7396) over a user's mutable attributes. Every
+        field is optional. For the nullable profile fields an explicit `null`
+        clears the attribute and a string sets it; omission leaves it
+        unchanged. `username` accepts a string (rename) but NOT `null` (the
+        login identifier is required — an explicit `null` is rejected). An
+        all-empty patch is rejected. `password` sets a new credential and is
+        never returned in any response.
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Rename the login identifier. Cannot be cleared.
+        email:
+          type: [string, 'null']
+          format: email
+          description: '`null` clears the email; a string sets it.'
+        display_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: '`null` clears the display name; a string sets it.'
+        first_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: '`null` clears the given name; a string sets it.'
+        last_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: '`null` clears the family name; a string sets it.'
+        password:
+          $ref: '#/components/schemas/NewUserPassword'
+
     User:
       type: object
       additionalProperties: false
@@ -1235,6 +1353,18 @@ components:
           format: email
         display_name:
           type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+        first_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: Optional given name (Keycloak firstName, OIDC given_name); `null` when unset.
+        last_name:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 255
+          description: Optional family name (Keycloak lastName, OIDC family_name); `null` when unset.
 
     UserPage:
       type: object
@@ -1329,8 +1459,13 @@ components:
             (e.g. `"integrity_check"`) for the exhaustion-source
             identifier rather than a top-level reason.
 
-        AM-internal 503 subsources (IdP-unavailable, IdP-unsupported-operation)
-        are intentionally NOT exposed as public discriminators on the
+        An unsupported IdP operation is a distinct, permanent failure: it
+        maps to `Unimplemented` (HTTP 501, sub-code
+        `idp_unsupported_operation`) — NOT to the 503 `service_unavailable`
+        envelope — because it is not retryable (the provider simply does
+        not implement the operation). Only transport failures and timeouts
+        are 503 sources; their AM-internal sub-source (`idp_unavailable`)
+        is intentionally NOT exposed as a public discriminator on the
         `service_unavailable` envelope. The 503 envelope is opaque to
         external clients by design: retry-after semantics are uniform
         across all 503 sources, so a sub-source code adds no actionable

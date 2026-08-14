@@ -27,11 +27,11 @@ fn normalize_path(path: &Path) -> String {
 pub enum VendorConfigError {
     #[error("vendor '{vendor}' not found in configuration")]
     NotFound { vendor: String },
-    #[error("invalid config for vendor '{vendor}': {source}")]
+    // Intentionally not named `source`; doing so would duplicate chained error output.
+    #[error("invalid config for vendor '{vendor}': {cause}")]
     InvalidConfig {
         vendor: String,
-        #[source]
-        source: serde_json::Error,
+        cause: serde_json::Error,
     },
 }
 
@@ -117,6 +117,13 @@ pub struct AppConfig {
     /// Allows vendors to add their own typed configuration sections.
     #[serde(default)]
     pub vendor: VendorConfig,
+    /// Out-of-process HTTP server configuration.
+    ///
+    /// When present, an `OoP` gear starts an Axum HTTP server (probes,
+    /// gear routes, self-registration, dependency resolution, graceful drain)
+    /// instead of the legacy gRPC-only lifecycle (`cpt-cf-component-oop-bootstrap`).
+    #[serde(default)]
+    pub oop_http: Option<OopHttpConfig>,
 }
 
 impl Default for AppConfig {
@@ -130,8 +137,50 @@ impl Default for AppConfig {
             gears_dir: None,
             gears: HashMap::new(),
             vendor: VendorConfig::new(),
+            oop_http: None,
         }
     }
+}
+
+/// Out-of-process HTTP server configuration (`cpt-cf-component-oop-bootstrap`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OopHttpConfig {
+    /// Address the main HTTP server binds to (gear routes + probes),
+    /// e.g. `"0.0.0.0:8080"`.
+    pub listen_addr: String,
+    /// Optional separate bind address for probe endpoints (sidecar port).
+    /// When set, `/healthz` and `/readyz` are also served here.
+    #[serde(default)]
+    pub probe_bind_addr: Option<String>,
+    /// Maximum seconds to wait for in-flight requests to drain on shutdown.
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+    /// Per-check timeout (ms) for readiness healthchecks on `/readyz`; raise for
+    /// slow dependencies. Mirrors the `api-gateway` `healthcheck_timeout_ms`.
+    #[serde(default = "default_healthcheck_timeout_ms")]
+    pub healthcheck_timeout_ms: u64,
+    /// Base URL other services use to reach this instance (registered as the
+    /// instance's REST endpoint). Defaults to `http://<listen_addr>` with an
+    /// unspecified host (`0.0.0.0`) rewritten to `127.0.0.1`.
+    #[serde(default)]
+    pub advertise_uri: Option<String>,
+    /// Platform-plane (`InternalAuthenticator`) configuration. When present it
+    /// drives both the *inbound* HTTP validator on the gear's own routes and
+    /// the *outbound* credential attached to the gear's `DirectoryService`
+    /// calls. The `shared_secret` provider works out of the box; the `kube`
+    /// provider's inbound `TokenReview` validator requires the `k8s-auth`
+    /// feature.
+    #[serde(default)]
+    pub internal_auth: Option<toolkit_security::InternalAuthConfig>,
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    30
+}
+
+fn default_healthcheck_timeout_ms() -> u64 {
+    500
 }
 
 impl ConfigProvider for AppConfig {
@@ -416,7 +465,7 @@ impl AppConfig {
             })?;
         T::deserialize(raw).map_err(|e| VendorConfigError::InvalidConfig {
             vendor: vendor_name.to_owned(),
-            source: e,
+            cause: e,
         })
     }
 
@@ -434,7 +483,7 @@ impl AppConfig {
         };
         T::deserialize(raw).map_err(|e| VendorConfigError::InvalidConfig {
             vendor: vendor_name.to_owned(),
-            source: e,
+            cause: e,
         })
     }
 
@@ -860,7 +909,7 @@ impl DbConfigBuilder {
     ) -> Result<()> {
         // Apply global server DSN
         if let Some(global_dsn) = &global_server.dsn {
-            let expanded_dsn = expand_env_in_dsn(global_dsn)?;
+            let expanded_dsn = expand_env_in_dsn(global_dsn.expose())?;
             // For SQLite, resolve @file() syntax before validation
             let resolved_dsn = if expanded_dsn.starts_with("sqlite") {
                 resolve_sqlite_dsn(&expanded_dsn, home_dir, gear_name, dry_run)?
@@ -881,7 +930,12 @@ impl DbConfigBuilder {
         if let Some(user) = &global_server.user {
             self.user = Some(user.clone());
         }
-        if let Some(password) = resolve_password(global_server.password.as_deref())? {
+        if let Some(password) = resolve_password(
+            global_server
+                .password
+                .as_ref()
+                .map(toolkit_utils::SecretString::expose),
+        )? {
             self.password = Some(password);
         }
         if let Some(dbname) = &global_server.dbname {
@@ -927,7 +981,12 @@ impl DbConfigBuilder {
         if let Some(user) = &gear_db_config.user {
             self.user = Some(user.clone());
         }
-        if let Some(password) = resolve_password(gear_db_config.password.as_deref())? {
+        if let Some(password) = resolve_password(
+            gear_db_config
+                .password
+                .as_ref()
+                .map(toolkit_utils::SecretString::expose),
+        )? {
             self.password = Some(password);
         }
         if let Some(dbname) = &gear_db_config.dbname {
@@ -1281,7 +1340,7 @@ pub fn build_final_db_for_gear(
 
     // Step 2: Apply gear DSN (override global)
     if let Some(gear_dsn) = &gear_db_config.dsn {
-        builder.apply_gear_dsn(gear_dsn, home_dir, gear_name, dry_run)?;
+        builder.apply_gear_dsn(gear_dsn.expose(), home_dir, gear_name, dry_run)?;
     }
 
     // Step 3: Apply gear fields (override everything)
@@ -1670,9 +1729,9 @@ logging:
         let mut app = create_app_with_server(
             "test_server",
             DbConnConfig {
-                dsn: Some(
-                    "postgresql://global_user:global_pass@global_host:5432/global_db".to_owned(),
-                ),
+                dsn: Some(toolkit_utils::SecretString::new(
+                    "postgresql://global_user:global_pass@global_host:5432/global_db",
+                )),
                 ..Default::default()
             },
         );
@@ -1802,7 +1861,9 @@ logging:
         let mut app = create_app_with_server(
             "test_server",
             DbConnConfig {
-                dsn: Some("postgresql://old_user:old_pass@old_host:5432/old_db".to_owned()),
+                dsn: Some(toolkit_utils::SecretString::new(
+                    "postgresql://old_user:old_pass@old_host:5432/old_db",
+                )),
                 host: Some("new_host".to_owned()), // This should override DSN host
                 port: Some(5433),                  // This should override DSN port
                 user: Some("new_user".to_owned()), // This should override DSN user
@@ -1849,7 +1910,7 @@ logging:
                     host: Some("localhost".to_owned()),
                     port: Some(5432),
                     user: Some("testuser".to_owned()),
-                    password: Some("${TEST_DB_PASSWORD}".to_owned()), // Should expand to "secret123"
+                    password: Some(toolkit_utils::SecretString::new("${TEST_DB_PASSWORD}")), // Should expand to "secret123"
                     dbname: Some("testdb".to_owned()),
                     ..Default::default()
                 },
@@ -1885,9 +1946,9 @@ logging:
                 let mut app = create_app_with_server(
                     "test_server",
                     DbConnConfig {
-                        dsn: Some(
-                            "postgresql://user:${DB_PASSWORD}@${DB_HOST}:5432/mydb".to_owned(),
-                        ),
+                        dsn: Some(toolkit_utils::SecretString::new(
+                            "postgresql://user:${DB_PASSWORD}@${DB_HOST}:5432/mydb",
+                        )),
                         ..Default::default()
                     },
                 );
@@ -2033,10 +2094,9 @@ logging:
             "sqlite_users".to_owned(),
             DbConnConfig {
                 engine: None,
-                dsn: Some(
-                    "sqlite://users_info.db?WAL=true&synchronous=NORMAL&busy_timeout=5000"
-                        .to_owned(),
-                ),
+                dsn: Some(toolkit_utils::SecretString::new(
+                    "sqlite://users_info.db?WAL=true&synchronous=NORMAL&busy_timeout=5000",
+                )),
                 host: None,
                 port: None,
                 user: None,
@@ -2046,6 +2106,7 @@ logging:
                 pool: None,
                 file: None,
                 path: None,
+                lock_keepalive: None,
                 server: None,
             },
         );
@@ -2268,7 +2329,7 @@ logging:
                 "test_server",
                 DbConnConfig {
                     host: Some("localhost".to_owned()),
-                    password: Some("${NONEXISTENT_PASSWORD}".to_owned()),
+                    password: Some(toolkit_utils::SecretString::new("${NONEXISTENT_PASSWORD}")),
                     dbname: Some("testdb".to_owned()),
                     ..Default::default()
                 },
@@ -2434,7 +2495,9 @@ logging:
                 host: Some("localhost".to_owned()),
                 port: Some(5432),
                 user: Some("user@domain".to_owned()),
-                password: Some("pa@ss:w0rd/with%special&chars".to_owned()),
+                password: Some(toolkit_utils::SecretString::new(
+                    "pa@ss:w0rd/with%special&chars",
+                )),
                 dbname: Some("test/db".to_owned()),
                 ..Default::default()
             },
@@ -2734,7 +2797,7 @@ logging:
                 host: Some("localhost".to_owned()),
                 port: Some(5432),
                 user: Some("user".to_owned()),
-                password: Some("pass".to_owned()),
+                password: Some(toolkit_utils::SecretString::new("pass")),
                 dbname: Some("db".to_owned()),
                 ..Default::default()
             },
@@ -3202,10 +3265,11 @@ vendor:
 
         let invalid = VendorConfigError::InvalidConfig {
             vendor: "bad".to_owned(),
-            source: serde_json::from_str::<TestVendorConfig>("invalid").unwrap_err(),
+            cause: serde_json::from_str::<TestVendorConfig>("invalid").unwrap_err(),
         };
         let msg = invalid.to_string();
         assert!(msg.starts_with("invalid config for vendor 'bad':"));
+        assert!(std::error::Error::source(&invalid).is_none());
     }
 
     #[test]

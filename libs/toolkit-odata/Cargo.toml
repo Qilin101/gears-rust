@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-toolkit-odata"
-version = "0.8.2"
+version = "0.9.2"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -23,6 +23,7 @@ with-utoipa = ["dep:utoipa"]
 
 [dependencies]
 toolkit-canonical-errors = { workspace = true }
+toolkit-gts = { workspace = true }
 bigdecimal = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true, default-features = false, features = ["clock"] }

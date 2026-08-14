@@ -26,9 +26,9 @@ fn keyset<const N: usize>(values: [&str; N]) -> BTreeSet<MetadataKey> {
         .collect()
 }
 
-fn sample_record(uuid: &str, idempotency_key: &str) -> UsageRecord {
+fn sample_record(id: &str, idempotency_key: &str) -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::parse_str(uuid).expect("valid record uuid fixture"),
+        id: Uuid::parse_str(id).expect("valid record id fixture"),
         gts_id: sample_id("test.uc.batch.order.v1"),
         tenant_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222")
             .expect("valid tenant uuid fixture"),

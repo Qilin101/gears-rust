@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
+use toolkit_gts::gts_id;
 
 use httpmock::prelude::{GET, HttpMockRequest, HttpMockResponse, MockServer, POST};
 use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
@@ -59,7 +60,7 @@ pub const TEST_S2S_CLIENT_ID: &str = "svc-test";
 /// Valid test client secret accepted by the mock token endpoint.
 pub const TEST_S2S_CLIENT_SECRET: &str = "test-secret-value";
 /// Default S2S subject type used by integration-test plugin fixtures.
-pub const TEST_S2S_DEFAULT_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_user.v1~";
+pub const TEST_S2S_DEFAULT_SUBJECT_TYPE: &str = gts_id!("cf.core.security.subject_user.v1~");
 
 type RequestCounters = Arc<Mutex<HashMap<String, usize>>>;
 
@@ -142,9 +143,10 @@ pub fn create_test_metrics() -> Arc<AuthNMetrics> {
 #[must_use]
 pub fn default_retry_policy_config() -> RetryPolicyConfig {
     RetryPolicyConfig {
-        max_attempts: 3,
-        initial_backoff_ms: 100,
-        max_backoff_ms: 2_000,
+        max_retries: 3,
+        backoff_base_ms: 2,
+        backoff_factor: 50,
+        max_backoff: std::time::Duration::from_secs(2),
         jitter: true,
     }
 }

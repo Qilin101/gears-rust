@@ -97,7 +97,7 @@ pub(crate) mod pep {
     ///   with the row's resolved `type_id` to drop entries the
     ///   caller cannot read — the PRD line 1848 contract.
     pub const METADATA: ResourceType = ResourceType::from_static(
-        "gts.cf.core.am.tenant_metadata.v1~",
+        account_management_sdk::TENANT_METADATA_RESOURCE_TYPE,
         &[
             pep_properties::OWNER_TENANT_ID,
             pep_properties::RESOURCE_ID,
@@ -144,6 +144,11 @@ pub(crate) mod pep {
         /// not AM.
         pub const WRITE: &str = "write";
         pub const DELETE: &str = "delete";
+
+        /// Every action in this vocabulary — see the note on the user
+        /// service's `actions::ALL`. Add new actions here as well as above.
+        #[cfg(test)]
+        pub const ALL: &[&str] = &[READ, LIST, WRITE, DELETE];
     }
 }
 
@@ -509,7 +514,7 @@ impl MetadataService {
             .await?;
 
         // UUIDv5 derivation cached on `ParsedTypeId` (matches the
-        // upstream `gts::GtsID::to_uuid()` namespace per
+        // upstream `gts::GtsId::to_uuid()` namespace per
         // `dod-tenant-metadata-schema-registration-and-uuid-derivation`).
         let schema_uuid = parsed.uuid();
 

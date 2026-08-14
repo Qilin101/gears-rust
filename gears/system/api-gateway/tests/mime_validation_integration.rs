@@ -16,6 +16,7 @@ use http::Method;
 use serde_json::json;
 use toolkit::api::OperationSpec;
 use toolkit_canonical_errors::Problem;
+use toolkit_gts::gts_uri;
 use tower::ServiceExt; // for oneshot
 
 use api_gateway::middleware::mime_validation::{
@@ -24,7 +25,7 @@ use api_gateway::middleware::mime_validation::{
 use toolkit::api::operation_builder::VendorExtensions;
 
 const INVALID_ARGUMENT_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~");
 const PROBLEM_JSON: &str = "application/problem+json";
 
 /// Helper to extract Problem from response
@@ -63,7 +64,7 @@ async fn test_middleware_allows_configured_content_type() {
         responses: vec![],
         handler_id: "test".to_owned(),
         authenticated: false,
-        is_public: true,
+        exposed: false,
         license_requirement: None,
         rate_limit: None,
         allowed_request_content_types: Some(vec!["application/json"]),
@@ -108,7 +109,7 @@ async fn test_middleware_strips_content_type_parameters() {
         responses: vec![],
         handler_id: "test".to_owned(),
         authenticated: false,
-        is_public: true,
+        exposed: false,
         license_requirement: None,
         rate_limit: None,
         allowed_request_content_types: Some(vec!["application/json"]),
@@ -153,7 +154,7 @@ async fn test_middleware_rejects_disallowed_content_type() {
         responses: vec![],
         handler_id: "test".to_owned(),
         authenticated: false,
-        is_public: true,
+        exposed: false,
         license_requirement: None,
         rate_limit: None,
         allowed_request_content_types: Some(vec!["application/json"]),
@@ -214,7 +215,7 @@ async fn test_middleware_rejects_missing_content_type() {
         responses: vec![],
         handler_id: "test".to_owned(),
         authenticated: false,
-        is_public: true,
+        exposed: false,
         license_requirement: None,
         rate_limit: None,
         allowed_request_content_types: Some(vec!["multipart/form-data"]),
@@ -304,7 +305,7 @@ async fn test_middleware_allows_multiple_content_types() {
         responses: vec![],
         handler_id: "test".to_owned(),
         authenticated: false,
-        is_public: true,
+        exposed: false,
         license_requirement: None,
         rate_limit: None,
         allowed_request_content_types: Some(vec![

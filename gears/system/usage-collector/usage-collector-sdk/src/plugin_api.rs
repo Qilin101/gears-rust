@@ -37,8 +37,8 @@ pub trait UsageCollectorPluginV1: Send + Sync + 'static {
         records: Vec<UsageRecord>,
     ) -> Result<Vec<Result<UsageRecord, UsageCollectorPluginError>>, UsageCollectorPluginError>;
 
-    /// Get a single usage record by its `uuid`.
-    async fn get_usage_record(&self, uuid: Uuid) -> Result<UsageRecord, UsageCollectorPluginError>;
+    /// Get a single usage record by its `id`.
+    async fn get_usage_record(&self, id: Uuid) -> Result<UsageRecord, UsageCollectorPluginError>;
 
     /// Aggregated query over usage records.
     ///
@@ -56,7 +56,7 @@ pub trait UsageCollectorPluginV1: Send + Sync + 'static {
     /// Keyset-paginated list of usage records.
     ///
     /// `query.order` is guaranteed non-empty (the gateway defaults to
-    /// `(created_at asc, uuid asc)` if the caller omits `$orderby`), so
+    /// `(created_at asc, id asc)` if the caller omits `$orderby`), so
     /// plugins MUST honour it for stable pagination.
     async fn list_usage_records(
         &self,

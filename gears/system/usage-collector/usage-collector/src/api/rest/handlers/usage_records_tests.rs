@@ -17,6 +17,7 @@
 //!   [`crate::domain::service::service_tests`].
 
 use std::sync::Arc;
+use toolkit_gts::gts_id;
 
 use axum::Json;
 use axum::extract::{Extension, Path};
@@ -60,7 +61,6 @@ async fn create_with_only_bad_gts_id_records_short_circuits_to_207_without_calli
 
     let req = CreateUsageRecordsRequest {
         records: vec![CreateUsageRecordRequest {
-            uuid: Uuid::new_v4(),
             gts_id: "not-a-valid-prefix".to_owned(),
             tenant_id: Uuid::new_v4(),
             resource_ref: ResourceRefDto {
@@ -332,11 +332,11 @@ async fn deactivate_with_unreachable_pdp_surfaces_503() {
 use std::collections::BTreeMap;
 use usage_collector_sdk::{
     IdempotencyKey, ResourceRef, UsageKind, UsageRecord, UsageRecordStatus, UsageType,
-    UsageTypeGtsId,
+    UsageTypeGtsId, derive_usage_record_id,
 };
 
 const HAPPY_RECORD_GTS_ID: &str =
-    "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
 fn happy_usage_type() -> UsageType {
     UsageType {
@@ -346,8 +346,8 @@ fn happy_usage_type() -> UsageType {
     }
 }
 
-fn sample_persisted_record(uuid: Uuid, tenant_id: Uuid) -> UsageRecord {
-    sample_persisted_record_with_status(uuid, tenant_id, UsageRecordStatus::Active)
+fn sample_persisted_record(id: Uuid, tenant_id: Uuid) -> UsageRecord {
+    sample_persisted_record_with_status(id, tenant_id, UsageRecordStatus::Active)
 }
 
 /// An [`ODataQuery`](toolkit_odata::ODataQuery) carrying a bounded
@@ -363,12 +363,12 @@ fn bounded_window_query() -> toolkit_odata::ODataQuery {
 }
 
 fn sample_persisted_record_with_status(
-    uuid: Uuid,
+    id: Uuid,
     tenant_id: Uuid,
     status: UsageRecordStatus,
 ) -> UsageRecord {
     UsageRecord {
-        uuid,
+        id,
         gts_id: UsageTypeGtsId::new(HAPPY_RECORD_GTS_ID).expect("valid gts_id"),
         tenant_id,
         resource_ref: ResourceRef::new("rsc-happy", "compute.vm").expect("valid resource ref"),
@@ -389,18 +389,25 @@ async fn create_records_happy_path_wire_body_reflects_service_returned_record() 
     //   1. returns a `Counter` `UsageType` from `get_usage_type` so
     //      semantics validation passes, and
     //   2. returns one `Ok(persisted_record)` from `create_usage_records`
-    //      where `persisted_record.uuid` is DIFFERENT from the input
-    //      record's UUID.
-    // The handler then emits 200 OK; the wire body's `records[0].record.uuid`
-    // MUST be the persisted UUID — proving the handler composes the
-    // response from the SERVICE-RETURNED record, not from the request.
+    //      where `persisted_record.id` is DIFFERENT from the gateway-derived
+    //      dispatched record's id.
+    // The handler then emits 200 OK; the wire body's `records[0].record.id`
+    // MUST be the persisted id — proving the handler composes the
+    // response from the SERVICE-RETURNED record, not from the dispatched one.
     let plugin = HappyPathPlugin::new();
     plugin.set_get_usage_type(happy_usage_type());
 
-    let input_uuid = Uuid::new_v4();
     let tenant_id = Uuid::from_u128(2);
+    let gts_id = UsageTypeGtsId::new(HAPPY_RECORD_GTS_ID).expect("valid gts_id");
+    let idempotency_key = IdempotencyKey::new("idem-happy").expect("valid idempotency key");
+    let derived_id = derive_usage_record_id(
+        tenant_id,
+        &gts_id,
+        &idempotency_key,
+        OffsetDateTime::UNIX_EPOCH,
+    );
     let persisted_uuid = Uuid::new_v4();
-    assert_ne!(input_uuid, persisted_uuid, "test premise");
+    assert_ne!(derived_id, persisted_uuid, "test premise");
     plugin.set_create_records(vec![Ok(sample_persisted_record(persisted_uuid, tenant_id))]);
 
     let service = service_with_permit(
@@ -410,7 +417,6 @@ async fn create_records_happy_path_wire_body_reflects_service_returned_record() 
 
     let req = CreateUsageRecordsRequest {
         records: vec![CreateUsageRecordRequest {
-            uuid: input_uuid,
             gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
             tenant_id,
             resource_ref: ResourceRefDto {
@@ -456,9 +462,10 @@ async fn create_records_happy_path_wire_body_reflects_service_returned_record() 
     );
     let record = item.get("record").expect("accepted item carries `record`");
     assert_eq!(
-        record.get("uuid").and_then(serde_json::Value::as_str),
+        record.get("id").and_then(serde_json::Value::as_str),
         Some(persisted_uuid.to_string().as_str()),
-        "wire body MUST echo the service-returned (persisted) UUID, NOT the input UUID",
+        "wire body MUST echo the service-returned (persisted) UUID, NOT the \
+         gateway-derived dispatched UUID",
     );
     assert_eq!(
         record.get("status").and_then(serde_json::Value::as_str),
@@ -468,12 +475,164 @@ async fn create_records_happy_path_wire_body_reflects_service_returned_record() 
          or the empty string would silently break OAS-typed clients)",
     );
 
-    // Sanity: the plugin was actually invoked with the eligible record.
+    // Sanity: the plugin was actually invoked with the gateway-derived id.
     let forwarded = plugin
         .last_create_records_input()
         .expect("plugin received the eligible batch");
     assert_eq!(forwarded.len(), 1);
-    assert_eq!(forwarded[0].uuid, input_uuid);
+    assert_eq!(forwarded[0].id, derived_id);
+}
+
+#[tokio::test]
+async fn create_stamps_derived_id() {
+    // The gateway MUST derive the dispatched record's id from the dedup key
+    // `(tenant_id, gts_id, idempotency_key, created_at)` rather than accept a
+    // caller-chosen value — pin both that the dispatched id matches
+    // `derive_usage_record_id` AND that a same-key resubmit derives the
+    // identical id (determinism).
+    let plugin = HappyPathPlugin::new();
+    plugin.set_get_usage_type(happy_usage_type());
+
+    let tenant_id = Uuid::from_u128(2);
+    let gts_id = UsageTypeGtsId::new(HAPPY_RECORD_GTS_ID).expect("valid gts_id");
+    let idempotency_key = IdempotencyKey::new("idem-derive-1").expect("valid idempotency key");
+    let expected = derive_usage_record_id(
+        tenant_id,
+        &gts_id,
+        &idempotency_key,
+        OffsetDateTime::UNIX_EPOCH,
+    );
+
+    let service = service_with_permit(
+        Arc::clone(&plugin) as Arc<dyn usage_collector_sdk::UsageCollectorPluginV1>,
+        "test.handler.create_records.derive_id.v1",
+    );
+
+    let build_req = || CreateUsageRecordsRequest {
+        records: vec![CreateUsageRecordRequest {
+            gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
+            tenant_id,
+            resource_ref: ResourceRefDto {
+                resource_id: "rsc-happy".to_owned(),
+                resource_type: "compute.vm".to_owned(),
+            },
+            subject_ref: None,
+            metadata: BTreeMap::new(),
+            value: rust_decimal::Decimal::from(1),
+            idempotency_key: "idem-derive-1".to_owned(),
+            corrects_id: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }],
+    };
+
+    // First submission.
+    plugin.set_create_records(vec![Ok(sample_persisted_record(Uuid::new_v4(), tenant_id))]);
+    let response = handle_create_usage_records(
+        Extension(authenticated_ctx()),
+        Extension(Arc::clone(&service)),
+        Json(build_req()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let forwarded = plugin
+        .last_create_records_input()
+        .expect("plugin received the eligible batch");
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(
+        forwarded[0].id, expected,
+        "gateway MUST stamp the dispatched record's id with \
+         derive_usage_record_id(tenant_id, gts_id, idempotency_key, created_at)",
+    );
+
+    // Same-key resubmit: the derived id MUST be identical.
+    plugin.set_create_records(vec![Ok(sample_persisted_record(Uuid::new_v4(), tenant_id))]);
+    let response = handle_create_usage_records(
+        Extension(authenticated_ctx()),
+        Extension(service),
+        Json(build_req()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let forwarded_again = plugin
+        .last_create_records_input()
+        .expect("plugin received the eligible batch");
+    assert_eq!(forwarded_again.len(), 1);
+    assert_eq!(
+        forwarded_again[0].id, expected,
+        "a same dedup-key resubmit MUST derive the identical id",
+    );
+}
+
+#[tokio::test]
+async fn create_same_key_different_created_at_derives_distinct_ids() {
+    // ADR-0014: `created_at` is part of the identity. Two submissions sharing
+    // `(tenant_id, gts_id, idempotency_key)` but carrying different `created_at`
+    // values MUST be dispatched with DISTINCT ids (previously they collided on
+    // one derived id).
+    let plugin = HappyPathPlugin::new();
+    plugin.set_get_usage_type(happy_usage_type());
+
+    let tenant_id = Uuid::from_u128(2);
+    let service = service_with_permit(
+        Arc::clone(&plugin) as Arc<dyn usage_collector_sdk::UsageCollectorPluginV1>,
+        "test.handler.create_records.distinct_created_at.v1",
+    );
+
+    let build_req = |created_at: OffsetDateTime| CreateUsageRecordsRequest {
+        records: vec![CreateUsageRecordRequest {
+            gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
+            tenant_id,
+            resource_ref: ResourceRefDto {
+                resource_id: "rsc-happy".to_owned(),
+                resource_type: "compute.vm".to_owned(),
+            },
+            subject_ref: None,
+            metadata: BTreeMap::new(),
+            value: rust_decimal::Decimal::from(1),
+            idempotency_key: "idem-distinct".to_owned(),
+            corrects_id: None,
+            created_at,
+        }],
+    };
+
+    plugin.set_create_records(vec![Ok(sample_persisted_record(Uuid::new_v4(), tenant_id))]);
+    let response = handle_create_usage_records(
+        Extension(authenticated_ctx()),
+        Extension(Arc::clone(&service)),
+        Json(build_req(OffsetDateTime::UNIX_EPOCH)),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let id_a = plugin
+        .last_create_records_input()
+        .expect("first batch dispatched")[0]
+        .id;
+
+    plugin.set_create_records(vec![Ok(sample_persisted_record(Uuid::new_v4(), tenant_id))]);
+    let response = handle_create_usage_records(
+        Extension(authenticated_ctx()),
+        Extension(service),
+        Json(build_req(
+            OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+        )),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let id_b = plugin
+        .last_create_records_input()
+        .expect("second batch dispatched")[0]
+        .id;
+
+    assert_ne!(
+        id_a, id_b,
+        "same dedup key + different created_at MUST derive distinct ids",
+    );
 }
 
 #[tokio::test]
@@ -488,7 +647,6 @@ async fn create_records_happy_path_wire_body_projects_inactive_status_as_lowerca
     let plugin = HappyPathPlugin::new();
     plugin.set_get_usage_type(happy_usage_type());
 
-    let input_uuid = Uuid::new_v4();
     let tenant_id = Uuid::from_u128(2);
     let persisted_uuid = Uuid::new_v4();
     plugin.set_create_records(vec![Ok(sample_persisted_record_with_status(
@@ -504,7 +662,6 @@ async fn create_records_happy_path_wire_body_projects_inactive_status_as_lowerca
 
     let req = CreateUsageRecordsRequest {
         records: vec![CreateUsageRecordRequest {
-            uuid: input_uuid,
             gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
             tenant_id,
             resource_ref: ResourceRefDto {
@@ -561,8 +718,19 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
     plugin.set_get_usage_type(happy_usage_type());
 
     let tenant_id = Uuid::from_u128(2);
-    let input_uuid_0 = Uuid::new_v4();
-    let input_uuid_2 = Uuid::new_v4();
+    let gts_id = UsageTypeGtsId::new(HAPPY_RECORD_GTS_ID).expect("valid gts_id");
+    let derived_id_0 = derive_usage_record_id(
+        tenant_id,
+        &gts_id,
+        &IdempotencyKey::new("idem-mixed-0").expect("valid idempotency key"),
+        OffsetDateTime::UNIX_EPOCH,
+    );
+    let derived_id_2 = derive_usage_record_id(
+        tenant_id,
+        &gts_id,
+        &IdempotencyKey::new("idem-mixed-2").expect("valid idempotency key"),
+        OffsetDateTime::UNIX_EPOCH,
+    );
     let persisted_uuid_0 = Uuid::new_v4();
     let persisted_uuid_2 = Uuid::new_v4();
     plugin.set_create_records(vec![
@@ -575,8 +743,7 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
         "test.handler.create_records.mixed.v1",
     );
 
-    let valid_record = |input_uuid: Uuid, idem: &str| CreateUsageRecordRequest {
-        uuid: input_uuid,
+    let valid_record = |idem: &str| CreateUsageRecordRequest {
         gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
         tenant_id,
         resource_ref: ResourceRefDto {
@@ -593,9 +760,8 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
 
     let req = CreateUsageRecordsRequest {
         records: vec![
-            valid_record(input_uuid_0, "idem-mixed-0"),
+            valid_record("idem-mixed-0"),
             CreateUsageRecordRequest {
-                uuid: Uuid::new_v4(),
                 gts_id: "not-a-valid-prefix".to_owned(),
                 tenant_id,
                 resource_ref: ResourceRefDto {
@@ -609,7 +775,7 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
                 corrects_id: None,
                 created_at: OffsetDateTime::UNIX_EPOCH,
             },
-            valid_record(input_uuid_2, "idem-mixed-2"),
+            valid_record("idem-mixed-2"),
         ],
     };
 
@@ -651,7 +817,7 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
     assert_eq!(
         results[0]
             .get("record")
-            .and_then(|r| r.get("uuid"))
+            .and_then(|r| r.get("id"))
             .and_then(serde_json::Value::as_str),
         Some(persisted_uuid_0.to_string().as_str()),
     );
@@ -664,7 +830,7 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
     assert_eq!(
         results[2]
             .get("record")
-            .and_then(|r| r.get("uuid"))
+            .and_then(|r| r.get("id"))
             .and_then(serde_json::Value::as_str),
         Some(persisted_uuid_2.to_string().as_str()),
     );
@@ -677,8 +843,8 @@ async fn create_records_mixed_batch_preserves_input_order_across_accept_and_reje
         2,
         "plugin MUST receive only the eligible (handler-validated) records",
     );
-    assert_eq!(forwarded[0].uuid, input_uuid_0);
-    assert_eq!(forwarded[1].uuid, input_uuid_2);
+    assert_eq!(forwarded[0].id, derived_id_0);
+    assert_eq!(forwarded[1].id, derived_id_2);
 }
 
 #[tokio::test]
@@ -916,7 +1082,7 @@ async fn get_happy_path_returns_200_with_record_body() {
         .expect("body collected");
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("body is JSON");
     assert_eq!(
-        body.get("uuid").and_then(serde_json::Value::as_str),
+        body.get("id").and_then(serde_json::Value::as_str),
         Some(target_uuid.to_string().as_str()),
         "wire body MUST echo the loaded record's UUID",
     );
@@ -927,7 +1093,7 @@ async fn get_happy_path_returns_200_with_record_body() {
 }
 
 // ---------------------------------------------------------------------------
-// prepare_list_query — $top clamp, $orderby default, cursor validate
+// prepare_list_query — $top cap, $orderby default, cursor validate
 // ---------------------------------------------------------------------------
 
 mod prepare_list_query_tests {
@@ -958,6 +1124,18 @@ mod prepare_list_query_tests {
         }
     }
 
+    fn extract_first_field_violation_field(err: &CanonicalError) -> Option<String> {
+        let CanonicalError::InvalidArgument { ctx, .. } = err else {
+            return None;
+        };
+        match ctx {
+            InvalidArgumentV1::FieldViolations { field_violations } => {
+                field_violations.first().map(|v| v.field.clone())
+            }
+            _ => None,
+        }
+    }
+
     #[test]
     fn limit_above_max_page_size_is_rejected_as_invalid_argument() {
         // A silent clamp would hand the caller a partial page that
@@ -972,6 +1150,22 @@ mod prepare_list_query_tests {
         assert_eq!(
             extract_first_field_violation_reason(&err).as_deref(),
             Some("VALIDATION"),
+        );
+    }
+
+    #[test]
+    fn limit_above_max_page_size_names_top_as_the_violating_field() {
+        // `$top` and `limit` both fold onto `ODataQuery.limit`, so the
+        // parsed query cannot say which spelling arrived. The violation
+        // names the canonical one and the detail names the alias —
+        // matching `toolkit_odata`'s own `InvalidLimit` mapping, so a
+        // client dispatching on `field` sees one spelling platform-wide.
+        let mut q = ODataQuery::new();
+        q.limit = Some(5_000);
+        let err = prepare_list_query(q).expect_err("limit > cap must be rejected");
+        assert_eq!(
+            extract_first_field_violation_field(&err).as_deref(),
+            Some("$top"),
         );
     }
 
@@ -1006,21 +1200,186 @@ mod prepare_list_query_tests {
         let out = prepare_list_query(ODataQuery::new()).expect("ok");
         assert_order_keys(
             &out.order,
-            &[("created_at", SortDir::Asc), ("uuid", SortDir::Asc)],
+            &[("created_at", SortDir::Asc), ("id", SortDir::Asc)],
         );
     }
 
     #[test]
-    fn supplied_orderby_is_preserved() {
+    fn supplied_orderby_gets_unique_tiebreaker_appended() {
+        // The caller's explicit `$orderby` is preserved as
+        // the leading sort key, but the gateway MUST append the canonical
+        // `(created_at, id)` suffix so the effective order ends in a
+        // globally-unique key. Without it the plugin keys against a
+        // non-unique boundary and silently drops the tied rows that did not
+        // fit on the previous page.
         let mut q = ODataQuery::new();
         q.order = ODataOrderBy(vec![OrderKey {
             field: "resource_id".into(),
             dir: SortDir::Desc,
         }]);
         let out = prepare_list_query(q).expect("ok");
-        // Caller's explicit orderby flows through; gateway does not
-        // inject a tiebreaker.
-        assert_order_keys(&out.order, &[("resource_id", SortDir::Desc)]);
+        // Direction-aware: the tiebreaker is appended in the order's existing
+        // direction so the plugin (uniform-direction keyset only) never sees
+        // a mixed-direction tuple.
+        assert_order_keys(
+            &out.order,
+            &[
+                ("resource_id", SortDir::Desc),
+                ("created_at", SortDir::Desc),
+                ("id", SortDir::Desc),
+            ],
+        );
+    }
+
+    #[test]
+    fn explicit_orderby_created_at_gets_id_tiebreaker() {
+        // The exact reproduction: `$orderby=created_at` (no unique
+        // final key). The gateway must append `id` so a page boundary at a
+        // tied `created_at` cannot drop rows. `created_at` is already the
+        // leading key, so `ensure_tiebreaker("created_at", …)` is a no-op and
+        // only `id` is appended.
+        let mut q = ODataQuery::new();
+        q.order = ODataOrderBy(vec![OrderKey {
+            field: "created_at".into(),
+            dir: SortDir::Asc,
+        }]);
+        let out = prepare_list_query(q).expect("ok");
+        assert_order_keys(
+            &out.order,
+            &[("created_at", SortDir::Asc), ("id", SortDir::Asc)],
+        );
+    }
+
+    #[test]
+    fn descending_orderby_appends_tiebreaker_in_same_direction() {
+        // Direction handling: this plugin's keyset only supports
+        // uniform-direction tuples, so the appended tiebreaker must follow
+        // the caller's direction. A `created_at desc` order must normalize to
+        // `(created_at desc, id desc)` — never `(created_at desc, id
+        // asc)`, which the plugin would reject as a mixed-direction keyset.
+        let mut q = ODataQuery::new();
+        q.order = ODataOrderBy(vec![OrderKey {
+            field: "created_at".into(),
+            dir: SortDir::Desc,
+        }]);
+        let out = prepare_list_query(q).expect("ok");
+        assert_order_keys(
+            &out.order,
+            &[("created_at", SortDir::Desc), ("id", SortDir::Desc)],
+        );
+    }
+
+    #[test]
+    fn mixed_direction_orderby_is_rejected_as_invalid_argument() {
+        // The storage plugin's keyset supports only uniform-direction
+        // tuples. A caller order that mixes ascending and descending keys
+        // (e.g. `$orderby=created_at asc, value desc`) can only ever compose
+        // into a mixed-direction keyset the plugin rejects downstream with a
+        // late, non-specific error. Reject it up front with a typed 400 that
+        // names the real cause (mixed sort directions) instead of leaking a
+        // plugin-internal keyset error to the caller.
+        let mut q = ODataQuery::new();
+        q.order = ODataOrderBy(vec![
+            OrderKey {
+                field: "created_at".into(),
+                dir: SortDir::Asc,
+            },
+            OrderKey {
+                field: "value".into(),
+                dir: SortDir::Desc,
+            },
+        ]);
+        let err =
+            prepare_list_query(q).expect_err("mixed-direction $orderby must be rejected up front");
+        assert!(
+            matches!(err, CanonicalError::InvalidArgument { .. }),
+            "mixed-direction $orderby must surface as InvalidArgument, got {err:?}",
+        );
+        assert_eq!(
+            extract_first_field_violation_reason(&err).as_deref(),
+            Some("VALIDATION"),
+        );
+    }
+
+    #[test]
+    fn orderby_on_a_nullable_field_is_rejected_as_invalid_argument() {
+        // The storage plugin's keyset continuation is a row-value tuple
+        // comparison that is only sound over NOT NULL columns. `subject_id`,
+        // `subject_type`, and `corrects_id` are domain-optional (nullable), so
+        // a `$orderby` leading on one of them would silently drop NULL-keyed
+        // rows from the page (and 500 on a page ending at a NULL row). Reject
+        // it up front with a typed 400 that names the real cause instead of
+        // leaking a plugin-internal keyset error — or, worse, an incomplete
+        // page — to the caller.
+        for field in ["subject_id", "subject_type", "corrects_id"] {
+            let mut q = ODataQuery::new();
+            q.order = ODataOrderBy(vec![OrderKey {
+                field: field.into(),
+                dir: SortDir::Asc,
+            }]);
+            let err =
+                prepare_list_query(q).expect_err("$orderby on a nullable field must be rejected");
+            assert!(
+                matches!(err, CanonicalError::InvalidArgument { .. }),
+                "$orderby on nullable `{field}` must surface as InvalidArgument, got {err:?}",
+            );
+            assert_eq!(
+                extract_first_field_violation_reason(&err).as_deref(),
+                Some("VALIDATION"),
+            );
+        }
+    }
+
+    #[test]
+    fn orderby_on_a_mandatory_field_other_than_the_tiebreaker_is_accepted() {
+        // Guard against over-rejection: `tenant_id` / `status` are mandatory
+        // (NOT NULL) columns, so ordering by them is a valid keyset and must
+        // still gain the canonical `(created_at, id)` suffix.
+        for field in ["tenant_id", "status"] {
+            let mut q = ODataQuery::new();
+            q.order = ODataOrderBy(vec![OrderKey {
+                field: field.into(),
+                dir: SortDir::Asc,
+            }]);
+            let out =
+                prepare_list_query(q).expect("ordering by a mandatory field is a valid keyset");
+            assert_order_keys(
+                &out.order,
+                &[
+                    (field, SortDir::Asc),
+                    ("created_at", SortDir::Asc),
+                    ("id", SortDir::Asc),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn uniform_multi_key_orderby_is_accepted_and_tiebroken() {
+        // A uniform-direction multi-key order (all `desc` here) is valid: it
+        // is preserved and gains the canonical `id` suffix in the same
+        // direction. Guards the mixed-direction rejection against
+        // over-rejecting legitimate multi-key orders.
+        let mut q = ODataQuery::new();
+        q.order = ODataOrderBy(vec![
+            OrderKey {
+                field: "resource_id".into(),
+                dir: SortDir::Desc,
+            },
+            OrderKey {
+                field: "created_at".into(),
+                dir: SortDir::Desc,
+            },
+        ]);
+        let out = prepare_list_query(q).expect("uniform multi-key order is valid");
+        assert_order_keys(
+            &out.order,
+            &[
+                ("resource_id", SortDir::Desc),
+                ("created_at", SortDir::Desc),
+                ("id", SortDir::Desc),
+            ],
+        );
     }
 
     #[test]
@@ -1039,7 +1398,7 @@ mod prepare_list_query_tests {
         q.cursor = Some(CursorV1 {
             k: vec!["2026-06-12T00:00:00Z".into(), uuid::Uuid::nil().to_string()],
             o: SortDir::Asc,
-            s: "+created_at,+uuid".to_owned(),
+            s: "+created_at,+id".to_owned(),
             f: None,
             d: "fwd".to_owned(),
         });
@@ -1047,7 +1406,7 @@ mod prepare_list_query_tests {
         let out = prepare_list_query(q).expect("cursor-driven request validates");
         assert_order_keys(
             &out.order,
-            &[("created_at", SortDir::Asc), ("uuid", SortDir::Asc)],
+            &[("created_at", SortDir::Asc), ("id", SortDir::Asc)],
         );
     }
 
@@ -1074,7 +1433,7 @@ mod prepare_list_query_tests {
         q.cursor = Some(CursorV1 {
             k: vec!["x".into()],
             o: SortDir::Asc,
-            s: "+created_at,+uuid".to_owned(),
+            s: "+created_at,+id".to_owned(),
             f: Some("hash_DIFFERENT".into()),
             d: "fwd".to_owned(),
         });
@@ -1112,7 +1471,7 @@ mod prepare_list_query_tests {
         q.cursor = Some(CursorV1 {
             k: vec!["k".into(), "u".into()],
             o: SortDir::Asc,
-            s: "+created_at,+uuid".to_owned(),
+            s: "+created_at,+id".to_owned(),
             f: Some("h0".into()),
             d: "fwd".to_owned(),
         });
@@ -1122,7 +1481,7 @@ mod prepare_list_query_tests {
         // so the storage plugin can build the ORDER BY / keyset predicate.
         assert_order_keys(
             &out.order,
-            &[("created_at", SortDir::Asc), ("uuid", SortDir::Asc)],
+            &[("created_at", SortDir::Asc), ("id", SortDir::Asc)],
         );
     }
 }
@@ -1300,6 +1659,7 @@ mod parse_required_gts_id_tests {
     use toolkit_canonical_errors::context::InvalidArgumentV1;
 
     use super::super::parse_required_gts_id;
+    use super::HAPPY_RECORD_GTS_ID;
 
     fn p(key: &str, value: &str) -> (String, String) {
         (key.to_owned(), value.to_owned())
@@ -1341,8 +1701,7 @@ mod parse_required_gts_id_tests {
         // would silently mask the caller bug. The helper MUST reject
         // outright. Pin BOTH the field/reason and that the rejection
         // happens regardless of whether either value is well-formed.
-        let valid_gts =
-            "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1".to_owned();
+        let valid_gts = HAPPY_RECORD_GTS_ID.to_owned();
         let err =
             parse_required_gts_id(&[p("gts_id", &valid_gts), p("gts_id", "even.something.else")])
                 .expect_err("duplicate gts_id MUST reject");
@@ -1371,20 +1730,102 @@ mod parse_required_gts_id_tests {
 
     #[test]
     fn well_formed_gts_id_round_trips_through_the_typed_newtype() {
-        let raw = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+        let raw = HAPPY_RECORD_GTS_ID;
         let parsed = parse_required_gts_id(&[p("gts_id", raw)]).expect("well-formed gts_id passes");
         assert_eq!(AsRef::<str>::as_ref(&parsed), raw);
     }
 }
 
 // ---------------------------------------------------------------------------
+// reject_unknown_list_params — the list allowlist admits both page-size
+// spellings and nothing beyond the declared set.
+//
+// `toolkit::api::odata::ODataParams` declares `limit` with
+// `#[serde(alias = "$top")]`, so `$top` and `limit` fold onto the same
+// `ODataQuery.limit` slot. An allowlist entry with no binding behind it
+// would be worse than a rejection — it would accept the parameter,
+// ignore it, and hand back a full page the caller reads as their
+// requested page — so each admitted spelling must be one the extractor
+// actually binds.
+// ---------------------------------------------------------------------------
+
+mod reject_unknown_list_params_tests {
+    use toolkit_canonical_errors::CanonicalError;
+    use toolkit_canonical_errors::context::InvalidArgumentV1;
+
+    use super::super::reject_unknown_list_params;
+
+    fn p(key: &str, value: &str) -> (String, String) {
+        (key.to_owned(), value.to_owned())
+    }
+
+    fn violating_field(err: &CanonicalError) -> Option<String> {
+        let CanonicalError::InvalidArgument { ctx, .. } = err else {
+            return None;
+        };
+        match ctx {
+            InvalidArgumentV1::FieldViolations { field_violations } => {
+                field_violations.first().map(|v| v.field.clone())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn allowed_params_pass() {
+        reject_unknown_list_params(&[
+            p("$filter", "created_at ge 1 and created_at lt 2"),
+            p("$orderby", "created_at asc"),
+            p("limit", "10"),
+            p("cursor", "opaque"),
+            p("gts_id", "g"),
+            p("metadata.user_id", "u1"),
+        ])
+        .expect("the list allowlist admits every documented parameter");
+    }
+
+    #[test]
+    fn top_is_admitted_as_the_canonical_page_size_spelling() {
+        // `$top` is canonical OData (OASIS OData 4.01 Part 2 §5.1.6) and
+        // the toolkit extractor binds it as an alias of `limit`. Rejecting
+        // it here would refuse a page size the platform honours.
+        reject_unknown_list_params(&[p("gts_id", "g"), p("$top", "5")])
+            .expect("`$top` MUST be admitted: the extractor binds it onto `ODataQuery.limit`");
+    }
+
+    #[test]
+    fn select_is_rejected_because_no_projection_is_applied() {
+        // The toolkit extractor parses `$select` into `ODataQuery.select`,
+        // but this gear never reads that field: the handler returns whole
+        // DTOs and the plugin selects a fixed column list. Admitting it
+        // would answer `200` with every field to a caller who asked for
+        // one, which reads as a satisfied projection rather than an
+        // unsupported parameter.
+        let err = reject_unknown_list_params(&[p("gts_id", "g"), p("$select", "id")])
+            .expect_err("`$select` MUST be rejected: no code path applies the projection");
+        assert_eq!(
+            violating_field(&err).as_deref(),
+            Some("$select"),
+            "the violation MUST name `$select` so the caller learns which parameter is unsupported",
+        );
+    }
+
+    #[test]
+    fn unknown_parameter_is_rejected_with_field_naming_the_offender() {
+        let err = reject_unknown_list_params(&[p("unknown_param", "x")])
+            .expect_err("unknown param MUST reject");
+        assert_eq!(violating_field(&err).as_deref(), Some("unknown_param"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // reject_unknown_aggregate_params — aggregate allowlist is STRICTER than list
 //
-// The list path admits `$top`, `cursor`, `$select`, and `limit`; the
+// The list path admits `$top`, `cursor`, `$orderby`, and `limit`; the
 // aggregate path intentionally rejects them (the aggregation result is
-// not paginated and the projection is fixed). Verify the asymmetry
-// directly — a regression that copy-pasted the list allowlist into the
-// aggregate validator would not be caught by any other test.
+// not paginated). Verify the asymmetry directly — a regression that
+// copy-pasted the list allowlist into the aggregate validator would not
+// be caught by any other test.
 // ---------------------------------------------------------------------------
 
 mod reject_unknown_aggregate_params_tests {
@@ -1412,7 +1853,11 @@ mod reject_unknown_aggregate_params_tests {
         // NOT on `AGGREGATE_ODATA_PARAMS`. The aggregate validator MUST
         // reject them — silent admission would let a caller paginate an
         // unpaginated endpoint and ship an inconsistent wire contract.
-        for forbidden in ["$top", "cursor", "$select", "limit", "$orderby"] {
+        //
+        // `$select` is deliberately absent: it is rejected on BOTH paths,
+        // so it demonstrates no asymmetry. Its list-path rejection is
+        // pinned by `reject_unknown_list_params_tests`.
+        for forbidden in ["$top", "cursor", "limit", "$orderby"] {
             assert!(
                 reject_unknown_aggregate_params(&[p(forbidden, "v")]).is_err(),
                 "`{forbidden}` MUST be rejected on the aggregate path - \
@@ -1500,7 +1945,6 @@ async fn create_with_batch_above_cap_rejects_without_iterating_records() {
     let oversize = MAX_BATCH_RECORDS + 1;
     let records: Vec<_> = (0..oversize)
         .map(|i| CreateUsageRecordRequest {
-            uuid: Uuid::new_v4(),
             gts_id: HAPPY_RECORD_GTS_ID.to_owned(),
             tenant_id: Uuid::from_u128(2),
             resource_ref: ResourceRefDto {
@@ -1583,7 +2027,7 @@ mod handle_list_usage_records_tests {
     use uuid::Uuid;
 
     use super::super::handle_list_usage_records;
-    use super::sample_persisted_record;
+    use super::{HAPPY_RECORD_GTS_ID, sample_persisted_record};
     use crate::domain::Service;
     use crate::domain::test_support::{
         CountingPermitResolver, CountingUnreachableResolver, HappyPathPlugin, authenticated_ctx,
@@ -1659,10 +2103,7 @@ mod handle_list_usage_records_tests {
             Extension(SecurityContext::anonymous()),
             Extension(service),
             Query(vec![
-                (
-                    "gts_id".to_owned(),
-                    "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1".to_owned(),
-                ),
+                ("gts_id".to_owned(), HAPPY_RECORD_GTS_ID.to_owned()),
                 ("totally_unknown".to_owned(), "x".to_owned()),
             ]),
             OData(ODataQuery::new()),
@@ -1685,7 +2126,7 @@ mod handle_list_usage_records_tests {
         q.cursor = Some(CursorV1 {
             k: vec!["k".into()],
             o: SortDir::Asc,
-            s: "+created_at,+uuid".to_owned(),
+            s: "+created_at,+id".to_owned(),
             f: Some("hash_DIFFERENT".into()),
             d: "fwd".to_owned(),
         });
@@ -1693,10 +2134,7 @@ mod handle_list_usage_records_tests {
         let response = handle_list_usage_records(
             Extension(SecurityContext::anonymous()),
             Extension(service),
-            Query(vec![(
-                "gts_id".to_owned(),
-                "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1".to_owned(),
-            )]),
+            Query(vec![("gts_id".to_owned(), HAPPY_RECORD_GTS_ID.to_owned())]),
             OData(q),
         )
         .await
@@ -1709,7 +2147,7 @@ mod handle_list_usage_records_tests {
     async fn happy_path_maps_page_items_through_dto_and_preserves_page_info() {
         // Plugin returns a 2-item `Page<UsageRecord>` with a non-default
         // `PageInfo`. The handler MUST:
-        //   1. project each item via `UsageRecordDto::from` (uuid +
+        //   1. project each item via `UsageRecordDto::from` (id +
         //      lowercase `status` are the cheapest, regression-prone
         //      witnesses), and
         //   2. carry `page_info` verbatim (`next_cursor`, `prev_cursor`,
@@ -1717,7 +2155,7 @@ mod handle_list_usage_records_tests {
         let plugin = HappyPathPlugin::new();
         let item_a = sample_persisted_record(Uuid::new_v4(), Uuid::from_u128(2));
         let item_b = sample_persisted_record(Uuid::new_v4(), Uuid::from_u128(2));
-        let expected_uuids = [item_a.uuid, item_b.uuid];
+        let expected_uuids = [item_a.id, item_b.id];
         plugin.set_list_usage_records_response(ODataPage::new(
             vec![item_a, item_b],
             PageInfo {
@@ -1732,10 +2170,7 @@ mod handle_list_usage_records_tests {
         let response = handle_list_usage_records(
             Extension(authenticated_ctx()),
             Extension(service),
-            Query(vec![(
-                "gts_id".to_owned(),
-                "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1".to_owned(),
-            )]),
+            Query(vec![("gts_id".to_owned(), HAPPY_RECORD_GTS_ID.to_owned())]),
             OData(super::bounded_window_query()),
         )
         .await
@@ -1755,7 +2190,7 @@ mod handle_list_usage_records_tests {
         let actual_uuids: Vec<_> = items
             .iter()
             .map(|i| {
-                i.get("uuid")
+                i.get("id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned()
@@ -1764,7 +2199,7 @@ mod handle_list_usage_records_tests {
         assert_eq!(
             actual_uuids,
             expected_uuids.map(|u| u.to_string()).to_vec(),
-            "items[i].uuid MUST echo plugin order (preserves keyset \
+            "items[i].id MUST echo plugin order (preserves keyset \
              pagination contract)",
         );
         for (i, item) in items.iter().enumerate() {
@@ -1812,18 +2247,22 @@ mod handle_list_usage_records_tests {
 // ---------------------------------------------------------------------------
 
 mod handle_query_aggregated_usage_records_tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use axum::Json;
     use axum::extract::{Extension, Query};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use rust_decimal::Decimal;
+    use bigdecimal::BigDecimal;
     use toolkit::api::canonical_prelude::OData;
     use toolkit::client_hub::ClientHub;
     use toolkit_odata::ODataQuery;
     use toolkit_security::{SecurityContext, pep_properties};
-    use usage_collector_sdk::{AggregationBucket, AggregationResult};
+    use usage_collector_sdk::{
+        AggregationBucket, AggregationResult, UsageKind, UsageType, UsageTypeGtsId,
+    };
     use uuid::Uuid;
 
     use super::super::handle_query_aggregated_usage_records;
@@ -1836,7 +2275,8 @@ mod handle_query_aggregated_usage_records_tests {
         enforcer_for, hub_with_plugin,
     };
 
-    const VALID_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    const VALID_GTS_ID: &str =
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
     fn service_no_plugin() -> Arc<Service> {
         let hub = Arc::new(ClientHub::new());
@@ -1965,13 +2405,18 @@ mod handle_query_aggregated_usage_records_tests {
         // MUST surface a 200 OK body whose `buckets` array projects
         // each bucket through `AggregationBucketDto` — `key` carried
         // verbatim, `value` serialised as a decimal string per the
-        // `rust_decimal::serde::str_option` contract.
+        // `bigdecimal_str_option` contract.
         let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type(UsageType {
+            gts_id: UsageTypeGtsId::new(VALID_GTS_ID).expect("valid gts_id"),
+            kind: UsageKind::Counter,
+            metadata_fields: BTreeSet::new(),
+        });
         plugin.set_query_aggregated_usage_records_response(AggregationResult {
             buckets: vec![
                 AggregationBucket {
                     key: vec!["eu".to_owned()],
-                    value: Some(Decimal::from(42)),
+                    value: Some(BigDecimal::from(42)),
                 },
                 AggregationBucket {
                     key: vec!["us".to_owned()],
@@ -2019,7 +2464,7 @@ mod handle_query_aggregated_usage_records_tests {
             Some("42"),
             "non-empty bucket value MUST serialise as the decimal string \
              form, NOT a JSON number (the float-round-trip safety \
-             requires the str_option codec)",
+             requires the bigdecimal_str_option codec)",
         );
         assert!(
             buckets[1]

@@ -27,6 +27,7 @@ use uuid::Uuid;
 /// match DESIGN §4.2 line 1363; renaming them is a contract change.
 pub(crate) mod pep {
     use super::{ResourceType, pep_properties};
+    use account_management_sdk::TENANT_RESOURCE_TYPE;
 
     /// `Tenant` resource — `gts.cf.core.am.tenant.v1~`.
     ///
@@ -55,7 +56,7 @@ pub(crate) mod pep {
     /// absent for `create` / `list_children` which have no single
     /// target tenant).
     pub const TENANT: ResourceType = ResourceType::from_static(
-        "gts.cf.core.am.tenant.v1~",
+        TENANT_RESOURCE_TYPE,
         &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
     );
 
@@ -66,6 +67,11 @@ pub(crate) mod pep {
         pub const UPDATE: &str = "update";
         pub const DELETE: &str = "delete";
         pub const LIST_CHILDREN: &str = "list_children";
+
+        /// Every action in this vocabulary — see the note on the user
+        /// service's `actions::ALL`. Add new actions here as well as above.
+        #[cfg(test)]
+        pub const ALL: &[&str] = &[CREATE, READ, UPDATE, DELETE, LIST_CHILDREN];
     }
 }
 
@@ -656,7 +662,7 @@ impl<R: TenantRepo> TenantService<R> {
             .await?;
 
         // Pure parse — derives the canonical UUIDv5 from the chained
-        // GTS string. No IO. `gts::GtsID::new` enforces the chain
+        // GTS string. No IO. `gts::GtsId::try_new` enforces the chain
         // shape; `to_uuid()` is the same algorithm Types Registry
         // uses internally (`types-registry-sdk/src/models.rs:152`),
         // so the derived uuid is the lookup key the registry stores
@@ -664,7 +670,7 @@ impl<R: TenantRepo> TenantService<R> {
         // malformed `tenant_type` string fails fast as
         // `InvalidTenantType` rather than after a wasted Types
         // Registry round-trip.
-        let tenant_type_uuid = gts::GtsID::new(input.tenant_type.as_ref())
+        let tenant_type_uuid = gts::GtsId::try_new(input.tenant_type.as_ref())
             .map_err(|e| DomainError::InvalidTenantType {
                 detail: format!("invalid tenant_type chain `{}`: {e}", input.tenant_type),
             })?
@@ -1876,7 +1882,7 @@ impl<R: TenantRepo> TenantService<R> {
         };
         let updated = self
             .repo
-            .schedule_deletion(&scope, tenant_id, now, retention)
+            .schedule_deletion(&scope, tenant_id, ctx.subject_id(), now, retention)
             .await?;
         // TODO(events): emit AM event when platform event-bus lands.
         tracing::info!(

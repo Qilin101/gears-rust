@@ -10,6 +10,7 @@ use crate::domain::test_support::{
     MockCredStoreClient, MockTenantResolverClient, allow_all_enforcer,
 };
 use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
+use oagw_sdk::HTTP_PROTOCOL_ID;
 use tenant_resolver_sdk::TenantId;
 
 fn make_service() -> ControlPlaneServiceImpl {
@@ -67,7 +68,7 @@ fn make_create_upstream_hostname() -> CreateUpstreamRequest {
                 port: 443,
             }],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -90,7 +91,7 @@ fn make_create_upstream_ip(alias: &str) -> CreateUpstreamRequest {
                 port: 443,
             }],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: Some(alias.into()),
         auth: None,
         headers: None,
@@ -221,7 +222,7 @@ async fn alias_auto_generation() {
                 port: 8443,
             }],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -1810,14 +1811,56 @@ async fn bind_rejects_inaccessible_secret_ref() {
         .await
         .unwrap_err();
     match err {
-        DomainError::Validation { detail, .. } => {
+        // A state precondition (retryable by provisioning callers), not a
+        // malformed-argument validation failure.
+        DomainError::SecretRefNotAccessible { detail, .. } => {
             assert!(
                 detail.contains("not accessible"),
                 "expected 'not accessible' error, got: {detail}"
             );
         }
-        _ => panic!("expected Validation error, got: {err:?}"),
+        _ => panic!("expected SecretRefNotAccessible error, got: {err:?}"),
     }
+}
+
+/// A client implementation that reports the not-found surface as an error
+/// (`Err(CredStoreError::NotFound)`) instead of `Ok(None)` — e.g. a resolved
+/// metadata row whose value is still being provisioned — must classify the
+/// same way: a retryable state precondition, not a misconfiguration.
+#[tokio::test]
+async fn bind_maps_not_found_error_to_secret_ref_not_accessible() {
+    let root = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let resolver = MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
+    let svc = ControlPlaneServiceImpl::new(
+        Arc::new(InMemoryUpstreamRepo::new()),
+        Arc::new(InMemoryRouteRepo::new()),
+        Arc::new(resolver),
+        allow_all_enforcer(),
+        Arc::new(MockCredStoreClient::erroring_not_found()),
+        Arc::new(SsrfGuard::disabled()),
+    );
+
+    let root_ctx = test_ctx(root);
+    let mut root_req = make_create_upstream_hostname();
+    root_req.auth = Some(AuthConfig {
+        plugin_type: "apikey".into(),
+        sharing: SharingMode::Inherit,
+        config: None,
+    });
+    svc.create_upstream(&root_ctx, root_req).await.unwrap();
+
+    let child_ctx = test_ctx(child);
+    let mut child_req = make_create_upstream_hostname();
+    child_req.auth = Some(auth_with_secret_ref("cred://missing-key"));
+    let err = svc
+        .create_upstream(&child_ctx, child_req)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::SecretRefNotAccessible { .. }),
+        "expected SecretRefNotAccessible, got: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -2969,7 +3012,7 @@ async fn create_ip_requires_explicit_alias() {
                 port: 443,
             }],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -3133,7 +3176,7 @@ async fn multi_endpoint_common_suffix_alias() {
                 },
             ],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -3170,7 +3213,7 @@ async fn multi_endpoint_same_suffix_different_ports_get_distinct_aliases() {
                 },
             ],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -3200,7 +3243,7 @@ async fn multi_endpoint_same_suffix_different_ports_get_distinct_aliases() {
                 },
             ],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -3241,7 +3284,7 @@ async fn multi_endpoint_public_suffix_requires_explicit_alias() {
                 },
             ],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: None,
         auth: None,
         headers: None,
@@ -3283,7 +3326,7 @@ async fn multi_endpoint_public_suffix_with_explicit_alias_succeeds() {
                 },
             ],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: Some("my-uk-backends".into()),
         auth: None,
         headers: None,
@@ -4753,7 +4796,7 @@ fn make_create_upstream_with_ip(ip: &str, alias: &str) -> CreateUpstreamRequest 
                 port: 443,
             }],
         },
-        protocol: "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1".into(),
+        protocol: HTTP_PROTOCOL_ID.into(),
         alias: Some(alias.into()),
         auth: None,
         headers: None,

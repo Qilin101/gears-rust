@@ -5,7 +5,7 @@
 //! `parameters` and inline schemas stay as `serde_json::Value` since they are
 //! arbitrary JSON Schema.
 
-use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of};
+use crate::models::extension::Extension;
 
 // ---------------------------------------------------------------------------
 // Tool
@@ -16,54 +16,24 @@ use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of}
 /// Core-owned tool types have named variants; any other `type` — a provider or
 /// third-party plugin extension the core does not own — is preserved verbatim
 /// in [`Tool::Other`] and forwarded without interpretation.
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
 pub enum Tool {
     /// A caller-defined function tool.
+    #[serde(rename = "function")]
     Function(FunctionTool),
     /// A reference to a tool schema in the Type Registry.
+    #[serde(rename = "reference")]
     Reference(ToolReference),
     /// An inline GTS schema definition.
+    #[serde(rename = "inline_gts")]
     InlineGts(ToolInlineGts),
     /// The built-in image-generation tool (Gears extension).
     #[serde(rename = "cf_gears:image_generation")]
     ImageGeneration(ImageGenerationTool),
     /// A tool `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for Tool {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Function(v) => serialize_tagged(serializer, "function", v),
-            Self::Reference(v) => serialize_tagged(serializer, "reference", v),
-            Self::InlineGts(v) => serialize_tagged(serializer, "inline_gts", v),
-            Self::ImageGeneration(v) => {
-                serialize_tagged(serializer, "cf_gears:image_generation", v)
-            }
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Tool {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "function" => return from_tagged(&value).map(Self::Function),
-                "reference" => return from_tagged(&value).map(Self::Reference),
-                "inline_gts" => return from_tagged(&value).map(Self::InlineGts),
-                "cf_gears:image_generation" => {
-                    return from_tagged(&value).map(Self::ImageGeneration);
-                }
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 /// Function tool.

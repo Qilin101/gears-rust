@@ -11,7 +11,7 @@
 
 use crate::models::content::{Annotation, LogProb, OutputContentPart};
 use crate::models::core::{ResponseError, ResponseResource};
-use crate::models::extension::{Extension, from_tagged, serialize_tagged, tag_of};
+use crate::models::extension::Extension;
 use crate::models::items::{DataOutput, OutputItem, ReasoningSummaryPart};
 
 // ---------------------------------------------------------------------------
@@ -27,9 +27,8 @@ use crate::models::items::{DataOutput, OutputItem, ReasoningSummaryPart};
 // `Other` is inherent to the protocol and not worth an allocation on the hot
 // path.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
-#[non_exhaustive]
 pub enum StreamingEvent {
     /// The response was created.
     #[serde(rename = "response.created")]
@@ -52,10 +51,10 @@ pub enum StreamingEvent {
 
     /// An output item was added.
     #[serde(rename = "response.output_item.added")]
-    OutputItemAdded(OutputItemAddedEvent),
+    OutputItemAdded(OutputItemEvent),
     /// An output item was completed.
     #[serde(rename = "response.output_item.done")]
-    OutputItemDone(OutputItemDoneEvent),
+    OutputItemDone(OutputItemEvent),
 
     /// A content part was added.
     #[serde(rename = "response.content_part.added")]
@@ -66,10 +65,10 @@ pub enum StreamingEvent {
 
     /// Output text was incrementally added.
     #[serde(rename = "response.output_text.delta")]
-    OutputTextDelta(OutputTextDeltaEvent),
+    OutputTextDelta(OutputTextEvent),
     /// Output text was completed.
     #[serde(rename = "response.output_text.done")]
-    OutputTextDone(OutputTextDoneEvent),
+    OutputTextDone(OutputTextEvent),
     /// An output-text annotation was added.
     #[serde(rename = "response.output_text.annotation.added")]
     OutputTextAnnotationAdded(OutputTextAnnotationAddedEvent),
@@ -79,21 +78,21 @@ pub enum StreamingEvent {
     RefusalDelta(ContentDeltaEvent),
     /// Refusal text was completed.
     #[serde(rename = "response.refusal.done")]
-    RefusalDone(RefusalDoneEvent),
+    RefusalDone(ContentDeltaEvent),
 
     /// Function-call arguments were incrementally added.
     #[serde(rename = "response.function_call_arguments.delta")]
-    FunctionCallArgumentsDelta(FunctionCallArgumentsDeltaEvent),
+    FunctionCallArgumentsDelta(FunctionCallArgumentsEvent),
     /// Function-call arguments were completed.
     #[serde(rename = "response.function_call_arguments.done")]
-    FunctionCallArgumentsDone(FunctionCallArgumentsDoneEvent),
+    FunctionCallArgumentsDone(FunctionCallArgumentsEvent),
 
     /// Reasoning text was incrementally added.
     #[serde(rename = "response.reasoning.delta")]
     ReasoningDelta(ContentDeltaEvent),
     /// Reasoning text was completed.
     #[serde(rename = "response.reasoning.done")]
-    ReasoningDone(ReasoningDoneEvent),
+    ReasoningDone(ContentDeltaEvent),
 
     /// A reasoning-summary part was added.
     #[serde(rename = "response.reasoning_summary_part.added")]
@@ -103,10 +102,10 @@ pub enum StreamingEvent {
     ReasoningSummaryPartDone(SummaryPartEvent),
     /// Reasoning-summary text was incrementally added.
     #[serde(rename = "response.reasoning_summary_text.delta")]
-    ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaEvent),
+    ReasoningSummaryTextDelta(ReasoningSummaryTextEvent),
     /// Reasoning-summary text was completed.
     #[serde(rename = "response.reasoning_summary_text.done")]
-    ReasoningSummaryTextDone(ReasoningSummaryTextDoneEvent),
+    ReasoningSummaryTextDone(ReasoningSummaryTextEvent),
 
     /// An error was emitted.
     #[serde(rename = "error")]
@@ -120,134 +119,8 @@ pub enum StreamingEvent {
     DataDone(DataEvent),
 
     /// An event `type` the core does not own, preserved verbatim.
-    #[serde(skip)]
+    #[serde(untagged)]
     Other(Extension),
-}
-
-impl serde::Serialize for StreamingEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Created(v) => serialize_tagged(serializer, "response.created", v),
-            Self::InProgress(v) => serialize_tagged(serializer, "response.in_progress", v),
-            Self::Queued(v) => serialize_tagged(serializer, "response.queued", v),
-            Self::Completed(v) => serialize_tagged(serializer, "response.completed", v),
-            Self::Incomplete(v) => serialize_tagged(serializer, "response.incomplete", v),
-            Self::Failed(v) => serialize_tagged(serializer, "response.failed", v),
-            Self::OutputItemAdded(v) => {
-                serialize_tagged(serializer, "response.output_item.added", v)
-            }
-            Self::OutputItemDone(v) => serialize_tagged(serializer, "response.output_item.done", v),
-            Self::ContentPartAdded(v) => {
-                serialize_tagged(serializer, "response.content_part.added", v)
-            }
-            Self::ContentPartDone(v) => {
-                serialize_tagged(serializer, "response.content_part.done", v)
-            }
-            Self::OutputTextDelta(v) => {
-                serialize_tagged(serializer, "response.output_text.delta", v)
-            }
-            Self::OutputTextDone(v) => serialize_tagged(serializer, "response.output_text.done", v),
-            Self::OutputTextAnnotationAdded(v) => {
-                serialize_tagged(serializer, "response.output_text.annotation.added", v)
-            }
-            Self::RefusalDelta(v) => serialize_tagged(serializer, "response.refusal.delta", v),
-            Self::RefusalDone(v) => serialize_tagged(serializer, "response.refusal.done", v),
-            Self::FunctionCallArgumentsDelta(v) => {
-                serialize_tagged(serializer, "response.function_call_arguments.delta", v)
-            }
-            Self::FunctionCallArgumentsDone(v) => {
-                serialize_tagged(serializer, "response.function_call_arguments.done", v)
-            }
-            Self::ReasoningDelta(v) => serialize_tagged(serializer, "response.reasoning.delta", v),
-            Self::ReasoningDone(v) => serialize_tagged(serializer, "response.reasoning.done", v),
-            Self::ReasoningSummaryPartAdded(v) => {
-                serialize_tagged(serializer, "response.reasoning_summary_part.added", v)
-            }
-            Self::ReasoningSummaryPartDone(v) => {
-                serialize_tagged(serializer, "response.reasoning_summary_part.done", v)
-            }
-            Self::ReasoningSummaryTextDelta(v) => {
-                serialize_tagged(serializer, "response.reasoning_summary_text.delta", v)
-            }
-            Self::ReasoningSummaryTextDone(v) => {
-                serialize_tagged(serializer, "response.reasoning_summary_text.done", v)
-            }
-            Self::Error(v) => serialize_tagged(serializer, "error", v),
-            Self::DataInProgress(v) => {
-                serialize_tagged(serializer, "cf_gears:response.data.in_progress", v)
-            }
-            Self::DataDone(v) => serialize_tagged(serializer, "cf_gears:response.data.done", v),
-            Self::Other(ext) => serde::Serialize::serialize(&ext.0, serializer),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for StreamingEvent {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(tag) = tag_of(&value) {
-            match tag {
-                "response.created" => return from_tagged(&value).map(Self::Created),
-                "response.in_progress" => return from_tagged(&value).map(Self::InProgress),
-                "response.queued" => return from_tagged(&value).map(Self::Queued),
-                "response.completed" => return from_tagged(&value).map(Self::Completed),
-                "response.incomplete" => return from_tagged(&value).map(Self::Incomplete),
-                "response.failed" => return from_tagged(&value).map(Self::Failed),
-                "response.output_item.added" => {
-                    return from_tagged(&value).map(Self::OutputItemAdded);
-                }
-                "response.output_item.done" => {
-                    return from_tagged(&value).map(Self::OutputItemDone);
-                }
-                "response.content_part.added" => {
-                    return from_tagged(&value).map(Self::ContentPartAdded);
-                }
-                "response.content_part.done" => {
-                    return from_tagged(&value).map(Self::ContentPartDone);
-                }
-                "response.output_text.delta" => {
-                    return from_tagged(&value).map(Self::OutputTextDelta);
-                }
-                "response.output_text.done" => {
-                    return from_tagged(&value).map(Self::OutputTextDone);
-                }
-                "response.output_text.annotation.added" => {
-                    return from_tagged(&value).map(Self::OutputTextAnnotationAdded);
-                }
-                "response.refusal.delta" => return from_tagged(&value).map(Self::RefusalDelta),
-                "response.refusal.done" => return from_tagged(&value).map(Self::RefusalDone),
-                "response.function_call_arguments.delta" => {
-                    return from_tagged(&value).map(Self::FunctionCallArgumentsDelta);
-                }
-                "response.function_call_arguments.done" => {
-                    return from_tagged(&value).map(Self::FunctionCallArgumentsDone);
-                }
-                "response.reasoning.delta" => {
-                    return from_tagged(&value).map(Self::ReasoningDelta);
-                }
-                "response.reasoning.done" => return from_tagged(&value).map(Self::ReasoningDone),
-                "response.reasoning_summary_part.added" => {
-                    return from_tagged(&value).map(Self::ReasoningSummaryPartAdded);
-                }
-                "response.reasoning_summary_part.done" => {
-                    return from_tagged(&value).map(Self::ReasoningSummaryPartDone);
-                }
-                "response.reasoning_summary_text.delta" => {
-                    return from_tagged(&value).map(Self::ReasoningSummaryTextDelta);
-                }
-                "response.reasoning_summary_text.done" => {
-                    return from_tagged(&value).map(Self::ReasoningSummaryTextDone);
-                }
-                "error" => return from_tagged(&value).map(Self::Error),
-                "cf_gears:response.data.in_progress" => {
-                    return from_tagged(&value).map(Self::DataInProgress);
-                }
-                "cf_gears:response.data.done" => return from_tagged(&value).map(Self::DataDone),
-                _ => {}
-            }
-        }
-        Ok(Self::Other(Extension(value)))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,25 +137,16 @@ pub struct ResponseSnapshotEvent {
     pub response: ResponseResource,
 }
 
-/// An output item was added.
+/// An output item event — used for both `added` and `done` wire types.
+/// The `item` is always present for `added` and optional for `done`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct OutputItemAddedEvent {
+pub struct OutputItemEvent {
     /// Monotonic ordering sequence number.
     pub sequence_number: u64,
     /// Index of the output item.
     pub output_index: u32,
-    /// The output item that was added.
-    pub item: OutputItem,
-}
-
-/// An output item was completed.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct OutputItemDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// The output item that was completed, if any.
+    /// The output item that was added or completed (absent for no-op done).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<OutputItem>,
 }
 
@@ -301,9 +165,10 @@ pub struct ContentPartEvent {
     pub part: OutputContentPart,
 }
 
-/// Output text delta.
+/// Output text event — used for both `delta` and `done` wire types.
+/// For delta the `text` field carries the incremental append; for done the final text.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct OutputTextDeltaEvent {
+pub struct OutputTextEvent {
     /// Monotonic ordering sequence number.
     pub sequence_number: u64,
     /// Identifier of the item that was updated.
@@ -312,27 +177,9 @@ pub struct OutputTextDeltaEvent {
     pub output_index: u32,
     /// Index of the content part.
     pub content_index: u32,
-    /// The text delta appended.
-    pub delta: String,
-    /// Token log-probabilities emitted with the delta, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<Vec<LogProb>>,
-}
-
-/// Output text completion.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct OutputTextDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Identifier of the item that was updated.
-    pub item_id: String,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// Index of the content part.
-    pub content_index: u32,
-    /// The final text emitted.
+    /// The text delta appended (delta) or the final text (done).
     pub text: String,
-    /// Token log-probabilities emitted with the final text, if any.
+    /// Token log-probabilities emitted with the event, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<LogProb>>,
 }
@@ -370,60 +217,18 @@ pub struct ContentDeltaEvent {
     pub delta: String,
 }
 
-/// Refusal text completion.
+/// Function-call arguments event — used for both `delta` and `done` wire types.
+/// For delta the `arguments` field carries the incremental append; for done the full arguments.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct RefusalDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Identifier of the item that was updated.
-    pub item_id: String,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// Index of the refusal content.
-    pub content_index: u32,
-    /// The final refusal text emitted.
-    pub refusal: String,
-}
-
-/// Function-call arguments delta.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct FunctionCallArgumentsDeltaEvent {
+pub struct FunctionCallArgumentsEvent {
     /// Monotonic ordering sequence number.
     pub sequence_number: u64,
     /// Identifier of the tool-call item that was updated.
     pub item_id: String,
     /// Index of the output item.
     pub output_index: u32,
-    /// The arguments delta appended.
-    pub delta: String,
-}
-
-/// Function-call arguments completion.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct FunctionCallArgumentsDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Identifier of the tool-call item that was updated.
-    pub item_id: String,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// The final arguments string emitted.
+    /// The arguments delta appended (delta) or the final arguments string (done).
     pub arguments: String,
-}
-
-/// Reasoning text completion.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReasoningDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Identifier of the item that was updated.
-    pub item_id: String,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// Index of the reasoning content.
-    pub content_index: u32,
-    /// The final reasoning text emitted.
-    pub text: String,
 }
 
 /// A reasoning-summary part was added or completed (shared by both summary-part
@@ -442,9 +247,10 @@ pub struct SummaryPartEvent {
     pub part: ReasoningSummaryPart,
 }
 
-/// Reasoning-summary text delta.
+/// Reasoning-summary text event — used for both `delta` and `done` wire types.
+/// For delta the `text` field carries the incremental append; for done the final text.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReasoningSummaryTextDeltaEvent {
+pub struct ReasoningSummaryTextEvent {
     /// Monotonic ordering sequence number.
     pub sequence_number: u64,
     /// Identifier of the item that was updated.
@@ -453,22 +259,7 @@ pub struct ReasoningSummaryTextDeltaEvent {
     pub output_index: u32,
     /// Index of the summary content.
     pub summary_index: u32,
-    /// The summary text delta appended.
-    pub delta: String,
-}
-
-/// Reasoning-summary text completion.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReasoningSummaryTextDoneEvent {
-    /// Monotonic ordering sequence number.
-    pub sequence_number: u64,
-    /// Identifier of the item that was updated.
-    pub item_id: String,
-    /// Index of the output item.
-    pub output_index: u32,
-    /// Index of the summary content.
-    pub summary_index: u32,
-    /// The final summary text emitted.
+    /// The summary text delta appended (delta) or the final summary text (done).
     pub text: String,
 }
 
@@ -504,15 +295,15 @@ pub struct DataEvent {
 mod tests {
     use super::*;
     use crate::models::content::OutputText;
-    use crate::models::core::Role;
     use crate::models::items::{ItemStatus, MessageOutput};
+    use crate::models::role::Role;
 
     #[test]
     fn output_item_added_roundtrips() {
-        let event = StreamingEvent::OutputItemAdded(OutputItemAddedEvent {
+        let event = StreamingEvent::OutputItemAdded(OutputItemEvent {
             sequence_number: 3,
             output_index: 0,
-            item: OutputItem::Message(MessageOutput {
+            item: Some(OutputItem::Message(MessageOutput {
                 id: "m1".into(),
                 status: ItemStatus::InProgress,
                 role: Role::Assistant,
@@ -521,7 +312,7 @@ mod tests {
                     annotations: vec![],
                     logprobs: None,
                 })],
-            }),
+            })),
         });
         let value = serde_json::to_value(&event).unwrap();
         let back: StreamingEvent = serde_json::from_value(value).unwrap();
@@ -577,7 +368,7 @@ mod tests {
             "item_id": "i1",
             "output_index": 0,
             "content_index": 0,
-            "delta": "a",
+            "text": "a",
             "logprobs": [
                 { "token": "a", "logprob": -0.1, "top_logprobs": [{ "token": "b", "logprob": -1.0 }] }
             ]
@@ -590,20 +381,16 @@ mod tests {
     }
 
     #[test]
-    fn derived_schema_keeps_type_discriminator_and_skips_other() {
-        // The schema is still derived even though serde is hand-written: it must
-        // document the known `type` tags and omit the `Other` catch-all.
+    fn schema_includes_other_variant() {
         let schema = serde_json::to_value(schemars::schema_for!(StreamingEvent)).unwrap();
         let text = schema.to_string();
+        // `Other` now appears as an untagged catch-all (any JSON object).
         assert!(
-            text.contains("response.created"),
-            "known tag missing: {text}"
+            text.contains("Other"),
+            "Other must appear in schema: {text}"
         );
-        assert!(
-            text.contains("cf_gears:response.data.done"),
-            "gears tag missing"
-        );
-        assert!(!text.contains("\"Other\""), "Other must be skipped: {text}");
+        // Payload field should be present in the schema defs.
+        assert!(text.contains("sequence_number"), "{text}");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 title: Security & multi-tenancy
 description: The secure-by-default data path — SecurityContext, PDP/PEP, AccessScope, SecureConn, and the tenant tree.
 sidebar:
-  label: Security & multi-tenancy
-  order: 4
+  label: Security and multi-tenancy
+  order: 7
 ---
 
 Security in Gears is not a library you remember to call — it is a layered path you cannot
@@ -70,8 +70,8 @@ the workspace lints. Always go through `SecureConn` with a scope obtained from t
 `PolicyEnforcer`.
 :::
 
-The [authorization guide](../../guides/authorization/) and [database guide](../../guides/database/)
-show the full flow against real code.
+The [Add authorization](../../build-with-gears/add-authorization/) and [Add a database](../../build-with-gears/add-a-database/)
+guides show the full flow against real code. See also [Secure data path](../secure-data-path/) for the end-to-end defense-in-depth layering.
 
 ## Multi-tenancy
 

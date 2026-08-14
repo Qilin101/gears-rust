@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-toolkit-gts-macros"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -24,3 +24,7 @@ proc-macro-crate = { workspace = true }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
+# For the configured GTS_ID_PREFIX used when expanding the `gts_id!("...")`
+# marker form inside `type_id = ...` / `id: ...` / `"id": ...` args.
+gts-id = { workspace = true }
+gts = { workspace = true }

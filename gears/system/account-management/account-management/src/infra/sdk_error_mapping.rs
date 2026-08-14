@@ -52,10 +52,10 @@ use crate::domain::metrics::{AM_CROSS_TENANT_DENIAL, MetricKind, emit_metric};
 // Resource markers — kept in sync with account_management_sdk::gts.
 // ---------------------------------------------------------------------------
 
-#[resource_error("gts.cf.core.am.tenant.v1~")]
+#[resource_error(gts_id!("cf.core.am.tenant.v1~"))]
 pub(crate) struct TenantResource;
 
-#[resource_error("gts.cf.core.am.user.v1~")]
+#[resource_error(gts_id!("cf.core.am.user.v1~"))]
 pub(crate) struct UserResource;
 
 // `TenantMetadataResource` carries the unified 404 for the metadata
@@ -64,11 +64,22 @@ pub(crate) struct UserResource;
 // `type_id` the caller supplied is surfaced through `resource_name`,
 // so consumers still see *which* schema was involved without a separate
 // type-level discriminator.
-#[resource_error("gts.cf.core.am.tenant_metadata.v1~")]
+#[resource_error(gts_id!("cf.core.am.tenant_metadata.v1~"))]
 pub(crate) struct TenantMetadataResource;
 
-#[resource_error("gts.cf.core.am.conversion_request.v1~")]
+#[resource_error(gts_id!("cf.core.am.conversion_request.v1~"))]
 pub(crate) struct ConversionRequestResource;
+
+/// Curated public `field_violations[].description` for one
+/// [`DomainError::IdpFieldNotWritable`] attribute. Derived from the typed
+/// attribute so the wording lives in exactly one place no matter how many
+/// attributes a single refusal carries, and no vendor text is echoed.
+fn idp_managed_field_description(attribute: account_management_sdk::IdpUserAttribute) -> String {
+    format!(
+        "the {} is managed by the identity provider and cannot be changed through this API",
+        attribute.as_human_phrase()
+    )
+}
 
 // ---------------------------------------------------------------------------
 // DomainError → CanonicalError (the single AIP-193 ladder).
@@ -141,6 +152,59 @@ impl From<DomainError> for CanonicalError {
                     account_management_sdk::field::IDP_INVALID_INPUT,
                 )
                 .create(),
+            // IdP password-policy reject: structured
+            // `password` / `PASSWORD_POLICY` tokens on the `user`
+            // resource, so clients attribute the 400 to the password
+            // input instead of the generic `request` / `VALIDATION`.
+            DomainError::IdpPasswordPolicy { detail } => UserResource::invalid_argument()
+                .with_field_violation(
+                    account_management_sdk::field::PASSWORD_FIELD,
+                    detail,
+                    account_management_sdk::field::PASSWORD_POLICY,
+                )
+                .create(),
+            // IdP-managed attribute reject: each `field` token is the
+            // exact `UserUpdateRequest` property name, so a client keys
+            // form-field attribution off it and disables those inputs.
+            // One violation per refused attribute — a merge patch can
+            // touch several locked attributes at once and the client
+            // learns the whole refused set from this one response.
+            // The public description is derived from the typed attribute
+            // here (single source of wording — the variant carries no
+            // caller- or vendor-supplied string to echo). Duplicates a
+            // provider may repeat collapse to one violation each.
+            DomainError::IdpFieldNotWritable { fields } => {
+                let mut seen = std::collections::HashSet::new();
+                let mut refused = fields.into_iter().filter(|a| seen.insert(*a));
+                match refused.next() {
+                    Some(first) => {
+                        let mut builder = UserResource::invalid_argument().with_field_violation(
+                            first.as_field_token(),
+                            idp_managed_field_description(first),
+                            account_management_sdk::field::IDP_MANAGED_FIELD,
+                        );
+                        for attribute in refused {
+                            builder = builder.with_field_violation(
+                                attribute.as_field_token(),
+                                idp_managed_field_description(attribute),
+                                account_management_sdk::field::IDP_MANAGED_FIELD,
+                            );
+                        }
+                        builder.create()
+                    }
+                    // Contract violation — the variant documents a
+                    // non-empty set. A 400 whose `field_violations[]` is
+                    // empty attributes the refusal to nothing, so degrade
+                    // to the generic `request` / `VALIDATION` pair.
+                    None => UserResource::invalid_argument()
+                        .with_field_violation(
+                            field::REQUEST_FIELD,
+                            "the identity provider refused the update",
+                            field::VALIDATION,
+                        )
+                        .create(),
+                }
+            }
 
             // ---- NotFound (HTTP 404) — one resource per variant ----
             DomainError::NotFound { detail, resource } => TenantResource::not_found(detail)
@@ -184,6 +248,17 @@ impl From<DomainError> for CanonicalError {
             DomainError::AlreadyExists { detail } => TenantResource::already_exists(detail)
                 .with_resource("tenant")
                 .create(),
+            // IdP-reported user uniqueness collision: both
+            // the curated public detail and the stable `resource_name`
+            // token derive from the typed field here — the single
+            // source of the wording; the caller-supplied value is
+            // never echoed.
+            DomainError::UserAlreadyExists { field } => UserResource::already_exists(format!(
+                "a user with this {} already exists",
+                field.as_human_phrase()
+            ))
+            .with_resource(field.as_field_token())
+            .create(),
             // Duplicate-on-create per AIP-193: the at-most-one-pending
             // invariant surfaces as HTTP 409 with the existing
             // `request_id` as the structural resource identifier.

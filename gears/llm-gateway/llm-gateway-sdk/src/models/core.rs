@@ -87,6 +87,10 @@ pub struct CreateResponseBody {
     /// Prompt cache key for reuse across requests (schema maximum 64 chars).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Provider-/plugin-specific parameters not covered by core fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub extra_fields: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Request `input`: either a single text string or a list of input items.
@@ -175,8 +179,8 @@ pub struct ResponseResource {
     pub presence_penalty: f64,
     /// Frequency penalty.
     pub frequency_penalty: f64,
-    /// Number of top log-probabilities returned per token.
-    pub top_logprobs: u32,
+    /// Number of top log-probabilities returned per token (schema range 0..=20).
+    pub top_logprobs: u8,
     /// Sampling temperature.
     pub temperature: f64,
     /// Reasoning configuration.
@@ -343,22 +347,6 @@ pub struct ResponseError {
 }
 
 // ---------------------------------------------------------------------------
-// Role
-// ---------------------------------------------------------------------------
-
-/// Message author role.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-    Developer,
-}
-
-// ---------------------------------------------------------------------------
 // TextFormat
 // ---------------------------------------------------------------------------
 
@@ -397,8 +385,10 @@ pub enum TextFormatKind {
         /// Schema name.
         name: String,
         /// Schema description.
+        #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         /// JSON Schema definition.
+        #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<serde_json::Value>,
         /// Strict schema enforcement.
         strict: bool,
@@ -675,5 +665,41 @@ mod tests {
         assert!(matches!(resource.output[0], items::OutputItem::Other(_)));
         assert!(matches!(resource.tools[0], tools::Tool::Other(_)));
         assert_eq!(serde_json::to_value(&resource).unwrap(), wire);
+    }
+
+    // -----------------------------------------------------------------------
+    // Extra fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn create_response_body_with_extra_fields_roundtrip() {
+        let wire = serde_json::json!({
+            "model": "gpt",
+            "input": "Hello",
+            "extra_fields": {
+                "provider_specific_param": { "option": "value" },
+                "openai:web_search_options": { "search_context_size": "high" }
+            }
+        });
+        let body: CreateResponseBody = serde_json::from_value(wire.clone()).unwrap();
+
+        let extras = body.extra_fields.as_ref().unwrap();
+        assert!(extras.contains_key("provider_specific_param"));
+        assert!(extras.contains_key("openai:web_search_options"));
+        assert_eq!(
+            extras.get("openai:web_search_options"),
+            Some(&serde_json::json!({ "search_context_size": "high" }))
+        );
+
+        assert_eq!(serde_json::to_value(&body).unwrap(), wire);
+    }
+
+    #[test]
+    fn create_response_body_extra_fields_defaults_to_none() {
+        let body = CreateResponseBody {
+            model: "gpt".to_owned(),
+            ..Default::default()
+        };
+        assert!(body.extra_fields.is_none());
     }
 }

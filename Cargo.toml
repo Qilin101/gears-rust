@@ -15,6 +15,7 @@ codegen-units = 16
 [profile.test]
 incremental = false
 codegen-units = 16
+debug = "line-tables-only" # to minimize build sizes in gitworkflows
 
 [profile.release]
 codegen-units = 1
@@ -38,29 +39,40 @@ members = [
     "libs/toolkit-gts-macros",
     "libs/toolkit-http",
     "libs/toolkit-http-middleware",
+    "libs/toolkit-gateway",
+    "libs/toolkit-k8s-auth",
     "libs/toolkit-sdk",
     "libs/toolkit-odata-macros",
     "libs/toolkit-security",
     "libs/toolkit-odata",
     "libs/toolkit-node-info",
+    "libs/toolkit-stable-hash",
     "libs/toolkit-transport-grpc",
     "libs/toolkit-utils",
     "libs/rustls-corecrypto-provider",
     "libs/rustls-fips-shim",
+    "libs/toolkit-contract",
+    "libs/toolkit-contract-macros",
+    "libs/toolkit-contract-macros-tests",
+    "libs/toolkit-contract-protogen",
     "libs/system-sdks",
     "libs/system-sdks/sdks/directory",
     "gears/credstore/credstore-sdk",
     "gears/credstore/credstore",
     "gears/credstore/plugins/static-credstore-plugin",
-    "gears/file-parser",
+    "gears/file-parser/file-parser-sdk",
+    "gears/file-parser/file-parser",
     "gears/file-storage/file-storage-sdk",
     "gears/file-storage/file-storage",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",
     "gears/system/account-management/plugins/static-idp-plugin",
     "gears/system/api-gateway",
-    "gears/system/cluster/cluster-sdk",
     "gears/system/cluster/cluster",
+    "gears/system/cluster/cluster-sdk",
+    "gears/system/cluster/cluster-conformance",
+    "gears/system/cluster/plugins/standalone-cluster-plugin",
+    "gears/system/cluster/plugins/postgres-cluster-plugin",
     "gears/system/grpc-hub",
     "gears/system/nodes-registry/nodes-registry",
     "gears/system/nodes-registry/nodes-registry-sdk",
@@ -97,8 +109,12 @@ members = [
     "gears/system/usage-collector/usage-collector-sdk",
     "gears/system/usage-collector/usage-collector",
     "gears/system/usage-collector/plugins/noop-usage-collector-plugin",
+    "gears/system/usage-collector/plugins/timescaledb-usage-collector-plugin",
     "gears/mini-chat/mini-chat-sdk",
     "gears/mini-chat/mini-chat",
+    "examples/toolkit/api-contracts/api-contracts-sdk",
+    "examples/toolkit/api-contracts/api-contracts",
+    "examples/toolkit/api-contracts/api-contracts-consumer",
     "gears/chat-engine/chat-engine-sdk",
     "gears/chat-engine/chat-engine",
     "gears/model-registry/model-registry-sdk",
@@ -107,13 +123,16 @@ members = [
     "gears/llm-gateway/llm-gateway-demo",
     "gears/bss/ledger/ledger",
     "gears/bss/ledger/ledger-sdk",
+    "gears/bss/rate-provider/rate-provider-sdk",
+    "gears/bss/rate-provider/rate-provider",
+    "gears/bss/rate-provider/plugins/ecb-plugin",
+    "gears/bss/rate-provider/plugins/http-json-plugin",
     "gears/bss/libs/coord",
+    "gears/system/event-broker/event-broker-sdk",
+    "gears/system/event-broker/event-broker",
 ]
 exclude = ["tools/fuzz"]
 resolver = "3"
-
-# Note: dylint_lints is a separate workspace for custom linters
-# See tools/dylint_lints/README.md for usage instructions
 
 [workspace.lints.rust]
 deprecated = "warn"
@@ -241,23 +260,27 @@ verbose_file_reads = "deny"
 
 [workspace.dependencies]
 # libs
-toolkit = { package = "cf-gears-toolkit", version = "0.6.13", path = "libs/toolkit" }
-toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.8", path = "libs/toolkit-http" }
-toolkit-auth = { package = "cf-gears-toolkit-auth", version = "0.7.2", path = "libs/toolkit-auth" }
-toolkit-canonical-errors = { package = "cf-gears-toolkit-canonical-errors", version = "0.7.4", path = "libs/toolkit-canonical-errors" }
-toolkit-canonical-errors-macro = { package = "cf-gears-toolkit-canonical-errors-macro", version = "0.6.1", path = "libs/toolkit-canonical-errors-macro" }
-toolkit-db = { package = "cf-gears-toolkit-db", version = "0.8.4", path = "libs/toolkit-db" }
-toolkit-db-macros = { package = "cf-gears-toolkit-db-macros", version = "0.6.3", path = "libs/toolkit-db-macros" }
-toolkit-gts = { package = "cf-gears-toolkit-gts", version = "0.1.2", path = "libs/toolkit-gts" }
-toolkit-gts-macros = { package = "cf-gears-toolkit-gts-macros", version = "0.1.2", path = "libs/toolkit-gts-macros" }
-toolkit-macros = { package = "cf-gears-toolkit-macros", version = "0.6.3", path = "libs/toolkit-macros" }
-toolkit-node-info = { package = "cf-gears-toolkit-node-info", version = "0.6.4", path = "libs/toolkit-node-info" }
-toolkit-odata = { package = "cf-gears-toolkit-odata", version = "0.8.2", path = "libs/toolkit-odata" }
-toolkit-odata-macros = { package = "cf-gears-toolkit-odata-macros", version = "0.6.7", path = "libs/toolkit-odata-macros" }
-toolkit-sdk = { package = "cf-gears-toolkit-sdk", version = "0.7.0", path = "libs/toolkit-sdk" }
-toolkit-security = { package = "cf-gears-toolkit-security", version = "0.7.2", path = "libs/toolkit-security" }
-toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.6.6", path = "libs/toolkit-transport-grpc" }
-toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.6.3", path = "libs/toolkit-utils" }
+toolkit = { package = "cf-gears-toolkit", version = "0.6.23", path = "libs/toolkit" }
+toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.12", path = "libs/toolkit-http" }
+toolkit-http-middleware = { package = "cf-gears-toolkit-http-middleware", version = "0.2.1", path = "libs/toolkit-http-middleware" }
+toolkit-gateway = { package = "cf-gears-toolkit-gateway", version = "0.2.0", path = "libs/toolkit-gateway" }
+toolkit-k8s-auth = { package = "cf-gears-toolkit-k8s-auth", version = "0.1.1", path = "libs/toolkit-k8s-auth" }
+toolkit-auth = { package = "cf-gears-toolkit-auth", version = "0.7.5", path = "libs/toolkit-auth" }
+toolkit-canonical-errors = { package = "cf-gears-toolkit-canonical-errors", version = "0.9.0", path = "libs/toolkit-canonical-errors" }
+toolkit-canonical-errors-macro = { package = "cf-gears-toolkit-canonical-errors-macro", version = "0.6.2", path = "libs/toolkit-canonical-errors-macro" }
+toolkit-db = { package = "cf-gears-toolkit-db", version = "0.11.3", path = "libs/toolkit-db" }
+toolkit-db-macros = { package = "cf-gears-toolkit-db-macros", version = "0.6.4", path = "libs/toolkit-db-macros" }
+toolkit-gts = { package = "cf-gears-toolkit-gts", version = "0.1.4", path = "libs/toolkit-gts" }
+toolkit-gts-macros = { package = "cf-gears-toolkit-gts-macros", version = "0.1.3", path = "libs/toolkit-gts-macros" }
+toolkit-macros = { package = "cf-gears-toolkit-macros", version = "0.6.5", path = "libs/toolkit-macros" }
+toolkit-node-info = { package = "cf-gears-toolkit-node-info", version = "0.6.5", path = "libs/toolkit-node-info" }
+toolkit-odata = { package = "cf-gears-toolkit-odata", version = "0.9.2", path = "libs/toolkit-odata" }
+toolkit-odata-macros = { package = "cf-gears-toolkit-odata-macros", version = "0.6.12", path = "libs/toolkit-odata-macros" }
+toolkit-sdk = { package = "cf-gears-toolkit-sdk", version = "0.7.5", path = "libs/toolkit-sdk" }
+toolkit-security = { package = "cf-gears-toolkit-security", version = "0.8.0", path = "libs/toolkit-security" }
+toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
+toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.7.2", path = "libs/toolkit-transport-grpc" }
+toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.6.4", path = "libs/toolkit-utils" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.1", path = "libs/rustls-corecrypto-provider" }
 rustls-fips-shim = { package = "cf-gears-rustls-fips-shim", version = "0.1.2", path = "libs/rustls-fips-shim" }
 # Windows CNG-backed rustls CryptoProvider (Windows-only FIPS path). Caret-pinned to 0.1.x;
@@ -274,45 +297,68 @@ rustls-cng-crypto = { version = "0.1", default-features = false, features = ["fi
 pkcs8 = "0.10"
 sec1 = { version = "0.7", default-features = false, features = ["alloc", "der"] }
 
+toolkit-contract = { package = "cf-gears-toolkit-contract", version = "0.1.2", path = "libs/toolkit-contract" }
+toolkit-contract-macros = { package = "cf-gears-toolkit-contract-macros", version = "0.1.0", path = "libs/toolkit-contract-macros" }
+toolkit-contract-protogen = { package = "cf-gears-toolkit-contract-protogen", version = "0.1.1", path = "libs/toolkit-contract-protogen" }
 
-cf-gears-system-sdks = { version = "0.1.37", path = "libs/system-sdks" }
-cf-gears-system-sdk-directory = { version = "0.1.37", path = "libs/system-sdks/sdks/directory" }
+cf-gears-system-sdks = { version = "0.1.42", path = "libs/system-sdks" }
+cf-gears-system-sdk-directory = { version = "0.1.42", path = "libs/system-sdks/sdks/directory" }
 
 # System gears
-types-registry = { package = "cf-gears-types-registry", version = "0.1.23", path = "gears/system/types-registry/types-registry" }
+types-registry = { package = "cf-gears-types-registry", version = "0.1.33", path = "gears/system/types-registry/types-registry" }
+authn-resolver = { package = "cf-gears-authn-resolver", version = "0.2.27", path = "gears/system/authn-resolver/authn-resolver" }
+authz-resolver = { package = "cf-gears-authz-resolver", version = "0.1.35", path = "gears/system/authz-resolver/authz-resolver" }
+tenant-resolver = { package = "cf-gears-tenant-resolver", version = "0.1.31", path = "gears/system/tenant-resolver/tenant-resolver" }
+resource-group = { package = "cf-gears-resource-group", version = "0.2.8", path = "gears/system/resource-group/resource-group" }
+credstore = { package = "cf-gears-credstore", version = "0.2.7", path = "gears/credstore/credstore" }
+oagw = { package = "cf-gears-oagw", version = "0.3.8", path = "gears/system/oagw/oagw" }
+account-management = { package = "cf-gears-account-management", version = "0.5.4", path = "gears/system/account-management/account-management" }
+usage-collector = { package = "cf-gears-usage-collector", version = "0.2.8", path = "gears/system/usage-collector/usage-collector" }
+cluster = { package = "cf-gears-cluster", version = "0.2.0", path = "gears/system/cluster/cluster" }
 
-cf-gears-cluster-sdk = { version = "0.1.0", path = "gears/system/cluster/cluster-sdk" }
+cf-gears-cluster-sdk = { version = "0.2.0", path = "gears/system/cluster/cluster-sdk" }
+cf-gears-cluster-conformance = { version = "0.3.0", path = "gears/system/cluster/cluster-conformance" }
 
 # System gears SDKs
-account-management-sdk = { package = "cf-gears-account-management-sdk", version = "0.2.0", path = "gears/system/account-management/account-management-sdk" }
-types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.0", path = "gears/system/types-registry/types-registry-sdk" }
-tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3.9", path = "gears/system/tenant-resolver/tenant-resolver-sdk" }
-authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.3.9", path = "gears/system/authz-resolver/authz-resolver-sdk" }
-resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.0", path = "gears/system/resource-group/resource-group-sdk" }
-oagw-sdk = { package = "cf-gears-oagw-sdk", version = "0.5.3", path = "gears/system/oagw/oagw-sdk" }
-usage-collector-sdk = { package = "cf-gears-usage-collector-sdk", version = "0.1.0", path = "gears/system/usage-collector/usage-collector-sdk" }
+account-management-sdk = { package = "cf-gears-account-management-sdk", version = "0.5.5", path = "gears/system/account-management/account-management-sdk" }
+cluster-sdk = { package = "cf-gears-cluster-sdk", version = "0.2.0", path = "gears/system/cluster/cluster-sdk" }
+types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.4", path = "gears/system/types-registry/types-registry-sdk" }
+tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3.19", path = "gears/system/tenant-resolver/tenant-resolver-sdk" }
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.3.19", path = "gears/system/authz-resolver/authz-resolver-sdk" }
+resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.5", path = "gears/system/resource-group/resource-group-sdk" }
+oagw-sdk = { package = "cf-gears-oagw-sdk", version = "0.5.7", path = "gears/system/oagw/oagw-sdk" }
+usage-collector-sdk = { package = "cf-gears-usage-collector-sdk", version = "0.3.6", path = "gears/system/usage-collector/usage-collector-sdk" }
 
 # BSS gears (ported from vhp-core)
-bss-ledger-sdk = { path = "gears/bss/ledger/ledger-sdk" }
+bss-ledger-sdk = { path = "gears/bss/ledger/ledger-sdk", version = "0.1.1" }
+bss-rate-provider-sdk = { path = "gears/bss/rate-provider/rate-provider-sdk", version = "0.1.1" }
 coord = { path = "gears/bss/libs/coord" }
 # FIPS-validated SHA-256 for the ledger idempotency payload fingerprint.
 aws-lc-rs = "1.17"
 
 # credstore
-credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.1.26", path = "gears/credstore/credstore-sdk" }
+credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.2.7", path = "gears/credstore/credstore-sdk" }
 
 # mini-chat
-mini-chat-sdk = { package = "cf-gears-mini-chat-sdk", version = "0.10.8", path = "gears/mini-chat/mini-chat-sdk" }
+mini-chat-sdk = { package = "cf-gears-mini-chat-sdk", version = "0.10.17", path = "gears/mini-chat/mini-chat-sdk" }
+
+# api-contracts (example: toolkit-contract macros showcased on a Payment API)
+api-contracts-sdk = { package = "cf-api-contracts-sdk", version = "0.1.0", path = "examples/toolkit/api-contracts/api-contracts-sdk" }
 
 # System gears
-grpc_hub = { package = "cf-gears-grpc-hub", version = "0.2.8", path = "gears/system/grpc-hub" }
+grpc_hub = { package = "cf-gears-grpc-hub", version = "0.2.17", path = "gears/system/grpc-hub" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 serde-saphyr = "0.0.22"
 secrecy = { version = "0.10", features = ["serde"] }
 serde_urlencoded = "0.7"
+# Query-string codec shared by the generated REST client and its server
+# extractor. Unlike `serde_urlencoded` it round-trips repeated keys into a
+# sequence, which is what makes `Vec<T>` query fields work end to end.
+serde_html_form = "0.4"
 schemars = { version = "1.2", features = ["derive", "uuid1"] }
 
 # Error handling
@@ -323,6 +369,9 @@ thiserror = "2.0"
 tokio = { version = "1.47", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
+# Default features include the `rand`-backed `strategy::jitter` helper used by
+# the gRPC retry schedules.
+tokio-retry = "0.3"
 futures = "0.3"
 async-trait = "0.1"
 async-stream = { version = "0.3" }
@@ -343,12 +392,12 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
 ] }
 tracing-log = "0.2"
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.33"
 tracing-appender = "0.2"
 tracing-test = "0.2"
-opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.31", features = [
+opentelemetry = { version = "0.32", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.32", features = ["trace", "rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.32", features = [
     "grpc-tonic",
     "http-proto",
 ] }
@@ -369,7 +418,7 @@ tower-http = { version = "0.6", features = [
     "follow-redirect",
     "catch-panic",
 ] }
-uuid = { version = "1.23.3", features = ["serde"] }
+uuid = { version = "1.23.3", features = ["serde", "v5"] }
 governor = "0.10"
 
 # OpenAPI documentation (only for api-gateway)
@@ -403,8 +452,18 @@ http-body = "1"
 reqwest = { version = "0.13", features = ["stream"] }
 rand = "0.10"
 
+# S3 client (file-storage gear only, cpt-cf-file-storage-adr-s3-client-selection) —
+# sign-only request builder; requests are executed via the existing reqwest client.
+rusty-s3 = { version = "0.10", default-features = false }
+# XML response/error parsing for the S3 backend (ADR-0005). Pinned >= 0.41.0: RUSTSEC-2026-0194 and
+# RUSTSEC-2026-0195 (DoS) are fixed only as of this release.
+quick-xml = "0.41"
+
 # Synchronous locks for better performance
 parking_lot = "0.12"
+
+# Property / model-based testing (cluster conformance suite reference model)
+proptest = "1"
 
 # CLI support
 clap = { version = "4.5", features = ["derive"] }
@@ -532,7 +591,6 @@ syn = { version = "2.0", features = [
 ] }
 heck = "0.5"
 proc-macro-crate = "3"
-proc-macro-error2 = "2.0"
 
 # Testing utilities
 trybuild = "1"
@@ -560,9 +618,13 @@ mime = "0.3"
 
 # Document parsing libraries
 docx-rust = "0.1.11"
+# `bundled-pdfium` downloads a prebuilt libpdfium at build time rather than vendoring one;
+# Cargo.lock does not pin it. The version lives in .cargo/config.toml as PDFIUM_VERSION.
 kreuzberg = { version = "=4.9.8", features = ["html", "excel", "office", "pdf", "bundled-pdfium"] }
 
 # Additional testing utilities
+tokio-test = "0.4"
+mockall = "0.13"
 temp-env = { version = "0.3", features = ["async_closure"] }
 
 # Additional utilities
@@ -573,10 +635,24 @@ fnv = "1.0"
 jsonschema = { version = "0.40", default-features = false }
 walkdir = "2.5"
 
-# GTS library
-gts-id = "0.10.0"
-gts = "0.10.0"
-gts-macros = "0.10.0"
+# GTS library.
+# Keep in sync with tools/dylint_lints/Cargo.toml.
+gts-id = "0.11.0"
+gts = "0.11.0"
+gts-macros = "0.11.0"
 
 [workspace.metadata.cargo-shear]
-ignored-paths = ["**/tests/ui/**"]
+ignored-paths = ["**/tests/ui/**", "**/tests/trybuild/**"]
+# Gear crate deps only consumed by macro-generated re-exports in #[toolkit::gear(deps = [...])].
+# cargo-shear cannot trace usage through proc-macro expansion, so these appear unused.
+ignored = [
+    "account-management",
+    "authn-resolver",
+    "authz-resolver",
+    "credstore",
+    "grpc_hub",
+    "oagw",
+    "resource-group",
+    "tenant-resolver",
+    "types-registry",
+]

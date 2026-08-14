@@ -18,6 +18,7 @@
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
+use toolkit_gts::gts_id;
 use uuid::Uuid;
 
 use account_management_sdk::{IdpUser, MetadataEntry, Tenant, TenantId, TenantStatus};
@@ -28,7 +29,7 @@ use toolkit_security::SecurityContext;
 use super::{
     MeDto, NewUserPasswordDto, PutTenantMetadataDto, ResolvedTenantMetadataDto,
     TenantCreateRequestDto, TenantDto, TenantMetadataEntryDto, TenantUpdateRequestDto,
-    UserCreateRequestDto, UserDto,
+    UserCreateRequestDto, UserDto, UserUpdateRequestDto,
 };
 
 fn sample_tenant() -> Uuid {
@@ -36,7 +37,11 @@ fn sample_tenant() -> Uuid {
 }
 
 fn sample_schema() -> &'static str {
-    "gts.cf.core.am.tenant_metadata.v1~vendor.app.metadata.theme.v1~"
+    gts_id!("cf.core.am.tenant_metadata.v1~vendor.app.metadata.theme.v1~")
+}
+
+fn sample_tenant_type() -> &'static str {
+    gts_id!("cf.core.am.tenant_type.v1~vendor.app.tenant.customer.v1~")
 }
 
 fn sample_updated() -> OffsetDateTime {
@@ -184,6 +189,86 @@ fn user_create_dto_required_username_only_deserialises() {
     assert_eq!(dto.username, "alice");
     assert!(dto.email.is_none());
     assert!(dto.display_name.is_none());
+}
+
+#[test]
+fn user_update_dto_tri_state_distinguishes_absent_null_and_value() {
+    // RFC 7396 JSON Merge Patch: an omitted key leaves the field
+    // unchanged (`None`), an explicit `null` clears it (`Some(None)`),
+    // and a value sets it (`Some(Some(v))`). This is the load-bearing
+    // wire behaviour the `double_option` deserializer provides.
+    //
+    // Here: `email` is set, `display_name` is cleared, `first_name` is
+    // omitted (absent), `last_name` is set.
+    let raw = r#"{"email":"a@example.test","display_name":null,"last_name":"Zed"}"#;
+    let dto: UserUpdateRequestDto = serde_json::from_str(raw).unwrap();
+    assert_eq!(
+        dto.email,
+        Some(Some("a@example.test".to_owned())),
+        "value -> Some(Some)"
+    );
+    assert_eq!(
+        dto.display_name,
+        Some(None),
+        "explicit null -> Some(None) (clear)"
+    );
+    assert_eq!(dto.first_name, None, "omitted -> None (unchanged)");
+    assert_eq!(dto.last_name, Some(Some("Zed".to_owned())));
+    assert_eq!(dto.username, None, "omitted username -> None (unchanged)");
+}
+
+#[test]
+fn user_update_dto_lowers_tri_state_into_idp_user_patch() {
+    let raw = r#"{"username":"alice2","email":null,"first_name":"Al"}"#;
+    let dto: UserUpdateRequestDto = serde_json::from_str(raw).unwrap();
+    let patch = dto.into_idp_user_patch().expect("valid patch lowers");
+    assert_eq!(
+        patch.username.as_deref(),
+        Some("alice2"),
+        "rename propagates"
+    );
+    assert_eq!(patch.email, Some(None), "explicit null lowers to clear");
+    assert_eq!(patch.first_name, Some(Some("Al".to_owned())));
+    assert_eq!(patch.display_name, None, "omitted stays unchanged");
+    assert!(patch.password.is_none());
+}
+
+#[test]
+fn user_update_dto_null_username_is_rejected_by_lowering() {
+    // The login identifier is required and cannot be cleared: an
+    // explicit `null` on `username` MUST surface as a validation error
+    // at the wire boundary, not silently become "unchanged".
+    let dto: UserUpdateRequestDto = serde_json::from_str(r#"{"username":null}"#).unwrap();
+    assert_eq!(
+        dto.username,
+        Some(None),
+        "null username parses to Some(None)"
+    );
+    assert!(
+        dto.into_idp_user_patch().is_err(),
+        "clearing the required username MUST be rejected"
+    );
+}
+
+#[test]
+fn user_update_dto_rejects_unknown_fields() {
+    // `deny_unknown_fields` locks the wire envelope so an immutable /
+    // misspelled field is an explicit error rather than a dropped write.
+    let err = serde_json::from_str::<UserUpdateRequestDto>(r#"{"id":"x"}"#);
+    assert!(err.is_err(), "unknown field MUST fail deserialization");
+}
+
+#[test]
+fn user_update_dto_password_lowers_into_patch() {
+    let raw = r#"{"password":{"value":"s3cret!","temporary":true}}"#;
+    let dto: UserUpdateRequestDto = serde_json::from_str(raw).unwrap();
+    let patch = dto
+        .into_idp_user_patch()
+        .expect("password-only patch is valid");
+    let pw = patch.password.as_ref().expect("password lowered");
+    assert_eq!(pw.value, "s3cret!");
+    assert!(pw.temporary);
+    assert!(!patch.is_empty(), "password-only patch is non-empty");
 }
 
 #[test]
@@ -395,7 +480,7 @@ fn sample_active_tenant() -> Tenant {
         id: sample_tenant_id(),
         name: "acme corp".into(),
         status: TenantStatus::Active,
-        tenant_type: Some("gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~".into()),
+        tenant_type: Some(sample_tenant_type().into()),
         parent_id: Some(sample_parent_id()),
         self_managed: false,
         depth: 2,
@@ -416,7 +501,7 @@ fn tenant_dto_active_wire_shape_mirrors_openapi() {
             "id": "33333333-3333-3333-3333-333333333333",
             "name": "acme corp",
             "status": "active",
-            "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+            "tenant_type": sample_tenant_type(),
             "parent_id": "44444444-4444-4444-4444-444444444444",
             "self_managed": false,
             "depth": 2,
@@ -483,18 +568,16 @@ fn tenant_create_request_required_fields_only_deserialise() {
     // `name`, `parent_id`, `tenant_type` are the required wire fields;
     // `self_managed` defaults to `false`, `provisioning_metadata` to
     // `None`. The lowering generates a fresh UUIDv4 for the child id.
-    let raw = r#"{
+    let raw = json!({
         "name": "acme corp",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~"
-    }"#;
-    let dto: TenantCreateRequestDto = serde_json::from_str(raw).unwrap();
+        "tenant_type": sample_tenant_type()
+    })
+    .to_string();
+    let dto: TenantCreateRequestDto = serde_json::from_str(&raw).unwrap();
     assert_eq!(dto.name, "acme corp");
     assert_eq!(dto.parent_id, sample_parent_id().0);
-    assert_eq!(
-        dto.tenant_type,
-        "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~"
-    );
+    assert_eq!(dto.tenant_type, sample_tenant_type());
     assert!(!dto.self_managed);
     assert!(dto.provisioning_metadata.is_none());
 
@@ -512,14 +595,15 @@ fn tenant_create_request_required_fields_only_deserialise() {
 
 #[test]
 fn tenant_create_request_full_payload_round_trips_into_sdk() {
-    let raw = r#"{
+    let raw = json!({
         "name": "acme child",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+        "tenant_type": sample_tenant_type(),
         "self_managed": true,
         "provisioning_metadata": {"vendor": "okta", "domain": "acme.example"}
-    }"#;
-    let dto: TenantCreateRequestDto = serde_json::from_str(raw).unwrap();
+    })
+    .to_string();
+    let dto: TenantCreateRequestDto = serde_json::from_str(&raw).unwrap();
     let request = dto.into_sdk_create_request();
     assert!(request.self_managed);
     assert_eq!(
@@ -571,13 +655,14 @@ fn tenant_create_request_rejects_non_object_provisioning_metadata() {
     // plugin (which has no input validation in this layer). The
     // happy path with a JSON object is covered by
     // `tenant_create_request_full_payload_round_trips_into_sdk`.
-    let raw_array = r#"{
+    let raw_array = json!({
         "name": "acme corp",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+        "tenant_type": sample_tenant_type(),
         "provisioning_metadata": [1, 2, 3]
-    }"#;
-    let err = serde_json::from_str::<TenantCreateRequestDto>(raw_array)
+    })
+    .to_string();
+    let err = serde_json::from_str::<TenantCreateRequestDto>(&raw_array)
         .expect_err("provisioning_metadata must be object | null per yaml");
     // serde reports the typed deserialise mismatch by shape ("expected
     // a map") rather than by field name. Either signal is fine as long
@@ -588,25 +673,27 @@ fn tenant_create_request_rejects_non_object_provisioning_metadata() {
         "error pinpoints the type mismatch: got `{err}`",
     );
 
-    let raw_string = r#"{
+    let raw_string = json!({
         "name": "acme corp",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+        "tenant_type": sample_tenant_type(),
         "provisioning_metadata": "literal"
-    }"#;
+    })
+    .to_string();
     assert!(
-        serde_json::from_str::<TenantCreateRequestDto>(raw_string).is_err(),
+        serde_json::from_str::<TenantCreateRequestDto>(&raw_string).is_err(),
         "string provisioning_metadata must also be rejected",
     );
 
     // `null` explicitly is admissible per yaml `type: [object, 'null']`.
-    let raw_null = r#"{
+    let raw_null = json!({
         "name": "acme corp",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+        "tenant_type": sample_tenant_type(),
         "provisioning_metadata": null
-    }"#;
-    let dto: TenantCreateRequestDto = serde_json::from_str(raw_null).unwrap();
+    })
+    .to_string();
+    let dto: TenantCreateRequestDto = serde_json::from_str(&raw_null).unwrap();
     assert!(dto.provisioning_metadata.is_none());
 }
 
@@ -673,13 +760,14 @@ fn tenant_create_request_rejects_unknown_fields() {
     // field) would otherwise receive `201 Created` for a
     // server-allocated UUID DIFFERENT from the one they sent —
     // believing it created a specific tenant id when it did not.
-    let raw = r#"{
+    let raw = json!({
         "name": "acme corp",
         "parent_id": "44444444-4444-4444-4444-444444444444",
-        "tenant_type": "gts.cf.core.am.tenant_type.v1~vendor.app.customer.v1~",
+        "tenant_type": sample_tenant_type(),
         "child_id": "55555555-5555-5555-5555-555555555555"
-    }"#;
-    let err = serde_json::from_str::<TenantCreateRequestDto>(raw)
+    })
+    .to_string();
+    let err = serde_json::from_str::<TenantCreateRequestDto>(&raw)
         .expect_err("child_id is not part of the wire contract");
     assert!(
         err.to_string().contains("child_id") || err.to_string().contains("unknown"),

@@ -9,6 +9,7 @@
 //! `tests/api_status_mapping_test.rs`.
 
 use std::time::Duration;
+use toolkit_gts::gts_id;
 
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 
@@ -236,7 +237,7 @@ fn metadata_entry_not_found_uses_metadata_resource_type_with_chained_type_id_as_
     // `TENANT_METADATA_RESOURCE_TYPE` (`gts.cf.core.am.tenant_metadata.v1~`)
     // with the chained `type_id` the caller supplied as
     // `resource_name`.
-    let chain = "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~";
+    let chain = gts_id!("cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~");
     let canonical = round_trip(DomainError::MetadataEntryNotFound {
         detail: "entry missing".to_owned(),
         entry: chain.to_owned(),
@@ -266,6 +267,214 @@ fn already_exists_maps_to_409() {
     );
 }
 
+/// An `IdP`-reported user uniqueness collision surfaces as
+/// 409 `already_exists` on the USER resource type, with the stable
+/// colliding-field token as `resource_name` and a detail derived from
+/// the typed field — never the caller-supplied value and never the raw
+/// provider text.
+#[test]
+fn user_already_exists_maps_to_409_with_user_resource() {
+    for (field, token, phrase) in [
+        (
+            account_management_sdk::IdpUserDuplicateField::Username,
+            "username",
+            "a user with this username already exists",
+        ),
+        (
+            account_management_sdk::IdpUserDuplicateField::Email,
+            "email",
+            "a user with this email already exists",
+        ),
+        (
+            account_management_sdk::IdpUserDuplicateField::UsernameOrEmail,
+            "username_or_email",
+            "a user with this username or email already exists",
+        ),
+    ] {
+        let canonical = round_trip(DomainError::UserAlreadyExists { field });
+        assert_eq!(canonical.status_code(), 409);
+        assert_eq!(canonical.resource_name(), Some(token));
+        assert_eq!(
+            canonical.resource_type(),
+            Some(account_management_sdk::gts::USER_RESOURCE_TYPE)
+        );
+        assert!(
+            matches!(canonical, CanonicalError::AlreadyExists { .. }),
+            "UserAlreadyExists MUST surface as the AlreadyExists variant"
+        );
+        assert_eq!(canonical.detail(), phrase);
+    }
+}
+
+/// An `IdP` password-policy reject carries the structured
+/// `password` / `PASSWORD_POLICY` field-violation tokens (not the
+/// generic `request` / `VALIDATION` pair) so clients can attribute
+/// the 400 to the password input without parsing `detail`.
+#[test]
+fn idp_password_policy_maps_to_400_with_password_field_violation() {
+    let canonical = round_trip(DomainError::IdpPasswordPolicy {
+        detail: "the supplied password does not meet the identity provider's password policy"
+            .to_owned(),
+    });
+    assert_eq!(canonical.status_code(), 400);
+    assert_eq!(
+        canonical.resource_type(),
+        Some(account_management_sdk::gts::USER_RESOURCE_TYPE)
+    );
+    let CanonicalError::InvalidArgument { ctx, .. } = canonical else {
+        panic!("expected CanonicalError::InvalidArgument");
+    };
+    let InvalidArgument::FieldViolations { field_violations } = ctx else {
+        panic!("expected InvalidArgument::FieldViolations ctx");
+    };
+    assert_eq!(field_violations.len(), 1);
+    assert_eq!(
+        field_violations[0].field,
+        account_management_sdk::field::PASSWORD_FIELD
+    );
+    assert_eq!(
+        field_violations[0].reason,
+        account_management_sdk::field::PASSWORD_POLICY
+    );
+}
+
+/// An `IdP`-managed attribute reject lands on 400 `invalid_argument`
+/// carrying the *patched property's own name* as
+/// `field_violations[].field` plus the `IDP_MANAGED_FIELD` reason, so a
+/// client can disable exactly that form input. Every
+/// [`account_management_sdk::IdpUserAttribute`] is exercised: the field
+/// token MUST equal the `UserUpdateRequest` JSON property name, because
+/// clients key form-field attribution off that string.
+///
+/// The `description` is pinned to the exact curated sentence, not merely
+/// checked non-empty: the typed-attribute design exists so the public
+/// wording lives in one place and cannot drift, which only holds if the
+/// wording is asserted somewhere.
+#[test]
+fn idp_field_not_writable_maps_to_400_with_the_patched_field_violation() {
+    for (attribute, expected_field, expected_description) in [
+        (
+            account_management_sdk::IdpUserAttribute::Username,
+            "username",
+            "the username is managed by the identity provider and cannot be changed through this API",
+        ),
+        (
+            account_management_sdk::IdpUserAttribute::Email,
+            "email",
+            "the email address is managed by the identity provider and cannot be changed through this API",
+        ),
+        (
+            account_management_sdk::IdpUserAttribute::DisplayName,
+            "display_name",
+            "the display name is managed by the identity provider and cannot be changed through this API",
+        ),
+        (
+            account_management_sdk::IdpUserAttribute::FirstName,
+            "first_name",
+            "the first name is managed by the identity provider and cannot be changed through this API",
+        ),
+        (
+            account_management_sdk::IdpUserAttribute::LastName,
+            "last_name",
+            "the last name is managed by the identity provider and cannot be changed through this API",
+        ),
+    ] {
+        let canonical = round_trip(DomainError::IdpFieldNotWritable {
+            fields: vec![attribute],
+        });
+        assert_eq!(
+            canonical.status_code(),
+            400,
+            "{expected_field}: writability is a field capability, not an authz decision -- \
+             it MUST NOT surface as 403"
+        );
+        assert_eq!(
+            canonical.resource_type(),
+            Some(account_management_sdk::gts::USER_RESOURCE_TYPE)
+        );
+        let CanonicalError::InvalidArgument { ctx, .. } = canonical else {
+            panic!("{expected_field}: expected CanonicalError::InvalidArgument");
+        };
+        let InvalidArgument::FieldViolations { field_violations } = ctx else {
+            panic!("{expected_field}: expected InvalidArgument::FieldViolations ctx");
+        };
+        assert_eq!(field_violations.len(), 1);
+        assert_eq!(
+            field_violations[0].field, expected_field,
+            "field token MUST match the UserUpdateRequest property name"
+        );
+        assert_eq!(
+            field_violations[0].reason,
+            account_management_sdk::field::IDP_MANAGED_FIELD
+        );
+        assert_eq!(
+            field_violations[0].description, expected_description,
+            "{expected_field}: the curated public wording is a contract -- it lives in exactly \
+             one place and MUST NOT drift"
+        );
+    }
+}
+
+/// A patch touching several locked attributes yields one violation per
+/// refused attribute in a single envelope, so the client learns the whole
+/// refused set from one round-trip instead of discovering it field by
+/// field. Repeats a provider may send collapse to one violation each.
+#[test]
+fn idp_field_not_writable_emits_one_violation_per_refused_attribute() {
+    let canonical = round_trip(DomainError::IdpFieldNotWritable {
+        fields: vec![
+            account_management_sdk::IdpUserAttribute::Email,
+            account_management_sdk::IdpUserAttribute::FirstName,
+            account_management_sdk::IdpUserAttribute::LastName,
+            account_management_sdk::IdpUserAttribute::Email,
+        ],
+    });
+    assert_eq!(canonical.status_code(), 400);
+    let CanonicalError::InvalidArgument { ctx, .. } = canonical else {
+        panic!("expected CanonicalError::InvalidArgument");
+    };
+    let InvalidArgument::FieldViolations { field_violations } = ctx else {
+        panic!("expected InvalidArgument::FieldViolations ctx");
+    };
+    let fields: Vec<&str> = field_violations.iter().map(|v| v.field.as_str()).collect();
+    assert_eq!(
+        fields,
+        ["email", "first_name", "last_name"],
+        "every refused attribute MUST get its own violation, de-duplicated"
+    );
+    assert!(
+        field_violations
+            .iter()
+            .all(|v| v.reason == account_management_sdk::field::IDP_MANAGED_FIELD),
+        "every violation in the set carries the IDP_MANAGED_FIELD reason"
+    );
+}
+
+/// An empty refused set is a provider contract violation. A 400 whose
+/// `field_violations[]` is empty attributes the refusal to nothing, so
+/// the mapping degrades to the generic `request` / `VALIDATION` pair
+/// rather than emitting an unattributable `IDP_MANAGED_FIELD`.
+#[test]
+fn idp_field_not_writable_with_no_attributes_degrades_to_the_generic_violation() {
+    let canonical = round_trip(DomainError::IdpFieldNotWritable { fields: Vec::new() });
+    assert_eq!(canonical.status_code(), 400);
+    let CanonicalError::InvalidArgument { ctx, .. } = canonical else {
+        panic!("expected CanonicalError::InvalidArgument");
+    };
+    let InvalidArgument::FieldViolations { field_violations } = ctx else {
+        panic!("expected InvalidArgument::FieldViolations ctx");
+    };
+    assert_eq!(field_violations.len(), 1);
+    assert_eq!(
+        field_violations[0].field,
+        account_management_sdk::field::REQUEST_FIELD
+    );
+    assert_eq!(
+        field_violations[0].reason,
+        account_management_sdk::field::VALIDATION
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Aborted (HTTP 409 with reason)
 // ---------------------------------------------------------------------------
@@ -292,7 +501,7 @@ fn metadata_version_mismatch_maps_to_aborted_409_with_reason() {
     // conflict from a generic 409, and a future mapper drift that
     // dropped `with_reason` would change the wire envelope in a way
     // unit-tested ONLY here.
-    let chain = "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~";
+    let chain = gts_id!("cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~");
     let canonical = round_trip(DomainError::MetadataVersionMismatch {
         entry: chain.to_owned(),
         expected: 4,

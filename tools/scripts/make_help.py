@@ -26,6 +26,12 @@ def _color_support() -> bool:
     return True
 
 
+def _is_help_target(name: str) -> bool:
+    return bool(name) and not name.startswith(".") and name == name.lower() and not any(
+        char.isspace() for char in name
+    )
+
+
 def generate_help(makefile_path: Path) -> None:
     section: str = ""
     section_order: list[str] = []
@@ -90,10 +96,7 @@ def generate_help(makefile_path: Path) -> None:
         if pending and ":" in stripped and not stripped.startswith("#"):
             name_part = stripped.split(":", 1)[0]
             name = name_part.strip()
-            if not name:
-                continue
-            # Skip .PHONY declarations - they are not real targets
-            if name == ".PHONY":
+            if not _is_help_target(name):
                 pending = None
                 continue
 

@@ -18,7 +18,7 @@ use crate::domain::error::DomainError;
 /// The macro literal mirrors [`resource_group_sdk::gts::GROUP_RESOURCE_TYPE`]
 /// (proc-macros cannot resolve a const); the SDK round-trip tests pin the
 /// two equal.
-#[resource_error("gts.cf.core.resource_group.group.v1~")]
+#[resource_error(gts_id!("cf.core.rg.group.v1~"))]
 pub struct RgError;
 
 /// Implement `From<DomainError> for CanonicalError` so `?` works in
@@ -127,6 +127,11 @@ impl From<DomainError> for CanonicalError {
             // `docs/arch/errors/categories/06-already-exists.md`).
             DomainError::DuplicateMembership { key, message } => {
                 RgError::already_exists(message).with_resource(key).create()
+            }
+            DomainError::GroupAlreadyExists { id } => {
+                RgError::already_exists(format!("Resource group with id '{id}' already exists"))
+                    .with_resource(id.to_string())
+                    .create()
             }
             DomainError::TenantRootAlreadyExists {
                 existing_root_id,

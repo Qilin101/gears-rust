@@ -8,8 +8,16 @@ fn default_body_limit_bytes() -> usize {
     16 * 1024 * 1024
 }
 
+fn default_healthcheck_timeout_ms() -> u64 {
+    500
+}
+
+fn default_gateway_sync_interval_secs() -> u64 {
+    10
+}
+
 /// API gateway configuration - reused from `api_gateway` gear
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ApiGatewayConfig {
@@ -57,6 +65,145 @@ pub struct ApiGatewayConfig {
     /// HTTP metrics configuration.
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    /// Per-check `/health`/`/readyz` timeout (ms); raise for slow dependencies.
+    #[serde(default = "default_healthcheck_timeout_ms")]
+    pub healthcheck_timeout_ms: u64,
+
+    /// Health-probe serving configuration (listener placement, bind address).
+    #[serde(default)]
+    pub health: HealthConfig,
+
+    /// Reverse-proxy (embedded edge) configuration. When enabled, the gateway
+    /// discovers out-of-process gears via the `DirectoryService` and
+    /// reverse-proxies their public routes. Default: disabled (Profile 1
+    /// monolith is unaffected).
+    #[serde(default)]
+    pub gateway_proxy: GatewayProxyConfig,
+}
+
+/// Reverse-proxy (embedded edge) configuration.
+///
+/// When [`enabled`](Self::enabled), a background task polls the
+/// `DirectoryService` at [`directory_endpoint`](Self::directory_endpoint) and
+/// keeps a reverse-proxy route table in sync, so requests for out-of-process
+/// gears' public routes are forwarded to the owning gear pod.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayProxyConfig {
+    /// Enable the directory-driven reverse proxy.
+    pub enabled: bool,
+    /// gRPC endpoint of the `DirectoryService` (e.g. the grpc-hub endpoint,
+    /// `http://gear-orchestrator:50051`). Required when `enabled` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory_endpoint: Option<String>,
+    /// Interval (seconds) between directory polls that refresh the proxy route
+    /// table.
+    pub sync_interval_secs: u64,
+    /// Platform-plane credential attached to the edge's `DirectoryService`
+    /// polls (`x-toolkit-internal-token`). Required when the directory host
+    /// enforces the platform plane; the `secret` must match the host's
+    /// `gear-orchestrator.internal_auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_auth: Option<toolkit_security::InternalAuthConfig>,
+}
+
+impl Default for GatewayProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory_endpoint: None,
+            sync_interval_secs: default_gateway_sync_interval_secs(),
+            internal_auth: None,
+        }
+    }
+}
+
+impl GatewayProxyConfig {
+    /// Validate the reverse-proxy configuration at config-load time.
+    ///
+    /// `enabled: true` without a `directory_endpoint` would otherwise start a
+    /// proxy that can never populate its route table: it emits a single `warn!`
+    /// and then silently serves `404` for every out-of-process route while the
+    /// gateway still reports healthy. Failing `init` instead surfaces a clean,
+    /// actionable error at startup rather than a runtime surprise.
+    ///
+    /// # Errors
+    /// Returns a human-readable description when `enabled` is `true` but
+    /// `directory_endpoint` is unset or blank.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.directory_endpoint.as_deref() {
+            Some(endpoint) if !endpoint.trim().is_empty() => Ok(()),
+            _ => Err(
+                "invalid gateway_proxy configuration: `gateway_proxy.enabled` is true but \
+                 `gateway_proxy.directory_endpoint` is unset or empty; set it to the \
+                 DirectoryService gRPC endpoint (e.g. \"http://gear-orchestrator:50051\") \
+                 or disable the reverse proxy"
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+/// Which listener(s) serve the health-probe endpoints (`/healthz`, `/readyz`, `/health`).
+///
+/// Health endpoints are unauthenticated in every mode; see [`HealthConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthServeMode {
+    /// Serve health endpoints on the main gateway listener (`bind_addr`). Default.
+    #[default]
+    Main,
+    /// Serve health endpoints only on a separate listener (`health.bind_addr`), e.g. a
+    /// private/management port not exposed alongside the main API.
+    Separate,
+    /// Serve health endpoints on both the main and the separate listener.
+    Both,
+}
+
+/// Health-probe serving configuration.
+///
+/// The endpoints (`/healthz`, `/readyz`, `/health`) never require authentication in any mode.
+/// In `main`/`both` mode they ride the main listener as public routes on the gateway
+/// middleware surface and inherit `prefix_path` (e.g. `/cf/healthz`); operators must keep the
+/// main gateway on a private network if the per-component detail in `/health` is sensitive. In
+/// `separate`/`both` mode they are also served at unprefixed paths on `bind_addr`, protected
+/// only by network placement of that listener.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct HealthConfig {
+    /// Which listener(s) serve the health endpoints.
+    pub serve: HealthServeMode,
+    /// Bind address for the separate health listener (e.g. `"0.0.0.0:8081"`).
+    /// Required when `serve` is `separate` or `both`; unused for `main`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_addr: Option<String>,
+}
+
+impl Default for ApiGatewayConfig {
+    // Manual (not derived) so defaults match the `#[serde(default = ...)]` fns above;
+    // a derived Default would zero each field (e.g. timeout 0 = instant probe failure).
+    fn default() -> Self {
+        Self {
+            bind_addr: String::default(),
+            enable_docs: false,
+            cors_enabled: false,
+            cors: None,
+            openapi: OpenApiConfig::default(),
+            defaults: Defaults::default(),
+            auth_disabled: false,
+            require_auth_by_default: default_require_auth_by_default(),
+            prefix_path: String::default(),
+            route_policies: RoutePoliciesConfig::default(),
+            metrics: MetricsConfig::default(),
+            healthcheck_timeout_ms: default_healthcheck_timeout_ms(),
+            health: HealthConfig::default(),
+            gateway_proxy: GatewayProxyConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -104,6 +251,15 @@ pub struct CorsConfig {
     pub allowed_methods: Vec<String>,
     /// Allowed request headers; `["*"]` means any
     pub allowed_headers: Vec<String>,
+    /// Response headers exposed to browser JavaScript via
+    /// `Access-Control-Expose-Headers`; `["*"]` means any (do not combine
+    /// with `allow_credentials` — the wildcard is invalid with credentials).
+    /// Defaults to `["ETag"]`: the optimistic-concurrency write contract
+    /// requires clients to read the `ETag` response header to build
+    /// `If-Match` guarded writes, and `ETag` is not on the CORS safelist —
+    /// without exposing it every ETag-guarded write is impossible from a
+    /// cross-origin browser client.
+    pub exposed_headers: Vec<String>,
     /// Whether to allow credentials
     pub allow_credentials: bool,
     /// Max age for preflight caching in seconds
@@ -123,6 +279,7 @@ impl Default for CorsConfig {
                 "OPTIONS".to_owned(),
             ],
             allowed_headers: vec!["*".to_owned()],
+            exposed_headers: vec!["ETag".to_owned()],
             allow_credentials: false,
             max_age_seconds: 600,
         }
@@ -213,4 +370,46 @@ pub struct RoutePolicyRule {
     /// Must not be empty.
     pub required_scopes: Vec<String>,
     // Future fields: rate_limit, timeout, operation_id, etc.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayProxyConfig;
+
+    #[test]
+    fn disabled_proxy_needs_no_endpoint() {
+        let cfg = GatewayProxyConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn enabled_proxy_without_endpoint_is_rejected() {
+        let cfg = GatewayProxyConfig {
+            enabled: true,
+            directory_endpoint: None,
+            ..GatewayProxyConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_proxy_with_blank_endpoint_is_rejected() {
+        let cfg = GatewayProxyConfig {
+            enabled: true,
+            directory_endpoint: Some("   ".to_owned()),
+            ..GatewayProxyConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_proxy_with_endpoint_is_accepted() {
+        let cfg = GatewayProxyConfig {
+            enabled: true,
+            directory_endpoint: Some("http://gear-orchestrator:50051".to_owned()),
+            ..GatewayProxyConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
 }

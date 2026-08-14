@@ -79,17 +79,27 @@ from `active` to `inactive`.
 
 | Field               | Required             | Type                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------- | -------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `uuid`              | Yes                  | `Uuid`                   | Caller-supplied record UUID. Persisted verbatim; ingestion requests supply it directly.                                                                                                                                                                                                                                                                                                                                                       |
+| `id`                | Yes                  | `Uuid`                   | Deterministic UUIDv5 of `(tenant_id, gts_id, idempotency_key, created_at)`; not caller-supplied — the create surface takes the identity-free `CreateUsageRecord` (no `id` field), and the service stamps this value; authoritative on return. See ADR 0013 and ADR 0014 (`./ADR/0014-created-at-in-dedup-identity.md`).                                                                                                                                                    |
 | `tenant_id`         | Yes                  | `Uuid`                   | Caller-supplied tenant attribution. PDP authorization decides whether the caller may emit or read this tenant scope.                                                                                                                                                                                                                                                                                                                          |
 | `resource_ref`      | Yes                  | `ResourceRef`            | Caller-supplied resource attribution. Both `resource_id` and `resource_type` are mandatory.                                                                                                                                                                                                                                                                                                                                                   |
 | `subject_ref`       | No                   | `SubjectRef`             | Optional caller-supplied subject attribution. When present, `subject_id` is mandatory and `subject_type` is optional.                                                                                                                                                                                                                                                                                                                         |
 | `gts_id`            | Yes                  | `UsageTypeGtsId`         | Reference to a `UsageType.gts_id` present in the usage-type catalog (managed via the Plugin SPI, persisted in the active storage plugin's database). The same `gts_id` string that identifies the usage type in the catalog is the value stored on every usage record that references it — no UUID derivation. Unknown UsageTypes are rejected before persistence. See ADR 0012 (`./ADR/0012-unified-plugin-catalog-and-gts-id-reference.md`). |
 | `value`             | Yes                  | `Decimal`                | Signed fixed-precision measurement value, carried as [`rust_decimal::Decimal`] on every surface (SDK, REST `UsageValue` schema, plugin SPI), wire-encoded as a JSON **string** (never a float), and persisted as Postgres `NUMERIC`. Floating-point representation is intentionally excluded: `SUM(value)` and counter-compensation netting MUST be bit-exact, which `f64` cannot guarantee at scale. Permitted sign depends jointly on the UsageType's `gts_id` prefix (counter vs gauge) and the presence of `corrects_id` per the four-cell validation matrix in this section. |
-| `corrects_id`       | Optional             | `Uuid`                   | Sole structural discriminator between an ordinary usage row and a counter-compensation row. When `corrects_id IS NULL`, the record is an ordinary usage row. When `corrects_id` is set, the record is a counter-compensation row that references the `UsageRecord.uuid` of the usage row being offset; the referenced row MUST itself have `corrects_id IS NULL` and share the full identity tuple `(tenant_id, gts_id, resource_ref, subject_ref)` (`subject_ref` presence is part of the identity). See the validation matrix below.    |
+| `corrects_id`       | Optional             | `Uuid`                   | Sole structural discriminator between an ordinary usage row and a counter-compensation row. When `corrects_id IS NULL`, the record is an ordinary usage row. When `corrects_id` is set, the record is a counter-compensation row that references the `UsageRecord.id` of the usage row being offset; the referenced row MUST itself have `corrects_id IS NULL` and share the full identity tuple `(tenant_id, gts_id, resource_ref, subject_ref)` (`subject_ref` presence is part of the identity). See the validation matrix below.    |
 | `created_at`        | Yes                  | UTC timestamp            | Event timestamp supplied by the usage source (event time, not arrival time). Accepted without wall-clock validation; see the `created_at` / late-arrival invariant under §2.1 Invariants.                                                                                                                                                                                                                                                     |
-| `idempotency_key`   | Yes                  | `IdempotencyKey`         | Caller-supplied key used to deduplicate retries within `(tenant_id, gts_id)`. A same-key collision is resolved by exact-equality of the caller-supplied canonical fields: an exact-equality retry is silently deduplicated, while any differing canonical field is a Conflict (rejected, not absorbed).                                                                                                                                       |
+| `idempotency_key`   | Yes                  | `IdempotencyKey`         | Caller-supplied key used to deduplicate retries within `(tenant_id, gts_id)`. `created_at` is part of the dedup identity (ADR 0014): a same-key submission with a different `created_at` is a distinct record, not a Conflict. A same-key-and-`created_at` collision is resolved by exact-equality of the caller-supplied canonical fields: an exact-equality retry is silently deduplicated, while any differing canonical field is a Conflict (rejected, not absorbed).                                                                                                                                       |
 | `status`            | Yes                  | `UsageRecordStatus`      | `active` on acceptance; may transition once to `inactive`. No reactivation exists.                                                                                                                                                                                                                                                                                                                                                            |
 | `metadata`          | No                   | `RecordMetadata`         | Optional opaque JSON object persisted and returned verbatim.                                                                                                                                                                                                                                                                                                                                                                                  |
+
+`UsageRecord` is the returned/persisted shape; the **create** surface never
+accepts it directly. Callers submit the identity-free `CreateUsageRecord`
+(every field above except the server-owned `id` and `status`), and the service
+projects it to a `UsageRecord` — stamping the derived `id` and the initial
+`status = active` — via `CreateUsageRecord::into_usage_record` at the single
+ingestion choke point every caller (REST and in-process SDK) funnels through.
+This encodes "id is derived, not supplied" in the type rather than as a
+doc-comment on a field. See ADR 0013
+(`./ADR/0013-deterministic-usage-record-id.md`).
 
 The permitted sign of `value` is jointly governed by the UsageType's
 `gts_id` prefix (counter vs gauge) and the presence of
@@ -109,14 +119,14 @@ derives from the reserved abstract base
 
 Invariants:
 
-- `uuid`, `tenant_id`, `resource_ref`, `gts_id`, `value`, `created_at`,
+- `id`, `tenant_id`, `resource_ref`, `gts_id`, `value`, `created_at`,
   `idempotency_key`, and `status` are never null on an accepted record.
 - `created_at` is event time, not ingestion time, and is not validated against
   wall-clock: any UTC instant (past or future) is accepted, so late-arriving
   and historical records are ingested at their event-time position in the
-  `(created_at, uuid)` sort order. Aggregation over a bounded `time_range`
+  `(created_at, id)` sort order. Aggregation over a bounded `time_range`
   re-scans and stays complete regardless of arrival order; but a consumer
-  tailing raw records by a forward `(created_at, uuid)` cursor may not observe a
+  tailing raw records by a forward `(created_at, id)` cursor may not observe a
   record that lands behind a position it already passed — incremental raw
   tailing is best-effort, not a lossless change feed. There is no dedicated
   backfill capability (no watermarks or late-data coordination); bulk
@@ -127,18 +137,26 @@ Invariants:
   database) before the record reaches the plugin; the record's
   `gts_id` value is the same `gts_id` string used as the catalog
   primary key (no UUID derivation; see ADR 0012).
-- Deduplication is unique on `(tenant_id, gts_id, idempotency_key)`.
+- Deduplication is unique on `(tenant_id, gts_id, idempotency_key,
+  created_at)` (ADR 0014, `./ADR/0014-created-at-in-dedup-identity.md`).
   The caller's gear identity is not part of that key; multiple emitting
   gears authorized for the same tenant and UsageType must coordinate key
-  allocation. On a collision the outcome is decided by exact equality of the
-  caller-supplied canonical fields (`value`, `created_at`, `resource_ref`,
-  `subject_ref`, `corrects_id`, `metadata`; the match-key tuple and the
-  server-owned `status` are excluded): an exact-equality retry is silently deduplicated,
+  allocation. A same-key submission with a *different* `created_at` is a
+  distinct record, not a Conflict. On a same-key-and-`created_at` collision
+  the outcome is decided by exact equality of the caller-supplied canonical
+  fields (`value`, `resource_ref`, `subject_ref`, `corrects_id`, `metadata`;
+  the match-key tuple — now including `created_at` — and the server-managed
+  `status` are excluded): an exact-equality retry is silently deduplicated,
   and any differing canonical field — including a metadata-only difference —
-  is a Conflict that is rejected, not absorbed.
+  is a Conflict that is rejected, not absorbed. The server-owned `id` is not a
+  caller-supplied comparison input either, but because it is a deterministic
+  UUIDv5 projection of the dedup key (ADR 0013/0014) it is equal by construction
+  once that key has matched; a plugin MAY therefore defensively verify the stored
+  `id` against the derived value — surfacing a corrupted stored row as a Conflict
+  rather than a silent absorb — without changing the outcome for well-formed data.
 - The idempotency window is unbounded: the key never expires, has no TTL, and
   is never intentionally reusable, so the `(tenant_id, gts_id,
-idempotency_key)` uniqueness is permanent. The active plugin must preserve
+idempotency_key, created_at)` uniqueness is permanent. The active plugin must preserve
   that key tuple permanently even when record bodies are purged or archived by
   retention — a retention purge must not free a dedup key.
 - Accepted records are immutable except for the `status` transition performed
@@ -229,10 +247,9 @@ single usage-type catalog, managed via the Plugin SPI and persisted in the
 active storage plugin's database. See ADR 0012
 (`./ADR/0012-unified-plugin-catalog-and-gts-id-reference.md`).
 
-Each UsageType is a **GTS Type Schema** — its identifier is a GTS _type_ id
-whose last segment ends `~` per the GTS naming convention — not a GTS instance
-id. UsageType types are flat for v1: there is no parent pointer on the catalog
-row and no inheritance chain walked at validation time. Every registered
+Each UsageType is a concrete derivation of the reserved abstract base type —
+its identifier is a GTS _instance_ id. UsageType types are flat for v1: there is no parent pointer on
+the catalog row and no inheritance chain walked at validation time. Every registered
 usage type is concrete and may receive usage rows on its declared shape.
 UsageType definitions are owned by usage-collector (semantic ownership) and
 physically stored on the active storage plugin's backend database alongside
@@ -301,25 +318,32 @@ does not block the usage-type / dimensions decision. The UsageType entity
 does NOT yet declare a `unit` field.
 
 `UsageTypeGtsId` is a newtype wrapping the platform-primitive `gts::GtsID`
-(re-exported by `libs/toolkit-gts`). Its `Deserialize` impl parses the input
-string as a GTS type id (trailing `~`) and asserts the parsed value derives
-from the reserved abstract base `USAGE_RECORD_BASE = "gts.cf.core.uc.usage_record.v1~"`
-(exposed by the usage-collector SDK / contracts crate) with at least one
-further `~`-separated derivation segment. The newtype is the validation
-point on REST `Json<UsageType>` deserialization at
-`POST /usage-collector/v1/usage-types`. The `kind` field is validated
+(re-exported by `libs/toolkit-gts`). `UsageTypeGtsId::new` parses the input
+string as a GTS *instance* id and rejects a type id (one ending in `~`),
+then asserts the parsed value derives directly from the reserved abstract
+base `USAGE_RECORD_BASE = "gts.cf.core.uc.usage_record.v1~"` (exposed by the
+usage-collector SDK / contracts crate) — the base plus exactly one further
+`~`-separated derivation segment, so a well-formed value contains one `~`
+and never ends with one. The bare base is itself a type id and is rejected.
+The newtype is the validation point inside the
+`POST /usage-collector/v1/usage-types` handler, not at deserialization:
+`CreateUsageTypeRequest::gts_id` is a permissive `String` so the handler can
+surface the canonical `invalid_base_gts_id` `Problem` rather than axum's
+`text/plain` rejection. The `kind` field is validated
 independently by parsing the permissive `CreateUsageTypeRequest::kind`
 string through `UsageKind::from_str` at the handler boundary (unknown
 values rejected).
 
 Invariants:
 
-- `gts_id` is unique across the deployment, is a GTS _type_ id (ends `~`), and
-  MUST derive from the reserved abstract base
-  `gts.cf.core.uc.usage_record.v1~` with at least one further `~`-separated
-  segment. Identifiers that do not satisfy that derivation (or are
-  non-type identifiers) are rejected at the `UsageTypeGtsId::deserialize`
-  boundary and surface on the REST path as a structured `400` `InvalidArgument`
+- `gts_id` is unique across the deployment and is a GTS _instance_ id deriving
+  directly from the reserved abstract base
+  `gts.cf.core.uc.usage_record.v1~` — the base plus exactly one further
+  `~`-separated segment. Identifiers that do not satisfy that derivation —
+  including the bare base and any other GTS type id (trailing `~`) — are
+  rejected at the `UsageTypeGtsId::new` boundary inside the
+  `POST /usage-collector/v1/usage-types` handler and surface on the REST path
+  as a structured `400` `InvalidArgument`
   `Problem` (`field_violations[0].field="gts_id"`, `.reason="INVALID_BASE_GTS_ID"`).
 - UsageType semantics (counter / gauge) is carried by the closed
   `UsageKind` enum on the catalog row's `kind` field per ADR 0012's
@@ -370,17 +394,26 @@ record.
 Invariants:
 
 - Keyless records are rejected before persistence.
-- A same-key submission with the same `(tenant_id, gts_id,
-idempotency_key)` is resolved by exact equality of the caller-supplied
-  canonical fields (`value`, `created_at`, `resource_ref`, `subject_ref`,
-  `corrects_id`, `metadata`; the match-key tuple and the server-owned `uuid`
-  and `status` are excluded). An exact-equality retry is silently deduplicated; any
+- The dedup key is the 4-tuple `(tenant_id, gts_id, idempotency_key,
+  created_at)` (ADR 0014, `./ADR/0014-created-at-in-dedup-identity.md`):
+  `created_at` is part of the dedup identity, so a same-key submission with a
+  *different* `created_at` is a distinct record, not a Conflict. A same-key
+  submission with the same `(tenant_id, gts_id, idempotency_key,
+  created_at)` is resolved by exact equality of the caller-supplied
+  canonical fields (`value`, `resource_ref`, `subject_ref`, `corrects_id`,
+  `metadata`; the match-key tuple — now including `created_at` — and the
+  server-managed `status` are excluded). An exact-equality retry is silently deduplicated; any
   differing canonical field — including a metadata-only difference — is a
   Conflict that is rejected fail-closed (surfaced on the wire as the
-  `idempotency_conflict` reason), never silently dropped.
+  `idempotency_conflict` reason), never silently dropped. The server-owned `id`
+  is not a caller-supplied comparison input; as a deterministic UUIDv5 projection
+  of the dedup key (ADR 0013/0014) it is equal by construction once that key has
+  matched, so a plugin MAY defensively verify the stored `id` against the derived
+  value — surfacing a corrupted stored row as a Conflict rather than a silent
+  absorb — without changing the outcome for well-formed data.
 - The idempotency window is unbounded: the key never expires, has no TTL, and
   is never intentionally reusable. The active plugin must preserve the
-  `(tenant_id, gts_id, idempotency_key)` tuple permanently even
+  `(tenant_id, gts_id, idempotency_key, created_at)` tuple permanently even
   when record bodies are purged or archived by retention; a retention purge
   must not free a dedup key.
 - The same key may legitimately appear under a different tenant or UsageType.
@@ -537,9 +570,11 @@ Invariants:
   only `eq` and `in`; ordering and range operators are rejected as a
   structural validation error.
 - `status` accepts the full comparison operator set
-  (`eq`, `ne`, `lt`, `le`, `gt`, `ge`). The time-window predicate
-  `created_at` is carried by the dedicated `TimeWindow` parameter on
-  the SDK / REST surfaces (not by OData).
+  (`eq`, `ne`, `lt`, `le`, `gt`, `ge`). `created_at` is a filterable
+  field that carries the mandatory bounded `[from, to)` time window on
+  the SDK / REST surfaces as `created_at ge … and created_at lt …`
+  conjuncts in `$filter` (at least one lower and one upper bound, else
+  `MISSING_TIME_WINDOW`) — there is no separate `TimeWindow` parameter.
 - Per-UsageType declared keys accept `eq` and `in` only in v1; any other
   operator on a declared-key field is rejected as a structural validation
   error before plugin dispatch.
@@ -590,13 +625,13 @@ encoder when paginating raw queries.
 | Component   | Type                     | Description                                                                             |
 | ----------- | ------------------------ | --------------------------------------------------------------------------------------- |
 | `created_at` | UTC timestamp            | Primary sort key; matches `UsageRecord.created_at` of the last row on the emitted page.  |
-| `id`        | Opaque record identifier | Deterministic tiebreaker; matches `UsageRecord.uuid` of the last row on the emitted page. |
+| `id`        | Opaque record identifier | Deterministic tiebreaker; matches `UsageRecord.id` of the last row on the emitted page. |
 
 Invariants:
 
 - `created_at` is the primary sort key; `id` is the deterministic tiebreaker.
   Together they MUST yield a total, stable order across all plugins so that
-  `(created_at, uuid)` pairs are unique within a tenant's record stream.
+  `(created_at, id)` pairs are unique within a tenant's record stream.
 - `Keyset` is produced from the last `UsageRecord` of an emitted page and is
   serialized by the toolkit gateway into the opaque `CursorV1` returned in
   `toolkit_odata::Page<UsageRecord>.page_info.next_cursor`.
@@ -672,8 +707,9 @@ inputs to `query_aggregated_usage_records` (mirroring the
   surface is reserved and any `gts_id`-touching predicate in `query`
   is rejected as a typed validation error — the typed parameter is the single
   source of truth).
-- `time_range` → `window: TimeWindow` (validated `[from, to)` UTC, `from
-  < to` enforced at construction).
+- `time_range` → `created_at ge … and created_at lt …` predicates on
+  `query: &ODataQuery` (the mandatory bounded `[from, to)` window; no
+  separate `TimeWindow` parameter).
 - `tenant_id` / `resource_ref` / `subject_ref` narrowing
   filters → predicates on `query: &ODataQuery` over
   `UsageRecordFilterField` minus the reserved `gts_id` field (flattened
@@ -688,7 +724,7 @@ inputs to `query_aggregated_usage_records` (mirroring the
 The result type is `AggregationResult { buckets: Vec<AggregationBucket> }`,
 where each `AggregationBucket` carries `key: Vec<String>` (in
 `group_by` order; empty for the no-grouping case) and
-`value: Option<Decimal>` (wire-encoded as a JSON string; `None` when no
+`value: Option<BigDecimal>` (arbitrary precision; wire-encoded as a JSON string; `None` when no
 rows matched in the bucket; `AVG` may carry a plugin-chosen rounding
 scale on non-terminating quotients). Each entry in `key` is the string
 form of the corresponding `AggregationDimension`: `TenantId` is
@@ -747,7 +783,7 @@ Bucket shape (`AggregationBucket`):
 | Field   | Required | Type                                 | Description                                                                                                                                              |
 | ------- | -------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `key`   | Yes      | `Vec<String>` (may be empty)         | One entry per dimension in `AggregationSpec::group_by`, in the same order. Empty when `group_by` was empty (the no-grouping case yields a single bucket).|
-| `value` | Yes      | `Option<Decimal>`                    | Aggregated value for the bucket, wire-encoded as a JSON string. `None` when no rows matched (e.g. `MIN` over an empty set). The `op` originated from the call's `AggregationSpec`; `AVG` may carry a plugin-chosen rounding scale on non-terminating quotients. |
+| `value` | Yes      | `Option<BigDecimal>`                 | Aggregated value for the bucket, carried as arbitrary-precision `bigdecimal::BigDecimal` (a wide `SUM`/`AVG` can exceed `rust_decimal::Decimal`'s ceiling) and wire-encoded as a JSON string. `None` when no rows matched (e.g. `MIN` over an empty set). The `op` originated from the call's `AggregationSpec`; `AVG` may carry a plugin-chosen rounding scale on non-terminating quotients. |
 
 Each entry in `key` is the string form of the corresponding
 `AggregationDimension`. `TenantId` MUST be emitted as `Uuid::to_string()`
@@ -776,6 +812,15 @@ Interpretation of `value`:
   bucket; compensation rows are excluded from these aggregations because
   compensation rows adjust `SUM` and are not events.
 - Inactive records of either kind are excluded from every aggregation.
+
+`AggregationOp` is restricted per `UsageType.kind` via
+`AggregationOp::is_allowed_for(kind)`: a **counter** admits `{SUM, COUNT}`; a
+**gauge** admits `{MIN, MAX, AVG, COUNT}`. `SUM` nets signed values across
+active rows (compensation-aware); every other op operates over
+`corrects_id IS NULL` rows only. Because `MIN`/`MAX`/`AVG` are gauge-only and
+gauges never carry compensations, that partition is load-bearing only for
+`COUNT`-on-counter. The gateway enforces the matrix with a typed `400` before
+plugin dispatch.
 
 ## 4. Authorization Domain
 

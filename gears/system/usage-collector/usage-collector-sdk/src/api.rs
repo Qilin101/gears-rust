@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::error::UsageCollectorError;
 use crate::models::{
-    AggregationResult, AggregationSpec, MetadataFilter, UsageRecord, UsageType, UsageTypeGtsId,
+    AggregationResult, AggregationSpec, CreateUsageRecord, MetadataFilter, UsageRecord, UsageType,
+    UsageTypeGtsId,
 };
 
 /// Consumer-facing API for Usage Collector operations.
@@ -16,32 +17,36 @@ use crate::models::{
 pub trait UsageCollectorClientV1: Send + Sync + 'static {
     /// Create a single usage record.
     ///
-    /// An exact-equality retry under the same idempotency key returns the
-    /// previously persisted record; a canonical-field mismatch surfaces as
-    /// [`UsageCollectorError::Conflict`].
+    /// Takes the identity-free [`CreateUsageRecord`]: the returned record's
+    /// `id` is derived deterministically from the dedup key, never supplied by
+    /// the caller. An exact-equality retry under the same idempotency key
+    /// returns the previously persisted record; a canonical-field mismatch
+    /// surfaces as [`UsageCollectorError::Conflict`].
     async fn create_usage_record(
         &self,
         ctx: &SecurityContext,
-        record: UsageRecord,
+        record: CreateUsageRecord,
     ) -> Result<UsageRecord, UsageCollectorError>;
 
     /// Create a batch of usage records.
     ///
-    /// Per-record outcomes are aligned with the input order.
+    /// Takes identity-free [`CreateUsageRecord`] submissions (see
+    /// [`Self::create_usage_record`]). Per-record outcomes are aligned with
+    /// the input order.
     async fn create_usage_records(
         &self,
         ctx: &SecurityContext,
-        records: Vec<UsageRecord>,
+        records: Vec<CreateUsageRecord>,
     ) -> Result<Vec<Result<UsageRecord, UsageCollectorError>>, UsageCollectorError>;
 
-    /// Get a single usage record by its `uuid`.
+    /// Get a single usage record by its `id`.
     ///
-    /// Returns the persisted record on `Ok`; an unknown `uuid` surfaces
+    /// Returns the persisted record on `Ok`; an unknown `id` surfaces
     /// as [`UsageCollectorError::NotFound`].
     async fn get_usage_record(
         &self,
         ctx: &SecurityContext,
-        uuid: Uuid,
+        id: Uuid,
     ) -> Result<UsageRecord, UsageCollectorError>;
 
     /// Aggregated query over usage records.

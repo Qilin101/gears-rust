@@ -1,8 +1,16 @@
 # Reference contract for the Usage Collector REST surface. The runtime
-# OpenAPI document is emitted from `OperationBuilder` calls in
-# `gears/system/usage-collector/src/api/rest/routes.rs`; a CI drift-check
-# diffs paths, methods, operationIds, tags, parameters, and response
-# schemas against this file.
+# OpenAPI document is emitted from `OperationBuilder` calls under
+# `gears/system/usage-collector/usage-collector/src/api/rest/routes/`.
+#
+# This file is enforced. The `openapi_contract_tests` module beside those
+# registrars builds the route registry and fails if the two disagree on
+# the set of operations, their methods, operation ids, tags, parameters
+# (name / location / required), request bodies (media type, `required`,
+# schema), 2xx responses (status, media type, schema), standard-error
+# coverage, or per-operation authentication posture.
+#
+# NOT enforced, and therefore maintained by hand: descriptions, examples,
+# field-level schema contents, and response headers. Keep them honest.
 
 openapi: 3.1.0
 info:
@@ -11,8 +19,7 @@ info:
   description: |
     Attributed usage-record ingestion, raw (OData) and aggregated read
     surfaces, individual record deactivation, and usage-type catalog
-    lifecycle. All operations require a resolved `SecurityContext`
-    supplied upstream by the platform gateway.
+    lifecycle.
 
 servers:
   - url: https://api.example.com
@@ -38,7 +45,7 @@ paths:
       description: |
         Submit up to 100 usage records for persistence. Every record
         carries an `idempotency_key` and is deduplicated per
-        `(tenant_id, gts_id, idempotency_key)`. A record with
+        `(tenant_id, gts_id, idempotency_key, created_at)`. A record with
         `corrects_id` set is a counter compensation row; otherwise it is
         an ordinary usage row. Returns `200` if every record was accepted
         or deduplicated, `207 Multi-Status` if at least one record was
@@ -48,14 +55,13 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/IngestRecordsRequest"
+              $ref: "#/components/schemas/CreateUsageRecordsRequest"
             examples:
               example_usage:
                 summary: Ordinary usage emission
                 value:
                   records:
-                    - uuid: "01234567-89ab-cdef-0123-456789abcdef"
-                      tenant_id: "11111111-1111-1111-1111-111111111111"
+                    - tenant_id: "11111111-1111-1111-1111-111111111111"
                       gts_id: gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1
                       value: "42"
                       created_at: "2026-05-29T12:00:00Z"
@@ -67,8 +73,7 @@ paths:
                 summary: Counter compensation (signed-negative, with corrects_id)
                 value:
                   records:
-                    - uuid: "fedcba98-7654-3210-fedc-ba9876543210"
-                      tenant_id: "11111111-1111-1111-1111-111111111111"
+                    - tenant_id: "11111111-1111-1111-1111-111111111111"
                       gts_id: gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1
                       value: "-10"
                       created_at: "2026-05-29T12:05:00Z"
@@ -83,15 +88,16 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/IngestRecordsResponse"
+                $ref: "#/components/schemas/CreateUsageRecordsResponse"
         "207":
           description: |
             At least one record rejected. Inspect each per-record
-            `outcome` and `error` field.
+            `outcome`; entries with `outcome: rejected` carry an
+            `error` envelope, `outcome: accepted` entries a `record`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/IngestRecordsResponse"
+                $ref: "#/components/schemas/CreateUsageRecordsResponse"
         default:
           $ref: "#/components/responses/Problem"
 
@@ -110,34 +116,75 @@ paths:
           required: true
           description: Single UsageType GTS id being queried.
           schema:
-            type: string
-            minLength: 1
-            maxLength: 512
+            $ref: "#/components/schemas/UsageTypeGtsId"
         - name: $filter
           in: query
           required: false
           description: |
-            OData $filter. Operands: fixed set
-            (`tenant_id`, `subject_id`, `subject_type`, `resource_id`,
-            `resource_type`, `created_at`, `status`) plus the queried
-            usage type's declared `metadata_fields` (string-valued).
+            OData `$filter` over the closed `UsageRecordFilterField`
+            operand set: `id`, `created_at`, `tenant_id`, `resource_id`,
+            `resource_type`, `subject_id`, `subject_type`, `corrects_id`,
+            `status`. A bounded `created_at` window (at least one lower
+            and one upper bound, e.g. `created_at ge … and created_at lt
+            …`) is mandatory; its absence is `MISSING_TIME_WINDOW`
+            (`400`).
+
+            The set is closed. Any other operand is rejected `400`
+            (`INVALID_FILTER`) when the expression is parsed, before any
+            authorization or storage work. In particular, a usage type's
+            declared `metadata_fields` are **not** `$filter` operands —
+            filter on them with the `metadata.<key>` parameter below —
+            and neither is `gts_id`, which is the required typed query
+            parameter above.
           schema:
             type: string
         - name: $orderby
           in: query
           required: false
           description: |
-            OData $orderby. MUST be a prefix of `(created_at, uuid)`.
+            OData $orderby. All keys MUST share one sort direction, and
+            each key MUST name a mandatory (never-null) record field
+            (`id`, `created_at`, `tenant_id`, `resource_id`,
+            `resource_type`, `status`). The server appends the canonical
+            unique `(created_at, id)` tiebreaker in the caller's
+            direction. Ordering by an optional field (`subject_id`,
+            `subject_type`, `corrects_id`) or mixing `asc`/`desc` across
+            keys is rejected `400` (`VALIDATION`), because keyset
+            pagination requires a uniform-direction, never-null keyset.
           schema:
             type: string
         - name: $top
           in: query
           required: false
-          description: Page size; server clamps to `[1, 1000]`.
+          description: |
+            Page size in the canonical OData spelling (OASIS OData 4.01
+            Part 2, §5.1.6); rejected with `400` above 1000, never
+            silently clamped. Folds onto the same slot as `limit`;
+            sending both in one request is ambiguous and is rejected
+            `400`.
           schema:
             type: integer
             minimum: 1
             maximum: 1000
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Page size hint; alias of `$top`, rejected with `400` above
+            1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+        - name: metadata.<key>
+          in: query
+          required: false
+          description: |
+            Repeated metadata-filter entries. Values for the same key are
+            OR-ed; distinct keys are AND-ed. Each `<key>` MUST be a member
+            of the queried usage type's declared `metadata_fields`.
+          schema:
+            type: string
         - name: cursor
           in: query
           required: false
@@ -162,15 +209,44 @@ paths:
       description: |
         Compute a server-side aggregation (`sum`, `count`, `min`, `max`,
         `avg`) for a single usage type. Group-by is capped at 2
-        dimensions; result rows bounded to 100,000. Mirrors the SDK's
+        dimensions; result rows bounded to 100,000 (a result exceeding
+        that is a `400`, `AGGREGATION_RESULT_TOO_LARGE`). Mirrors the SDK's
         `UsageCollectorClientV1::query_aggregated_usage_records`
         signature.
+
+        `sum` requires a counter usage type; `min`/`max`/`avg` require a gauge;
+        `count` is valid for both. A mismatched op/kind pair is a `400`.
+      parameters:
+        - name: gts_id
+          in: query
+          required: true
+          description: Single UsageType GTS id being aggregated.
+          schema:
+            $ref: "#/components/schemas/UsageTypeGtsId"
+        - name: metadata.<key>
+          in: query
+          required: false
+          description: |
+            Repeated metadata-filter entries. Values for the same key are
+            OR-ed; distinct keys are AND-ed. Each `<key>` MUST be a member
+            of the queried usage type's declared `metadata_fields`.
+          schema:
+            type: string
+        - name: $filter
+          in: query
+          required: false
+          description: |
+            OData `$filter` over the record read-filter set. A bounded
+            `created_at` window (at least one lower and one upper bound)
+            is mandatory; its absence is `MISSING_TIME_WINDOW` (`400`).
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AggregationRequest"
+              $ref: "#/components/schemas/QueryAggregatedUsageRecordsRequest"
       responses:
         "200":
           description: Aggregation result for the requested usage type.
@@ -178,6 +254,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AggregationResult"
+        "400":
+          description: |
+            Canonical `InvalidArgument` envelope. Discrimination via
+            `field_violations[0].reason`: `MISSING_TIME_WINDOW` (no bounded
+            `created_at` window), `OP_NOT_ALLOWED_FOR_KIND` (the `op` is not
+            valid for the usage type's `kind` — `sum` on a gauge, or
+            `min`/`max`/`avg` on a counter), or `AGGREGATION_RESULT_TOO_LARGE`
+            (the grouping produced more than 100,000 buckets — narrow the
+            window or drop a high-cardinality `group_by` dimension).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "404":
+          description: |
+            The requested `gts_id` is not registered in the usage-type
+            catalog (resolved via a pre-dispatch `get_usage_type`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         default:
           $ref: "#/components/responses/Problem"
 
@@ -188,7 +285,7 @@ paths:
       operationId: usage_collector.get_usage_record
       tags: [Usage Records]
       summary: Read a single usage record by id
-      description: Read a single persisted usage record by its `uuid`.
+      description: Read a single persisted usage record by its `id`.
       responses:
         "200":
           description: The persisted usage record.
@@ -233,13 +330,25 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
+        - name: $filter
+          in: query
+          required: false
+          description: OData `$filter` over the usage-type catalog field set.
+          schema:
+            type: string
+        - name: $orderby
+          in: query
+          required: false
+          description: OData `$orderby` over the usage-type catalog field set.
+          schema:
+            type: string
       responses:
         "200":
           description: Page of usage-type catalog entries.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/UsageTypeList"
+                $ref: "#/components/schemas/Page_UsageType"
         default:
           $ref: "#/components/responses/Problem"
     post:
@@ -247,8 +356,8 @@ paths:
       tags: [Usage Types]
       summary: Register a new UsageType
       description: |
-        Create a usage type in the catalog. `gts_id` MUST end with `~`
-        and derive from the reserved abstract base
+        Create a usage type in the catalog. `gts_id` MUST be a GTS
+        *instance* id deriving directly from the reserved abstract base
         `gts.cf.core.uc.usage_record.v1~`. Duplicate registration
         returns `409`.
       requestBody:
@@ -256,7 +365,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/UsageType"
+              $ref: "#/components/schemas/CreateUsageTypeRequest"
       responses:
         "201":
           description: UsageType registered.
@@ -295,7 +404,7 @@ paths:
 
   /usage-collector/v1/usage-types/{gts_id}:
     parameters:
-      - $ref: "#/components/parameters/UsageTypeGtsId"
+      - $ref: "#/components/parameters/UsageTypeGtsIdPath"
     get:
       operationId: usage_collector.get_usage_type
       tags: [Usage Types]
@@ -358,31 +467,27 @@ components:
       name: id
       in: path
       required: true
-      description: Caller-supplied `UsageRecord.uuid` (RFC 4122 UUID).
+      description: Gateway-derived `UsageRecord.id` (RFC 4122 UUID).
       schema:
         type: string
         format: uuid
-    UsageTypeGtsId:
+    UsageTypeGtsIdPath:
       name: gts_id
       in: path
       required: true
-      description: |
-        GTS semantic id of the usage type. MUST end with `~` and derive
-        from `gts.cf.core.uc.usage_record.v1~`. URL-encoded as required.
+      description: URL-encoded GTS instance id of the usage type.
       schema:
-        type: string
-        minLength: 1
-        maxLength: 512
+        $ref: "#/components/schemas/UsageTypeGtsId"
     Limit:
       name: limit
       in: query
       required: false
-      description: Number of items per page (1..200).
+      description: Number of items per page (1..1000).
       schema:
         type: integer
         minimum: 1
-        maximum: 200
-        default: 50
+        maximum: 1000
+        default: 100
     Cursor:
       name: cursor
       in: query
@@ -405,7 +510,7 @@ components:
       enum: [active, inactive]
       description: Monotonic record lifecycle marker. Only `active → inactive` is permitted.
 
-    AggregationFunction:
+    AggregationOp:
       type: string
       enum: [sum, count, min, max, avg]
       description: |
@@ -415,7 +520,13 @@ components:
         well-defined for any value shape; the others require a numeric
         `value`.
 
-    GroupByDimension:
+        Ops are restricted per usage kind: a counter usage type admits
+        `{sum, count}`; a gauge admits `{min, max, avg, count}`. A mismatched
+        `(op, kind)` pair is rejected with a `400`
+        (`field_violations[0].reason="OP_NOT_ALLOWED_FOR_KIND"`) before the
+        server-side aggregation runs.
+
+    AggregationDimension:
       oneOf:
         - type: string
           enum: [tenant_id, resource_id, resource_type, subject_id, subject_type]
@@ -445,16 +556,6 @@ components:
         wire shape (serde `rename_all = "snake_case"` over unit and
         single-field variants).
 
-    IngestOutcome:
-      type: string
-      enum: [accepted, duplicate, rejected]
-      description: |
-        Per-record outcome. `duplicate` means an exact-equality retry
-        was silently absorbed. `rejected` means the record failed
-        validation, PDP, semantics, or a same-key canonical-field
-        mismatch (`IDEMPOTENCY_CONFLICT`); inspect the per-record
-        `error` field.
-
     Timestamp:
       type: string
       format: date-time
@@ -473,13 +574,27 @@ components:
         are enforced server-side from the usage type's `kind` and the
         presence of `corrects_id` (see `UsageRecord.corrects_id`).
 
+    AggregatedValue:
+      type: string
+      pattern: '^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$'
+      example: "79228162514264337593543950400"
+      description: |
+        Signed **arbitrary-precision** numeric aggregation result, wire-encoded
+        as a JSON **string** (never a JSON number) for the same float-round-trip
+        safety as `UsageValue`. Unlike `UsageValue` (a single record's
+        fixed-precision `rust_decimal::Decimal`), a `sum`/`avg` aggregate over a
+        wide window can exceed `Decimal`'s ~7.9×10²⁸ ceiling, so the carrier on
+        every server surface is `bigdecimal::BigDecimal` (Postgres `NUMERIC`,
+        unbounded, at rest). `avg` may carry a plugin-chosen rounding scale on
+        non-terminating quotients.
+
     IdempotencyKey:
       type: string
       minLength: 1
       maxLength: 256
       description: |
         Caller-supplied dedup key. Dedup unique is
-        `(tenant_id, gts_id, idempotency_key)`.
+        `(tenant_id, gts_id, idempotency_key, created_at)`.
 
     RecordMetadata:
       type: object
@@ -529,7 +644,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        - uuid
+        - id
         - tenant_id
         - resource_ref
         - gts_id
@@ -542,10 +657,10 @@ components:
         the one-way `status` transition. `corrects_id` distinguishes a
         usage row (absent) from a counter compensation row (set).
       properties:
-        uuid:
+        id:
           type: string
           format: uuid
-          description: Caller-supplied record UUID.
+          description: Deterministic gateway-derived UUIDv5 of (tenant_id, gts_id, idempotency_key, created_at).
         tenant_id:
           type: string
           format: uuid
@@ -555,10 +670,7 @@ components:
         subject_ref:
           $ref: "#/components/schemas/SubjectRef"
         gts_id:
-          type: string
-          minLength: 1
-          maxLength: 512
-          description: GTS instance id of the referenced usage type.
+          $ref: "#/components/schemas/UsageTypeGtsId"
         value:
           $ref: "#/components/schemas/UsageValue"
         created_at:
@@ -570,9 +682,8 @@ components:
         corrects_id:
           type: string
           format: uuid
-          nullable: true
           description: |
-            Optional reference to a prior usage row's `uuid`. Presence
+            Optional reference to a prior usage row's `id`. Presence
             marks this record as a counter compensation row. The
             referenced row MUST itself have `corrects_id` absent, share
             the full identity tuple
@@ -581,11 +692,10 @@ components:
         metadata:
           $ref: "#/components/schemas/RecordMetadata"
 
-    UsageRecordInput:
+    CreateUsageRecordRequest:
       type: object
       additionalProperties: false
       required:
-        - uuid
         - tenant_id
         - resource_ref
         - gts_id
@@ -594,15 +704,20 @@ components:
         - idempotency_key
       description: |
         Ingestion projection of `UsageRecord` — same shape minus
-        `status` (server-defaulted to `active`). The caller supplies
-        `uuid` and `created_at` on every submission. The same schema
-        carries both ordinary usage and counter compensations; the
-        server enforces the `(kind × corrects_id presence)` value
-        matrix and `corrects_id` referential integrity at ingestion.
+        `status` (server-defaulted to `active`) and minus the record
+        identity: `id` is gateway-derived, never caller-supplied, and
+        is rejected as an unknown field if present. The gateway
+        computes it as a deterministic UUIDv5 of the dedup key:
+        `id = UUIDv5(NS, tenant_id ⟨0x1F⟩ gts_id ⟨0x1F⟩ created_at_micros ⟨0x1F⟩ idempotency_key)`,
+        where `NS` is the fixed namespace
+        `56313026-863b-4de8-b32b-1f96b67306ed` and `created_at_micros` is
+        the event timestamp as integer microseconds-since-epoch
+        (ADR-0014). The caller supplies `created_at` on every
+        submission. The same schema carries both
+        ordinary usage and counter compensations; the server enforces
+        the `(kind × corrects_id presence)` value matrix and
+        `corrects_id` referential integrity at ingestion.
       properties:
-        uuid:
-          type: string
-          format: uuid
         tenant_id:
           type: string
           format: uuid
@@ -611,9 +726,7 @@ components:
         subject_ref:
           $ref: "#/components/schemas/SubjectRef"
         gts_id:
-          type: string
-          minLength: 1
-          maxLength: 512
+          $ref: "#/components/schemas/UsageTypeGtsId"
         value:
           $ref: "#/components/schemas/UsageValue"
         created_at:
@@ -623,14 +736,13 @@ components:
         corrects_id:
           type: string
           format: uuid
-          nullable: true
           description: |
-            Optional reference to a prior usage row's `uuid`. See
+            Optional reference to a prior usage row's `id`. See
             `UsageRecord.corrects_id`.
         metadata:
           $ref: "#/components/schemas/RecordMetadata"
 
-    IngestRecordsRequest:
+    CreateUsageRecordsRequest:
       type: object
       additionalProperties: false
       required: [records]
@@ -640,26 +752,68 @@ components:
           minItems: 1
           maxItems: 100
           items:
-            $ref: "#/components/schemas/UsageRecordInput"
+            $ref: "#/components/schemas/CreateUsageRecordRequest"
 
-    IngestRecordResult:
+    CreateUsageRecordResult:
+      oneOf:
+        - $ref: "#/components/schemas/AcceptedUsageRecord"
+        - $ref: "#/components/schemas/RejectedUsageRecord"
+      discriminator:
+        propertyName: outcome
+        mapping:
+          accepted: "#/components/schemas/AcceptedUsageRecord"
+          rejected: "#/components/schemas/RejectedUsageRecord"
+      description: |
+        Per-record acknowledgement, internally tagged on `outcome`. Every
+        submitted record yields exactly one entry and `results` preserves
+        input order, so `index` is redundant with the array position and
+        is carried anyway to keep an entry self-describing once it is
+        lifted out of the array.
+
+        There is no `duplicate` outcome on the wire. An exact-equality
+        retry is absorbed by the dedup unique
+        `(tenant_id, gts_id, idempotency_key, created_at)` and reported as
+        `accepted` carrying the already-persisted record; a same-key
+        submission whose canonical fields differ is `rejected` with
+        `IDEMPOTENCY_CONFLICT`.
+
+    AcceptedUsageRecord:
       type: object
       additionalProperties: false
-      required: [outcome]
-      description: Per-record acknowledgement; array preserves input order.
+      required: [outcome, index, record]
+      description: The record was persisted (or an identical one already was).
       properties:
         outcome:
-          $ref: "#/components/schemas/IngestOutcome"
-        uuid:
           type: string
-          format: uuid
-          description: Record UUID; present on `accepted` and `duplicate` (echoes the caller-supplied `UsageRecord.uuid`).
-        idempotency_key:
-          $ref: "#/components/schemas/IdempotencyKey"
+          const: accepted
+        index:
+          type: integer
+          minimum: 0
+          description: Zero-based position of this record in the request's `records` array.
+        record:
+          $ref: "#/components/schemas/UsageRecord"
+
+    RejectedUsageRecord:
+      type: object
+      additionalProperties: false
+      required: [outcome, index, error]
+      description: |
+        The record failed validation, PDP authorization, the emission
+        semantics matrix, or a same-key canonical-field mismatch
+        (`IDEMPOTENCY_CONFLICT`). `error` is the same canonical envelope a
+        single-record failure would have surfaced, folded into the batch.
+      properties:
+        outcome:
+          type: string
+          const: rejected
+        index:
+          type: integer
+          minimum: 0
+          description: Zero-based position of this record in the request's `records` array.
         error:
           $ref: "#/components/schemas/Problem"
 
-    IngestRecordsResponse:
+    CreateUsageRecordsResponse:
       type: object
       additionalProperties: false
       required: [results]
@@ -669,18 +823,7 @@ components:
           minItems: 1
           maxItems: 100
           items:
-            $ref: "#/components/schemas/IngestRecordResult"
-
-    TimeWindow:
-      type: object
-      additionalProperties: false
-      required: [from, to]
-      description: Bounded UTC interval; `from` inclusive, `to` exclusive, `to > from`.
-      properties:
-        from:
-          $ref: "#/components/schemas/Timestamp"
-        to:
-          $ref: "#/components/schemas/Timestamp"
+            $ref: "#/components/schemas/CreateUsageRecordResult"
 
     Page_UsageRecord:
       type: object
@@ -696,42 +839,23 @@ components:
         page_info:
           $ref: "#/components/schemas/PageInfo"
 
-    MetadataFilter:
-      type: object
-      additionalProperties: false
-      required: [key, values]
-      description: |
-        Equality-set filter applied to a single `UsageRecord.metadata`
-        key. Across a `metadata_filter` array: AND across distinct
-        filters (different keys), OR within a single filter's `values`.
-        An empty array imposes no metadata filter. Matches the SDK's
-        `MetadataFilter` 1:1.
-      properties:
-        key:
-          type: string
-          minLength: 1
-          description: |
-            Validated metadata key (non-empty, no NUL bytes). MUST be a
-            member of the queried usage type's `metadata_fields`.
-        values:
-          type: array
-          minItems: 1
-          description: Candidate value set; at least one entry.
-          items:
-            type: string
-
-    AggregationSpec:
+    QueryAggregatedUsageRecordsRequest:
       type: object
       additionalProperties: false
       required: [op]
       description: |
-        Aggregation specification: the function to compute (`op`) and
-        the optional grouping (`group_by`). Matches the SDK's
-        `AggregationSpec` wire shape; `group_by` is omitted on the wire
-        when empty.
+        Aggregation request body. Carries only the aggregation spec: the
+        function to compute (`op`) and the optional grouping
+        (`group_by`).
+
+        The target usage type (`gts_id`), the OData `filter`, and the
+        metadata filters are query parameters on this operation,
+        mirroring `GET /usage-collector/v1/records` — they are not part
+        of this body. PDP-authorized scope is intersected with the
+        supplied filter.
       properties:
         op:
-          $ref: "#/components/schemas/AggregationFunction"
+          $ref: "#/components/schemas/AggregationOp"
         group_by:
           type: array
           maxItems: 2
@@ -741,48 +865,7 @@ components:
             no-grouping case, which yields a single bucket with no
             `key`. Capped at 2 dimensions.
           items:
-            $ref: "#/components/schemas/GroupByDimension"
-
-    AggregationRequest:
-      type: object
-      additionalProperties: false
-      required: [gts_id, time_range, aggregation]
-      description: |
-        Aggregation request body. Mirrors the SDK's
-        `query_aggregated_usage_records` parameters: `gts_id`
-        + `time_range` (`TimeWindow`) + OData `filter` (parsed into
-        `ODataQuery`) + typed `metadata_filter` (sidechannel for
-        JSON-keyed values that OData cannot express) + `aggregation`
-        (`AggregationSpec`). PDP-authorized scope is intersected with
-        the supplied filter.
-      properties:
-        gts_id:
-          type: string
-          minLength: 1
-          maxLength: 512
-          description: GTS semantic id of the usage type to query. MUST end with `~`.
-        time_range:
-          $ref: "#/components/schemas/TimeWindow"
-        filter:
-          type: string
-          description: |
-            OData `$filter` expression over the SDK's
-            `UsageRecordQuery` field set (`tenant_id`, `resource_id`,
-            `resource_type`, `subject_id`, `subject_type`,
-            `corrects_id`, `status`). Time bounds are carried by the
-            separate `time_range` field, and `metadata_*` keys are
-            filtered through `metadata_filter` — neither flows
-            through OData.
-        metadata_filter:
-          type: array
-          description: |
-            Typed metadata filters. Each entry targets one declared
-            metadata key; entries AND together, values within a single
-            entry OR together.
-          items:
-            $ref: "#/components/schemas/MetadataFilter"
-        aggregation:
-          $ref: "#/components/schemas/AggregationSpec"
+            $ref: "#/components/schemas/AggregationDimension"
 
     AggregationBucket:
       type: object
@@ -790,7 +873,7 @@ components:
       required: [value]
       description: |
         Single aggregated bucket. `key` carries the dimension values in
-        `AggregationSpec.group_by` order; omitted when `group_by` was
+        the request's `group_by` order; omitted when `group_by` was
         empty (the no-grouping case yields one bucket with no `key`).
         Matches the SDK's `AggregationBucket` wire shape.
       properties:
@@ -808,12 +891,12 @@ components:
             type: string
         value:
           oneOf:
-            - $ref: "#/components/schemas/UsageValue"
+            - $ref: "#/components/schemas/AggregatedValue"
             - type: "null"
           description: |
             Aggregated value for the bucket. `null` when no rows
             matched (e.g. `min` over an empty set). Wire-encoded as a
-            JSON string (see `UsageValue`); `avg` may carry a
+            JSON string (see `AggregatedValue`); `avg` may carry a
             plugin-chosen rounding scale on non-terminating quotients.
 
     AggregationResult:
@@ -834,6 +917,16 @@ components:
           items:
             $ref: "#/components/schemas/AggregationBucket"
 
+    UsageTypeGtsId:
+      type: string
+      minLength: 1
+      maxLength: 512
+      pattern: '^gts\.cf\.core\.uc\.usage_record\.v1~[^~]+$'
+      example: gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1
+      description: |
+        GTS **instance** id of a usage type, deriving directly from the
+        reserved abstract base `gts.cf.core.uc.usage_record.v1~`.
+
     UsageType:
       type: object
       additionalProperties: false
@@ -844,13 +937,7 @@ components:
       description: Canonical UsageType catalog row.
       properties:
         gts_id:
-          type: string
-          minLength: 1
-          maxLength: 512
-          pattern: "~$"
-          description: |
-            GTS semantic id; MUST end with `~` and derive from
-            `gts.cf.core.uc.usage_record.v1~`. Deployment-unique.
+          $ref: "#/components/schemas/UsageTypeGtsId"
         kind:
           type: string
           enum: [counter, gauge]
@@ -868,11 +955,32 @@ components:
             is admissible as a `$filter` operand on raw query and as a
             `group_by` operand on aggregation.
 
-    UsageTypeList:
+    CreateUsageTypeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - gts_id
+        - kind
+        - metadata_fields
+      description: |
+        Registration body for `POST /usage-collector/v1/usage-types`.
+      properties:
+        gts_id:
+          $ref: "#/components/schemas/UsageTypeGtsId"
+        kind:
+          type: string
+          enum: [counter, gauge]
+        metadata_fields:
+          type: array
+          items:
+            type: string
+          uniqueItems: true
+
+    Page_UsageType:
       type: object
       additionalProperties: false
       required: [items, page_info]
-      description: Cursor-paginated list of usage-type catalog rows.
+      description: Cursor-paginated page of usage-type catalog rows.
       properties:
         items:
           type: array
@@ -884,15 +992,15 @@ components:
     PageInfo:
       type: object
       additionalProperties: false
-      required: [limit]
+      required: [next_cursor, prev_cursor, limit]
       description: Cursor-based pagination envelope.
       properties:
         next_cursor:
-          type: string
-          description: Opaque cursor for the next page. Omitted on the last page.
+          type: [string, "null"]
+          description: Opaque cursor for the next page. `null` on the last page.
         prev_cursor:
-          type: string
-          description: Opaque cursor for the previous page. Omitted on the first page.
+          type: [string, "null"]
+          description: Opaque cursor for the previous page. `null` on the first page.
         limit:
           type: integer
           format: int64
@@ -903,7 +1011,7 @@ components:
     Problem:
       type: object
       additionalProperties: true
-      required: [type, title, status, detail]
+      required: [type, title, status, detail, context]
       description: |
         RFC 9457 problem+json envelope. `type` is a canonical-error
         category URI; `status` is the HTTP status; `context` is a

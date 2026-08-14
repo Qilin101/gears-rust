@@ -1,7 +1,7 @@
 # Created: 2026-04-16 by Constructor Tech
 [package]
 name = "cf-gears-resource-group"
-version = "0.1.4"
+version = "0.2.8"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -12,6 +12,9 @@ keywords = ["constructorfabric", "cf-gears", "resource-group"]
 categories = ["web-programming"]
 metadata.docs.rs.all-features = true
 
+[lib]
+name = "resource_group"
+
 [lints]
 workspace = true
 
@@ -21,7 +24,7 @@ odata = []
 
 [dependencies]
 # SDK - public API, models, and errors
-resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.0", path = "../resource-group-sdk", features = ["odata"] }
+resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.5", path = "../resource-group-sdk", features = ["odata"] }
 
 # Core dependencies
 anyhow = { workspace = true }
@@ -57,12 +60,15 @@ authz-resolver-sdk = { workspace = true }
 
 # GTS type system — types registry for schema resolution
 types-registry-sdk = { workspace = true }
+authz-resolver = { workspace = true }
+types-registry = { workspace = true }
 gts = { workspace = true }
 
 # Local dependencies
 toolkit = { workspace = true }
 toolkit-canonical-errors = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-gts = { workspace = true }
 toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }

@@ -14,8 +14,8 @@ use toolkit_canonical_errors::Problem;
 use toolkit_odata::{ODataQuery, Page as ODataPage};
 use toolkit_security::SecurityContext;
 use usage_collector_sdk::{
-    AggregationSpec, IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef,
-    UsageCollectorError, UsageRecord, UsageRecordStatus, UsageTypeGtsId,
+    AggregationSpec, CreateUsageRecord, IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef,
+    SubjectRef, UsageCollectorError, UsageRecord, UsageTypeGtsId, is_keyset_safe_record_field,
 };
 use uuid::Uuid;
 
@@ -70,7 +70,7 @@ pub async fn handle_create_usage_records(
 
     let mut indexed_results: Vec<(usize, CreateUsageRecordResultDto)> =
         Vec::with_capacity(req.records.len());
-    let mut eligible: Vec<(usize, UsageRecord)> = Vec::new();
+    let mut eligible: Vec<(usize, CreateUsageRecord)> = Vec::new();
 
     for (index, item) in req.records.into_iter().enumerate() {
         match record_request_into_domain(item) {
@@ -87,7 +87,7 @@ pub async fn handle_create_usage_records(
     // @cpt-end:cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization:p1:inst-algo-attrib-receive-ctx
 
     if !eligible.is_empty() {
-        let (indices, batch): (Vec<usize>, Vec<UsageRecord>) = eligible.into_iter().unzip();
+        let (indices, batch): (Vec<usize>, Vec<CreateUsageRecord>) = eligible.into_iter().unzip();
 
         // Batch-level dispatch failure (plugin resolution, SPI size
         // mismatch) bubbles through `?` as a whole-request canonical
@@ -168,8 +168,8 @@ pub async fn handle_get_usage_record(
 /// for exactly that purpose — and the service rejects an absent or
 /// one-sided window with `400 InvalidArgument`
 /// (`MISSING_TIME_WINDOW`) before any plugin dispatch. `$filter` /
-/// `$orderby` / `$top` / `cursor` flow through the standard [`OData`]
-/// extractor.
+/// `$orderby` / `$top` (alias `limit`) / `cursor` flow through the
+/// standard [`OData`] extractor.
 ///
 /// Gateway-side guards applied before the service is invoked:
 ///
@@ -182,9 +182,14 @@ pub async fn handle_get_usage_record(
 ///   the canonical `cursor_decode` / `order_mismatch` / `filter_mismatch`
 ///   `Problem`. The decoded `CursorV1` flows to the plugin via
 ///   `ODataQuery.cursor` unchanged.
-/// * **`$orderby` default** — when the caller omits `$orderby`, the
-///   gateway substitutes `(created_at asc, uuid asc)` so the plugin
-///   has a stable keyset for pagination.
+/// * **`$orderby` normalization** — the gateway always appends the
+///   canonical unique `(created_at, id)` suffix to the effective
+///   order so the plugin has a stable, gap-free keyset. When the caller
+///   omits `$orderby` this yields `(created_at asc, id asc)`; when the
+///   caller supplies an `$orderby` lacking a unique final key (e.g.
+///   `$orderby=created_at`), the missing tiebreaker key is appended in
+///   the caller's sort direction so pagination cannot drop rows tied on
+///   the boundary value.
 ///
 /// Per-key metadata filtering is the typed side-channel
 /// [`MetadataFilter`] from the SDK — `toolkit-odata` has no surface for
@@ -301,10 +306,10 @@ fn prepare_aggregate_request(
     Ok((gts_id, metadata_filter, query, aggregation))
 }
 
-/// `$`-prefixed `OData` parameters accepted on the aggregate path. `$top`,
-/// `cursor`, and `$select` are intentionally excluded — aggregation is
-/// not paginated and its projection is fixed (operator + group-by
-/// dimensions ship in the body).
+/// `$`-prefixed `OData` parameters accepted on the aggregate path. `$top`
+/// (alias `limit`) and `cursor` are intentionally excluded — aggregation
+/// is not paginated. `$select` is excluded on both paths, for the reason
+/// given on [`OUR_ODATA_PARAMS`].
 const AGGREGATE_ODATA_PARAMS: &[&str] = &["$filter"];
 
 /// Reject any query parameter on the aggregate path that is not in the
@@ -354,8 +359,8 @@ fn prepare_list_request(
 /// Maximum number of records the gateway will request from the plugin
 /// in a single page per
 /// `cpt-cf-usage-collector-dod-usage-query-constraint-nfr-thresholds`.
-/// A caller-supplied `limit` above this ceiling is rejected with 400
-/// `InvalidArgument` (never silently clamped) so the plugin cannot be
+/// A caller-supplied `$top` / `limit` above this ceiling is rejected with
+/// 400 `InvalidArgument` (never silently clamped) so the plugin cannot be
 /// coaxed into unbounded reads.
 pub const MAX_PAGE_SIZE: u64 = 1000;
 
@@ -372,10 +377,22 @@ pub const MAX_METADATA_FILTER_VALUES: usize = 32;
 
 /// `$`-prefixed `OData` parameters (parsed by the toolkit `OData`
 /// extractor) and the non-`OData` scalars the toolkit also accepts.
-/// Both `$top` (canonical `OData`) and `limit` (toolkit alias) are
-/// admitted — the toolkit extractor folds them onto the same
-/// `ODataQuery.limit` slot.
-const OUR_ODATA_PARAMS: &[&str] = &["$filter", "$orderby", "$select", "$top", "limit", "cursor"];
+///
+/// Both `$top` (canonical `OData`, OASIS `OData` 4.01 Part 2 §5.1.6) and
+/// `limit` (toolkit alias) are admitted: [`toolkit::api::odata::ODataParams`]
+/// declares `limit` with `#[serde(alias = "$top")]`, so the extractor folds
+/// both spellings onto the same `ODataQuery.limit` slot. Sending both in one
+/// request is ambiguous and the extractor rejects it as a duplicate field
+/// before this allowlist runs.
+///
+/// `$select` is absent on purpose. The toolkit extractor parses it into
+/// `ODataQuery.select`, but this gear never applies the projection — the
+/// handler returns whole [`UsageRecordDto`]s and the plugin selects a
+/// fixed column list — so admitting it would take a caller's field list,
+/// discard it, and return every field under a `200` that reads as the
+/// requested projection. Rejecting names the parameter instead of
+/// leaving the caller to diff the response against what they asked for.
+const OUR_ODATA_PARAMS: &[&str] = &["$filter", "$orderby", "$top", "limit", "cursor"];
 
 /// Typed query parameters carrying SDK values that are NOT part of the
 /// `OData` surface.
@@ -385,59 +402,145 @@ const TYPED_LIST_PARAMS: &[&str] = &["gts_id"];
 /// (`metadata.<key>=<value>`, repeatable).
 const METADATA_PREFIX: &str = "metadata.";
 
-/// Default `$orderby` projection — the canonical cursor keyset.
-const DEFAULT_ORDER_KEYS: &[(&str, toolkit_odata::SortDir)] = &[
-    ("created_at", toolkit_odata::SortDir::Asc),
-    ("uuid", toolkit_odata::SortDir::Asc),
-];
+/// The canonical unique keyset suffix appended to every raw-list order.
+/// `created_at` is the primary time key and `id` the globally-unique final
+/// tiebreaker; the pair is the canonical cursor keyset. Appended (via
+/// [`toolkit_odata::ODataOrderBy::ensure_tiebreaker`]) in the caller order's
+/// direction, so an empty `$orderby` normalizes to `(created_at, id)` and
+/// any explicit `$orderby` gains the same unique suffix — see
+/// [`prepare_list_query`].
+const CANONICAL_TIEBREAKER_FIELDS: &[&str] = &["created_at", "id"];
 
 /// Apply gateway-side guards on the parsed [`ODataQuery`]:
-/// 1. reject `limit > MAX_PAGE_SIZE` as `InvalidArgument` (no silent
+/// 1. reject `$top > MAX_PAGE_SIZE` as `InvalidArgument` (no silent
 ///    clamp; a caller asking for more rows than the page-size cap MUST
 ///    be told so they can paginate explicitly);
-/// 2. default `$orderby` to `(created_at asc, uuid asc)` when empty;
-/// 3. validate the optional cursor against the (now-defaulted) order
+/// 2. normalize `$orderby` so the effective order always ends in the
+///    canonical unique `(created_at, id)` suffix — on the empty-order
+///    path this defaults to `(created_at asc, id asc)`, and on an
+///    explicit `$orderby` it appends whichever of `created_at` / `id`
+///    the caller did not already name;
+/// 3. validate the optional cursor against the (now-normalized) order
 ///    and the parsed filter hash.
 ///
-/// The defaulted order is applied BEFORE cursor validation so a cursor
-/// minted against `(created_at, uuid)` continues to validate when the
-/// caller omits `$orderby` on subsequent calls.
+/// The normalization is applied BEFORE cursor validation so a cursor
+/// minted against the normalized keyset continues to validate on
+/// subsequent calls.
 // @cpt-begin:cpt-cf-usage-collector-flow-usage-query-query-raw:p1:inst-raw-odata-parse
 // @cpt-begin:cpt-cf-usage-collector-flow-usage-query-query-raw:p1:inst-raw-cursor-validate
 fn prepare_list_query(mut query: ODataQuery) -> Result<ODataQuery, CanonicalError> {
     // 1. $top cap. Reject above the cap so the caller observes the
     //    boundary rather than silently receiving a truncated page that
     //    looks complete.
+    //
+    //    The violation names `$top` — the canonical spelling — because the
+    //    parsed `ODataQuery` does not record which of the two accepted
+    //    spellings arrived on the wire, and the detail names the alias so
+    //    a `limit` caller still recognises their own parameter. Same
+    //    convention as `toolkit_odata`'s own `InvalidLimit` mapping.
     match query.limit {
         Some(l) if l > MAX_PAGE_SIZE => {
             return Err(UsageRecordResource::invalid_argument()
                 .with_field_violation(
                     "$top",
-                    format!("$top must be <= {MAX_PAGE_SIZE}, got {l}"),
+                    format!("page size ($top, alias limit) must be <= {MAX_PAGE_SIZE}, got {l}"),
                     "VALIDATION",
                 )
                 .create());
         }
-        // Within the cap: keep the caller's $top unchanged.
+        // Within the cap: keep the caller's page size unchanged.
         Some(_) => {}
         None => query.limit = Some(MAX_PAGE_SIZE),
     }
 
-    // 2. $orderby default.
-    if query.order.is_empty() && query.cursor.is_none() {
-        // When a cursor IS present the toolkit OData extractor has
-        // already left `order` empty by design (derived from
-        // `cursor.s` at validate-against time), so we only inject the
-        // canonical keys when there is no cursor either.
-        query.order = toolkit_odata::ODataOrderBy(
-            DEFAULT_ORDER_KEYS
-                .iter()
-                .map(|&(field, dir)| toolkit_odata::OrderKey {
-                    field: field.to_owned(),
-                    dir,
-                })
-                .collect(),
-        );
+    // 2. $orderby normalization: ensure a unique keyset suffix.
+    //
+    // On every non-cursor request — whether the caller omitted `$orderby`
+    // entirely or supplied one — append the canonical `(created_at, id)`
+    // suffix so the effective order always ends in a globally-unique key.
+    // A non-unique final sort key (e.g. `$orderby=created_at`) would let the
+    // plugin's keyset predicate skip rows that share the boundary value but
+    // did not fit on the previous page — silent data loss across page
+    // boundaries. `ensure_tiebreaker` is a no-op for a
+    // field the order already names, so an order ending in `id` (or the
+    // canonical default) is left untouched.
+    //
+    // Direction-aware: the storage plugin's keyset supports only
+    // uniform-direction tuples, so the suffix is appended in the order's
+    // existing direction (its trailing key's, or `Asc` for an empty order)
+    // — never pairing a descending caller order with an ascending
+    // tiebreaker, which the plugin rejects as a mixed-direction keyset.
+    //
+    // Skipped when a cursor is present: the toolkit OData extractor leaves
+    // `order` empty on a cursor request (and rejects `$orderby` + `cursor`
+    // together), so the effective keyset order is reconstructed from the
+    // cursor's signed tokens in step 3 instead — and those tokens already
+    // carry the suffix minted into the cursor on the first page.
+    if query.cursor.is_none() {
+        // Reject a mixed-direction caller order up front. The storage
+        // plugin's keyset supports only uniform-direction tuples, so an
+        // order like `$orderby=created_at asc, value desc` can never compose
+        // into a valid keyset — appending the tiebreaker would only forward a
+        // non-uniform tuple to the plugin, which rejects it with a late,
+        // non-specific keyset error. Surface a typed `400` here that names
+        // the real cause (mixed sort directions) instead.
+        if let Some(first) = query.order.0.first() {
+            let first_dir = first.dir;
+            if query.order.0.iter().any(|key| key.dir != first_dir) {
+                return Err(UsageRecordResource::invalid_argument()
+                    .with_field_violation(
+                        "$orderby",
+                        "$orderby must use a single sort direction across all keys; \
+                         mixing `asc` and `desc` is unsupported because keyset \
+                         pagination requires a uniform-direction order",
+                        "VALIDATION",
+                    )
+                    .create());
+            }
+        }
+
+        // Reject a caller order on a nullable (domain-optional) field. Every
+        // caller-supplied key is a *leading* key of the effective keyset (the
+        // canonical `(created_at, id)` suffix is appended after this), and the
+        // plugin's keyset continuation is a row-value tuple comparison
+        // `(c1, …) > ($…)` that is only sound when every column is NOT NULL: a
+        // NULL leading key makes the tuple compare as NULL, silently dropping
+        // NULL-keyed rows from the page (and 500-ing on a page that ends at a
+        // NULL row, which cannot encode a cursor). Fields backed by
+        // `subject_ref: Option<_>` / `corrects_id: Option<_>` are the nullable
+        // ones — see [`is_keyset_safe_record_field`]. Surface a typed `400`
+        // here that names the real cause instead of forwarding an unsound
+        // order to the plugin.
+        if let Some(bad) = query
+            .order
+            .0
+            .iter()
+            .find(|key| !is_keyset_safe_record_field(&key.field))
+        {
+            return Err(UsageRecordResource::invalid_argument()
+                .with_field_violation(
+                    "$orderby",
+                    format!(
+                        "$orderby key `{}` is not supported: keyset pagination requires an \
+                         always-present sort key, so ordering by an optional field \
+                         (subject_id, subject_type, corrects_id) is not allowed",
+                        bad.field
+                    ),
+                    "VALIDATION",
+                )
+                .create());
+        }
+
+        let dir = query
+            .order
+            .0
+            .last()
+            .map_or(toolkit_odata::SortDir::Asc, |key| key.dir);
+        let mut order = std::mem::take(&mut query.order);
+        for &field in CANONICAL_TIEBREAKER_FIELDS {
+            order = order.ensure_tiebreaker(field, dir);
+        }
+        query.order = order;
     }
 
     // 3. Cursor validation + order materialization. When a cursor is
@@ -637,13 +740,15 @@ pub async fn handle_deactivate_usage_record(
     // @cpt-end:cpt-cf-usage-collector-algo-event-deactivation-atomic-outcome-mapping:p1:inst-algo-outcome-transitioned
 }
 
-/// Convert one per-record submission into the domain shape, lifting
-/// `gts_id`-, attribution-, `idempotency_key`-, and metadata-shape
-/// failures into per-record `Problem` envelopes. `created_at` is
-/// caller-supplied and forwarded verbatim — neither the handler nor
-/// [`Service::create_usage_records`] rewrites it.
+/// Convert one per-record submission into the identity-free domain create
+/// input, lifting `gts_id`-, attribution-, `idempotency_key`-, and
+/// metadata-shape failures into per-record `Problem` envelopes. `created_at`
+/// is caller-supplied and forwarded verbatim. The record's `id` and initial
+/// `status` are NOT set here: they are stamped once, authoritatively, inside
+/// [`Service::create_usage_records`] via
+/// [`usage_collector_sdk::CreateUsageRecord::into_usage_record`].
 #[allow(clippy::result_large_err)]
-fn record_request_into_domain(req: CreateUsageRecordRequest) -> Result<UsageRecord, Problem> {
+fn record_request_into_domain(req: CreateUsageRecordRequest) -> Result<CreateUsageRecord, Problem> {
     let gts_id = UsageTypeGtsId::new(req.gts_id)
         .map_err(|err| Problem::from(usage_collector_error_to_canonical(err)))?;
 
@@ -662,8 +767,7 @@ fn record_request_into_domain(req: CreateUsageRecordRequest) -> Result<UsageReco
     let metadata = metadata_from_wire(req.metadata)
         .map_err(|err| Problem::from(usage_collector_error_to_canonical(err)))?;
 
-    Ok(UsageRecord {
-        uuid: req.uuid,
+    Ok(CreateUsageRecord {
         gts_id,
         tenant_id: req.tenant_id,
         resource_ref,
@@ -672,7 +776,6 @@ fn record_request_into_domain(req: CreateUsageRecordRequest) -> Result<UsageReco
         value: req.value,
         idempotency_key,
         corrects_id: req.corrects_id,
-        status: UsageRecordStatus::Active,
         created_at: req.created_at,
     })
 }

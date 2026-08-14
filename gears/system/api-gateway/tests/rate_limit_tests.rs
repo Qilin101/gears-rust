@@ -21,14 +21,15 @@ use toolkit::{
     contracts::{ApiGatewayCapability, OpenApiRegistry},
 };
 use toolkit_canonical_errors::Problem;
+use toolkit_gts::gts_uri;
 use tower::ServiceExt;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 const RESOURCE_EXHAUSTED_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~");
 const SERVICE_UNAVAILABLE_TYPE: &str =
-    "gts://gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~";
+    gts_uri!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~");
 const PROBLEM_JSON: &str = "application/problem+json";
 
 /// Helper to create a test `GearCtx`
@@ -95,7 +96,7 @@ impl RestApiCapability for RateLimitedGear {
         let router = builder
             .operation_id("test:limited")
             .summary("Strictly rate-limited endpoint")
-            .public()
+            .anonymous()
             .json_response(http::StatusCode::OK, "Success")
             .handler(get(limited_handler))
             .register(router, openapi);
@@ -106,7 +107,7 @@ impl RestApiCapability for RateLimitedGear {
         let router = builder
             .operation_id("test:slow")
             .summary("Slow endpoint with low in-flight limit")
-            .public()
+            .anonymous()
             .json_response(http::StatusCode::OK, "Success")
             .handler(get(slow_handler))
             .register(router, openapi);
@@ -115,7 +116,7 @@ impl RestApiCapability for RateLimitedGear {
         let router = OperationBuilder::get("/tests/v1/normal")
             .operation_id("test:normal")
             .summary("Normal endpoint")
-            .public()
+            .anonymous()
             .json_response(http::StatusCode::OK, "Success")
             .handler(get(normal_handler))
             .register(router, openapi);
@@ -172,7 +173,11 @@ async fn test_rate_limit_enforcement() {
 
     // Build the final router with middleware
     let _final_router = api_gateway
-        .rest_finalize(&ctx, router)
+        .rest_finalize(
+            &ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize router");
 
     // Note: Full HTTP testing would require starting a server and making real requests
@@ -247,7 +252,7 @@ async fn test_rate_limit_metadata_stored() {
     // Register and verify it's stored
     let _router = builder
         .operation_id("test")
-        .public()
+        .anonymous()
         .json_response(http::StatusCode::OK, "OK")
         .handler(get(normal_handler))
         .register(router, &api_gateway);
@@ -290,7 +295,11 @@ async fn test_rate_limit_returns_canonical_problem_with_headers() {
         .expect("Failed to register routes");
 
     let app = api_gateway
-        .rest_finalize(&ctx, router)
+        .rest_finalize(
+            &ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize router");
 
     // First request consumes the only token.
@@ -382,13 +391,17 @@ async fn test_in_flight_limit_returns_canonical_service_unavailable() {
     let router = OperationBuilder::get("/tests/v1/inflight")
         .operation_id("test:inflight")
         .summary("In-flight cap test endpoint")
-        .public()
+        .anonymous()
         .json_response(http::StatusCode::OK, "Success")
         .handler(get(slow_handler))
         .register(Router::new(), &api_gateway);
 
     let app = api_gateway
-        .rest_finalize(&ctx, router)
+        .rest_finalize(
+            &ctx,
+            router,
+            Arc::new(toolkit::RestHealthcheckRegistry::new()),
+        )
         .expect("Failed to finalize router");
 
     // Start one slow request and immediately fire a second one while the first holds the only permit.

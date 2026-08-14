@@ -40,11 +40,11 @@ async fn main() -> anyhow::Result<()> {
     // Now try to acquire the same lock with a timeout policy
     let config = LockConfig {
         max_wait: Some(Duration::from_millis(500)),
-        initial_backoff: Duration::from_millis(50),
+        max_retries: Some(5),
+        backoff_base_ms: 2,
+        backoff_factor: 25,
         max_backoff: Duration::from_millis(200),
-        backoff_multiplier: 1.5,
-        jitter_pct: 0.2,
-        max_attempts: Some(5),
+        jitter: true,
     };
 
     let start = std::time::Instant::now();
@@ -91,8 +91,10 @@ async fn main() -> anyhow::Result<()> {
     println!("Key features demonstrated:");
     println!("• Gear namespacing prevents conflicts between different gears");
     println!("• try_lock provides configurable retry/backoff policies");
-    println!("• File-based locks for SQLite with automatic cleanup");
-    println!("• All locks are automatically released on guard drop");
+    println!(
+        "• Native PG/MySQL locks share one dedicated session; a held lock does NOT pin a pool connection"
+    );
+    println!("• Prefer guard.release().await for deterministic unlock");
 
     Ok(())
 }

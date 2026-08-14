@@ -12,6 +12,7 @@
 mod common;
 
 use std::sync::Arc;
+use toolkit_gts::GTS_ID_PREFIX;
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -25,11 +26,11 @@ use toolkit_db::{DBProvider, DbError};
 use toolkit_odata::ODataQuery;
 use toolkit_security::pep_properties;
 
-use cf_gears_resource_group::domain::group_service::{GroupService, QueryProfile};
-use cf_gears_resource_group::domain::type_service::TypeService;
-use cf_gears_resource_group::infra::storage::group_repo::GroupRepository;
-use cf_gears_resource_group::infra::storage::membership_repo::MembershipRepository;
-use cf_gears_resource_group::infra::storage::type_repo::TypeRepository;
+use resource_group::domain::group_service::{GroupService, QueryProfile};
+use resource_group::domain::type_service::TypeService;
+use resource_group::infra::storage::group_repo::GroupRepository;
+use resource_group::infra::storage::membership_repo::MembershipRepository;
+use resource_group::infra::storage::type_repo::TypeRepository;
 
 use common::{make_ctx, test_db};
 
@@ -446,7 +447,7 @@ async fn group_based_in_group_predicate_produces_combined_scope() {
     let scope = enforcer
         .access_scope(
             &ctx,
-            &cf_gears_resource_group::domain::group_service::RG_GROUP_RESOURCE,
+            &resource_group::domain::group_service::RG_GROUP_RESOURCE,
             "list",
             None,
         )
@@ -490,11 +491,11 @@ async fn group_based_membership_data_correctly_stored() {
 
     // Create types: project (root, allows "task" members) and task
     let project_type = format!(
-        "gts.cf.core.rg.type.v1~x.test.proj.i{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.proj.i{}.v1~",
         Uuid::now_v7().as_simple()
     );
     let task_type = format!(
-        "gts.cf.core.rg.type.v1~x.test.task.i{}.v1~",
+        "{GTS_ID_PREFIX}cf.core.rg.type.v1~x.test.task.i{}.v1~",
         Uuid::now_v7().as_simple()
     );
 
@@ -555,14 +556,13 @@ async fn group_based_membership_data_correctly_stored() {
     // Add memberships via MembershipService (with PolicyEnforcer)
     let authz: Arc<dyn AuthZResolverClient> = Arc::new(TenantScopingAuthZ);
     let enforcer = PolicyEnforcer::new(authz);
-    let membership_svc =
-        cf_gears_resource_group::domain::membership_service::MembershipService::new(
-            db.clone(),
-            enforcer,
-            Arc::new(GroupRepository),
-            Arc::new(TypeRepository),
-            Arc::new(MembershipRepository),
-        );
+    let membership_svc = resource_group::domain::membership_service::MembershipService::new(
+        db.clone(),
+        enforcer,
+        Arc::new(GroupRepository),
+        Arc::new(TypeRepository),
+        Arc::new(MembershipRepository),
+    );
 
     // task-001, task-002 → ProjectA
     membership_svc

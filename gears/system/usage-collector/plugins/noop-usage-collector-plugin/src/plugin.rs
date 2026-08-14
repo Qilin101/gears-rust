@@ -48,8 +48,8 @@ impl UsageCollectorPluginV1 for NoopBackend {
         Ok(records.into_iter().map(Ok).collect())
     }
 
-    async fn get_usage_record(&self, uuid: Uuid) -> Result<UsageRecord, UsageCollectorPluginError> {
-        Err(UsageCollectorPluginError::UsageRecordNotFound { id: uuid })
+    async fn get_usage_record(&self, id: Uuid) -> Result<UsageRecord, UsageCollectorPluginError> {
+        Err(UsageCollectorPluginError::UsageRecordNotFound { id })
     }
 
     async fn query_aggregated_usage_records(

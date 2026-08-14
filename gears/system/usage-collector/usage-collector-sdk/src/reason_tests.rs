@@ -13,6 +13,10 @@ fn validation_reason_round_trips_each_constant() {
             GAUGE_COMPENSATION_REJECTED,
             ValidationReason::GaugeCompensationRejected,
         ),
+        (
+            OP_NOT_ALLOWED_FOR_KIND,
+            ValidationReason::OpNotAllowedForKind,
+        ),
         (MISSING_TIME_WINDOW, ValidationReason::MissingTimeWindow),
         (INVALID_BASE_GTS_ID, ValidationReason::InvalidBaseGtsId),
         (
@@ -26,6 +30,10 @@ fn validation_reason_round_trips_each_constant() {
         (
             INVALID_METADATA_FIELDS_DUPLICATE,
             ValidationReason::MetadataFieldDuplicate,
+        ),
+        (
+            AGGREGATION_RESULT_TOO_LARGE,
+            ValidationReason::AggregationResultTooLarge,
         ),
     ] {
         assert_eq!(ValidationReason::from_wire(wire), expected);

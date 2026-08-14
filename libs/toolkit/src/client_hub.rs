@@ -123,6 +123,15 @@ type ScopedClientMap = HashMap<ScopedKey, Boxed>;
 pub struct ClientHub {
     map: RwLock<ClientMap>,
     scoped_map: RwLock<ScopedClientMap>,
+    /// Types registered by consumer wiring as a discovery-resolving remote
+    /// proxy rather than a genuine in-process implementation.
+    ///
+    /// The hub is keyed by type alone, so a proxy and a local impl are
+    /// indistinguishable once stored. Consumer wiring needs to tell them apart:
+    /// finding a *proxy* under a contract does not mean the dependency is
+    /// satisfied locally, and treating it as such marks the dependency
+    /// readiness-resolved while the provider is still absent.
+    remote_proxies: RwLock<std::collections::HashSet<TypeKey>>,
 }
 
 impl ClientHub {
@@ -132,6 +141,7 @@ impl ClientHub {
         Self {
             map: RwLock::new(HashMap::new()),
             scoped_map: RwLock::new(HashMap::new()),
+            remote_proxies: RwLock::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -185,6 +195,74 @@ impl ClientHub {
             return Ok(arc_t.clone());
         }
         Err(ClientHubError::TypeMismatch { type_key })
+    }
+
+    /// Try to fetch a client by interface type `T`.
+    ///
+    /// Returns `None` if no client is registered for the type or if the stored
+    /// type doesn't match. This sees every registration, proxies included — use
+    /// [`Self::try_get_local`] when the answer needs to mean "satisfied
+    /// in-process".
+    pub fn try_get<T>(&self) -> Option<Arc<T>>
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        let type_key = TypeKey::of::<T>();
+        let r = self.map.read();
+        let boxed = r.get(&type_key)?;
+        boxed.downcast_ref::<Arc<T>>().cloned()
+    }
+
+    /// Register a client that is a discovery-resolving proxy to a *remote*
+    /// provider, not an in-process implementation.
+    ///
+    /// Stored exactly like [`Self::register`]; the difference is that the type
+    /// is remembered as remote so [`Self::try_get_local`] will not report it as
+    /// a local implementation.
+    pub fn register_remote_proxy<T>(&self, client: Arc<T>)
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        let type_key = TypeKey::of::<T>();
+        self.remote_proxies.write().insert(type_key.clone());
+        self.map.write().insert(type_key, Box::new(client));
+    }
+
+    /// Try to fetch a client by interface type `T`, ignoring remote proxies.
+    ///
+    /// This is the short-circuit probe for consumer wiring: a compile-time
+    /// (local) registration takes priority over a discovery-based proxy, so the
+    /// wiring closure asks whether a *local* implementation exists before
+    /// registering one of its own.
+    ///
+    /// Using plain [`Self::try_get`] here would be wrong when two consumers in
+    /// one process depend on the same contract: whichever wires second would
+    /// find the first one's proxy, conclude the dependency is local, and mark
+    /// it readiness-resolved — turning `/readyz` green before the provider
+    /// exists.
+    pub fn try_get_local<T>(&self) -> Option<Arc<T>>
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        let type_key = TypeKey::of::<T>();
+        if self.remote_proxies.read().contains(&type_key) {
+            return None;
+        }
+        let r = self.map.read();
+        let boxed = r.get(&type_key)?;
+        boxed.downcast_ref::<Arc<T>>().cloned()
+    }
+
+    /// Whether a remote proxy is already registered for interface type `T`.
+    ///
+    /// Lets consumer wiring reuse an existing proxy instead of building and
+    /// registering a second identical one for the same contract.
+    #[must_use]
+    pub fn has_remote_proxy<T>(&self) -> bool
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        self.remote_proxies.read().contains(&TypeKey::of::<T>())
     }
 
     /// Fetch a scoped client by interface type `T` and scope.
@@ -279,6 +357,7 @@ impl ClientHub {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use toolkit_gts::gts_id;
 
     #[async_trait::async_trait]
     trait TestApi: Send + Sync {
@@ -318,6 +397,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn try_get_local_ignores_a_remote_proxy() {
+        let hub = ClientHub::new();
+        let proxy: Arc<dyn TestApi> = Arc::new(ImplA(1));
+        hub.register_remote_proxy::<dyn TestApi>(proxy);
+
+        // Reachable for business calls...
+        assert!(hub.try_get::<dyn TestApi>().is_some());
+        assert!(hub.get::<dyn TestApi>().is_ok());
+        // ...but not a local implementation. This is what stops a second
+        // consumer of the same contract from reporting `WireOutcome::Local`
+        // and marking the dependency readiness-resolved while the provider is
+        // still absent.
+        assert!(hub.try_get_local::<dyn TestApi>().is_none());
+        assert!(hub.has_remote_proxy::<dyn TestApi>());
+    }
+
+    #[tokio::test]
+    async fn try_get_local_sees_a_plain_registration() {
+        let hub = ClientHub::new();
+        let local: Arc<dyn TestApi> = Arc::new(ImplA(2));
+        hub.register::<dyn TestApi>(local);
+
+        assert!(hub.try_get_local::<dyn TestApi>().is_some());
+        assert!(!hub.has_remote_proxy::<dyn TestApi>());
+    }
+
+    #[tokio::test]
     async fn overwrite_replaces_atomically() {
         let hub = ClientHub::new();
         hub.register::<dyn TestApi>(Arc::new(ImplA(1)));
@@ -337,12 +443,12 @@ mod tests {
     #[tokio::test]
     async fn scoped_register_and_get_dyn_trait() {
         let hub = ClientHub::new();
-        let scope_a = ClientScope::gts_id(
-            "gts.cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~contoso.app._.plugin.v1.0",
-        );
-        let scope_b = ClientScope::gts_id(
-            "gts.cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0",
-        );
+        let scope_a = ClientScope::gts_id(gts_id!(
+            "cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~contoso.app._.plugin.v1.0"
+        ));
+        let scope_b = ClientScope::gts_id(gts_id!(
+            "cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0"
+        ));
 
         let api_a: Arc<dyn TestApi> = Arc::new(ImplA(1));
         let api_b: Arc<dyn TestApi> = Arc::new(ImplA(2));
@@ -363,9 +469,9 @@ mod tests {
     #[test]
     fn scoped_get_is_independent_from_global_get() {
         let hub = ClientHub::new();
-        let scope = ClientScope::gts_id(
-            "gts.cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0",
-        );
+        let scope = ClientScope::gts_id(gts_id!(
+            "cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0"
+        ));
         hub.register::<str>(Arc::from("global"));
         hub.register_scoped::<str>(scope.clone(), Arc::from("scoped"));
 
@@ -376,9 +482,9 @@ mod tests {
     #[test]
     fn try_get_scoped_returns_some_on_hit() {
         let hub = ClientHub::new();
-        let scope = ClientScope::gts_id(
-            "gts.cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~contoso.app._.plugin.v1.0",
-        );
+        let scope = ClientScope::gts_id(gts_id!(
+            "cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~contoso.app._.plugin.v1.0"
+        ));
         hub.register_scoped::<str>(scope.clone(), Arc::from("scoped"));
 
         let got = hub.try_get_scoped::<str>(&scope);
@@ -388,9 +494,9 @@ mod tests {
     #[test]
     fn try_get_scoped_returns_none_on_miss() {
         let hub = ClientHub::new();
-        let scope = ClientScope::gts_id(
-            "gts.cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0",
-        );
+        let scope = ClientScope::gts_id(gts_id!(
+            "cf.core.toolkit.plugins.v1~cf.core.tenant_resolver.plugin.v1~fabrikam.app._.plugin.v1.0"
+        ));
 
         let got = hub.try_get_scoped::<str>(&scope);
         assert!(got.is_none());

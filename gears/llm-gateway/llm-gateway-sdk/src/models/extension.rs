@@ -11,9 +11,6 @@
 //! (per `principle-content-non-interpretation`); a consumer that has the
 //! provider's crate projects it into a typed view with [`Extension::decode`].
 //!
-//! [`serialize_tagged`], [`tag_of`], and [`from_tagged`] are the shared pieces
-//! the families' hand-written `Serialize`/`Deserialize` impls build on — derive
-//! cannot express a data-carrying catch-all on an internally-tagged enum.
 
 use serde::de::DeserializeOwned;
 
@@ -45,42 +42,24 @@ impl Extension {
     }
 }
 
-/// Serialize `value` as a JSON object with an injected `type` discriminator.
-///
-/// Used by the families' `Serialize` impls for their core-owned variants; the
-/// payload structs carry no `type` field of their own.
-pub(crate) fn serialize_tagged<S, T>(serializer: S, tag: &str, value: &T) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    T: serde::Serialize,
-{
-    let mut v = serde_json::to_value(value).map_err(<S::Error as serde::ser::Error>::custom)?;
-    match v.as_object_mut() {
-        Some(map) => {
-            map.insert(
-                String::from("type"),
-                serde_json::Value::String(String::from(tag)),
-            );
-        }
-        None => {
-            return Err(<S::Error as serde::ser::Error>::custom(
-                "tagged enum payload did not serialize to a JSON object",
-            ));
-        }
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_returns_type_discriminator() {
+        let ext = Extension(serde_json::json!({"type": "my_provider:foo", "data": 1}));
+        assert_eq!(ext.kind(), Some("my_provider:foo"));
     }
-    serde::Serialize::serialize(&v, serializer)
-}
 
-/// The `type` discriminator of an already-parsed value, if present.
-pub(crate) fn tag_of(value: &serde_json::Value) -> Option<&str> {
-    value.get("type").and_then(serde_json::Value::as_str)
-}
-
-/// Deserialize a core-owned variant payload from an already-parsed value.
-pub(crate) fn from_tagged<T, E>(value: &serde_json::Value) -> Result<T, E>
-where
-    T: DeserializeOwned,
-    E: serde::de::Error,
-{
-    T::deserialize(value).map_err(E::custom)
+    #[test]
+    fn decode_projects_into_typed_view() {
+        let ext = Extension(serde_json::json!({"name": "hello"}));
+        let val: serde_json::Value = ext.decode().unwrap();
+        assert_eq!(val["name"], "hello");
+    }
 }

@@ -45,6 +45,25 @@ pub const ROOT_TENANT_CANNOT_CHANGE_STATUS: &str = "ROOT_TENANT_CANNOT_CHANGE_ST
 /// `provisioning_metadata.realm_name`) — see [`PROVISIONING_METADATA_FIELD`].
 pub const IDP_INVALID_INPUT: &str = "IDP_INVALID_INPUT";
 
+/// The `IdP` rejected the supplied password against its configured
+/// password policy. Carried on the [`PASSWORD_FIELD`]
+/// field-violation so clients can attribute the failure to the
+/// password input; the raw policy text stays provider-side.
+pub const PASSWORD_POLICY: &str = "PASSWORD_POLICY";
+
+/// The patched attribute is managed by the `IdP` and not overridable
+/// through AM (federated from a read-only mapper, or marked
+/// non-writable in the provider's user-profile configuration). The
+/// accompanying `field` is the exact `UserUpdateRequest` property the
+/// caller tried to write, sourced from
+/// [`crate::IdpUserAttribute::as_field_token`], so a client can
+/// attribute the refusal to one input and disable it.
+///
+/// A capability fact about the field, not an authorization decision
+/// about the caller — hence `InvalidArgument` (400) rather than
+/// `PermissionDenied` (403): no grant would make the write succeed.
+pub const IDP_MANAGED_FIELD: &str = "IDP_MANAGED_FIELD";
+
 // ---------------------------------------------------------------------------
 // `field_violations[].field` attribution keys.
 //
@@ -69,6 +88,10 @@ pub const METADATA_FIELD: &str = "metadata";
 /// [`ROOT_TENANT_CANNOT_CHANGE_STATUS`]).
 pub const TENANT_ID_FIELD: &str = "tenant_id";
 
+/// `password` field for `IdP` password-policy rejects (carries
+/// [`PASSWORD_POLICY`]).
+pub const PASSWORD_FIELD: &str = "password";
+
 /// Shared fallback field for [`IDP_INVALID_INPUT`] when the `IdP`
 /// plugin cannot localise the violation to a specific sub-key — the
 /// public surface every `IdP` plugin shares.
@@ -86,7 +109,14 @@ pub const PROVISIONING_METADATA_FIELD: &str = "provisioning_metadata";
 /// catch-all because every `reason` AM emits under `InvalidArgument` is
 /// one of the modeled codes — the catch-all only fires for a future code
 /// added after this SDK version, keeping the projection forward-compatible.
+///
+/// `#[non_exhaustive]`: AM grows its `InvalidArgument` reason vocabulary
+/// over time, so a downstream `match` MUST keep a wildcard arm and a new
+/// reason code is not a breaking SDK release. [`Self::Unknown`] covers the
+/// same growth on the *value* side (an older SDK reading a newer wire
+/// string); this attribute covers it on the *type* side.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValidationReason {
     /// See [`INVALID_TENANT_TYPE`].
     InvalidTenantType,
@@ -100,6 +130,10 @@ pub enum ValidationReason {
     RootTenantCannotChangeStatus,
     /// See [`IDP_INVALID_INPUT`].
     IdpInvalidInput,
+    /// See [`PASSWORD_POLICY`].
+    PasswordPolicy,
+    /// See [`IDP_MANAGED_FIELD`].
+    IdpManagedField,
     /// Unmodeled / future reason — preserves the raw wire string.
     Unknown(String),
 }
@@ -117,6 +151,8 @@ impl ValidationReason {
             ROOT_TENANT_CANNOT_CONVERT => Self::RootTenantCannotConvert,
             ROOT_TENANT_CANNOT_CHANGE_STATUS => Self::RootTenantCannotChangeStatus,
             IDP_INVALID_INPUT => Self::IdpInvalidInput,
+            PASSWORD_POLICY => Self::PasswordPolicy,
+            IDP_MANAGED_FIELD => Self::IdpManagedField,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -132,6 +168,8 @@ impl ValidationReason {
             Self::RootTenantCannotConvert => ROOT_TENANT_CANNOT_CONVERT,
             Self::RootTenantCannotChangeStatus => ROOT_TENANT_CANNOT_CHANGE_STATUS,
             Self::IdpInvalidInput => IDP_INVALID_INPUT,
+            Self::PasswordPolicy => PASSWORD_POLICY,
+            Self::IdpManagedField => IDP_MANAGED_FIELD,
             Self::Unknown(s) => s.as_str(),
         }
     }
@@ -165,6 +203,8 @@ mod tests {
                 ValidationReason::RootTenantCannotChangeStatus,
             ),
             (IDP_INVALID_INPUT, ValidationReason::IdpInvalidInput),
+            (PASSWORD_POLICY, ValidationReason::PasswordPolicy),
+            (IDP_MANAGED_FIELD, ValidationReason::IdpManagedField),
         ] {
             assert_eq!(ValidationReason::from_wire(wire), expected);
             assert_eq!(expected.as_wire(), wire);

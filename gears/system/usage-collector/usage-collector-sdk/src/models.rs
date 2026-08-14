@@ -4,12 +4,13 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use toolkit_odata_macros::ODataFilterable;
 use uuid::Uuid;
 
-use gts::{GtsID, GtsInstanceId};
+use gts::{GtsId, GtsIdSegment, GtsInstanceId};
 
 use crate::error::UsageCollectorError;
 
@@ -22,7 +23,9 @@ use crate::error::UsageCollectorError;
 /// `Counter` and `Gauge` are CF-platform-internal kinds with no vendor
 /// extensibility. Serde `deny_unknown_fields` on [`UsageType`] plus the
 /// closed-enum serde shape rejects any other value at the deserialize
-/// boundary.
+/// boundary. The allowed aggregation ops per kind are defined by
+/// [`AggregationOp::is_allowed_for`]: `Counter` admits `{Sum, Count}`;
+/// `Gauge` admits `{Min, Max, Avg, Count}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UsageKind {
@@ -450,12 +453,12 @@ impl UsageTypeGtsId {
     /// Every catalog `gts_id` MUST left-prefix-match this value and carry at
     /// least one further `~`-separated derivation segment. The base itself
     /// is abstract and rejected as a bare value.
-    pub const USAGE_RECORD_BASE: &'static str = "gts.cf.core.uc.usage_record.v1~";
+    pub const USAGE_RECORD_BASE: &'static str = crate::gts::USAGE_RECORD_RESOURCE;
 
     /// Creates a `UsageTypeGtsId` after validating that the input is a
     /// well-formed GTS instance id deriving from [`Self::USAGE_RECORD_BASE`].
     ///
-    /// Validation routes through [`gts::GtsID::new`], which enforces the GTS
+    /// Validation routes through [`gts::GtsId::try_new`], which enforces the GTS
     /// per-segment grammar (`vendor.package.namespace.type.v<major>[.<minor>]`),
     /// the allowed character set, terminator semantics, and the chained-id
     /// rules. That is the same validator other gears use for catalog-key
@@ -472,7 +475,7 @@ impl UsageTypeGtsId {
     /// segment of the parsed chain).
     pub fn new(value: impl Into<String>) -> Result<Self, UsageCollectorError> {
         let raw = value.into();
-        let parsed = GtsID::new(&raw).map_err(|e| {
+        let parsed = GtsId::try_new(&raw).map_err(|e| {
             UsageCollectorError::invalid_usage_type_gts_id(
                 &raw,
                 &format!("usage type gts_id `{raw}` is not a valid GTS id: {e}"),
@@ -508,7 +511,7 @@ impl UsageTypeGtsId {
         // returning `Some(base)` implies `gts_id_segments.len() >= 2` —
         // but is kept as a graceful error rather than `expect` to satisfy
         // the workspace `clippy::expect_used` rule.
-        let Some(segment) = parsed.gts_id_segments.last().map(|s| s.segment.as_str()) else {
+        let Some(segment) = parsed.segments().last().map(GtsIdSegment::raw) else {
             return Err(UsageCollectorError::invalid_usage_type_gts_id(
                 &raw,
                 &format!("usage type gts_id `{raw}` is missing a derivation segment"),
@@ -659,6 +662,18 @@ pub struct UsageTypeQuery {
 
 pub use UsageTypeQueryFilterField as UsageTypeFilterField;
 
+/// Usage-type filter fields that are sound to use as a keyset-pagination
+/// ordering key. Both `usage_type_catalog` columns on the filter surface
+/// (`gts_id`, the primary key, and `kind`) are `NOT NULL`, so both are
+/// keyset-safe. The catalog list only ever orders by `gts_id`, but this is
+/// the type-surface analogue of [`is_keyset_safe_record_field`] so the
+/// plugin's shared keyset builder can enforce the never-null invariant on
+/// both surfaces. Fail-closed: an unknown field is unsafe.
+#[must_use]
+pub fn is_keyset_safe_type_field(name: &str) -> bool {
+    matches!(name, "gts_id" | "kind")
+}
+
 // ---------------------------------------------------------------------------
 // Usage-record exchange types
 // ---------------------------------------------------------------------------
@@ -682,8 +697,13 @@ pub enum UsageRecordStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageRecord {
-    /// Caller-supplied record UUID.
-    pub uuid: Uuid,
+    /// Deterministic gateway-derived record identity: `UUIDv5` of the 4-tuple
+    /// dedup key `(tenant_id, gts_id, idempotency_key, created_at)` (see
+    /// [`crate::derive_usage_record_id`]; ADR-0014). Stamped by
+    /// [`CreateUsageRecord::into_usage_record`] on create and authoritative on
+    /// read / return. The identity cannot be caller-supplied: the create
+    /// surface takes the identity-free [`CreateUsageRecord`], not this type.
+    pub id: Uuid,
     /// Usage type this record attaches to.
     pub gts_id: UsageTypeGtsId,
     /// Owning tenant for this record. Caller-supplied; PDP uses it as the
@@ -723,9 +743,110 @@ pub struct UsageRecord {
     /// Record lifecycle status.
     #[serde(default)]
     pub status: UsageRecordStatus,
-    /// Record creation timestamp (RFC 3339 on the wire).
+    /// Record creation timestamp (RFC 3339 on the wire). Persisted at
+    /// microsecond precision (matching `timestamptz` storage); see
+    /// [`CreateUsageRecord::into_usage_record`].
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
+}
+
+/// Identity-free create submission — the input to every create surface
+/// ([`crate::UsageCollectorClientV1::create_usage_record`] /
+/// [`crate::UsageCollectorClientV1::create_usage_records`]).
+///
+/// This mirrors [`UsageRecord`] minus the two fields a caller cannot own on
+/// create: `id` (a deterministic projection of the 4-tuple dedup key — see
+/// [`Self::into_usage_record`]) and `status` (always [`UsageRecordStatus::Active`]
+/// on a fresh insert). Encoding "id is derived, not supplied" in the type —
+/// rather than a doc-comment on a full [`UsageRecord`] — is what keeps a
+/// caller from constructing a meaningless identity the gateway would only
+/// discard. The wire REST surface encodes the same shape as
+/// `CreateUsageRecordRequest`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateUsageRecord {
+    /// Usage type this record attaches to.
+    pub gts_id: UsageTypeGtsId,
+    /// Owning tenant for this record. Caller-supplied; PDP uses it as the
+    /// `OWNER_TENANT_ID` attribute.
+    pub tenant_id: Uuid,
+    /// Resource attribution composite (mandatory).
+    pub resource_ref: ResourceRef,
+    /// Optional subject attribution composite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_ref: Option<SubjectRef>,
+    /// Caller-supplied metadata. Same validation and closed-shape rules as
+    /// [`UsageRecord::metadata`]. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<MetadataKey, String>,
+    /// Signed numeric measurement value. Same encoding and sign governance as
+    /// [`UsageRecord::value`].
+    #[serde(with = "rust_decimal::serde::str")]
+    pub value: Decimal,
+    /// Mandatory caller-supplied key for at-least-once-with-dedup semantics.
+    pub idempotency_key: IdempotencyKey,
+    /// When set, marks this submission as a counter compensation referencing a
+    /// previously emitted ordinary usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects_id: Option<Uuid>,
+    /// Record creation timestamp (RFC 3339 on the wire). Forwarded to the
+    /// persisted record at microsecond precision (canonicalized by
+    /// [`Self::into_usage_record`] to match `timestamptz` storage); it is part
+    /// of the dedup identity, so it also feeds the derived `id`.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl CreateUsageRecord {
+    /// Project this create submission into the persisted [`UsageRecord`] shape.
+    ///
+    /// This is the single point at which a submission acquires its identity:
+    /// `id` is stamped as the deterministic `UUIDv5` derivation of the 4-tuple
+    /// dedup key `(tenant_id, gts_id, idempotency_key, created_at)` (see
+    /// [`crate::derive_usage_record_id`]; ADR-0014), `created_at` is normalized
+    /// to microsecond precision, and `status` is initialized to
+    /// [`UsageRecordStatus::Active`]. Every other field is forwarded verbatim.
+    /// Because the identity is a pure projection of caller-supplied fields it
+    /// cannot be supplied independently — which is exactly why the create
+    /// surface takes this identity-free type rather than a full
+    /// [`UsageRecord`].
+    #[must_use]
+    pub fn into_usage_record(self) -> UsageRecord {
+        // Canonicalize `created_at` to microsecond precision (what Postgres
+        // `timestamptz` stores) so the persisted timestamp, the 4-tuple dedup
+        // key, and the derived `id` are consistent by construction — independent
+        // of any backend's rounding. This truncation MUST agree with the µs
+        // count [`crate::id::created_at_micros`] projects (the shared primitive
+        // `derive_usage_record_id` below and the plugin's dedup check both use):
+        // it drops exactly the sub-microsecond nanos that projection ignores, so
+        // the id derived here matches one a client reproduces from the same
+        // instant. `replace_nanosecond` cannot fail here (`microsecond() * 1000`
+        // is always a valid nanosecond count); the `unwrap_or` is a lint-safe
+        // no-op fallback.
+        let created_at = self
+            .created_at
+            .replace_nanosecond(self.created_at.microsecond() * 1_000)
+            .unwrap_or(self.created_at);
+        let id = crate::id::derive_usage_record_id(
+            self.tenant_id,
+            &self.gts_id,
+            &self.idempotency_key,
+            created_at,
+        );
+        UsageRecord {
+            id,
+            gts_id: self.gts_id,
+            tenant_id: self.tenant_id,
+            resource_ref: self.resource_ref,
+            subject_ref: self.subject_ref,
+            metadata: self.metadata,
+            value: self.value,
+            idempotency_key: self.idempotency_key,
+            corrects_id: self.corrects_id,
+            status: UsageRecordStatus::Active,
+            created_at,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +854,30 @@ pub struct UsageRecord {
 // ---------------------------------------------------------------------------
 
 /// Aggregation function applied to the filtered `UsageRecord.value` stream.
+///
+/// # Op-per-kind matrix
+///
+/// Each op is valid only for the usage [`UsageKind`] for which it is
+/// semantically meaningful. The gateway enforces this with a typed `400`
+/// (`UsageCollectorError::aggregation_op_not_allowed_for_kind`) before
+/// plugin dispatch — see [`AggregationOp::is_allowed_for`].
+///
+/// | Op                | Counter | Gauge |
+/// |-------------------|:-------:|:-----:|
+/// | `Sum`             |   ✅    |  ❌   |
+/// | `Min`/`Max`/`Avg` |   ❌    |  ✅   |
+/// | `Count`           |   ✅    |  ✅   |
+///
+/// Counter allows `{Sum, Count}`; gauge allows `{Min, Max, Avg, Count}`.
+///
+/// # Compensation handling
+///
+/// `SUM` nets across all active rows regardless of `corrects_id` (counter
+/// compensations reduce the total). Every other op operates over
+/// `corrects_id IS NULL` rows only. Under the matrix that partition is
+/// load-bearing only for `Count`-on-counter; `Min`/`Max`/`Avg` are gauge-only
+/// and gauges never carry compensations, so the filter is a structural no-op
+/// for them.
 ///
 /// `Count` counts matched rows and is well-defined for any value shape. The
 /// other variants require a numeric `value`; non-numeric values surface as a
@@ -750,6 +895,23 @@ pub enum AggregationOp {
     Max,
     /// Mean of matched values.
     Avg,
+}
+
+impl AggregationOp {
+    /// Returns `true` when this op is semantically valid for `kind`.
+    ///
+    /// Counter allows `{Sum, Count}`; gauge allows `{Min, Max, Avg, Count}`
+    /// (see the type-level matrix). This is the single source of truth the
+    /// gateway consults before dispatch.
+    #[must_use]
+    pub fn is_allowed_for(self, kind: UsageKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Count, _)
+                | (Self::Sum, UsageKind::Counter)
+                | (Self::Min | Self::Max | Self::Avg, UsageKind::Gauge)
+        )
+    }
 }
 
 /// Dimension to group an aggregation by.
@@ -813,15 +975,20 @@ pub struct AggregationBucket {
     /// `group_by` was empty (the no-grouping case yields a single bucket).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key: Vec<String>,
-    /// Aggregation result for the bucket, carried as a fixed-precision
-    /// [`Decimal`] so `SUM`, `MIN`, `MAX`, and `COUNT` are exact and
-    /// compensation rows net to zero. `AVG` may carry a plugin-chosen
-    /// rounding scale on non-terminating quotients. `None` when no rows
-    /// matched the bucket (e.g. `MIN` over an empty set). Wire-encoded as
-    /// a JSON string for the same float-round-trip reason as
-    /// [`UsageRecord::value`].
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    pub value: Option<Decimal>,
+    /// Aggregation result for the bucket, carried as an arbitrary-precision
+    /// [`bigdecimal::BigDecimal`] so `SUM`, `MIN`, `MAX`, and `COUNT` are exact
+    /// at any magnitude and compensation rows net to zero. Postgres `NUMERIC`
+    /// is unbounded, and a wide `SUM` (or large-magnitude `AVG`) can exceed
+    /// [`rust_decimal::Decimal`]'s ~7.9×10²⁸ ceiling — which previously
+    /// surfaced as an `Internal` (HTTP 500) on decode. `AVG` is now exact in
+    /// magnitude but may still carry a backend/plugin-chosen rounding scale on
+    /// non-terminating quotients (arbitrary precision is still finite). `None`
+    /// when no rows matched the bucket (e.g. `MIN` over an empty set).
+    /// Wire-encoded as a JSON string (never a float) for the same round-trip
+    /// reason as [`UsageRecord::value`], via
+    /// [`crate::serde_helpers::bigdecimal_str_option`].
+    #[serde(default, with = "crate::serde_helpers::bigdecimal_str_option")]
+    pub value: Option<BigDecimal>,
 }
 
 /// Aggregated-query result.
@@ -832,6 +999,19 @@ pub struct AggregationResult {
     /// Result buckets in plugin-emitted order.
     pub buckets: Vec<AggregationBucket>,
 }
+
+/// Maximum number of buckets a single [`AggregationResult`] may carry.
+///
+/// The gateway-enforced bounded `created_at` window caps the rows an aggregate
+/// *scans*; this caps the distinct *groups* it produces. A high-cardinality
+/// [`AggregationDimension::Metadata`] key (e.g. a per-record id) could otherwise
+/// materialize an unbounded bucket set into memory, unlike the page-size-clamped
+/// list path. The storage plugin MUST bound its own result (e.g. append
+/// `LIMIT MAX_AGGREGATION_BUCKETS + 1`) so an over-cap query cannot blow up
+/// plugin memory; the gateway rejects a result exceeding this cap with a `400`
+/// ([`crate::reason::AGGREGATION_RESULT_TOO_LARGE`]). Declared on the wire as the
+/// `AggregatedQueryResult.buckets` `maxItems` in `usage-collector-v1.yaml`.
+pub const MAX_AGGREGATION_BUCKETS: usize = 100_000;
 
 // ---------------------------------------------------------------------------
 // Filter surface for `list_usage_records`
@@ -853,10 +1033,10 @@ pub struct AggregationResult {
 // `FilterError::UnknownField`, so neither plugins nor the gateway need a
 // runtime reject path.
 //
-// `created_at` and `uuid` ARE on the schema: the gateway treats the
+// `created_at` and `id` ARE on the schema: the gateway treats the
 // `[from, to)` time window as an ordinary `created_at ge … and
 // created_at lt …` predicate inside `$filter` (no separate `TimeWindow`
-// typed parameter), and `uuid` is the canonical cursor tiebreaker the
+// typed parameter), and `id` is the canonical cursor tiebreaker the
 // gateway substitutes into `$orderby` when the caller omits one.
 //
 // Nested attribution composites (`resource_ref`, `subject_ref`) are
@@ -882,12 +1062,12 @@ pub struct AggregationResult {
 #[derive(ODataFilterable)]
 #[allow(dead_code)]
 pub struct UsageRecordQuery {
-    /// `usage_records.uuid` (record primary key). Carried on the filter
+    /// `usage_records.id` (record primary key). Carried on the filter
     /// surface so the gateway can use it as the canonical cursor
-    /// tiebreaker (`(created_at, uuid)`) and so callers can pin a
+    /// tiebreaker (`(created_at, id)`) and so callers can pin a
     /// specific record via `$filter`.
     #[odata(filter(kind = "Uuid"))]
-    pub uuid: Uuid,
+    pub id: Uuid,
     /// `usage_records.created_at` (record creation timestamp). The
     /// `[from, to)` time-window is expressed as
     /// `created_at ge X and created_at lt Y` inside `$filter`; the
@@ -926,6 +1106,35 @@ pub struct UsageRecordQuery {
 }
 
 pub use UsageRecordQueryFilterField as UsageRecordFilterField;
+
+/// Record filter fields backed by a **mandatory (never-null)** attribute, and
+/// therefore sound to use as a keyset-pagination ordering key.
+///
+/// The storage plugin's keyset continuation is a row-value tuple comparison
+/// (`(c1, c2, …) > ($…)`). In SQL three-valued logic a tuple whose leading
+/// column is NULL compares as NULL, so every NULL-keyed row is silently
+/// dropped from the paged result — and a page ending on such a row cannot
+/// encode a `next_cursor` at all (a 500). A field is keyset-safe **iff** its
+/// backing [`UsageRecord`] attribute is never absent:
+///
+/// - `subject_id` / `subject_type` come from `subject_ref: Option<SubjectRef>`
+///   and `corrects_id` is `Option<Uuid>` — all three are domain-optional, so
+///   they are **not** keyset-safe.
+/// - `id`, `created_at`, `tenant_id`, `resource_id`, `resource_type`, `status`
+///   are mandatory on every record, so they are keyset-safe.
+///
+/// This is a domain-optionality fact (an SDK concern), not a storage-column
+/// fact — the gateway rejects a caller `$orderby` on a non-keyset-safe field
+/// with `400`, and the plugin enforces the same invariant fail-closed. The
+/// allowlist is deliberately fail-closed: an unknown or newly added field is
+/// unsafe until it is classified here.
+#[must_use]
+pub fn is_keyset_safe_record_field(name: &str) -> bool {
+    matches!(
+        name,
+        "id" | "created_at" | "tenant_id" | "resource_id" | "resource_type" | "status"
+    )
+}
 
 /// Equality-set filter applied to a single [`UsageRecord::metadata`] key.
 ///

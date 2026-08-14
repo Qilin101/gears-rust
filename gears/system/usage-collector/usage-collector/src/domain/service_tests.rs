@@ -312,6 +312,7 @@ mod create_usage_type_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use toolkit_gts::gts_id;
 
     use std::collections::BTreeSet;
 
@@ -332,8 +333,8 @@ mod create_usage_type_tests {
     use crate::domain::local_client::UsageCollectorLocalClient;
     use crate::domain::test_support::{CountingAllowAllResolver, DenyAllResolver, enforcer_for};
 
-    const COUNTER_ID: &str = "gts.cf.core.uc.usage_record.v1~example.usage._.bytes_in.v1";
-    const GAUGE_ID: &str = "gts.cf.core.uc.usage_record.v1~example.usage._.cpu_load.v1";
+    const COUNTER_ID: &str = gts_id!("cf.core.uc.usage_record.v1~example.usage._.bytes_in.v1");
+    const GAUGE_ID: &str = gts_id!("cf.core.uc.usage_record.v1~example.usage._.cpu_load.v1");
 
     fn keyset<const N: usize>(values: [&str; N]) -> BTreeSet<MetadataKey> {
         values
@@ -469,7 +470,7 @@ mod create_usage_type_tests {
 
         async fn get_usage_record(
             &self,
-            _uuid: Uuid,
+            _id: Uuid,
         ) -> Result<UsageRecord, UsageCollectorPluginError> {
             Err(UsageCollectorPluginError::internal(
                 "test_fake: RegisterStubPlugin: get_usage_record must not be called",
@@ -826,6 +827,7 @@ mod catalog_dispatch_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use toolkit_gts::gts_id;
 
     use async_trait::async_trait;
     use toolkit::client_hub::{ClientHub, ClientScope};
@@ -851,7 +853,7 @@ mod catalog_dispatch_tests {
             .collect()
     }
 
-    const COUNTER_ID: &str = "gts.cf.core.uc.usage_record.v1~example.usage._.bytes_in.v1";
+    const COUNTER_ID: &str = gts_id!("cf.core.uc.usage_record.v1~example.usage._.bytes_in.v1");
 
     // ── programmable stub plugin: per-op response queues + call counters ────
 
@@ -1039,7 +1041,7 @@ mod catalog_dispatch_tests {
 
         async fn get_usage_record(
             &self,
-            _uuid: Uuid,
+            _id: Uuid,
         ) -> Result<UsageRecord, UsageCollectorPluginError> {
             Err(UsageCollectorPluginError::internal(
                 "test_fake: CatalogStubPlugin: get_usage_record must not be called",
@@ -1434,6 +1436,7 @@ mod deactivate_usage_record_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use toolkit_gts::gts_id;
 
     use async_trait::async_trait;
     use toolkit::client_hub::{ClientHub, ClientScope};
@@ -1520,10 +1523,10 @@ mod deactivate_usage_record_tests {
         use time::OffsetDateTime;
         use usage_collector_sdk::{IdempotencyKey, ResourceRef, UsageRecordStatus, UsageTypeGtsId};
         UsageRecord {
-            uuid: Uuid::from_u128(0xAAAA_AAAA),
-            gts_id: UsageTypeGtsId::new(
-                "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1",
-            )
+            id: Uuid::from_u128(0xAAAA_AAAA),
+            gts_id: UsageTypeGtsId::new(gts_id!(
+                "cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1"
+            ))
             .expect("valid usage_record-derived gts_id"),
             tenant_id: Uuid::from_u128(2),
             resource_ref: ResourceRef::new("rsc-stub", "compute.vm").expect("valid resource ref"),
@@ -1634,14 +1637,14 @@ mod deactivate_usage_record_tests {
 
         async fn get_usage_record(
             &self,
-            uuid: Uuid,
+            id: Uuid,
         ) -> Result<UsageRecord, UsageCollectorPluginError> {
             self.get_record_calls.fetch_add(1, Ordering::SeqCst);
             let outcome = self.get_record_outcome.lock().expect("mutex not poisoned");
             match &*outcome {
                 GetRecordOutcome::Found(record) => Ok((**record).clone()),
                 GetRecordOutcome::NotFound => {
-                    Err(UsageCollectorPluginError::UsageRecordNotFound { id: uuid })
+                    Err(UsageCollectorPluginError::UsageRecordNotFound { id })
                 }
                 GetRecordOutcome::Transient => Err(UsageCollectorPluginError::transient(
                     "test_fake: DeactivateStubPlugin: prefetch transient",
@@ -1964,11 +1967,12 @@ mod pdp_dedup_tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use time::OffsetDateTime;
     use usage_collector_sdk::{
-        IdempotencyKey, ResourceRef, SubjectRef, UsageCollectorPluginV1, UsageKind, UsageRecord,
-        UsageRecordStatus, UsageType, UsageTypeGtsId,
+        CreateUsageRecord, IdempotencyKey, ResourceRef, SubjectRef, UsageCollectorPluginV1,
+        UsageKind, UsageRecord, UsageRecordStatus, UsageType, UsageTypeGtsId,
     };
     use uuid::Uuid;
 
@@ -1977,7 +1981,8 @@ mod pdp_dedup_tests {
         service_with_counting_permit,
     };
 
-    const HAPPY_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    const HAPPY_GTS_ID: &str =
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
     fn happy_usage_type() -> UsageType {
         UsageType {
@@ -1989,7 +1994,7 @@ mod pdp_dedup_tests {
 
     fn persisted_record(tenant_id: Uuid, resource_id: &str, idem: &str) -> UsageRecord {
         UsageRecord {
-            uuid: Uuid::new_v4(),
+            id: Uuid::new_v4(),
             gts_id: UsageTypeGtsId::new(HAPPY_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new(resource_id, "compute.vm").expect("valid resource ref"),
@@ -2003,12 +2008,21 @@ mod pdp_dedup_tests {
         }
     }
 
-    fn input_record(tenant_id: Uuid, resource_id: &str, idem: &str) -> UsageRecord {
-        let mut r = persisted_record(tenant_id, resource_id, idem);
-        // Distinct UUIDs guarantee distinct caller-supplied records even when
-        // they all share an attribution tuple.
-        r.uuid = Uuid::new_v4();
-        r
+    fn input_record(tenant_id: Uuid, resource_id: &str, idem: &str) -> CreateUsageRecord {
+        // Distinct `idem` values keep records distinct even when they share an
+        // attribution tuple; the create surface is identity-free (the id is
+        // derived from the dedup key inside the service).
+        CreateUsageRecord {
+            gts_id: UsageTypeGtsId::new(HAPPY_GTS_ID).expect("valid gts_id"),
+            tenant_id,
+            resource_ref: ResourceRef::new(resource_id, "compute.vm").expect("valid resource ref"),
+            subject_ref: None,
+            metadata: BTreeMap::new(),
+            value: rust_decimal::Decimal::from(1),
+            idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
+            corrects_id: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
     }
 
     fn input_record_with_subject(
@@ -2016,7 +2030,7 @@ mod pdp_dedup_tests {
         resource_id: &str,
         subject_id: &str,
         idem: &str,
-    ) -> UsageRecord {
+    ) -> CreateUsageRecord {
         let mut r = input_record(tenant_id, resource_id, idem);
         r.subject_ref =
             Some(SubjectRef::new(subject_id, None::<String>).expect("valid subject ref"));
@@ -2032,7 +2046,7 @@ mod pdp_dedup_tests {
         plugin.set_get_usage_type(happy_usage_type());
 
         let tenant_id = Uuid::from_u128(0xAA);
-        let input: Vec<UsageRecord> = (0..5)
+        let input: Vec<CreateUsageRecord> = (0..5)
             .map(|i| input_record(tenant_id, "rsc-shared", &format!("idem-shared-{i}")))
             .collect();
 
@@ -2352,10 +2366,11 @@ mod gts_id_dedup_tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use time::OffsetDateTime;
     use usage_collector_sdk::{
-        IdempotencyKey, ResourceRef, USAGE_TYPE_RESOURCE, UsageCollectorError,
+        CreateUsageRecord, IdempotencyKey, ResourceRef, USAGE_TYPE_RESOURCE, UsageCollectorError,
         UsageCollectorPluginV1, UsageKind, UsageRecord, UsageRecordStatus, UsageType,
         UsageTypeGtsId,
     };
@@ -2363,9 +2378,9 @@ mod gts_id_dedup_tests {
 
     use crate::domain::test_support::{HappyPathPlugin, authenticated_ctx, service_with_permit};
 
-    const GTS_A: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
-    const GTS_B: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_emitted.v1";
-    const GTS_C: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_buffered.v1";
+    const GTS_A: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
+    const GTS_B: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_emitted.v1");
+    const GTS_C: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_buffered.v1");
 
     fn counter_usage_type() -> UsageType {
         UsageType {
@@ -2378,9 +2393,8 @@ mod gts_id_dedup_tests {
         }
     }
 
-    fn record_for(gts: &str, tenant_id: Uuid, idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn record_for(gts: &str, tenant_id: Uuid, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(gts).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-gts-dedup", "compute.vm")
@@ -2390,14 +2404,13 @@ mod gts_id_dedup_tests {
             value: rust_decimal::Decimal::from(1),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: None,
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn persisted_for(input: &UsageRecord) -> UsageRecord {
+    fn persisted_for(input: &CreateUsageRecord) -> UsageRecord {
         UsageRecord {
-            uuid: Uuid::new_v4(),
+            id: Uuid::new_v4(),
             gts_id: input.gts_id.clone(),
             tenant_id: input.tenant_id,
             resource_ref: input.resource_ref.clone(),
@@ -2419,7 +2432,7 @@ mod gts_id_dedup_tests {
         plugin.set_get_usage_type(counter_usage_type());
 
         let tenant_id = Uuid::from_u128(0xEE);
-        let input: Vec<UsageRecord> = (0..5)
+        let input: Vec<CreateUsageRecord> = (0..5)
             .map(|i| record_for(GTS_A, tenant_id, &format!("idem-gts-{i}")))
             .collect();
 
@@ -2592,10 +2605,11 @@ mod corrects_id_dedup_tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use time::OffsetDateTime;
     use usage_collector_sdk::{
-        IdempotencyKey, ResourceRef, USAGE_RECORD_RESOURCE, UsageCollectorError,
+        CreateUsageRecord, IdempotencyKey, ResourceRef, USAGE_RECORD_RESOURCE, UsageCollectorError,
         UsageCollectorPluginV1, UsageKind, UsageRecord, UsageRecordStatus, UsageType,
         UsageTypeGtsId,
     };
@@ -2603,7 +2617,8 @@ mod corrects_id_dedup_tests {
 
     use crate::domain::test_support::{HappyPathPlugin, authenticated_ctx, service_with_permit};
 
-    const COUNTER_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    const COUNTER_GTS_ID: &str =
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
     fn counter_usage_type() -> UsageType {
         UsageType {
@@ -2617,11 +2632,11 @@ mod corrects_id_dedup_tests {
         // The L1 verifier checks (corrects_id IS NULL, identity-tuple match,
         // status=Active) against this row, so the compensation records under
         // test must mirror its (tenant, gts_id, resource_ref, subject_ref)
-        // shape. `set_get_record` returns this same row for any uuid the
+        // shape. `set_get_record` returns this same row for any id the
         // host looks up — that's fine because verify_l1_corrects_id reads
-        // identity fields, not uuid.
+        // identity fields, not id.
         UsageRecord {
-            uuid: Uuid::from_u128(0xDEAD_BEEF),
+            id: Uuid::from_u128(0xDEAD_BEEF),
             gts_id: UsageTypeGtsId::new(COUNTER_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-comp", "compute.vm").expect("valid resource ref"),
@@ -2635,9 +2650,8 @@ mod corrects_id_dedup_tests {
         }
     }
 
-    fn compensation_for(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn compensation_for(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(COUNTER_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-comp", "compute.vm").expect("valid resource ref"),
@@ -2646,14 +2660,12 @@ mod corrects_id_dedup_tests {
             value: rust_decimal::Decimal::from(-1),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: Some(corrects_id),
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn ordinary_record(tenant_id: Uuid, idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn ordinary_record(tenant_id: Uuid, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(COUNTER_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-comp", "compute.vm").expect("valid resource ref"),
@@ -2662,15 +2674,14 @@ mod corrects_id_dedup_tests {
             value: rust_decimal::Decimal::from(1),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: None,
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn persisted_echo(record: &UsageRecord) -> UsageRecord {
-        let mut r = record.clone();
-        r.uuid = Uuid::new_v4();
-        r
+    // The plugin echo just needs a valid persisted `UsageRecord`; the create
+    // input projects to one via the same derivation the service applies.
+    fn persisted_echo(record: &CreateUsageRecord) -> UsageRecord {
+        record.clone().into_usage_record()
     }
 
     /// Five compensations sharing one `corrects_id` MUST collapse to a
@@ -2684,7 +2695,7 @@ mod corrects_id_dedup_tests {
         plugin.set_get_record(referenced_original(tenant_id));
 
         let corrects_id = Uuid::from_u128(0x601);
-        let input: Vec<UsageRecord> = (0..5)
+        let input: Vec<CreateUsageRecord> = (0..5)
             .map(|i| compensation_for(tenant_id, corrects_id, &format!("idem-comp-{i}")))
             .collect();
 
@@ -2773,7 +2784,7 @@ mod corrects_id_dedup_tests {
         plugin.set_get_usage_type(counter_usage_type());
 
         let tenant_id = Uuid::from_u128(0x503);
-        let input: Vec<UsageRecord> = (0..5)
+        let input: Vec<CreateUsageRecord> = (0..5)
             .map(|i| ordinary_record(tenant_id, &format!("idem-ord-{i}")))
             .collect();
 
@@ -2895,6 +2906,7 @@ mod corrects_id_dedup_tests {
 // - Prefetch transient error lifts to `ServiceUnavailable`.
 mod get_usage_record_tests {
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use usage_collector_sdk::{
         USAGE_RECORD_RESOURCE, UsageCollectorError, UsageCollectorPluginV1, UsageRecord,
@@ -2909,14 +2921,14 @@ mod get_usage_record_tests {
     };
 
     const HAPPY_RECORD_GTS_ID: &str =
-        "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
-    fn sample_persisted_record(uuid: Uuid, tenant_id: Uuid) -> UsageRecord {
+    fn sample_persisted_record(id: Uuid, tenant_id: Uuid) -> UsageRecord {
         use std::collections::BTreeMap;
         use time::OffsetDateTime;
         use usage_collector_sdk::{IdempotencyKey, ResourceRef, UsageTypeGtsId};
         UsageRecord {
-            uuid,
+            id,
             gts_id: UsageTypeGtsId::new(HAPPY_RECORD_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-happy", "compute.vm").expect("valid resource ref"),
@@ -2950,7 +2962,7 @@ mod get_usage_record_tests {
             .await
             .expect("happy-path read MUST succeed");
 
-        assert_eq!(record.uuid, target);
+        assert_eq!(record.id, target);
         assert_eq!(record.tenant_id, tenant_id);
         assert_eq!(
             plugin.get_usage_record_calls(),
@@ -3164,7 +3176,7 @@ mod get_usage_record_tests {
             }
             async fn get_usage_record(
                 &self,
-                _uuid: Uuid,
+                _id: Uuid,
             ) -> Result<UsageRecord, UsageCollectorPluginError> {
                 Err(UsageCollectorPluginError::transient(
                     "test_fake: TransientGetPlugin: simulated prefetch transient",
@@ -3279,12 +3291,13 @@ mod private_helpers_tests {
 mod create_usage_record_path_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use time::OffsetDateTime;
     use usage_collector_sdk::{
-        ConflictReason, IdempotencyKey, ResourceRef, USAGE_RECORD_RESOURCE, UsageCollectorError,
-        UsageCollectorPluginError, UsageCollectorPluginV1, UsageKind, UsageRecord,
-        UsageRecordStatus, UsageType, UsageTypeGtsId, ValidationReason,
+        ConflictReason, CreateUsageRecord, IdempotencyKey, ResourceRef, USAGE_RECORD_RESOURCE,
+        UsageCollectorError, UsageCollectorPluginError, UsageCollectorPluginV1, UsageKind,
+        UsageRecord, UsageRecordStatus, UsageType, UsageTypeGtsId, ValidationReason,
     };
     use uuid::Uuid;
 
@@ -3294,8 +3307,10 @@ mod create_usage_record_path_tests {
         service_with_permit,
     };
 
-    const COUNTER_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
-    const GAUGE_GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_inflight.v1";
+    const COUNTER_GTS_ID: &str =
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
+    const GAUGE_GTS_ID: &str =
+        gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_inflight.v1");
 
     fn counter_usage_type() -> UsageType {
         UsageType {
@@ -3317,9 +3332,8 @@ mod create_usage_record_path_tests {
     /// `tenant_id` and `value`. Used as the base shape every test in this
     /// module shapes — call sites mutate `value` / `gts_id` /
     /// `corrects_id` to drive the per-stage outcome.
-    fn counter_record(tenant_id: Uuid, value: i64, idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn counter_record(tenant_id: Uuid, value: i64, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(COUNTER_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-singular", "compute.vm")
@@ -3329,14 +3343,12 @@ mod create_usage_record_path_tests {
             value: rust_decimal::Decimal::from(value),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: None,
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn gauge_compensation(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn gauge_compensation(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(GAUGE_GTS_ID).expect("valid gts_id"),
             tenant_id,
             resource_ref: ResourceRef::new("rsc-singular", "compute.vm")
@@ -3349,12 +3361,11 @@ mod create_usage_record_path_tests {
             value: rust_decimal::Decimal::from(-1),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: Some(corrects_id),
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
 
-    fn counter_compensation(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> UsageRecord {
+    fn counter_compensation(tenant_id: Uuid, corrects_id: Uuid, idem: &str) -> CreateUsageRecord {
         let mut r = counter_record(tenant_id, -1, idem);
         r.corrects_id = Some(corrects_id);
         r
@@ -3590,7 +3601,7 @@ mod create_usage_record_path_tests {
         // compensation will be shaped under `other_tenant` so the
         // identity-tuple comparison fails on the tenant axis.
         let referenced = UsageRecord {
-            uuid: corrects_id,
+            id: corrects_id,
             gts_id: UsageTypeGtsId::new(COUNTER_GTS_ID).expect("valid gts_id"),
             tenant_id: referenced_tenant,
             resource_ref: ResourceRef::new("rsc-singular", "compute.vm")
@@ -3639,7 +3650,7 @@ mod create_usage_record_path_tests {
 
     /// Happy path: PDP permit + catalog hit + ordinary counter semantics +
     /// metadata validation pass + persist SPI returns the persisted echo
-    /// ⇒ `Ok(persisted_record)`. The persisted echo's `uuid` differs
+    /// ⇒ `Ok(persisted_record)`. The persisted echo's `id` differs
     /// from the input so the returned record can be distinguished from
     /// the caller-supplied one.
     #[tokio::test]
@@ -3647,11 +3658,12 @@ mod create_usage_record_path_tests {
         let plugin = HappyPathPlugin::new();
         plugin.set_get_usage_type(counter_usage_type());
 
-        let mut persisted = counter_record(Uuid::from_u128(0xCAFE), 1, "idem-happy-persist");
+        let mut persisted =
+            counter_record(Uuid::from_u128(0xCAFE), 1, "idem-happy-persist").into_usage_record();
         // Distinguish persisted from input — the plugin's persisted echo
-        // typically carries a different uuid than the input's caller-set
-        // uuid.
-        persisted.uuid = Uuid::from_u128(0xDEAD_C0DE);
+        // carries a different id than the record the service derives and
+        // dispatches.
+        persisted.id = Uuid::from_u128(0xDEAD_C0DE);
         plugin.set_create_record(persisted.clone());
 
         let service = service_with_permit(
@@ -3667,7 +3679,7 @@ mod create_usage_record_path_tests {
             .expect("happy path MUST return the persisted record");
 
         assert_eq!(
-            returned.uuid, persisted.uuid,
+            returned.id, persisted.id,
             "the returned record MUST be the plugin's persisted echo \
              (not the caller's input)",
         );
@@ -3695,18 +3707,19 @@ mod create_usage_record_path_tests {
 mod batch_size_cap_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
+    use toolkit_gts::gts_id;
 
     use time::OffsetDateTime;
     use usage_collector_sdk::{
-        IdempotencyKey, ResourceRef, UsageCollectorError, UsageCollectorPluginV1, UsageKind,
-        UsageRecord, UsageRecordStatus, UsageType, UsageTypeGtsId, ValidationReason,
+        CreateUsageRecord, IdempotencyKey, ResourceRef, UsageCollectorError,
+        UsageCollectorPluginV1, UsageKind, UsageType, UsageTypeGtsId, ValidationReason,
     };
     use uuid::Uuid;
 
     use crate::domain::service::MAX_BATCH_RECORDS;
     use crate::domain::test_support::{HappyPathPlugin, authenticated_ctx, service_with_permit};
 
-    const GTS_ID: &str = "gts.cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1";
+    const GTS_ID: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
 
     fn counter_usage_type() -> UsageType {
         UsageType {
@@ -3716,9 +3729,8 @@ mod batch_size_cap_tests {
         }
     }
 
-    fn input_record(idem: &str) -> UsageRecord {
-        UsageRecord {
-            uuid: Uuid::new_v4(),
+    fn input_record(idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
             gts_id: UsageTypeGtsId::new(GTS_ID).expect("valid gts_id"),
             tenant_id: Uuid::from_u128(1),
             resource_ref: ResourceRef::new("rsc-batch-cap", "compute.vm")
@@ -3728,7 +3740,6 @@ mod batch_size_cap_tests {
             value: rust_decimal::Decimal::from(1),
             idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
             corrects_id: None,
-            status: UsageRecordStatus::Active,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
     }
@@ -3787,7 +3798,7 @@ mod batch_size_cap_tests {
             "test.batch_cap.over.records.v1",
         );
 
-        let input: Vec<UsageRecord> = (0..=MAX_BATCH_RECORDS)
+        let input: Vec<CreateUsageRecord> = (0..=MAX_BATCH_RECORDS)
             .map(|i| input_record(&format!("idem-cap-{i}")))
             .collect();
         assert_eq!(input.len(), MAX_BATCH_RECORDS + 1);
@@ -3806,6 +3817,358 @@ mod batch_size_cap_tests {
             plugin.get_usage_type_calls(),
             0,
             "over-cap batch MUST NOT issue a catalog lookup",
+        );
+    }
+}
+
+// ── Service-level derived-id stamp (in-process / SDK callers) ───────────────
+//
+// The create surface is identity-free (`CreateUsageRecord`): callers never
+// supply an `id`. The domain `Service` is the single, guaranteed point where a
+// submission acquires its identity — via
+// `CreateUsageRecord::into_usage_record`, which derives the `id` from the dedup
+// key. These tests drive the `Service` create methods directly (NOT through the
+// REST handler) and assert the record the plugin RECEIVED carries the
+// deterministic derivation, pinning that the service stamps the derived id on
+// the dispatch path.
+#[cfg(test)]
+mod derived_id_stamp_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use time::OffsetDateTime;
+    use toolkit_gts::gts_id;
+    use usage_collector_sdk::{
+        CreateUsageRecord, IdempotencyKey, ResourceRef, UsageCollectorPluginV1, UsageKind,
+        UsageType, UsageTypeGtsId, derive_usage_record_id,
+    };
+    use uuid::Uuid;
+
+    use crate::domain::test_support::{HappyPathPlugin, authenticated_ctx, service_with_permit};
+
+    const GTS_ID: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
+
+    fn counter_usage_type() -> UsageType {
+        UsageType {
+            gts_id: UsageTypeGtsId::new(GTS_ID).expect("valid gts_id"),
+            kind: UsageKind::Counter,
+            metadata_fields: BTreeSet::new(),
+        }
+    }
+
+    /// Build a create submission with a known dedup key
+    /// (`tenant_id` / `gts_id` / `idempotency_key` / `created_at`), so a
+    /// passing assertion can only mean the service derived the dispatched
+    /// record's id from it.
+    fn input_record(tenant_id: Uuid, idem: &str) -> CreateUsageRecord {
+        CreateUsageRecord {
+            gts_id: UsageTypeGtsId::new(GTS_ID).expect("valid gts_id"),
+            tenant_id,
+            resource_ref: ResourceRef::new("rsc-derive", "compute.vm").expect("valid resource ref"),
+            subject_ref: None,
+            metadata: BTreeMap::new(),
+            value: rust_decimal::Decimal::from(1),
+            idempotency_key: IdempotencyKey::new(idem).expect("valid idempotency key"),
+            corrects_id: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// Singular `create_usage_record`: the dispatched record's `id` MUST be the
+    /// service-derived value.
+    #[tokio::test]
+    async fn create_usage_record_stamps_derived_id() {
+        let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type(counter_usage_type());
+
+        let tenant_id = Uuid::from_u128(0xD1);
+        let idem = "idem-derive-singular";
+        let input = input_record(tenant_id, idem);
+        let expected = derive_usage_record_id(
+            input.tenant_id,
+            &input.gts_id,
+            &input.idempotency_key,
+            input.created_at,
+        );
+
+        // The plugin echoes back the record it was dispatched, so the persist
+        // SPI succeeds; the assertion reads the CAPTURED dispatched record.
+        plugin.set_create_record(input.clone().into_usage_record());
+
+        let service = service_with_permit(
+            Arc::clone(&plugin) as Arc<dyn UsageCollectorPluginV1>,
+            "test.derived_id.singular.records.v1",
+        );
+
+        service
+            .create_usage_record(&authenticated_ctx(), input)
+            .await
+            .expect("happy path MUST accept the record");
+
+        let dispatched = plugin
+            .last_create_record_input()
+            .expect("plugin received the dispatched record");
+        assert_eq!(
+            dispatched.id, expected,
+            "the SERVICE MUST stamp the dispatched record's id with \
+             derive_usage_record_id(tenant_id, gts_id, idempotency_key, created_at) - this \
+             guards the in-process (non-REST) caller path independently of the \
+             handler",
+        );
+    }
+
+    /// Batch `create_usage_records`: every dispatched record's `id` MUST be its
+    /// own service-derived value.
+    #[tokio::test]
+    async fn create_usage_records_stamps_derived_id() {
+        let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type(counter_usage_type());
+
+        let tenant_id = Uuid::from_u128(0xD2);
+        let idems = ["idem-derive-batch-0", "idem-derive-batch-1"];
+        let input: Vec<CreateUsageRecord> = idems
+            .iter()
+            .map(|idem| input_record(tenant_id, idem))
+            .collect();
+        let expected: Vec<Uuid> = input
+            .iter()
+            .map(|r| {
+                derive_usage_record_id(r.tenant_id, &r.gts_id, &r.idempotency_key, r.created_at)
+            })
+            .collect();
+
+        plugin.set_create_records(
+            input
+                .iter()
+                .cloned()
+                .map(|r| Ok(r.into_usage_record()))
+                .collect(),
+        );
+
+        let service = service_with_permit(
+            Arc::clone(&plugin) as Arc<dyn UsageCollectorPluginV1>,
+            "test.derived_id.batch.records.v1",
+        );
+
+        let results = service
+            .create_usage_records(&authenticated_ctx(), input)
+            .await
+            .expect("batch dispatch succeeded");
+        assert!(results.iter().all(Result::is_ok));
+
+        let dispatched = plugin
+            .last_create_records_input()
+            .expect("plugin received the dispatched batch");
+        let dispatched_ids: Vec<Uuid> = dispatched.iter().map(|r| r.id).collect();
+        assert_eq!(
+            dispatched_ids, expected,
+            "the SERVICE MUST stamp each dispatched record's id with its own \
+             derive_usage_record_id(tenant_id, gts_id, idempotency_key, created_at), \
+             overwriting the caller-supplied ids - this guards the in-process \
+             (non-REST) batch caller path independently of the handler",
+        );
+    }
+}
+
+mod aggregate_op_kind_enforcement_tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use toolkit_gts::gts_id;
+    use toolkit_security::pep_properties;
+    use usage_collector_sdk::{
+        AggregationBucket, AggregationOp, AggregationResult, AggregationSpec,
+        MAX_AGGREGATION_BUCKETS, UsageCollectorError, UsageCollectorPluginV1, UsageKind, UsageType,
+        UsageTypeGtsId, ValidationReason,
+    };
+    use uuid::Uuid;
+
+    use crate::domain::Service;
+    use crate::domain::test_support::{
+        CountingPermitResolver, HappyPathPlugin, authenticated_ctx, enforcer_for, hub_with_plugin,
+    };
+
+    const GTS_ID: &str = gts_id!("cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1");
+
+    fn gts_id() -> UsageTypeGtsId {
+        UsageTypeGtsId::new(GTS_ID).expect("valid gts_id")
+    }
+
+    fn usage_type(kind: UsageKind) -> UsageType {
+        UsageType {
+            gts_id: gts_id(),
+            kind,
+            metadata_fields: BTreeSet::new(),
+        }
+    }
+
+    fn spec(op: AggregationOp) -> AggregationSpec {
+        AggregationSpec {
+            op,
+            group_by: Vec::new(),
+        }
+    }
+
+    // Mirrors the proven aggregate-path handler-test wiring: a permit scoped to
+    // the request's OWNER_TENANT_ID (uuid 2, matching `authenticated_ctx`), so
+    // authz permits AND PDP-constraint composition succeeds — allowed pairs
+    // reach the plugin dispatch.
+    fn service_with_plugin(plugin: &Arc<HappyPathPlugin>, suffix: &str) -> Arc<Service> {
+        let hub = hub_with_plugin(
+            Arc::clone(plugin) as Arc<dyn UsageCollectorPluginV1>,
+            suffix,
+            "cyberfabric",
+        );
+        let resolver = CountingPermitResolver::new(
+            pep_properties::OWNER_TENANT_ID,
+            Uuid::from_u128(2).to_string(),
+        );
+        let enforcer = enforcer_for(Arc::clone(&resolver) as _);
+        Arc::new(Service::new(hub, "cyberfabric".to_owned(), enforcer))
+    }
+
+    fn bounded_window() -> toolkit_odata::ODataQuery {
+        let expr = toolkit_odata::parse_filter_string(
+            "created_at ge 2026-01-01T00:00:00Z and created_at lt 2026-02-01T00:00:00Z",
+        )
+        .expect("filter parses")
+        .into_expr();
+        toolkit_odata::ODataQuery::from(Some(expr))
+    }
+
+    async fn run(
+        kind: UsageKind,
+        op: AggregationOp,
+    ) -> Result<AggregationResult, UsageCollectorError> {
+        let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type(usage_type(kind));
+        plugin.set_query_aggregated_usage_records_response(AggregationResult { buckets: vec![] });
+        let service = service_with_plugin(&plugin, "test.aggregate.opkind.guard.v1");
+        service
+            .query_aggregated_usage_records(
+                &authenticated_ctx(),
+                gts_id(),
+                &bounded_window(),
+                &[],
+                spec(op),
+            )
+            .await
+    }
+
+    fn assert_op_not_allowed(result: Result<AggregationResult, UsageCollectorError>) {
+        match result {
+            Err(UsageCollectorError::InvalidArgument { reason, .. }) => {
+                assert_eq!(reason, ValidationReason::OpNotAllowedForKind);
+            }
+            other => panic!("expected OP_NOT_ALLOWED_FOR_KIND 400, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sum_on_gauge_is_rejected() {
+        assert_op_not_allowed(run(UsageKind::Gauge, AggregationOp::Sum).await);
+    }
+
+    #[tokio::test]
+    async fn min_max_avg_on_counter_are_rejected() {
+        for op in [AggregationOp::Min, AggregationOp::Max, AggregationOp::Avg] {
+            assert_op_not_allowed(run(UsageKind::Counter, op).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_pairs_dispatch_to_plugin() {
+        // COUNT on both kinds; SUM on counter; MIN/MAX/AVG on gauge → dispatched.
+        for (kind, op) in [
+            (UsageKind::Counter, AggregationOp::Sum),
+            (UsageKind::Counter, AggregationOp::Count),
+            (UsageKind::Gauge, AggregationOp::Count),
+            (UsageKind::Gauge, AggregationOp::Min),
+            (UsageKind::Gauge, AggregationOp::Max),
+            (UsageKind::Gauge, AggregationOp::Avg),
+        ] {
+            run(kind, op)
+                .await
+                .unwrap_or_else(|e| panic!("({kind:?}, {op:?}) MUST dispatch, got {e:?}"));
+        }
+    }
+
+    // Build an `AggregationResult` with exactly `n` empty-key buckets. Mirrors
+    // what the plugin's `LIMIT MAX_AGGREGATION_BUCKETS + 1` produces on an
+    // over-cardinality `group_by`.
+    fn result_with_buckets(n: usize) -> AggregationResult {
+        AggregationResult {
+            buckets: (0..n)
+                .map(|_| AggregationBucket {
+                    key: Vec::new(),
+                    value: None,
+                })
+                .collect(),
+        }
+    }
+
+    async fn run_with_buckets(
+        n: usize,
+        suffix: &str,
+    ) -> Result<AggregationResult, UsageCollectorError> {
+        let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type(usage_type(UsageKind::Counter));
+        plugin.set_query_aggregated_usage_records_response(result_with_buckets(n));
+        let service = service_with_plugin(&plugin, suffix);
+        service
+            .query_aggregated_usage_records(
+                &authenticated_ctx(),
+                gts_id(),
+                &bounded_window(),
+                &[],
+                spec(AggregationOp::Count),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn over_cap_bucket_count_is_rejected() {
+        // One bucket over the cap — exactly what the plugin's `LIMIT cap + 1`
+        // yields on overflow — must lift to a client-fixable 400, not a page.
+        match run_with_buckets(
+            MAX_AGGREGATION_BUCKETS + 1,
+            "test.aggregate.overcap.guard.v1",
+        )
+        .await
+        {
+            Err(UsageCollectorError::InvalidArgument { reason, .. }) => {
+                assert_eq!(reason, ValidationReason::AggregationResultTooLarge);
+            }
+            other => panic!("expected AGGREGATION_RESULT_TOO_LARGE 400, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn at_cap_bucket_count_is_allowed() {
+        // Exactly at the cap is the boundary — `>` must not reject it.
+        let result = run_with_buckets(MAX_AGGREGATION_BUCKETS, "test.aggregate.atcap.guard.v1")
+            .await
+            .expect("a result exactly at the cap must be returned");
+        assert_eq!(result.buckets.len(), MAX_AGGREGATION_BUCKETS);
+    }
+
+    #[tokio::test]
+    async fn unregistered_gts_id_is_not_found_before_dispatch() {
+        let plugin = HappyPathPlugin::new();
+        plugin.set_get_usage_type_not_found(gts_id());
+        let service = service_with_plugin(&plugin, "test.aggregate.notfound.guard.v1");
+        let result = service
+            .query_aggregated_usage_records(
+                &authenticated_ctx(),
+                gts_id(),
+                &bounded_window(),
+                &[],
+                spec(AggregationOp::Sum),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(UsageCollectorError::NotFound { .. })),
+            "unregistered gts_id MUST surface as a pre-dispatch 404, got {result:?}",
         );
     }
 }

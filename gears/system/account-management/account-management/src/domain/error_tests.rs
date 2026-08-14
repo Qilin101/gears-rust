@@ -10,6 +10,7 @@
 //! envelope (category, status, resource type, context tokens).
 
 use std::time::Duration;
+use toolkit_gts::gts_id;
 
 use account_management_sdk::error::AccountManagementError;
 use toolkit_canonical_errors::CanonicalError;
@@ -224,7 +225,7 @@ fn metadata_entry_not_found_carries_chained_type_id() {
     // the metadata resource type.
     let ame = project(DomainError::MetadataEntryNotFound {
         detail: "schema billing.v1 missing".into(),
-        entry: "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~".into(),
+        entry: gts_id!("cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~").into(),
     });
     let AccountManagementError::NotFound {
         resource_type,
@@ -236,7 +237,7 @@ fn metadata_entry_not_found_carries_chained_type_id() {
     };
     assert_eq!(
         name,
-        "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~"
+        gts_id!("cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~")
     );
     assert_eq!(
         resource_type,
@@ -291,7 +292,7 @@ fn service_unavailable_without_hint_omits_retry_after() {
 // by service-layer tests to pin the variant→code/status contract without
 // going through `AccountManagementError::from(...)` on every assertion.
 // Production callers MUST go through [`crate::infra::sdk_error_mapping`];
-// this impl block lives in the companion test file (per dylint `DE1101`) so
+// this impl block lives in the companion test file (per `cargo gears lint` rule `DE1101`) so
 // the production [`DomainError`] surface stays free of test-only items.
 
 impl DomainError {
@@ -315,6 +316,9 @@ impl DomainError {
             Self::MetadataEntryNotFound { .. } => "metadata_entry_not_found",
             Self::MetadataVersionMismatch { .. } => "metadata_version_mismatch",
             Self::AlreadyExists { .. } => "already_exists",
+            Self::UserAlreadyExists { .. } => "user_already_exists",
+            Self::IdpPasswordPolicy { .. } => "idp_password_policy",
+            Self::IdpFieldNotWritable { .. } => "idp_field_not_writable",
             Self::Aborted { .. } => "aborted",
             Self::TypeNotAllowed { .. } => "type_not_allowed",
             Self::TenantDepthExceeded { .. } => "tenant_depth_exceeded",
@@ -364,12 +368,15 @@ impl DomainError {
             | Self::PendingExists { .. }
             | Self::AlreadyResolved
             | Self::Conflict { .. }
+            | Self::IdpPasswordPolicy { .. }
+            | Self::IdpFieldNotWritable { .. }
             | Self::FeatureDisabled { .. } => 400,
             Self::NotFound { .. }
             | Self::UserNotFound { .. }
             | Self::ConversionRequestNotFound { .. }
             | Self::MetadataEntryNotFound { .. } => 404,
             Self::AlreadyExists { .. }
+            | Self::UserAlreadyExists { .. }
             | Self::Aborted { .. }
             | Self::MetadataVersionMismatch { .. } => 409,
             Self::CrossTenantDenied { .. } => 403,

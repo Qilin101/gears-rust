@@ -338,6 +338,15 @@ gears:
           parent_id: "00000000-0000-0000-0000-000000000005"
           status: active
 
+  credstore:
+    database:
+      server: "sqlite_users"
+      file: "credstore.db"
+    config:
+      # Gateway selects its value-store backend plugin by GTS vendor;
+      # must match static-credstore-plugin (default "constructorfabric").
+      vendor: "constructorfabric"
+
   static-credstore-plugin:
     config:
       secrets:
@@ -356,6 +365,10 @@ gears:
     config:
       sidecar_base_url: "http://localhost:8099"
       storage_root: "./.file-storage-data"
+      signing_key_seed: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      # Quickstart exercises the production default: sweep the orphan/expired
+      # backlog in the background.
+      enable_background_sweep: true
 
   # File parser gear configuration (no database needed)
   file-parser:

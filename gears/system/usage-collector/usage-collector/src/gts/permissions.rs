@@ -28,7 +28,7 @@ use crate::domain::authz::{usage_record, usage_type};
 
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_create.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_create.v1"),
         resource_type: USAGE_TYPE_RESOURCE.to_owned(),
         action: usage_type::actions::CREATE.to_owned(),
         display_name: "Create usage type".to_owned(),
@@ -36,7 +36,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_get.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_get.v1"),
         resource_type: USAGE_TYPE_RESOURCE.to_owned(),
         action: usage_type::actions::GET.to_owned(),
         display_name: "Get usage type".to_owned(),
@@ -44,7 +44,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_list.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_list.v1"),
         resource_type: USAGE_TYPE_RESOURCE.to_owned(),
         action: usage_type::actions::LIST.to_owned(),
         display_name: "List usage types".to_owned(),
@@ -52,7 +52,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_delete.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_delete.v1"),
         resource_type: USAGE_TYPE_RESOURCE.to_owned(),
         action: usage_type::actions::DELETE.to_owned(),
         display_name: "Delete usage type".to_owned(),
@@ -63,7 +63,7 @@ gts_instance! {
 
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_create.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_create.v1"),
         resource_type: USAGE_RECORD_RESOURCE.to_owned(),
         action: usage_record::actions::CREATE.to_owned(),
         display_name: "Create usage record".to_owned(),
@@ -71,7 +71,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_get.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_get.v1"),
         resource_type: USAGE_RECORD_RESOURCE.to_owned(),
         action: usage_record::actions::GET.to_owned(),
         display_name: "Get usage record".to_owned(),
@@ -79,7 +79,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_list.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_list.v1"),
         resource_type: USAGE_RECORD_RESOURCE.to_owned(),
         action: usage_record::actions::LIST.to_owned(),
         display_name: "List usage records".to_owned(),
@@ -87,7 +87,7 @@ gts_instance! {
 }
 gts_instance! {
     AuthzPermissionV1 {
-        id: "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_deactivate.v1",
+        id: gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_deactivate.v1"),
         resource_type: USAGE_RECORD_RESOURCE.to_owned(),
         action: usage_record::actions::DEACTIVATE.to_owned(),
         display_name: "Deactivate usage record".to_owned(),
@@ -96,35 +96,47 @@ gts_instance! {
 
 #[cfg(test)]
 mod tests {
-    use toolkit_gts::InventoryInstance;
+    use toolkit_gts::{GtsId, InventoryInstance, gts_id};
 
-    const PERMISSION_TYPE_ID: &str = "gts.cf.toolkit.authz.permission.v1~";
-    /// Usage-collector's instance-id namespace segment, appended after
-    /// [`PERMISSION_TYPE_ID`]. Kept as a bare fragment (not a `gts.`-prefixed
-    /// literal) so it is composed with the valid type id at the filter site
-    /// rather than spelled as a malformed standalone GTS string.
-    const UC_INSTANCE_NS: &str = "cf.core.uc.";
+    const PERMISSION_TYPE_ID: &str = gts_id!("cf.toolkit.authz.permission.v1~");
+    /// Usage-collector instance-segment coordinates (`cf.core.uc`) — the
+    /// vendor / package / namespace every UC permission instance's concrete
+    /// segment carries. Matched structurally against the parsed GTS segment
+    /// (not by raw-string prefix), so a lookalike namespace cannot slip through.
+    const UC_VENDOR: &str = "cf";
+    const UC_PACKAGE: &str = "core";
+    const UC_NAMESPACE: &str = "uc";
 
     /// One per `(resource_type, action)` the usage-collector REST/PEP surface
     /// enforces.
     const EXPECTED_PERMISSION_IDS: &[&str] = &[
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_create.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_get.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_list.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_delete.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_create.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_get.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_list.v1",
-        "gts.cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_deactivate.v1",
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_create.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_get.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_list.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_type_delete.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_create.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_get.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_list.v1"),
+        gts_id!("cf.toolkit.authz.permission.v1~cf.core.uc.usage_record_deactivate.v1"),
     ];
 
     fn uc_permission_instances() -> Vec<&'static InventoryInstance> {
         inventory::iter::<InventoryInstance>
             .into_iter()
             .filter(|e| {
-                e.instance_id
-                    .strip_prefix(PERMISSION_TYPE_ID)
-                    .is_some_and(|seg| seg.starts_with(UC_INSTANCE_NS))
+                // Parse the instance id through the GTS grammar rather than
+                // slicing the raw string: select concrete permission instances
+                // (type id == `PERMISSION_TYPE_ID`) whose derivation segment
+                // sits in the usage-collector namespace.
+                let Ok(parsed) = GtsId::try_new(e.instance_id) else {
+                    return false;
+                };
+                parsed.get_type_id().as_deref() == Some(PERMISSION_TYPE_ID)
+                    && parsed.segments().last().is_some_and(|seg| {
+                        seg.vendor() == UC_VENDOR
+                            && seg.package() == UC_PACKAGE
+                            && seg.namespace() == UC_NAMESPACE
+                    })
             })
             .collect()
     }

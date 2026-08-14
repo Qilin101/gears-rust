@@ -1,9 +1,12 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 extern crate self as toolkit_canonical_errors;
 
 pub mod builder;
 pub mod context;
 pub mod error;
 pub mod problem;
+pub mod transport;
 
 pub use builder::{ResourceErrorBuilder, ServiceUnavailableBuilder};
 pub use context::{
@@ -16,5 +19,12 @@ pub use context::{
     Unauthenticated, UnauthenticatedV1, Unimplemented, UnimplementedV1, Unknown, UnknownV1,
 };
 pub use error::CanonicalError;
-pub use problem::{Problem, ProblemConversionError};
+pub use problem::{Problem, ProblemCategory, ProblemConversionError};
 pub use toolkit_canonical_errors_macro::resource_error;
+pub use transport::{Http, TransportOverride};
+// Re-export the `gts_id!` helper so consumers using `#[resource_error(...)]`
+// can write `#[resource_error(gts_id!("cf.core.users.user.v1~"))]` without
+// adding a separate `gts-macros` dependency. The macro expands at compile
+// time to a `&'static str` literal with the configured GTS ID prefix
+// prepended (overridable via `GTS_ID_PREFIX`).
+pub use toolkit_gts::gts_id;
