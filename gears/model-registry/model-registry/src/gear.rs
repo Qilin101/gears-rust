@@ -1,15 +1,14 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
 use axum::Router;
+use tenant_resolver_sdk::TenantResolverClient;
 use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx};
 use toolkit_db::DBProvider;
 use toolkit_db::DbError;
 use tracing::info;
-
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
-use tenant_resolver_sdk::TenantResolverClient;
 
 use model_registry_sdk::ModelRegistryClientV1;
 
@@ -26,7 +25,7 @@ type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMe
 
 #[toolkit::gear(
     name = "model-registry",
-    deps = ["tenant-resolver", "authz-resolver"],
+    deps = [authz_resolver, tenant_resolver],
     capabilities = [rest, db]
 )]
 pub struct ModelRegistryGear {

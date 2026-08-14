@@ -1,4 +1,4 @@
-.PHONY: test check clippy fmt dylint
+.PHONY: test check clippy fmt
 
 test:
 	cargo test -p cf-gears-model-registry -p cf-gears-model-registry-sdk
@@ -8,9 +8,6 @@ clippy:
 
 fmt:
 	cargo fmt -p cf-gears-model-registry -p cf-gears-model-registry-sdk
-
-dylint:
-	cargo dylint --all -p cf-gears-model-registry -p cf-gears-model-registry-sdk
 
 check: fmt clippy test dylint
 

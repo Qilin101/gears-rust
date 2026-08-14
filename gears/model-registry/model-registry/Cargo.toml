@@ -27,6 +27,8 @@ model-registry-sdk = { package = "cf-gears-model-registry-sdk", version = "0.1.0
 # System SDKs
 tenant-resolver-sdk = { workspace = true }
 authz-resolver-sdk = { workspace = true }
+authz-resolver = { workspace = true }
+tenant-resolver = { workspace = true }
 
 # Toolkit framework
 toolkit = { workspace = true }
