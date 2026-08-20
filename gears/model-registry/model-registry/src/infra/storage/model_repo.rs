@@ -83,7 +83,7 @@ impl ModelRepository for ModelRepositoryImpl {
         // Mandatory predicates: allow-list membership + unconditional lifecycle
         // exclusion (DESIGN §3.3). The OData `$filter` is ANDed on top; even
         // a `$filter=lifecycle_status eq 'deprecated'` cannot escape the eval
-        // lifecycle exclusion — the escape hatch (B4) is removed here.
+        // lifecycle exclusion.
         if let ListVisibility::Eval { allow_list } = visibility {
             base = base.filter(
                 Condition::all()
@@ -1212,7 +1212,7 @@ mod tests {
     }
 
     // =======================================================================
-    // ListVisibility — Eval lifecycle escape hatch removed (B4)
+    // ListVisibility — Eval lifecycle exclusion is unconditional
     // =======================================================================
 
     #[tokio::test]
@@ -1256,8 +1256,7 @@ mod tests {
             .expect("soft delete");
 
         // Eval with $filter=lifecycle_status eq 'deprecated' — should return
-        // empty because the eval path unconditionally excludes deprecated/sunset
-        // and the escape hatch (B4) has been removed.
+        // empty because the eval path unconditionally excludes deprecated/sunset.
         let parsed = toolkit_odata::parse_filter_string("lifecycle_status eq 'deprecated'")
             .expect("parse filter");
         let query = ODataQuery {

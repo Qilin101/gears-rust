@@ -272,7 +272,7 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // SlugOwnership — cache entity with tombstones (Task 6)
+    // SlugOwnership — cache entity with tombstones
     // ═════════════════════════════════════════════════════════════════════════
 
     fn make_test_provider(tenant_id: Uuid) -> crate::ProviderV1 {

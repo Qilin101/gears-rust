@@ -8,11 +8,11 @@ use toolkit_db::odata::sea_orm_filter::LimitCfg;
 pub struct ModelRegistryConfig {
     /// TTL in seconds for every cache entry (default: 600 = 10 min).
     ///
-    /// One value for own and inherited data alike: keys are prefixed by the
-    /// owning tenant, so a single entry is shared by that tenant and its whole
-    /// subtree. Within a process every write drops the owning tenant's prefix
-    /// for owner and descendants alike, so the TTL only backstops cross-replica
-    /// and out-of-band changes — symmetric for both.
+    /// One value for every entry: keys are prefixed by the owning tenant, so a
+    /// single entry is shared by that tenant and its whole subtree and cannot
+    /// carry two expiries. Within a process every write drops the owning
+    /// tenant's prefix, reaching owner and descendants alike, so the TTL only
+    /// backstops cross-replica and out-of-band changes.
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_seconds: u64,
 
@@ -140,11 +140,10 @@ mod tests {
         assert_eq!(config.max_page_size, 50);
     }
 
-    /// The retired `own_ttl_seconds` / `inherited_ttl_seconds` keys are not
-    /// aliased: serde ignores unknown fields, so a config still carrying them
-    /// silently falls back to the default rather than failing to start.
+    /// Unknown keys are ignored rather than rejected: serde skips them, so a
+    /// config carrying stale TTL keys starts on the default rather than failing.
     #[test]
-    fn test_retired_ttl_keys_are_ignored() {
+    fn test_unknown_ttl_keys_are_ignored() {
         let json = r#"{"own_ttl_seconds": 1800, "inherited_ttl_seconds": 300}"#;
         let config: ModelRegistryConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.cache_ttl_seconds, 600);

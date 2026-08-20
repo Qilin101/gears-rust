@@ -820,7 +820,7 @@ async fn child_shadows_parent_by_same_canonical_id() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4b. G3: Child shadows slug but has NO colliding model — ancestor's model must
+// 4b. Child shadows slug but has NO colliding model — ancestor's model must
 //     be invisible from the eval listing (headline shadowing bug fix)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -837,7 +837,7 @@ async fn child_shadows_slug_no_colliding_model_hides_ancestor_model() {
     create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
 
     // Create ONLY a provider in the child tenant with the SAME slug "openai",
-    // but NO model. This is the G3 scenario: the child shadows the slug but
+    // but NO model: the child shadows the slug but
     // has no colliding model.
     create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
 
@@ -859,7 +859,7 @@ async fn child_shadows_slug_no_colliding_model_hides_ancestor_model() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4c. Disabled provider hides models from the eval listing (G4)
+// 4c. Disabled provider hides models from the eval listing
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1568,7 +1568,7 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 7. Shadowed provider: child shadows parent's slug, cached ancestor model
-//    must NOT be served (Task 7 - C1's headline case)
+//    must NOT be served
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1632,7 +1632,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 8. Provider create drops slug tombstone (Task 7 - G5, deferred from Task 6)
+// 8. Provider create drops slug tombstone
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -1678,7 +1678,7 @@ async fn create_provider_drops_slug_tombstone() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 9. Disabled winning provider (Task 7 - G4, gate-ordering disclosure rule)
+// 9. Disabled winning provider (gate-ordering disclosure rule)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]

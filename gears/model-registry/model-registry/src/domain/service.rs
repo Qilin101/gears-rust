@@ -4,7 +4,7 @@
 //! persistence for providers and models. Generic over the two repository
 //! traits and the cache backend so unit tests can inject mocks.
 //!
-//! ## Provider operations (Task 11)
+//! ## Provider operations
 //!
 //! All five provider CRUD methods with:
 //! - Authz via [`PolicyEnforcer`]
@@ -172,8 +172,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// Get a provider by ID with cache-first lookup and inheritance resolution.
     ///
     /// Searches the own tenant first (cache then DB), then falls back to each
-    /// ancestor tenant. The closest match wins (child shadows parent). Results
-    /// are cached with TTL appropriate to the ownership classification.
+    /// ancestor tenant. The closest match wins (child shadows parent). The row
+    /// is cached under the tenant that owns it, for `cache_ttl_seconds`.
     pub async fn get_provider(
         &self,
         ctx: &SecurityContext,
@@ -246,7 +246,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let own_page = self.provider_repo.list(&conn, &own_scope, query).await?;
 
         // 4. Merge the inherited set, shadowing ancestor providers by slug.
-        //    Fail closed on ancestor query errors (B5): skipping an ancestor
+        //    Fail closed on ancestor query errors: skipping an ancestor
         //    provider row would un-shadow an ancestor and widen the caller's view.
         let conn = &conn;
         merge_inherited_page(
@@ -396,7 +396,7 @@ impl<R, M, C> Service<R, M, C> {
     }
 }
 
-// ── Model read operations (Task 12) ────────────────────────────────────
+// ── Model read operations ──────────────────────────────────────────────
 
 impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C> {
     /// Resolve a single `(tenant_id, slug)` hop, cache-first with tombstones.
@@ -406,9 +406,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// - `Ok(SlugOwnership::None)` when the tenant has no provider with this slug
     ///   (a tombstone from a prior DB miss, so the caller skips a round-trip)
     /// - `Err(e)` on any non-not-found query error (fail-closed — a skipped
-    ///   ancestor hop would un-shadow an earlier ancestor, B5)
+    ///   ancestor hop would un-shadow an earlier ancestor)
     ///
-    /// Both polarities take the same TTL.
+    /// Both polarities take `cache_ttl_seconds`.
     async fn resolve_slug_ownership(
         &self,
         conn: &impl toolkit_db::secure::DBRunner,
@@ -453,11 +453,11 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// Approval is **reported, not enforced** — `ModelNotApproved` stays
     /// unreachable from this path.
     ///
-    /// A malformed `canonical_id` (no `::` separator) yields `ModelNotFound` (C5).
-    /// An unresolved slug yields `ProviderNotFoundBySlug` (C3).
+    /// A malformed `canonical_id` (no `::` separator) yields `ModelNotFound`.
+    /// An unresolved slug yields `ProviderNotFoundBySlug`.
     ///
     /// Slug resolution is **fail-closed**: any non-not-found query error at any
-    /// chain hop propagates as `Internal` (B5).
+    /// chain hop propagates as `Internal`.
     pub async fn get_tenant_model(
         &self,
         ctx: &SecurityContext,
@@ -471,14 +471,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         // 2. Resolve ancestor chain
         let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
 
-        // 3. Split canonical_id on the first `::` to get slug and model id (C5).
+        // 3. Split canonical_id on the first `::` to get slug and model id.
         let slug = canonical_id.split_once("::").map(|(s, _)| s);
         let Some(slug) = slug else {
             return Err(DomainError::model_not_found(canonical_id));
         };
 
-        // 4. Resolve the slug closest-first via the Task 6 cache-first helper.
-        //    Stop at the first owner. Fail-closed on non-not-found errors (B5).
+        // 4. Resolve the slug closest-first via the cache-first helper.
+        //    Stop at the first owner. Fail-closed on non-not-found errors.
         let conn = self.db.conn().map_err(DomainError::from)?;
         let conn = &conn;
 
@@ -497,7 +497,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 }
                 Err(e) => {
                     // Fail-closed: a skipped ancestor provider query would
-                    // un-shadow an earlier ancestor (B5).
+                    // un-shadow an earlier ancestor.
                     return Err(e);
                 }
             }
@@ -510,7 +510,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             return Err(DomainError::provider_not_found_by_slug(slug));
         };
 
-        // 5. Scope the model read (C1):
+        // 5. Scope the model read:
         //    - Winner is own tenant → use the PDP-derived own_scope (preserves
         //      compiled constraints).
         //    - Winner is an ancestor → construct a scoped scope.
@@ -581,9 +581,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     ///
     /// The eval path builds `ChainProviders(T0)` and queries each chain tenant
     /// with `ListVisibility::Eval`, passing only the winning active provider ids
-    /// for that tenant. Ancestors whose allow-list slice is empty are skipped
-    /// (B3). The `canonical_id` dedupe in `merge_inherited_page` is kept as a
-    /// redundant safety net (B1).
+    /// for that tenant. Ancestors whose allow-list slice is empty are skipped.
+    /// The `canonical_id` dedupe in `merge_inherited_page` is kept as a
+    /// redundant safety net.
     pub async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
@@ -601,7 +601,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
-        //    query error (B5). A skipped ancestor would un-shadow an earlier one.
+        //    query error. A skipped ancestor would un-shadow an earlier one.
         let conn = &conn;
         let chain = build_chain_providers(&inheritance, |scope| async move {
             self.provider_repo.list_all_for_tenant(conn, &scope).await
@@ -609,7 +609,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         .await?;
 
         // 4. Get own-tenant models with ListVisibility::Eval.
-        //    Skip own tenant when its allow-list slice is empty (B3) —
+        //    Skip own tenant when its allow-list slice is empty —
         //    synthesize an empty page rather than querying with an empty list.
         let own_slice = chain.allow_slice_for(inheritance.tenant_id());
         let own_page = if own_slice.is_empty() {
@@ -1849,7 +1849,7 @@ mod tests {
             .expect("empty allow-list must not error");
 
         // The child shadows "openai" (no `register_provider` for that
-        // slug) so the ancestor model is hidden by G3, and the child has
+        // slug) so the ancestor model is hidden, and the child has
         // no own model — the result is empty.
         assert!(
             page.items.is_empty(),
@@ -2056,7 +2056,7 @@ mod tests {
 
         // Create a real provider so the slug resolution succeeds and the model
         // can be found in cache. The cached model's provider_id must match the
-        // winner to reach the lifecycle gate (C2).
+        // winner to reach the lifecycle gate.
         let provider_repo = ProviderRepositoryImpl::default();
         let scope = scope_for(tenant_id);
         let (provider_id, _slug) =
@@ -2191,7 +2191,7 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // get_tenant_model — inherited model visible with shorter TTL
+    // get_tenant_model — inherited model visible through the chain
     // ═════════════════════════════════════════════════════════════════════════
 
     #[tokio::test]
@@ -3011,12 +3011,12 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // get_tenant_model — slug resolution gates (Task 7)
+    // get_tenant_model — slug resolution gates
     // ═════════════════════════════════════════════════════════════════════════
 
     #[tokio::test]
     async fn test_get_tenant_model_malformed_canonical_id() {
-        // A canonical_id without `::` should yield ModelNotFound (C5).
+        // A canonical_id without `::` should yield ModelNotFound.
         let db = setup_db().await;
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -3039,7 +3039,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_tenant_model_stale_cache_provider_id_mismatch() {
         // A stale cached row whose provider_id no longer matches the winning
-        // provider should yield ModelNotFound (C2), not the row.
+        // provider should yield ModelNotFound, not the row.
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -3097,7 +3097,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_tenant_model_disabled_winner_provider() {
-        // A winning provider that is disabled should yield ProviderDisabled (C4).
+        // A winning provider that is disabled should yield ProviderDisabled.
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -3153,7 +3153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_tenant_model_gate_order_lifecycle_before_provider_status() {
-        // Gate order (C4): terminal lifecycle check comes before provider
+        // Gate order: terminal lifecycle check comes before provider
         // status check. A deprecated model on a disabled provider should yield
         // ModelDeprecated, not ProviderDisabled.
         let db = setup_db().await;
@@ -3222,7 +3222,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_tenant_model_unresolved_slug() {
-        // When no tenant in the chain owns the slug, return ProviderNotFoundBySlug (C3).
+        // When no tenant in the chain owns the slug, return ProviderNotFoundBySlug.
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -3355,7 +3355,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_tenant_model_fail_closed_on_slug_query_error() {
-        // A non-not-found error during slug resolution must propagate (B5).
+        // A non-not-found error during slug resolution must propagate.
         use std::sync::atomic::AtomicUsize;
 
         #[domain_model]

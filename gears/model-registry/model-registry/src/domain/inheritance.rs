@@ -31,9 +31,9 @@ use model_registry_sdk::models::ProviderStatus;
 /// Classification of a resource's ownership relative to the requesting tenant.
 ///
 /// Carried by [`InheritanceContext::apply_additive_visibility`] so callers can
-/// tell an own row from an inherited one. Cache TTL does **not** depend on it —
-/// one entry is shared by the owning tenant and its whole subtree, so a single
-/// TTL governs all readers (`ModelRegistryConfig::cache_ttl_seconds`).
+/// tell an own row from an inherited one. It drives visibility merging only:
+/// every entry expires after `ModelRegistryConfig::cache_ttl_seconds`, since one
+/// entry is shared by the owning tenant and its whole subtree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[domain_model]
 pub enum Ownership {
@@ -134,7 +134,7 @@ impl ChainProviders {
 /// `list_all` is invoked once per chain tenant (closest first), each call
 /// returning that tenant's **complete** provider set. Any query error fails
 /// the whole construction closed — a skipped ancestor provider query would
-/// silently un-shadow an ancestor (B5).
+/// silently un-shadow an ancestor.
 ///
 /// The winner is the closest chain tenant owning a given slug — ownership
 /// only, status is not a factor.
@@ -392,7 +392,7 @@ where
 /// The two modes reflect an intentional asymmetry (DESIGN §3.5 sub-decision 4):
 /// dropping ancestor **model** rows only narrows what the caller sees, while
 /// skipping an ancestor **provider** row widens visibility by silently
-/// un-shadowing an earlier ancestor (B5).
+/// un-shadowing an earlier ancestor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[domain_model]
 pub enum AncestorFailure {
