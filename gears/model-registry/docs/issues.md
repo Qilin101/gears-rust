@@ -71,18 +71,27 @@ commit** — everything below is a documentation-only comparison; `[x]` items ar
 
 ## High — internal contradictions in the design
 
-11. [ ] **"TTL by ownership" is not well-defined.** Unchanged. DESIGN.md:821 still writes an
-    inherited row under `mr:{ancestor}:model:{id}` — the key has no reader component, so the same
-    key gets 30-minute TTL when the owner reads it and 5-minute TTL when a descendant does; last
-    writer wins (DESIGN.md:168, :738-739).
+11. [x] **"TTL by ownership" is not well-defined.** Resolved by collapsing to one TTL. The PRD no
+    longer states any TTL numbers (single configurable TTL only, PRD §7 `fr-cache-isolation`), and
+    DESIGN now applies one `cache_ttl_seconds` (default 10 min) to every entry — the last
+    "TTL by ownership" / "ownership TTL" / "inherited-data TTL" phrasings are gone from the driver
+    row, the NFR allocation table, the `get_tenant_model` diagram and prose, §4 Cache Invalidation
+    item 3, and the Technical Debt entries. `Ownership` still classifies rows for visibility
+    merging; it no longer selects a TTL (§2.1 records why the split was rejected).
 12. [ ] **Same key scheme falsifies the descendant-invalidation claim.** Unchanged. DESIGN.md:889,
     :1372 (item 5), and the capacity/consistency notes still assert descendants are not invalidated
     on a parent write and converge only via TTL — but inherited entries live under the writer's own
     prefix, so `invalidate_tenant(parent)` does drop them.
-13. [ ] **`mr:{tenant}:models:*` doesn't exist.** Unchanged. DESIGN.md:170 states there are exactly
-    two cache entities and "list responses are not cached" — yet DESIGN.md:885, :1012, :1043
-    invalidate `mr:{tenant}:models:*`, and §4 items reference "model-list keys" (DESIGN.md:1372,
-    :1374).
+13. [x] **`mr:{tenant}:models:*` doesn't exist.** Resolved in favour of no list caching. §2.1 now
+    says *why* list responses are uncached — a list result is a function of the caller's
+    PDP-derived `AccessScope`, not of the reader tenant alone, so a tenant-keyed page could serve
+    one caller's visibility to another. Every reference to the phantom entity is gone: the three
+    sequence diagrams (discovery, approval, tag assignment) now show
+    `invalidate_tenant(owner) - drops mr:{owner}:*`, and the §4 invalidation items no longer
+    mention "model-list keys" (approval invalidates the owner prefix; tag writes invalidate
+    nothing, since tags are not carried on `ModelV1`). The NFR row records that list reads meet
+    their target through indexes and the per-ancestor query path, and §4 Technical Debt carries
+    the deferral plus what would unlock it.
 14. [ ] **"B-tree index on every filterable column" is false.** Unchanged, and now has one more
     exception. `models.managed` is still unindexed (DESIGN.md:1222 lists thirteen indexes for the
     fourteen non-identity shadow columns). On `providers`, only PK + `(tenant_id, slug)` exist
@@ -203,9 +212,12 @@ commit** — everything below is a documentation-only comparison; `[x]` items ar
     per-backend dispatch note added.
 37. [ ] `model_tags.model_id` FK `ON DELETE CASCADE` "so hard-deleting a model removes its
     assignments" (DESIGN.md:1313) — still no hard-delete path for models in any phase.
-38. [ ] Cache participant still named `Redis` in three sequence diagrams (DESIGN.md:859, :1033,
-    :1074) while §2.1/§3.2 (DESIGN.md:727) insist P1 opens no Redis connection; the other diagrams
-    use `CacheService` (DESIGN.md:795, :981, :1005).
+38. [x] Cache participant named `Redis` in three sequence diagrams. Resolved: all three now use
+    `participant Cache as CacheService`, matching the other diagrams. The wider Redis framing went
+    with it — DESIGN and ADR-0001 now state that P1 implements only the local in-process
+    `InMemoryCache` and that adopting any distributed backend (technology included) is an open
+    question; the `##### Redis (Distributed Cache)` external interface became
+    `##### Cache (in-process in P1 …)` / `cpt-cf-model-registry-interface-cache`.
 39. [ ] `BOOLEAN … DEFAULT 0` on `models` (DESIGN.md:1205, :1211-1214) vs `DEFAULT false` on
     `providers` (DESIGN.md:1124, :1126) and on the new `models.provider_disabled` (DESIGN.md:1232)
     — same rendering, still inconsistent style within the same table.

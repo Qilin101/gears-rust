@@ -437,17 +437,13 @@ The system must validate all input data.
 
 The system must isolate cached data by tenant.
 
-Cache keys MUST include tenant_id as prefix.
+Every cached entry MUST be scoped to exactly one tenant: data cached for one tenant must never be served to another.
 
-Format: `mr:{tenant_id}:{entity}:{id}`
-
-**TTL strategy**:
-- Own data (tenant created): TTL 30 min
-- Inherited data (from parent): TTL 5 min
+**Freshness**: Cached data MUST expire after a configurable TTL.
 
 **Cache invalidation on tenant re-parenting**: On `tenant.reparented` event, invalidate ALL cache entries for that tenant.
 
-**Cache unavailable**: Fallback to direct DB queries (latency SLOs may be violated). Cache backend is pluggable (default: Redis).
+**Cache unavailable**: Fallback to direct DB queries (latency SLOs may be violated). The cache backend is pluggable.
 
 #### Get Tenant Model
 
@@ -796,7 +792,7 @@ The system must support assigning and removing tags on models, and filtering mod
 
 The system must define tiered behavior when database is unavailable.
 
-- Model capabilities and metadata: serve from stale cache (up to 30 min TTL)
+- Model capabilities and metadata: serve from stale cache (up to the configured TTL)
 - Approval verification: fail request with `service_unavailable` error
 
 P1 and P2 behavior: DB unavailable = all requests fail (fail-closed). The tiered degraded mode above replaces fail-closed starting in P3.
@@ -871,9 +867,7 @@ Read operations are not audited (high volume, low value).
 | `approve_model` | - | 100ms |
 | Discovery job (per provider) | - | 30s |
 
-Caching: Distributed cache (default: Redis, pluggable) with TTL-based invalidation.
-- Own data: 30 min TTL
-- Inherited data: 5 min TTL
+Caching: Reads are served from cache with a configurable TTL plus event-driven invalidation. The cache backend is pluggable.
 
 ### Availability
 
@@ -939,9 +933,9 @@ Error responses follow RFC 9457 Problem Details standard.
 
 | Threat | Mitigation |
 |--------|------------|
-| Tenant data leakage | Tenant ID prefix in all cache keys; query filters enforce tenant scope |
+| Tenant data leakage | Cache entries scoped per tenant; query filters enforce tenant scope |
 | Unauthorized approval | Role-based authorization checks on all admin operations |
-| Cache poisoning | TTL-based expiry; no user-controlled cache keys |
+| Cache poisoning | TTL-based expiry; cached entries are never keyed by user-controlled input |
 | Provider credential exposure | Credentials handled by OAGW, not stored in Model Registry |
 | Privilege escalation via hierarchy | Child tenants can only restrict, not expand parent permissions |
 | Stale approval served | Approval status always verified from DB (P1 & P2 fail-closed) |
@@ -1068,7 +1062,7 @@ Key interfaces:
 1. Tenant admin reviews pending models via Approval Service (or Model Registry API proxying to Approval Service)
 2. Admin approves or rejects via Approval Service
 3. Approval Service updates status and emits event
-4. Model Registry receives event and updates local cache
+4. Model Registry invalidates cached approval state for the model
 
 **Postconditions**: Model approval status updated in Approval Service.
 
@@ -1090,7 +1084,7 @@ Key interfaces:
 1. Tenant admin selects approved model
 2. Admin initiates revocation via Approval Service
 3. Approval Service updates status to `revoked` and emits event
-4. Model Registry receives event and updates local cache
+4. Model Registry invalidates cached approval state for the model
 
 **Postconditions**: Model access revoked.
 
@@ -1305,7 +1299,7 @@ Key interfaces:
 **Postconditions**: Cache invalidated, approvals re-evaluated on access.
 
 **Acceptance criteria**:
-- All cache keys with tenant prefix invalidated
+- All cache entries for the affected tenant invalidated
 - No stale inherited data served after re-parenting
 
 ### UC-016: Bulk Approve Models
@@ -1604,7 +1598,7 @@ Key interfaces:
 2. OAGW handles all provider authentication
 3. OAGW enforces outbound URL policy (blocks internal networks, requires HTTPS)
 4. Each provider plugin exposes an endpoint returning available models (implementation is plugin responsibility)
-5. Distributed cache is available (default: Redis); cache backend is pluggable for vendor customization. If cache unavailable, fallback to direct DB queries
+5. A cache is available; the cache backend is pluggable for vendor customization. If cache unavailable, fallback to direct DB queries
 6. Platform authenticates requests and provides verified tenant context
 7. Platform provides audit logging for all operations
 8. Platform provides distributed tracing, structured logging, metrics, and health endpoints
@@ -1616,7 +1610,7 @@ Key interfaces:
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Cache invalidation delay | Stale model data served (up to TTL) | TTL-based expiry (own data 30 min, inherited 5 min) |
+| Cache invalidation delay | Stale model data served (up to TTL) | TTL-based expiry plus event-driven invalidation on approval and hierarchy changes |
 | Tenant hierarchy changes | Inherited approvals may become invalid | Invalidate tenant cache on re-parenting event |
 | Provider removes model without notice | Requests fail until catalog synced | Periodic sync detection |
 | Discovery plugin produces malformed or oversized output | Catalog bloat or resource exhaustion from ingesting unbounded model-definition sets | Validate and bound the model-definition count per plugin invocation; reject plugin output that exceeds the configured threshold before any catalog writes |
@@ -1643,7 +1637,7 @@ Key interfaces:
 
 **Data migration**: To be defined per release in DESIGN.md.
 
-**Cache invalidation on deployment**: Clear all cache keys on major version deployment.
+**Cache invalidation on deployment**: Clear all cached entries on major version deployment.
 
 ## 20. Traceability
 
