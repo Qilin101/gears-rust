@@ -294,6 +294,10 @@ Represents an AI model in the catalog.
 - Hardware compatibility checks (format, architecture)
 - Dynamic model loading/unloading (managed)
 
+**Approval Status**: `pending` | `approved` | `rejected` | `revoked`. Only `approved` makes a model
+available for eval (see `cpt-cf-model-registry-fr-get-tenant-model`); the other three are equivalent
+in that respect and differ only in what they tell an operator. The flow an admin typically drives:
+
 ```mermaid
 stateDiagram-v2
     [*] --> pending: Model discovered
@@ -304,6 +308,14 @@ stateDiagram-v2
     rejected --> approved: Admin reconsiders
     revoked --> approved: Admin reinstates
 ```
+
+This diagram is **illustrative, not a normative state machine.** Model Registry does not validate
+approval-transition legality in any phase: an authorized admin may set any of the four values
+directly, in any order (`cpt-cf-model-registry-fr-manual-model-management`). Owning a transition
+state machine belongs to the Approval Service, which takes over the workflow from P2 along with
+whatever legality rules it chooses to apply (§4 Out of Scope, `cpt-cf-model-registry-adr-approval-delegation`).
+The one change the registry does refuse is structural rather than a transition rule: a model whose
+`lifecycle_status` is `deprecated` or `sunset` accepts no approval change at all.
 
 #### AutoApprovalRule (P3)
 
@@ -514,8 +526,15 @@ The system must allow admins to manually create, update, and remove model catalo
 
 **Approval status (P1)**:
 - Approval status is managed directly by the tenant admin of the model's own tenant (which always equals its provider's tenant) via the Model Registry API — no Approval Service in P1. A descendant tenant that merely inherits the model has no approval authority over it; its only lever is shadowing the model's provider (see Domain Model → Provider → Inheritance & Shadowing).
-- Admin can set status to `approved`, `rejected`, or `revoked`. Default for newly created models is `pending` (admin must explicitly approve), unless created with `status=approved` in a single call (admin convenience).
-- State transitions follow the approval state machine and are enforced by Model Registry domain logic; no workflow engine in P1.
+- Admin can set any of the four statuses, `pending` included. Default for newly created models is `pending` (admin must explicitly approve), unless created with `status=approved` in a single call (admin convenience).
+- Approval transitions are **not validated**: any of the four values may be set directly, in any
+  order, by an admin authorized for the model's tenant. P1 has no workflow engine, and transition
+  legality is not this module's concern in any phase — from P2 the Approval Service owns the
+  workflow (§4 Out of Scope). The §5 diagram shows the intended operational flow, not an enforced
+  contract.
+- The one approval change the registry refuses is structural: a model whose `lifecycle_status` is
+  `deprecated` or `sunset` accepts no approval change (`invalid_transition`), because terminal
+  lifecycle states are read-only.
 - Approval granularity in P1: tenant-level — approval grants access to all users in tenant (and, by inheritance, descendant tenants, unless shadowed).
 - A model that is not `approved` (i.e. `pending`, `rejected`, or `revoked`) is not available for eval — see `cpt-cf-model-registry-fr-get-tenant-model` / `cpt-cf-model-registry-fr-list-tenant-models`.
 
@@ -922,7 +941,7 @@ The registry MUST support adding a new provider's discovery capability without m
 | `tag_already_exists` | 409 | Tag with the same name already exists in tenant |
 | `provider_disabled` | 403 | Provider exists but is disabled — the requested operation (e.g. creating a model against it, running discovery) is refused; also returned by `get_tenant_model`/`list_tenant_models` for any model attached to a disabled provider, since disabling makes all of that provider's models unavailable for eval |
 | `provider_not_owned` | 403 | Provider exists (inherited from an ancestor tenant) but a model can only be created against a provider owned by the same tenant |
-| `invalid_transition` | 409 | Invalid approval state transition (e.g., concurrent modification) |
+| `invalid_transition` | 409 | Transition refused: a `lifecycle_status` change out of a terminal state (`deprecated` / `sunset`), or an approval change on a model already in one |
 | `validation_error` | 400 | Input validation failed |
 | `unauthorized` | 403 | Actor lacks required role for operation |
 | `service_unavailable` | 503 | Database unavailable |
@@ -1454,7 +1473,10 @@ Key interfaces:
 **Acceptance criteria**:
 - Manual creation does NOT call out to an Approval Service in P1
 - `canonical_id` is immutable after creation; rename requires delete + recreate
-- Status transitions follow the approval state machine
+- Any approval status may be set directly; the registry validates no transition order (§5, and
+  `cpt-cf-model-registry-fr-manual-model-management`)
+- An approval change on a model already in a terminal lifecycle state (`deprecated` / `sunset`) is
+  refused with `invalid_transition`
 - Soft-delete sets status to `deprecated` without purging the record; resurrection allowed by re-creating with same `canonical_id` only if previous record purged
 - Tenant admin can manage models for own providers only; platform admin can manage any, always within that provider's owning tenant
 - Creating a model against a provider owned by an ancestor tenant returns `provider_not_owned`, regardless of actor role

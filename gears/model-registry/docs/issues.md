@@ -11,13 +11,13 @@ and the whole net-new implementation backlog is closed.
 refreshed to current line numbers and the sub-items that *did* close called out.
 
 1. [x] **Per-tenant approval of an inherited model** — resolved in docs **and code**. Both docs
-   commit to `model.tenant_id == provider.tenant_id` (DESIGN.md:180, :527-537; PRD.md:99, :511).
+   commit to `model.tenant_id == provider.tenant_id` (DESIGN.md:180, :527-537; PRD.md:99, :523).
    `create_model` resolves `provider_slug` own-tenant-only and returns `ProviderNotOwned` when the
    slug resolves solely in an ancestor (`service.rs:806-841`); shadow-hides-all-models falls out of
    `allow_list` membership (`inheritance.rs:141-196`, `service.rs:604-668`).
 2. [x] **UC-009 / fr-model-pricing had no design response** — resolved. Cost shape follows the
-   provider's own structure (`OpenAiCost`/`AnthropicCost`), PRD.md:557-571 ↔ DESIGN.md:67.
-3. [x] **`base_url` dropped from Provider silently** — resolved. PRD.md:230, :549 state explicitly
+   provider's own structure (`OpenAiCost`/`AnthropicCost`), PRD.md:576-590 ↔ DESIGN.md:67.
+3. [x] **`base_url` dropped from Provider silently** — resolved. PRD.md:230, :568 state explicitly
    that there is no generic `base_url`; connection settings are GTS-typed and provider-specific.
 4. [x] **A disabled provider's models stayed fully resolvable** — resolved, and the mechanism
    changed for the better. The `models.provider_disabled` shadow column of the previous pass was
@@ -30,11 +30,11 @@ refreshed to current line numbers and the sub-items that *did* close called out.
    ownership alone and status is ANDed on separately (DESIGN.md:840), so a `disabled` shadow still
    wins its slug and the parent's models stay hidden — asserted at `inheritance.rs:1626-1631`.
 6. [x] **PRD names two interfaces (`ModelRegistryClient`/`AdminClient`), DESIGN ships one** —
-   resolved. PRD.md:956 describes one client with two method groups split by authorization.
+   resolved. PRD.md:975 describes one client with two method groups split by authorization.
 7. [x] **Approval is now enforced on the eval read paths.** Resolved 2026-08-20 in DESIGN, ADR-0002
    and code. The PRD needed no change — UC-001 already required `model_not_approved` (403)
-   (PRD.md:996), UC-002 already required "Returns only approved models, unconditionally"
-   (PRD.md:1019), and PRD.md:452 / :941 already stated the fail-closed contract. What landed:
+   (PRD.md:1015), UC-002 already required "Returns only approved models, unconditionally"
+   (PRD.md:1038), and PRD.md:464 / :960 already stated the fail-closed contract. What landed:
    - **DESIGN** replaced every "returned on the model, not enforced" statement with the gate: a
      third eval mandatory predicate `approval_status = 'approved'` (DESIGN.md:708, :734, pseudocode
      :896), a fourth ordered gate on `get_tenant_model` returning `ModelNotApproved` (403) after the
@@ -63,34 +63,47 @@ refreshed to current line numbers and the sub-items that *did* close called out.
    DESIGN exactly (`api/rest/error.rs`), so every remaining row is a PRD-vs-DESIGN divergence.
    - *Closed*: **duplicate `canonical_id`**. DESIGN.md:1577 documents the `Validation`/400 rationale
      and the PRD's general `already_exists` framing is gone — the only `*_already_exists` row left
-     is `tag_already_exists` (PRD.md:922), which is P3 and genuinely a collision.
+     is `tag_already_exists` (PRD.md:941), which is P3 and genuinely a collision.
    - `ModelDeprecated` is 404 in DESIGN (DESIGN.md:1558, rationale at :1572) vs 410 in PRD's error
-     table (PRD.md:919) and UC-001 AC (PRD.md:997).
-   - `InvalidTransition` is 400/`invalid_argument` in DESIGN (DESIGN.md:1565) vs
-     `invalid_transition`
-     409 in PRD's table (PRD.md:925).
+     table (PRD.md:938) and UC-001 AC (PRD.md:1016).
+   - `InvalidTransition` is 400/`invalid_argument` in DESIGN (DESIGN.md:1565) and in the code
+     (`api/rest/error.rs:81`) vs `invalid_transition` 409 in PRD's table (PRD.md:944). #10 corrected
+     that row's *description* — it no longer claims an approval state machine — but the status code
+     is still divergent, and here it is the PRD that disagrees with the shipped code.
    - 503 `discovery_failed` appears only in a sequence diagram (DESIGN.md:1305) and in no error
-     table; the PRD's only 503 is `service_unavailable` for DB-down (PRD.md:928).
+     table; the PRD's only 503 is `service_unavailable` for DB-down (PRD.md:947).
    - `ProviderHasModels` → `already_exists` (DESIGN.md:1564) is still semantically wrong — nothing
      already exists; it is a precondition conflict.
-   - **New**: PRD.md:923 says `provider_disabled` is "also returned by `get_tenant_model`/
+   - **New**: PRD.md:942 says `provider_disabled` is "also returned by `get_tenant_model`/
      `list_tenant_models`", but DESIGN.md:1575 is explicit that `list_tenant_models` has no such
      error and silently drops those rows via the allow-list predicate — which is what the code does.
 9. [x] **Stale `fr-model-pricing` driver line** — resolved (DESIGN.md:67).
 
 ## Critical
 
-10. [ ] **The approval state machine is not enforced, but `fr-manual-model-management` is checked
-    off.** Unchanged; citation corrected — this is about *approval* transitions, not the lifecycle
-    ones. PRD.md:297-306 defines the approval state machine (`pending → approved|rejected`,
-    `approved → revoked`, `rejected|revoked → approved`), PRD.md:520 says transitions "follow the
-    approval state machine and are enforced by Model Registry domain logic", and UC-020's AC
-    repeats it (PRD.md:1457). DESIGN.md:196 and :1234 say the opposite — "no workflow state
-    machine … the only guard is that approval cannot be changed on a model in a terminal lifecycle
-    state" — and that is exactly what the code does: `update_model` validates the *lifecycle*
-    transition (`service.rs:385-395`, terminal-only) plus the terminal-lifecycle approval freeze
-    (`service.rs:889-896`), and accepts any `approval_status` value otherwise.
-    DESIGN.md:64 keeps `fr-manual-model-management` `[x]`.
+10. [x] **The approval state machine requirement is withdrawn.** Resolved 2026-08-20 by relaxing
+    the PRD, which was the only document asking for enforcement. DESIGN and the code already agreed
+    that the registry owns no transition machine (DESIGN.md:197, :1234; `service.rs:897-912`
+    validates the *lifecycle* transition and the terminal-lifecycle approval freeze, nothing else),
+    so nothing in DESIGN or the gear crate changed.
+    - PRD.md:297-318 keeps the four statuses and the `stateDiagram-v2`, now captioned
+      **"illustrative, not a normative state machine"**, with transition legality assigned to the
+      Approval Service from P2 per `cpt-cf-model-registry-adr-approval-delegation`.
+    - PRD.md:530-536 (`fr-manual-model-management`) replaces "State transitions follow the approval
+      state machine and are enforced by Model Registry domain logic" with: any of the four values
+      may be set directly, in any order; the sole refusal is structural — a `deprecated` / `sunset`
+      model accepts no approval change (`invalid_transition`).
+    - PRD.md:1476-1479 (UC-020 AC) matches, replacing "Status transitions follow the approval state
+      machine" with the two rules the code actually implements.
+    - PRD.md:944's `invalid_transition` row no longer describes an "invalid approval state
+      transition"; it now names the two transitions the registry does refuse.
+    Note this is the opposite resolution from #7, and deliberately so: #7 was a *read* gate whose
+    answer is the current `approval_status` value, and enforcing it costs one column comparison;
+    #10 is a *write* rule whose answer depends on the prior value, and owning it would duplicate a
+    state machine ADR-0002 already delegates. The consequence to accept is that an illegal-looking
+    change (`revoked → approved` with no review, `approved → pending` silently dropping an
+    approval) is permitted by this module and now has a direct visibility effect through the #7
+    gate — auditing and legality live with the Approval Service and the audit sink (#32).
 
 ## High — internal contradictions in the design
 
@@ -118,14 +131,14 @@ refreshed to current line numbers and the sub-items that *did* close called out.
 16. [ ] **Wrong provider GTS namespace** — unchanged, and now confirmed against code. DESIGN.md:1129
     and :1323 plus DEMO.md:56 use the plural `gts.cf.genai.models.provider.v1~`, and so does the
     code everywhere (`entity/provider.rs:21`, `initial_001.rs:190`, `request.rs:286` and the test
-    fixtures). PRD.md:146, :225, :410 and `guidelines/GTS.md:146` register the singular
+    fixtures). PRD.md:146, :225, :422 and `guidelines/GTS.md:146` register the singular
     `gts.cf.genai.model.provider.v1~`. The model-info chain is singular in both
     (`gts.cf.genai.model.info.v1~`), so the plural is an outlier, not a convention.
 17. [ ] **`fr-degraded-mode` is mis-cited; DB-unavailability is undesigned.** Unchanged.
     DESIGN.md:1314 attributes provider-unreachability to `cpt-cf-model-registry-fr-degraded-mode`,
-    but that FR is about *database* unavailability (DESIGN.md:77; PRD.md:789-798). No 503 row exists
+    but that FR is about *database* unavailability (DESIGN.md:77; PRD.md:808-817). No 503 row exists
     in any error table (see item 8), and the read path can still answer from cache without touching
-    the DB (`service.rs:461-540` probes the cache on every hop), contradicting PRD.md:798/:878
+    the DB (`service.rs:461-540` probes the cache on every hop), contradicting PRD.md:817/:878
     "DB unavailable = requests fail (fail-closed)".
 
 ## High — carried over
@@ -143,10 +156,10 @@ refreshed to current line numbers and the sub-items that *did* close called out.
 
 ## Medium — gaps
 
-20. [ ] **UC-017 job/status mismatch.** Unchanged. PRD.md:1334-1341 still has the registry "queue a
+20. [ ] **UC-017 job/status mismatch.** Unchanged. PRD.md:1353-1360 still has the registry "queue a
     discovery job" and return `queued`/`running`/`completed`; DESIGN.md:1106 returns
     `discovery_result` synchronously, with no job entity and no status endpoint.
-21. [ ] **Discovery concurrency/staggering NFR is unverifiable.** Unchanged. PRD.md:590 and :1049
+21. [ ] **Discovery concurrency/staggering NFR is unverifiable.** Unchanged. PRD.md:609 and :1068
     require a "fixed concurrency limit + staggered intervals"; DESIGN.md:1113 has one
     single-provider trigger and argues isolation from per-call independence plus the per-provider
     lock — no concurrency construct, and no staggering anywhere.
@@ -154,7 +167,7 @@ refreshed to current line numbers and the sub-items that *did* close called out.
     DESIGN.md:1113, :1175, :1651, :1668, :1699, but absent from §3.3 External Interfaces
     (DESIGN.md:755-792, which lists only Cache, PostgreSQL, Provider APIs), from §3.4 Internal
     Dependencies (DESIGN.md:793), and from the gear's declared deps (DESIGN.md:753).
-23. [ ] **`$filter` by provider is missing.** Unchanged. PRD.md:1017 requires `$filter` by provider
+23. [ ] **`$filter` by provider is missing.** Unchanged. PRD.md:1036 requires `$filter` by provider
     slug; the 15-field surface (DESIGN.md:727 = `odata/models.rs`) has no `provider_slug` /
     `provider_id`, and `models` carries no slug column. Note the same DESIGN section rules out the
     obvious fixes for the *flag* fields (DESIGN.md:717) but never addresses provider identity —
@@ -166,20 +179,20 @@ refreshed to current line numbers and the sub-items that *did* close called out.
     (DESIGN.md:393-396) is `max_input_tokens` / `max_output_tokens` / `output_vector_size` only —
     with no mapping table reconciling the three per-media limits against it.
 25. [ ] **`fr-input-validation` marked implemented with two rules missing.** Unchanged.
-    PRD.md:430-431 require provider **name** 1-32 chars lowercase-alnum-hyphen and capabilities
+    PRD.md:442-443 require provider **name** 1-32 chars lowercase-alnum-hyphen and capabilities
     conforming to a GTS capability schema. `create_provider` validates slug and discovery interval
     only (`service.rs:274-276`) — there is no name check and no capability-schema check anywhere.
     DESIGN.md:60 is `[x]` (its description is at least honest about what it covers), and
     DESIGN.md:1341 `name VARCHAR(255)` "Display name" still contradicts the PRD's name-format rule.
 26. [ ] **`fr-cache-isolation` is checked off P1 while its reparenting handler is P3.** Unchanged.
-    PRD.md:444 puts "invalidate ALL cache entries on `tenant.reparented`" inside the P1
+    PRD.md:456 puts "invalidate ALL cache entries on `tenant.reparented`" inside the P1
     cache-isolation FR; DESIGN.md:61 marks the FR `[x]` covering only key format, TTL and
     prefix invalidation, and the reparenting handler stays P3 (DESIGN.md:78, :1589).
 27. [x] **`nfr-rate-limiting` was P1 in the PRD, deferred wholesale in DESIGN** — resolved by
     removing the requirement; no `nfr-rate-limiting` id remains in either doc, and DESIGN.md:1747
     records the exclusion.
 28. [ ] **`nfr-performance` is allocated for two of its four operations.** Partially resolved.
-    PRD.md:866-870 sets targets for `get_tenant_model` (2ms/10ms), `list_tenant_models` (10ms/50ms),
+    PRD.md:885-889 sets targets for `get_tenant_model` (2ms/10ms), `list_tenant_models` (10ms/50ms),
     `approve_model` (—/100ms) and the per-provider discovery job (—/30s).
     - *Closed*: `list_tenant_models` now has a design response — DESIGN.md:86 states list reads are
       uncached and meet their target "through indexed columns and the per-ancestor query path".
@@ -191,7 +204,7 @@ refreshed to current line numbers and the sub-items that *did* close called out.
       the **OAGW call**, not on the end-to-end job (OAGW call + reconciliation writes).
 29. [ ] **Capacity basis is 10× under the PRD envelope, and the PRD contradicts itself.**
     Unchanged. DESIGN.md:1651 plans "10 000 tenants × 200 models = 2 million rows". PRD's scale
-    table (PRD.md:888-893) states 20 providers × 100 models/provider × 10 000 tenants = 20M, yet the
+    table (PRD.md:907-912) states 20 providers × 100 models/provider × 10 000 tenants = 20M, yet the
     same table's "Total models (worst case)" cell says "~2,000,000" — a 10× internal PRD
     inconsistency that DESIGN adopts as its planning basis without flagging.
 30. [ ] **Open questions routed to DESIGN remain unanswered/unacknowledged.** Mostly unchanged.
@@ -200,15 +213,15 @@ refreshed to current line numbers and the sub-items that *did* close called out.
       lost-update discussion; OQ#2 (per-endpoint QPS) — absent; OQ#3 (plugin retry policy) — only
       the generic dependency retries at DESIGN.md:1666; OQ#5 (discovery-settings GTS namespace) —
       still "plugin-declared" (DESIGN.md:1130); OQ#6 (retry/backoff) — answered in substance at
-      DESIGN.md:1666 but never marked resolved in PRD.md:1619-1631.
+      DESIGN.md:1666 but never marked resolved in PRD.md:1641-1653.
     - DESIGN §5 Traceability (DESIGN.md:1752-1766) still references no open question.
 31. [ ] **Tag-filter scope stated two ways.** Unchanged. DESIGN.md:730 says the `tag` predicate is
     "scoped to the request tenant"; DESIGN.md:1268 and :1273 say `JOIN model_tags (tenant chain)` /
     "scoped to the tenant chain". Whether inherited tag assignments are visible is still undecided.
 32. [ ] **Audit (PRD §7 is a MUST) — DESIGN P1 has no audit sink.** Unchanged. DESIGN.md:1624: "no
-    audit-sink integration exists in this module yet", structured `tracing` only. PRD.md:829-855
+    audit-sink integration exists in this module yet", structured `tracing` only. PRD.md:848-874
     still presents the audit-fields table normatively, and PRD.md:206 assigns storage/retention to
-    "Core platform", without either one referencing the reconciling assumption at PRD.md:1603.
+    "Core platform", without either one referencing the reconciling assumption at PRD.md:1625.
 33. [ ] **`ProviderV1` has no field list in §3.1.** Unchanged. §3.1 (DESIGN.md:259-526) enumerates
     `ModelInfoV1`'s fields at length; Provider appears only as a one-line row in the Core Entities
     table. There is still no `#### Provider` field list to check PRD §5's Provider fields
