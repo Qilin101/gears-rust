@@ -449,9 +449,12 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     /// 1. `provider_id` mismatch → `ModelNotFound` (stale cache row)
     /// 2. Terminal lifecycle → `ModelDeprecated`
     /// 3. Disabled provider → `ProviderDisabled`
+    /// 4. Not `approved` → `ModelNotApproved`
     ///
-    /// Approval is **reported, not enforced** — `ModelNotApproved` stays
-    /// unreachable from this path.
+    /// The read is a **fail-closed access gate**: a successful return means
+    /// approved, live, and on an active winning provider. Approval is checked
+    /// last so a 403 is only ever returned for a model the caller could
+    /// otherwise observe (DESIGN §3.5).
     ///
     /// A malformed `canonical_id` (no `::` separator) yields `ModelNotFound`.
     /// An unresolved slug yields `ProviderNotFoundBySlug`.
@@ -568,7 +571,16 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             return Err(DomainError::provider_disabled(winner.id));
         }
 
-        // 8. Approval is reported, not enforced (see doc comment).
+        //    Gate 4: not approved → ModelNotApproved.
+        //    NOTE: We keep the cached entry, unlike gates 1 and 3. Their verdict
+        //    comes from outside the cached row (the provider chain, the provider
+        //    row), so the entry may be stale; this one reads a column the entry
+        //    already carries, and every write that changes it invalidates the
+        //    owning tenant's whole prefix (DESIGN §3.5).
+        if !matches!(model.approval_status, ApprovalStatus::Approved) {
+            return Err(DomainError::model_not_approved(canonical_id));
+        }
+
         Ok(model)
     }
 
@@ -1779,7 +1791,7 @@ mod tests {
 
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &child_scope,
@@ -1872,7 +1884,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = create_test_model(
+        let model = create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -1903,8 +1915,9 @@ mod tests {
 
         let found = result.unwrap();
         assert_eq!(found.canonical_id, "openai::gpt-4o");
-        // approval_status should be populated
-        assert_eq!(found.approval_status, crate::ApprovalStatus::Pending);
+        // The cached row carries its approval status, and clears the approval
+        // gate because the fixture is approved.
+        assert_eq!(found.approval_status, crate::ApprovalStatus::Approved);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1922,7 +1935,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let _model = create_test_model(
+        let _model = create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2105,7 +2118,7 @@ mod tests {
     // ═════════════════════════════════════════════════════════════════════════
 
     #[tokio::test]
-    async fn test_get_tenant_model_pending_returns_model_with_status() {
+    async fn test_get_tenant_model_pending_returns_not_approved() {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -2136,16 +2149,64 @@ mod tests {
             .subject_tenant_id(tenant_id)
             .build()
             .expect("ctx");
-        let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("a pending model must not resolve for eval");
         assert!(
-            result.is_ok(),
-            "pending model should be returned, got: {:?}",
-            result.err()
+            matches!(
+                &err,
+                DomainError::ModelNotApproved { canonical_id } if canonical_id == "openai::gpt-4o"
+            ),
+            "expected ModelNotApproved, got: {err:?}"
         );
+    }
 
-        let found = result.unwrap();
-        // Approval status should be populated (not fail-closed).
-        assert_eq!(found.approval_status, crate::ApprovalStatus::Pending);
+    /// Every non-`approved` status fails the gate, not just `pending`.
+    #[tokio::test]
+    async fn test_get_tenant_model_rejected_and_revoked_are_not_approved() {
+        for status in [
+            crate::ApprovalStatus::Rejected,
+            crate::ApprovalStatus::Revoked,
+        ] {
+            let db = setup_db().await;
+            let conn = db.conn().expect("conn");
+
+            let provider_repo = ProviderRepositoryImpl::default();
+            let model_repo = ModelRepositoryImpl::default();
+            let tenant_id = test_tenant();
+            let scope = scope_for(tenant_id);
+            let (_provider_id, provider_slug) =
+                create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+            let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+            req.approval_status = Some(status);
+            crate::domain::repo::ModelRepository::create(
+                &model_repo,
+                &conn,
+                &scope,
+                tenant_id,
+                &req,
+            )
+            .await
+            .expect("create model");
+
+            let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+            let ctx = SecurityContext::builder()
+                .subject_id(Uuid::new_v4())
+                .subject_tenant_id(tenant_id)
+                .build()
+                .expect("ctx");
+
+            let err = service
+                .get_tenant_model(&ctx, "openai::gpt-4o")
+                .await
+                .expect_err("non-approved model must not resolve for eval");
+            assert!(
+                matches!(&err, DomainError::ModelNotApproved { .. }),
+                "expected ModelNotApproved for {status:?}, got: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2208,7 +2269,7 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -2256,7 +2317,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2265,7 +2326,7 @@ mod tests {
             "gpt-4o",
         )
         .await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2308,7 +2369,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2317,7 +2378,7 @@ mod tests {
             "gpt-4o",
         )
         .await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2371,7 +2432,7 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -2421,7 +2482,7 @@ mod tests {
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
         // Create model with same canonical_id in both tenants.
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &child_scope,
@@ -2430,7 +2491,7 @@ mod tests {
             "gpt-4o",
         )
         .await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -2480,7 +2541,7 @@ mod tests {
 
         let (_parent_provider_id, parent_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -2498,7 +2559,7 @@ mod tests {
             "openai",
         )
         .await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &grandparent_scope,
@@ -2542,7 +2603,7 @@ mod tests {
 
         // Create 3 models
         for i in 0..3 {
-            create_test_model(
+            create_test_approved_model(
                 &model_repo,
                 &conn,
                 &scope,
@@ -2872,16 +2933,32 @@ mod tests {
             "provider is active, not disabled"
         );
 
-        // 2. Eval listing also shows the model (approval is reported, not enforced).
+        // 2. The eval listing excludes it — the approval predicate is mandatory.
         let eval = service
             .list_tenant_models(&ctx, &ODataQuery::default())
             .await
             .expect("eval list should succeed");
 
-        assert_eq!(
-            eval.items.len(),
-            1,
-            "eval should still show non-approved model (approval is reported, not enforced)"
+        assert!(
+            eval.items.is_empty(),
+            "eval must not return a non-approved model, got {} row(s)",
+            eval.items.len()
+        );
+
+        // 3. …and a $filter naming approval_status cannot re-admit it.
+        let parsed = toolkit_odata::parse_filter_string("approval_status eq 'pending'")
+            .expect("parse filter");
+        let query = ODataQuery {
+            filter: Some(Box::new(parsed.into_expr())),
+            ..Default::default()
+        };
+        let narrowed = service
+            .list_tenant_models(&ctx, &query)
+            .await
+            .expect("eval list with filter should succeed");
+        assert!(
+            narrowed.items.is_empty(),
+            "$filter must narrow within the approved set, never widen it"
         );
     }
 
@@ -3268,7 +3345,7 @@ mod tests {
         let parent_scope = scope_for(parent_tid);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -3314,7 +3391,7 @@ mod tests {
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
         // Child has a model, parent also has a model with the same canonical_id.
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &child_scope,
@@ -3323,7 +3400,7 @@ mod tests {
             "gpt-4o",
         )
         .await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &parent_scope,
@@ -4256,7 +4333,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -4399,7 +4476,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        create_test_approved_model(
             &model_repo,
             &conn,
             &scope,

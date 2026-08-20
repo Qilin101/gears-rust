@@ -382,6 +382,22 @@ fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> Create
     }
 }
 
+/// Same as [`make_create_model_req`], but the model is created `approved`.
+///
+/// The eval read paths gate on `approval_status = approved`, so any test whose
+/// subject is something else — projection round-trips, `OData` filtering,
+/// inheritance, provider status — needs an approved fixture to reach the
+/// behavior it is actually asserting.
+fn make_create_approved_model_req(
+    provider_slug: &str,
+    provider_model_id: &str,
+) -> CreateModelRequestV1 {
+    CreateModelRequestV1 {
+        approval_status: Some(ApprovalStatus::Approved),
+        ..make_create_model_req(provider_slug, provider_model_id)
+    }
+}
+
 /// Build a full `Service` instance for integration testing.
 fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
@@ -431,7 +447,12 @@ async fn create_provider_direct(
     (p.id, p.slug)
 }
 
-/// Create a model in the given tenant via the repository directly.
+/// Create an **approved** model in the given tenant via the repository directly.
+///
+/// Approved rather than `pending` (the request default) because the eval read
+/// paths gate on `approval_status = approved`: a `pending` fixture would make an
+/// inheritance / shadowing / provider-status test pass for the wrong reason.
+/// Tests that exercise the approval gate itself set the status explicitly.
 async fn create_model_direct(
     repo: &ModelRepositoryImpl,
     conn: &impl DBRunner,
@@ -440,15 +461,11 @@ async fn create_model_direct(
     provider_model_id: &str,
 ) -> ModelV1 {
     let scope = scope_for(tenant_id);
-    ModelRepository::create(
-        repo,
-        conn,
-        &scope,
-        tenant_id,
-        &make_create_model_req(provider_slug, provider_model_id),
-    )
-    .await
-    .expect("create model in test setup")
+    let mut req = make_create_model_req(provider_slug, provider_model_id);
+    req.approval_status = Some(ApprovalStatus::Approved);
+    ModelRepository::create(repo, conn, &scope, tenant_id, &req)
+        .await
+        .expect("create model in test setup")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -479,22 +496,18 @@ async fn full_lifecycle_single_tenant() {
     assert_eq!(model.lifecycle_status, LifecycleStatus::Production);
     assert_eq!(model.approval_status, ApprovalStatus::Pending);
 
-    // ── Step 3: get_tenant_model (cache miss → DB populate) ─────────────────
-    let fetched = service
+    // ── Step 3: a pending model is refused by the eval read ─────────────────
+    let err = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
-        .expect("get model");
-    assert_eq!(fetched.canonical_id, "openai::gpt-4o");
-    assert_eq!(fetched.approval_status, ApprovalStatus::Pending);
+        .expect_err("a pending model must not resolve for eval");
+    assert!(
+        matches!(&err, DomainError::ModelNotApproved { .. }),
+        "expected ModelNotApproved, got: {err:?}"
+    );
 
-    // ── Step 4: get_tenant_model again (cache hit) ──────────────────────────
-    let cached = service
-        .get_tenant_model(&ctx, "openai::gpt-4o")
-        .await
-        .expect("get model from cache");
-    assert_eq!(cached.canonical_id, "openai::gpt-4o");
-
-    // ── Step 5: List with OData filter ──────────────────────────────────────
+    // ── Step 4: …and is absent from the eval listing, even when the caller's
+    //           $filter names its status — $filter narrows, never widens ─────
     let parsed = parse_filter_string("approval_status eq 'pending'").expect("parse filter");
     let query = ODataQuery {
         filter: Some(Box::new(parsed.into_expr())),
@@ -504,8 +517,22 @@ async fn full_lifecycle_single_tenant() {
         .list_tenant_models(&ctx, &query)
         .await
         .expect("list models with OData filter");
-    assert_eq!(page.items.len(), 1, "one pending model should be listed");
-    assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+    assert!(
+        page.items.is_empty(),
+        "a pending model must not be listed for eval, got {} row(s)",
+        page.items.len()
+    );
+
+    // ── Step 5: the management listing does return it, marked unavailable ────
+    let mgmt = service
+        .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+        .await
+        .expect("management list");
+    assert_eq!(mgmt.items.len(), 1, "management listing shows the row");
+    assert!(
+        !mgmt.items[0].available_for_eval,
+        "a pending model is not available for eval"
+    );
 
     // ── Step 6: Update approval to Approved ─────────────────────────────────
     let approved = service
@@ -521,13 +548,27 @@ async fn full_lifecycle_single_tenant() {
         .expect("approve model");
     assert_eq!(approved.approval_status, ApprovalStatus::Approved);
 
-    // ── Step 7: Verify the approval persisted by reading back ───────────────
+    // ── Step 7: the approval opens the gate — read back twice, DB then cache ─
     let refetched = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
         .expect("get approved model");
     // After cache invalidation from update, the read comes from DB.
     assert_eq!(refetched.approval_status, ApprovalStatus::Approved);
+    let cached = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("get approved model from cache");
+    assert_eq!(cached.canonical_id, "openai::gpt-4o");
+    let listed = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("list approved models");
+    assert_eq!(
+        listed.items.len(),
+        1,
+        "the approved model is now eval-visible"
+    );
 
     // ── Step 8: Soft-delete the model ───────────────────────────────────────
     service
@@ -698,7 +739,7 @@ async fn child_inherits_provider_and_model_from_parent() {
     assert_eq!(inherited.canonical_id, "openai::gpt-4o");
     assert_eq!(
         inherited.approval_status,
-        ApprovalStatus::Pending,
+        ApprovalStatus::Approved,
         "inherited model should have populated approval_status"
     );
 
@@ -997,7 +1038,7 @@ async fn odata_filters_work_on_filterable_columns() {
 
     // Create two models with different providers but same vendor/family.
     let _model1 = service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("create model gpt-4o");
 
@@ -1009,7 +1050,7 @@ async fn odata_filters_work_on_filterable_columns() {
     // Create a second provider with different slug for second model.
     // (The model's provider settings reference the provider slug;
     //  the `gts_type` in the info drives the `gts_type` column.)
-    let mut model2_req = make_create_model_req("openai", "gpt-4o-mini");
+    let mut model2_req = make_create_approved_model_req("openai", "gpt-4o-mini");
     model2_req.info = {
         let mut info_val = serde_json::to_value(&model2_req.info).expect("serialize info");
         if let Some(obj) = info_val.as_object_mut() {
@@ -1022,18 +1063,9 @@ async fn odata_filters_work_on_filterable_columns() {
         .await
         .expect("create model gpt-4o-mini");
 
-    // Approve model1.
-    service
-        .update_model(
-            &ctx,
-            "openai::gpt-4o",
-            &UpdateModelRequestV1 {
-                approval_status: Some(ApprovalStatus::Approved),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("approve gpt-4o");
+    // Both models are created approved: the eval listing only ever returns
+    // approved rows, so a pending fixture would drop out of every assertion
+    // below and this test would stop covering the filter surface.
 
     // ── Filter by approval_status eq 'approved' ─────────────────────────────
     let parsed = parse_filter_string("approval_status eq 'approved'").expect("parse");
@@ -1047,8 +1079,7 @@ async fn odata_filters_work_on_filterable_columns() {
         )
         .await
         .expect("list filtered by approval_status");
-    assert_eq!(page.items.len(), 1, "only gpt-4o is approved");
-    assert_eq!(page.items[0].canonical_id, "openai::gpt-4o");
+    assert_eq!(page.items.len(), 2, "both models are approved");
 
     // ── Filter by vision eq true ────────────────────────────────────────────
     let parsed = parse_filter_string("vision eq true").expect("parse");
@@ -1183,7 +1214,7 @@ async fn create_and_read_round_trip_full_model_info() {
         .await
         .expect("create provider");
 
-    let mut req = make_create_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req("openai", "gpt-4o");
     // Populate the fields that ride inside the JSONB sub-objects (rather than
     // in a promoted scalar column) so the whole-payload assertion at the end of
     // this test covers them too.
@@ -1286,7 +1317,7 @@ async fn additional_info_and_allow_extra_params_round_trip_non_empty() {
         .await
         .expect("create provider");
 
-    let mut req = make_create_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req("openai", "gpt-4o");
     req.info.additional_info = serde_json::from_value(serde_json::json!({
         "team": "alpha",
         "trace_id": true,
@@ -1354,7 +1385,7 @@ async fn size_bytes_over_2gib_round_trips() {
         .await
         .expect("create provider");
 
-    let mut req = make_create_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req("openai", "gpt-4o");
     req.info.size_bytes = Some(LARGE_MODEL_BYTES);
 
     service
@@ -1392,7 +1423,7 @@ async fn context_window_max_input_tokens_over_2gib_round_trips() {
         .await
         .expect("create provider");
 
-    let mut req = make_create_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req("openai", "gpt-4o");
     req.info.context_window.max_input_tokens = LARGE_CTX;
 
     service
@@ -1427,7 +1458,7 @@ async fn patch_reprojects_all_promoted_columns() {
         .expect("create provider");
 
     service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("create model");
 
@@ -1497,16 +1528,19 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
 
     // Seed: function_calling=true, vision enabled with jpeg mime types.
     service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("create model");
 
     // PATCH: flip function_calling off (preserving the rest of the
     // capabilities). `ModelCapabilities` is `#[non_exhaustive]` so we
     // round-trip through JSON.
-    let original_caps =
-        serde_json::to_value(&make_create_model_req("openai", "gpt-4o").info.capabilities)
-            .expect("serialize caps");
+    let original_caps = serde_json::to_value(
+        &make_create_approved_model_req("openai", "gpt-4o")
+            .info
+            .capabilities,
+    )
+    .expect("serialize caps");
     let mut caps_value = original_caps;
     if let Some(obj) = caps_value.as_object_mut() {
         obj.insert("function_calling".into(), serde_json::Value::Bool(false));
@@ -1616,7 +1650,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
     // Step 5: Create a model under the child's provider with the same
     // canonical_id and verify the child's model IS returned.
     service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("child creates own model");
 
@@ -1664,7 +1698,7 @@ async fn create_provider_drops_slug_tombstone() {
 
     // Step 3: Create a model under the child's provider.
     service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("child creates model");
 
@@ -1693,7 +1727,7 @@ async fn disabled_provider_hides_model_on_get() {
         .await
         .expect("create provider");
     service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
         .await
         .expect("create model");
 

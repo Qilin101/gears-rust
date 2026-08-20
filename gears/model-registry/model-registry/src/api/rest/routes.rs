@@ -147,7 +147,12 @@ pub fn register_routes(
     router = OperationBuilder::get("/model-registry/v1/models")
         .operation_id("model_registry.list_models")
         .summary("List models")
-        .description("List models visible to the caller's tenant with OData filtering")
+        .description(
+            "List models available for eval to the caller's tenant, with OData filtering. \
+             Returns only approved models on active, non-shadowed providers, and excludes \
+             deprecated/sunset models; `$filter` narrows within that set and never widens it. \
+             For the full catalog see GET /model-registry/v1/admin/models.",
+        )
         .tag("Models")
         .authenticated()
         .require_license_features::<License>([])
@@ -190,7 +195,11 @@ pub fn register_routes(
     router = OperationBuilder::get("/model-registry/v1/models/{canonical_id}")
         .operation_id("model_registry.get_model")
         .summary("Get a model")
-        .description("Get a model by canonical ID with cache-first lookup")
+        .description(
+            "Get a model by canonical ID with cache-first lookup. Eval-facing: returns the model \
+             only when it is approved, live, and on an active winning provider; otherwise \
+             404 (unknown or deprecated) or 403 (provider disabled, or model not approved).",
+        )
         .tag("Models")
         .authenticated()
         .require_license_features::<License>([])

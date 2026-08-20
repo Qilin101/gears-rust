@@ -81,15 +81,17 @@ impl ModelRepository for ModelRepositoryImpl {
 
         // ── Eval path ──────────────────────────────────────────────────────
         // Mandatory predicates: allow-list membership + unconditional lifecycle
-        // exclusion (DESIGN §3.3). The OData `$filter` is ANDed on top; even
-        // a `$filter=lifecycle_status eq 'deprecated'` cannot escape the eval
-        // lifecycle exclusion.
+        // and approval exclusions (DESIGN §3.3). The OData `$filter` is ANDed on
+        // top, so it can only narrow within this set — neither
+        // `$filter=lifecycle_status eq 'deprecated'` nor
+        // `$filter=approval_status eq 'pending'` can escape them.
         if let ListVisibility::Eval { allow_list } = visibility {
             base = base.filter(
                 Condition::all()
                     .add(model::Column::ProviderId.is_in(allow_list.to_vec()))
                     .add(model::Column::LifecycleStatus.ne("deprecated"))
-                    .add(model::Column::LifecycleStatus.ne("sunset")),
+                    .add(model::Column::LifecycleStatus.ne("sunset"))
+                    .add(model::Column::ApprovalStatus.eq(ApprovalStatus::Approved.as_str())),
             );
         }
 
@@ -1126,25 +1128,19 @@ mod tests {
         let (_anthropic_id, anthropic_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "anthropic").await;
 
-        // Create a model under each provider.
-        ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&openai_slug, "gpt-4o"),
-        )
-        .await
-        .expect("create openai model");
-        ModelRepository::create(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &make_create_model_req(&anthropic_slug, "claude-3"),
-        )
-        .await
-        .expect("create anthropic model");
+        // Create an approved model under each provider — the eval path also
+        // gates on `approval_status = approved`, so a `pending` fixture would
+        // make this test pass for the wrong reason.
+        let mut openai_req = make_create_model_req(&openai_slug, "gpt-4o");
+        openai_req.approval_status = Some(crate::ApprovalStatus::Approved);
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &openai_req)
+            .await
+            .expect("create openai model");
+        let mut anthropic_req = make_create_model_req(&anthropic_slug, "claude-3");
+        anthropic_req.approval_status = Some(crate::ApprovalStatus::Approved);
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &anthropic_req)
+            .await
+            .expect("create anthropic model");
 
         // Eval with allow-list containing only openai's provider_id.
         let allow_list = vec![openai_id];
@@ -1282,6 +1278,84 @@ mod tests {
             page.items.is_empty(),
             "eval path must unconditionally exclude deprecated models"
         );
+    }
+
+    /// The eval approval exclusion is mandatory: a `$filter` naming
+    /// `approval_status` narrows within the approved set, it cannot re-admit
+    /// non-approved rows (DESIGN §3.3 "The narrowing invariant").
+    #[tokio::test]
+    async fn model_list_eval_hides_non_approved_even_with_filter() {
+        let provider = setup_provider().await;
+        #[allow(clippy::expect_used)]
+        let conn = provider.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let (provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        // One row per non-approved status, plus one approved row.
+        for (model_id, status) in [
+            ("gpt-4o", crate::ApprovalStatus::Pending),
+            ("gpt-4o-mini", crate::ApprovalStatus::Rejected),
+            ("o3", crate::ApprovalStatus::Revoked),
+            ("gpt-5", crate::ApprovalStatus::Approved),
+        ] {
+            let mut req = make_create_model_req(&provider_slug, model_id);
+            req.approval_status = Some(status);
+            ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+                .await
+                .expect("create model");
+        }
+
+        let allow_list = vec![provider_id];
+
+        // Unfiltered: only the approved row survives.
+        let page = ModelRepository::list(
+            &model_repo,
+            &conn,
+            &scope,
+            &ODataQuery::default(),
+            ListVisibility::Eval {
+                allow_list: &allow_list,
+            },
+        )
+        .await
+        .expect("eval list");
+        assert_eq!(
+            page.items.len(),
+            1,
+            "only the approved model is eval-visible"
+        );
+        assert_eq!(page.items[0].canonical_id, "openai::gpt-5");
+
+        // Filtered by a non-approved status: empty, not those rows.
+        for status in ["pending", "rejected", "revoked"] {
+            let parsed =
+                toolkit_odata::parse_filter_string(&format!("approval_status eq '{status}'"))
+                    .expect("parse filter");
+            let query = ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            };
+            let page = ModelRepository::list(
+                &model_repo,
+                &conn,
+                &scope,
+                &query,
+                ListVisibility::Eval {
+                    allow_list: &allow_list,
+                },
+            )
+            .await
+            .expect("eval list with approval filter");
+            assert!(
+                page.items.is_empty(),
+                "eval path must unconditionally exclude `{status}` models"
+            );
+        }
     }
 
     #[tokio::test]

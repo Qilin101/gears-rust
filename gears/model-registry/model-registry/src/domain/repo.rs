@@ -23,9 +23,11 @@ use super::error::DomainError;
 #[derive(Debug, Clone)]
 #[domain_model]
 pub enum ListVisibility<'a> {
-    /// Eval visibility: ANDs `provider_id IN (allow_list)` and an unconditional
-    /// lifecycle exclusion. Models whose `lifecycle_status` is `deprecated` or
-    /// `sunset` are never returned through this path, regardless of the ``OData $filter`` in the query.
+    /// Eval visibility: ANDs `provider_id IN (allow_list)` plus two unconditional
+    /// exclusions — terminal lifecycle and non-approved. Models whose
+    /// `lifecycle_status` is `deprecated` / `sunset`, or whose `approval_status`
+    /// is anything other than `approved`, are never returned through this path,
+    /// regardless of the ``OData $filter`` in the query (DESIGN §3.3).
     Eval {
         /// Provider IDs allowed for this tenant. Must be a non-empty slice to
         /// produce any results — an empty slice yields an empty page.
