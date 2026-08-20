@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     fn make_create_req(slug: &str, name: &str) -> crate::CreateProviderRequestV1 {
-        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         crate::CreateProviderRequestV1::builder(slug, name, gts).build()
     }
 
@@ -3549,7 +3549,7 @@ mod tests {
             tenant_id,
             slug: slug.to_owned(),
             name: slug.to_owned(),
-            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            gts_type: GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~"),
             status: crate::ProviderStatus::Active,
             managed: false,
             metadata: None,

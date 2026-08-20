@@ -1424,7 +1424,7 @@ mod tests {
             tenant_id: Uuid::nil(),
             slug: slug.to_owned(),
             name: slug.to_owned(),
-            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            gts_type: GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~"),
             status,
             managed: false,
             metadata: None,

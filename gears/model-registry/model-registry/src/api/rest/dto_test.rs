@@ -25,7 +25,7 @@ fn provider_dto_serializes() {
         id,
         slug: "openai".into(),
         name: "OpenAI".into(),
-        gts_type: "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~".into(),
+        gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".into(),
         status: "active".into(),
         managed: true,
         metadata: Some(json!({"region": "us-east-1"})),
@@ -41,7 +41,7 @@ fn provider_dto_serializes() {
     assert_eq!(json["name"], "OpenAI");
     assert_eq!(
         json["gts_type"],
-        "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"
+        "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"
     );
     assert_eq!(json["status"], "active");
     assert_eq!(json["managed"], true);
@@ -58,7 +58,7 @@ fn provider_dto_omits_absent_fields() {
         id: Uuid::nil(),
         slug: "ollama".into(),
         name: "Ollama".into(),
-        gts_type: "gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~".into(),
+        gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~".into(),
         status: "active".into(),
         managed: false,
         metadata: None,
@@ -82,7 +82,7 @@ fn create_provider_request_deserializes() {
     let json = json!({
         "slug": "anthropic",
         "name": "Anthropic",
-        "gts_type": "gts.cf.genai.models.provider.v1~cf.genai._.anthropic.v1~",
+        "gts_type": "gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~",
         "managed": true,
         "metadata": {"region": "eu-west-1"},
         "discovery_enabled": true,
@@ -94,7 +94,7 @@ fn create_provider_request_deserializes() {
     assert_eq!(dto.name, "Anthropic");
     assert_eq!(
         dto.gts_type,
-        "gts.cf.genai.models.provider.v1~cf.genai._.anthropic.v1~"
+        "gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~"
     );
     assert!(dto.managed);
     assert_eq!(dto.metadata, Some(json!({"region": "eu-west-1"})));
@@ -107,7 +107,7 @@ fn create_provider_request_defaults() {
     let json = json!({
         "slug": "test",
         "name": "Test",
-        "gts_type": "gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~",
+        "gts_type": "gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~",
     });
 
     let dto: CreateProviderRequestDto = serde_json::from_value(json).expect("deserialize");
@@ -324,7 +324,7 @@ fn provider_list_dto_serializes() {
             id: Uuid::nil(),
             slug: "openai".into(),
             name: "OpenAI".into(),
-            gts_type: "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~".into(),
+            gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".into(),
             status: "active".into(),
             managed: true,
             metadata: None,
@@ -424,7 +424,7 @@ mod provider_from_v1 {
             tenant_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
             slug: "openai".into(),
             name: "OpenAI".into(),
-            gts_type: gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"),
+            gts_type: gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
             status,
             managed: true,
             metadata: Some(json!({"region": "us-east-1"})),
@@ -445,7 +445,7 @@ mod provider_from_v1 {
         assert_eq!(dto.name, "OpenAI");
         assert_eq!(
             dto.gts_type,
-            "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"
+            "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"
         );
         assert_eq!(dto.status, "active");
         assert!(dto.managed);

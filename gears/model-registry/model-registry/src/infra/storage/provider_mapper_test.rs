@@ -34,7 +34,7 @@ fn make_provider_entity(
         tenant_id,
         slug: slug.to_owned(),
         name: format!("Provider {slug}"),
-        gts_type: "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~".to_owned(),
+        gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".to_owned(),
         status: status.to_owned(),
         managed: false,
         metadata: Some(json!({"region": "us-east"})),
@@ -59,7 +59,7 @@ fn provider_entity_to_v1_active() {
     assert_eq!(v1.status, ProviderStatus::Active);
     assert_eq!(
         v1.gts_type.as_ref(),
-        "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~"
+        "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"
     );
     assert!(v1.metadata.is_some());
 }
@@ -102,7 +102,7 @@ fn provider_entity_to_v1_rejects_corrupt_status() {
 
 #[test]
 fn provider_create_sets_fields() {
-    let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+    let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
     let req = CreateProviderRequestV1::builder("openai", "OpenAI", gts)
         .managed(true)
         .metadata(json!({"k": "v"}))
@@ -123,7 +123,7 @@ fn provider_create_sets_fields() {
 
 #[test]
 fn provider_create_defaults() {
-    let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.custom.v1~");
+    let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.custom.v1~");
     let req = CreateProviderRequestV1::builder("custom", "Custom", gts).build();
 
     let am = provider_create_active_model(test_tenant_id(), &req);

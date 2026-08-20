@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn provider_builder_threads_required_fields_and_applies_overrides() {
-        let gts = gts::GtsTypeId::new(gts_id!("cf.genai.models.provider.v1~cf.genai._.openai.v1~"));
+        let gts = gts::GtsTypeId::new(gts_id!("cf.genai.model.provider.v1~cf.genai._.openai.v1~"));
 
         let full = CreateProviderRequestV1::builder("openai", "OpenAI", gts.clone())
             .managed(true)

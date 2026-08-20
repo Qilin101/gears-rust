@@ -53,7 +53,7 @@ OpenAPI spec is served at `http://127.0.0.1:8087/cf/docs` (Swagger UI).
 
 - Auth is disabled; requests use the root tenant `00000000-df51-5b42-9538-d2b56b7ee953` automatically.
 - `lifecycle_status` and `approval_status` are lowercase strings: `production`, `preview`, `experimental`, `deprecated`, `sunset`; `pending`, `approved`, `rejected`, `revoked`.
-- `gts_type` must end with `~`. The base schemas (`gts.cf.genai.model.info.v1~`, `gts.cf.genai.models.provider.v1~`) are valid; provider-specific leaves like `gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~` are typed more strictly.
+- `gts_type` must end with `~`. The base schemas (`gts.cf.genai.model.info.v1~`, `gts.cf.genai.model.provider.v1~`) are valid; provider-specific leaves like `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~` are typed more strictly.
 - To reset state between runs: `rm -rf ~/.cf-gears/model-registry`.
 
 

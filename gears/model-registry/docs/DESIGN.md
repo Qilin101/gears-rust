@@ -1126,7 +1126,7 @@ Each discovery plugin implements the `DiscoveryPlugin` trait and registers two G
 
 | Registration field | GTS type | Purpose |
 |--------------------|----------|---------|
-| `serves_gts_type` | Provider GTS type (e.g. `gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~`) | The provider type this plugin serves. Plugin selection is exact match on the provider's `info.gts_type`. |
+| `serves_gts_type` | Provider GTS type (e.g. `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`) | The provider type this plugin serves. Plugin selection is exact match on the provider's own `gts_type` (the `providers.gts_type` column), never on a model's `info.gts_type` — discovery runs before any model exists. |
 | `accepts_settings_gts_type` | Discovery-settings GTS type (plugin-declared) | The schema of the `discovery_settings` payload this plugin expects. |
 
 **Selection rule**: exactly one plugin per provider GTS type. If the registry has no plugin for a provider's GTS type, the discovery request is rejected with a `validation_error` (400) **before** any plugin invocation or network call.
@@ -1342,7 +1342,7 @@ All P1 tables are created by the single migration `infra/storage/migrations/init
 | gts_type | VARCHAR(255) | NOT NULL | GTS type identifier |
 | status | VARCHAR(50) | NOT NULL, DEFAULT 'active' | active, disabled. Not settable on create — always starts `active` |
 | managed | BOOLEAN | NOT NULL, DEFAULT false | Whether Gears can manage this provider (e.g. install/unload models on ollama, lm_studio) |
-| metadata | JSONB | | Provider-specific metadata, GTS-typed (e.g. `gts.cf.genai.models.provider.v1~x.genai.local.provider.v1~` for local providers with capabilities like `install_model`, `import_model`, `streaming`) |
+| metadata | JSONB | | Provider-specific metadata, GTS-typed (e.g. `gts.cf.genai.model.provider.v1~x.genai.local.provider.v1~` for local providers with capabilities like `install_model`, `import_model`, `streaming`) |
 | discovery_enabled | BOOLEAN | NOT NULL, DEFAULT false | Discovery feature flag |
 | discovery_interval_seconds | INTEGER | | Column exists in P1 and is settable through the API; it is **only consumed in P2**, as a discovery-interval hint for external schedulers. The module runs no in-module scheduler; the value is read by the platform scheduler / Kubernetes CronJob when deciding when to call `POST /providers/{id}/discover`. NULL means "no cadence configured — trigger manually only". Because the column is 32-bit, the service rejects values above `i32::MAX` rather than letting them truncate |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |

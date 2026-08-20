@@ -18,7 +18,7 @@ pub struct Model {
     /// Format: 1-64 chars, lowercase alphanumeric + hyphen.
     pub slug: String,
     pub name: String,
-    /// GTS type identifier string (e.g. `gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~`).
+    /// GTS type identifier string (e.g. `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`).
     pub gts_type: String,
     /// Operational status: `active` or `disabled`.
     pub status: String,

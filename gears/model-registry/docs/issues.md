@@ -13,16 +13,6 @@ so gaps in the sequence are removed-resolved items and references from elsewhere
     `managed` has no index at all. `providers` has only PK + `(tenant_id, slug)`
     (DESIGN.md:1353 = `initial_001.rs:60-61`) for **six** filter fields — `name`, `status`,
     `gts_type`, `managed`, `discovery_enabled` are all unindexed.
-15. [ ] **Plugin selection keys off the wrong GTS chain.** Unchanged. DESIGN.md:1129:
-    `serves_gts_type` is the *provider* GTS type, but the same row says "Plugin selection is exact
-    match on the provider's `info.gts_type`" — `info.gts_type` is `ModelInfoV1.gts_type`, a
-    different chain (`gts.cf.genai.model.info.v1~…`). The match can never succeed as specified.
-16. [ ] **Wrong provider GTS namespace** — unchanged, and now confirmed against code. DESIGN.md:1129
-    and :1323 plus DEMO.md:56 use the plural `gts.cf.genai.models.provider.v1~`, and so does the
-    code everywhere (`entity/provider.rs:21`, `initial_001.rs:190`, `request.rs:286` and the test
-    fixtures). PRD.md:146, :225, :422 and `guidelines/GTS.md:146` register the singular
-    `gts.cf.genai.model.provider.v1~`. The model-info chain is singular in both
-    (`gts.cf.genai.model.info.v1~`), so the plural is an outlier, not a convention.
 17. [ ] **`fr-degraded-mode` is mis-cited; DB-unavailability is undesigned.** Unchanged.
     DESIGN.md:1314 attributes provider-unreachability to `cpt-cf-model-registry-fr-degraded-mode`,
     but that FR is about *database* unavailability (DESIGN.md:77; PRD.md:808-817). No 503 row exists

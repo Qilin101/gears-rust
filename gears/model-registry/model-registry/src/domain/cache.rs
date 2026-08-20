@@ -283,7 +283,7 @@ mod tests {
             tenant_id,
             slug: "test-provider".to_owned(),
             name: "Test Provider".to_owned(),
-            gts_type: GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.generic.v1~"),
+            gts_type: GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~"),
             status: crate::ProviderStatus::Active,
             managed: false,
             metadata: None,

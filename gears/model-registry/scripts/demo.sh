@@ -26,7 +26,7 @@ PROVIDER_PAYLOAD=$(cat <<JSON
 {
   "slug": "${PROVIDER_SLUG}",
   "name": "${PROVIDER_NAME}",
-  "gts_type": "gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~",
+  "gts_type": "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~",
   "managed": false,
   "metadata": { "region": "us-east-1" },
   "discovery_enabled": false

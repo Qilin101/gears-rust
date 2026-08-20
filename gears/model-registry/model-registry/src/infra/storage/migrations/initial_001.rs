@@ -187,7 +187,7 @@ mod tests {
 
         // Validate schema by inserting a raw SQL row into providers
         conn.execute_unprepared(
-            "INSERT INTO providers (id, tenant_id, slug, name, gts_type, status, managed, metadata, discovery_enabled, discovery_interval_seconds, created_at, updated_at) VALUES ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000', 'test-provider', 'Test Provider', 'gts.cf.genai.models.provider.v1~', 'active', 0, NULL, 0, NULL, datetime('now'), datetime('now'))"
+            "INSERT INTO providers (id, tenant_id, slug, name, gts_type, status, managed, metadata, discovery_enabled, discovery_interval_seconds, created_at, updated_at) VALUES ('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000', 'test-provider', 'Test Provider', 'gts.cf.genai.model.provider.v1~', 'active', 0, NULL, 0, NULL, datetime('now'), datetime('now'))"
         ).await.expect("insert into providers should succeed");
 
         // Run migration down and verify tables are dropped

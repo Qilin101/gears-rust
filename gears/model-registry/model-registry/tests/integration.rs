@@ -289,7 +289,7 @@ fn security_context(tenant_id: Uuid) -> SecurityContext {
 }
 
 fn make_provider_gts() -> gts::GtsTypeId {
-    gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~")
+    gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~")
 }
 
 fn make_create_provider_req(slug: &str, name: &str) -> CreateProviderRequestV1 {

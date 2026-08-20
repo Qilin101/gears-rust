@@ -316,7 +316,7 @@ mod tests {
         tenant_id: Uuid,
         slug: &str,
     ) -> (Uuid, String) {
-        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         let req = crate::CreateProviderRequestV1::builder(slug, slug, gts).build();
         let p = ProviderRepository::create(repo, conn, scope, tenant_id, &req)
             .await

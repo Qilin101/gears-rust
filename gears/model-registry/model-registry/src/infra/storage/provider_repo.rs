@@ -305,12 +305,12 @@ mod tests {
     }
 
     fn make_create_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
-        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         CreateProviderRequestV1::builder(slug, name, gts).build()
     }
 
     fn make_full_create_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
-        let gts = gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+        let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         CreateProviderRequestV1::builder(slug, name, gts)
             .managed(true)
             .metadata(serde_json::json!({"region": "us-east-1"}))
@@ -811,9 +811,9 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let gts_openai =
-            gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.openai.v1~");
+            gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         let gts_anthropic =
-            gts::GtsTypeId::new("gts.cf.genai.models.provider.v1~cf.genai._.anthropic.v1~");
+            gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~");
 
         ProviderRepository::create(
             &repo,
