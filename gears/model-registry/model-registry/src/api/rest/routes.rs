@@ -127,12 +127,16 @@ pub fn register_routes(
     router = OperationBuilder::delete("/model-registry/v1/providers/{id}")
         .operation_id("model_registry.delete_provider")
         .summary("Delete a provider")
-        .description("Delete a provider by ID")
+        .description(
+            "Delete a provider by ID. Refused with 400 `failed_precondition` while any model \
+             still references it; soft-deleted (deprecated) models count.",
+        )
         .tag("Providers")
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::delete_provider)
         .no_content_response(StatusCode::NO_CONTENT, "Provider deleted")
+        .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)

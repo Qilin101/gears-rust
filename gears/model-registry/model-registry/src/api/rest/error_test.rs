@@ -123,7 +123,7 @@ fn forbidden_maps_to_403() {
 }
 
 // ---------------------------------------------------------------------------
-// 409 — Already Exists / Conflict
+// 409 — Already Exists
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -154,14 +154,64 @@ fn provider_disabled_maps_to_403() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 400 — Failed Precondition
+// ---------------------------------------------------------------------------
+
 #[test]
-fn invalid_transition_maps_to_400() {
-    assert_mapping_with_detail(
-        DomainError::invalid_transition("cannot deprecate from preview"),
-        400,
-        "gts.cf.core.errors.err.v1~cf.core.err.invalid_argument",
-        "Invalid state transition",
+fn invalid_transition_maps_to_400_failed_precondition() {
+    let canon: CanonicalError =
+        DomainError::invalid_transition("cannot deprecate from preview").into();
+    assert_eq!(canon.status_code(), 400);
+    assert!(
+        canon
+            .gts_type()
+            .starts_with("gts.cf.core.errors.err.v1~cf.core.err.failed_precondition"),
+        "expected failed_precondition, got '{}'",
+        canon.gts_type()
     );
+    let CanonicalError::FailedPrecondition { ctx, .. } = canon else {
+        panic!("expected FailedPrecondition variant");
+    };
+    assert_eq!(ctx.violations.len(), 1);
+    assert_eq!(ctx.violations[0].subject, "model");
+    assert_eq!(ctx.violations[0].type_, "INVALID_TRANSITION");
+    assert_eq!(
+        ctx.violations[0].description,
+        "cannot deprecate from preview"
+    );
+}
+
+#[test]
+fn provider_has_models_maps_to_400_failed_precondition() {
+    let canon: CanonicalError = DomainError::provider_has_models(Uuid::nil(), 3).into();
+    assert_eq!(canon.status_code(), 400);
+    assert_eq!(
+        canon.resource_name(),
+        Some(Uuid::nil().to_string().as_str())
+    );
+    let CanonicalError::FailedPrecondition { ctx, .. } = canon else {
+        panic!("expected FailedPrecondition variant");
+    };
+    assert_eq!(ctx.violations[0].subject, "provider");
+    assert_eq!(ctx.violations[0].type_, "PROVIDER_HAS_MODELS");
+    assert!(
+        ctx.violations[0].description.contains('3'),
+        "expected the model count in the violation description, got '{}'",
+        ctx.violations[0].description
+    );
+}
+
+/// The FK-violation fallback passes `model_count: 0` (count unknown, not
+/// zero), so the description must not claim zero models.
+#[test]
+fn provider_has_models_omits_unknown_count() {
+    let canon: CanonicalError = DomainError::provider_has_models(Uuid::nil(), 0).into();
+    assert_eq!(canon.status_code(), 400);
+    let CanonicalError::FailedPrecondition { ctx, .. } = canon else {
+        panic!("expected FailedPrecondition variant");
+    };
+    assert_eq!(ctx.violations[0].description, "provider still owns models");
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +273,7 @@ fn all_error_variants_have_valid_status() {
         (DomainError::model_not_approved("m1"), 403),
         (DomainError::forbidden("x"), 403),
         (DomainError::provider_conflict("s"), 409),
-        (DomainError::provider_has_models(Uuid::nil(), 3), 409),
+        (DomainError::provider_has_models(Uuid::nil(), 3), 400),
         (DomainError::provider_disabled(Uuid::nil()), 403),
         (DomainError::invalid_transition("t"), 400),
         (DomainError::validation("v"), 400),

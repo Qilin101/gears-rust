@@ -1561,8 +1561,8 @@ Error codes follow the RFC 9457 Problem Details standard, produced through `tool
 | ProviderDisabled | ProviderDisabled | 403 | `permission_denied` |
 | ProviderNotOwned | ProviderNotOwned | 403 | `permission_denied` |
 | ProviderConflict | ProviderConflict | 409 | `already_exists` |
-| ProviderHasModels | ProviderHasModels | 409 | `already_exists` |
-| InvalidTransition | InvalidTransition | 400 | `invalid_argument` |
+| ProviderHasModels | ProviderHasModels | 400 | `failed_precondition` |
+| InvalidTransition | InvalidTransition | 400 | `failed_precondition` |
 | Validation | Validation | 400 | `invalid_argument` |
 | Internal | Internal | 500 | `internal` |
 | Database | Internal | 500 | `internal` |
@@ -1575,7 +1575,17 @@ Notes on the mapping as implemented:
 - **`ProviderDisabled` is 403, not 404** — the provider exists and the caller may see it; what is refused is creating a model against it. `get_tenant_model` must also return `ProviderDisabled`, not only `create_model` — for a `canonical_id` that resolves to a live model whose winning provider is `disabled`, checked after the lifecycle gate so an unresolvable ID still yields `ModelNotFound` (§3.5 "Tenant Visibility Resolution"). `list_tenant_models` has no such error to return: it drops those rows from the page via the allow-list predicate.
 - **`ProviderNotOwned`**: a 403 variant for `create_model` when `provider_slug` resolves only in an ancestor tenant, not the caller's own. Distinct from `ProviderNotFound` (the provider genuinely doesn't exist anywhere in the chain) and from `Forbidden` (a role/PDP denial) — this is a structural ownership rule, not an authorization decision.
 - **Duplicate `canonical_id`** on create is a `Validation` (400), not a 409: the conflict is in the *derived* identity (`provider_slug` + `provider_model_id`), so it reads as a bad request body rather than a resource collision.
-- **`TagNotFound` / `TagAlreadyExists`** are P3 — they arrive with the tag surface and are not in the SDK error enum today.
+- **`ProviderHasModels` and `InvalidTransition` are `failed_precondition` (400), not `already_exists` (409) or `invalid_argument` (400).** Both refuse an operation because of the target row's current state, which is what `failed_precondition` means; `already_exists` would claim a collision when nothing already exists, and `invalid_argument` would blame the request body when it is well-formed. The reason travels as a `violations[]` entry — `subject` is the discriminator (`provider` / `model`), `type` is the finer token (`PROVIDER_HAS_MODELS` / `INVALID_TRANSITION`) — so callers dispatch on structure instead of parsing the detail string. `ProviderHasModels` also carries the provider id as `resource_name`; its violation description states the referencing-model count, except on the FK-violation fallback where the count is unknown (`provider_repo::delete`). This is the same shape `account-management` uses for `TenantHasChildren` / `AlreadyResolved`.
+
+Errors deferred to a later phase, listed here with the phase that introduces them so they are scoped rather than undocumented. None is a `DomainError` or `ModelRegistryError` variant today:
+
+| Error | HTTP Status | Canonical category | Phase | Raised by |
+|-------|-------------|--------------------|-------|-----------|
+| `discovery_failed` | 503 | `service_unavailable` | P2 | `trigger_discovery`, when the OAGW leg fails (§3.5 "Discovery Failure"). Scoped to the discovery call, not the module: catalog reads keep serving from cache and DB while it is returned. |
+| `tag_not_found` | 404 | `not_found` | P3 | The tag surface. |
+| `tag_already_exists` | 409 | `already_exists` | P3 | The tag surface. |
+
+A DB outage is out of both tables' scope: it surfaces as `DomainError::Database` → 500 `internal`, not as a 503 — the PRD's fail-closed DB-unavailability contract has no design response in this document yet.
 
 ### Cache Invalidation Strategy
 

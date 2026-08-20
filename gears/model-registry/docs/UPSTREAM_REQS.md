@@ -89,7 +89,7 @@ The gear **MUST** resolve model lookups within <10ms at P99 latency.
 
 The gear **MUST** return distinct errors for: model not found in catalog, model not approved for tenant, and model deprecated/sunset by provider.
 
-- **Rationale**: LLM Gateway maps these errors to specific HTTP status codes (404, 403, 410) for its callers; a generic error is insufficient.
+- **Rationale**: LLM Gateway maps these errors to its own outward responses for its callers; a generic error is insufficient. The registry keeps the three distinguishable, but not all three by status alone: not-found and deprecated are both 404 `not_found`, told apart by the SDK error variant (`ModelNotFound` / `ModelDeprecated`) or by the problem detail over HTTP (DESIGN.md §4 Error Handling).
 - **Source**: `gears/llm-gateway` ([`cpt-cf-llm-gateway-seq-provider-resolution-v1`](../../llm-gateway/docs/DESIGN.md))
 
 ## 3. Priorities

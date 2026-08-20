@@ -178,18 +178,19 @@ curl -fsS -X DELETE -o /dev/null -w 'HTTP %{http_code}\n' \
 
 # ── 10. DELETE /providers/{id} ──────────────────────────────────────────────
 # Soft-delete on the model retains the FK row, so the provider delete may
-# either succeed (if you hard-delete the model first) or return 409 because
-# the (soft-deleted) model still references it. Both are valid outcomes —
-# the demo just demonstrates the call lands on the route.
-step "DELETE /providers/{id} — expect 204 or 409 (FK from soft-deleted model)"
+# either succeed (if you hard-delete the model first) or return 400
+# `failed_precondition` because the (soft-deleted) model still references it.
+# Both are valid outcomes — the demo just demonstrates the call lands on the
+# route.
+step "DELETE /providers/{id} — expect 204 or 400 (model still references it)"
 
 DEL_HTTP=$(curl -sS -o /tmp/mr_delete_resp.json -w '%{http_code}' \
     -X DELETE "${BASE_URL}/providers/${PROVIDER_ID}" || true)
 echo "HTTP ${DEL_HTTP}"
 if [ -s /tmp/mr_delete_resp.json ]; then jq . /tmp/mr_delete_resp.json; fi
 
-if [ "${DEL_HTTP}" != "204" ] && [ "${DEL_HTTP}" != "409" ]; then
-    echo "expected 204 or 409, got ${DEL_HTTP}" >&2
+if [ "${DEL_HTTP}" != "204" ] && [ "${DEL_HTTP}" != "400" ]; then
+    echo "expected 204 or 400, got ${DEL_HTTP}" >&2
     exit 1
 fi
 

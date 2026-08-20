@@ -22,7 +22,7 @@ In a second terminal:
 bash gears/model-registry/scripts/demo.sh
 ```
 
-The script hits every endpoint in order — create provider, list/get/patch, create model, list/get/patch, soft-delete model, delete provider — and prints each request's response. It exits 0 on full success; the final `DELETE /providers/{id}` is allowed to return either `204` (clean state) or `409` (because the soft-deleted model still holds the FK).
+The script hits every endpoint in order — create provider, list/get/patch, create model, list/get/patch, soft-delete model, delete provider — and prints each request's response. It exits 0 on full success; the final `DELETE /providers/{id}` is allowed to return either `204` (clean state) or `400` `failed_precondition` (because the soft-deleted model still holds the FK).
 
 To target a different host:
 

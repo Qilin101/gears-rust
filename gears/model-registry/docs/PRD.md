@@ -567,6 +567,9 @@ Provider config:
 - Discovery enabled/interval
 - Provider-type-specific connection settings (GTS-typed), only where the provider type requires them — there is no generic `base_url` field
 
+Provider deletion:
+- Deleting a provider that still owns models is refused (`provider_has_models`); soft-deleted (`deprecated`) models still count as owned. Deletion is unrelated to disabling — disabling retains every catalog entry (see UC-007)
+
 Credentials handled by OAGW — not stored in Model Registry.
 
 **Actors**: `cpt-cf-model-registry-actor-platform-admin` (root tenant providers), `cpt-cf-model-registry-actor-tenant-admin` (own tenant's providers, including shadowing an inherited provider)
@@ -935,18 +938,20 @@ The registry MUST support adding a new provider's discovery capability without m
 |------|-------------|-------------|
 | `model_not_found` | 404 | Model identifier does not exist in catalog |
 | `model_not_approved` | 403 | Model exists but not approved for tenant |
-| `model_deprecated` | 410 | Model was removed by provider (soft-deleted) |
+| `model_deprecated` | 404 | Model was soft-deleted — removed by the provider, or deprecated by an admin. 404 and not 410: the platform's canonical error categories have no gone-resource category, so the deprecation is carried in the problem detail rather than the status |
 | `provider_not_found` | 404 | Provider identifier does not exist |
 | `tag_not_found` | 404 | Tag does not exist for tenant (own or inherited) |
 | `tag_already_exists` | 409 | Tag with the same name already exists in tenant |
-| `provider_disabled` | 403 | Provider exists but is disabled — the requested operation (e.g. creating a model against it, running discovery) is refused; also returned by `get_tenant_model`/`list_tenant_models` for any model attached to a disabled provider, since disabling makes all of that provider's models unavailable for eval |
+| `provider_disabled` | 403 | Provider exists but is disabled — the requested operation (e.g. creating a model against it, running discovery) is refused. `get_tenant_model` also returns it for a model whose winning provider is disabled, since disabling makes all of that provider's models unavailable for eval. `list_tenant_models` returns no such error: it silently omits those models from the page, the same way it omits non-approved ones |
 | `provider_not_owned` | 403 | Provider exists (inherited from an ancestor tenant) but a model can only be created against a provider owned by the same tenant |
-| `invalid_transition` | 409 | Transition refused: a `lifecycle_status` change out of a terminal state (`deprecated` / `sunset`), or an approval change on a model already in one |
+| `invalid_transition` | 400 | Transition refused: a `lifecycle_status` change out of a terminal state (`deprecated` / `sunset`), or an approval change on a model already in one. A state precondition, not a resource collision — hence 400 `failed_precondition`, not 409 |
+| `provider_has_models` | 400 | Provider still has models attached; they must be removed before the provider can be deleted. Soft-deleted (deprecated) models still count |
 | `validation_error` | 400 | Input validation failed |
 | `unauthorized` | 403 | Actor lacks required role for operation |
+| `discovery_failed` | 503 | Discovery trigger failed because the provider was unreachable through OAGW (P2, with the discovery surface) |
 | `service_unavailable` | 503 | Database unavailable |
 
-Error responses follow RFC 9457 Problem Details standard.
+Error responses follow RFC 9457 Problem Details standard. Each status above is fixed by the canonical error category the platform assigns (`toolkit-canonical-errors`) rather than chosen per endpoint — the per-variant mapping, and the reason a state-precondition refusal is 400 rather than 409, are in DESIGN.md §4 Error Handling.
 
 ## 10. Security Considerations
 
@@ -1013,7 +1018,7 @@ Key interfaces:
 - Returns `model_not_found` (404) if model not in catalog
 - Returns `provider_disabled` (403) if the model's provider is disabled
 - Returns `model_not_approved` (403) if not approved for tenant (or any ancestor)
-- Returns `model_deprecated` (410) if model was soft-deleted
+- Returns `model_deprecated` (404) if model was soft-deleted
 
 ### UC-002: List Tenant Models
 
@@ -1154,7 +1159,7 @@ Key interfaces:
 
 **Acceptance criteria**:
 - Auto-discovery is suspended for the provider; a discovery trigger against it returns `provider_disabled`
-- `get_tenant_model` / `list_tenant_models` (eval) return `provider_disabled` for models attached to this provider, even if previously approved
+- `get_tenant_model` returns `provider_disabled` for a model attached to this provider, even if previously approved; `list_tenant_models` returns no error and silently omits those models from the page
 - Models already in the catalog for this provider remain visible via `cpt-cf-model-registry-fr-list-tenant-models-management`, marked as unavailable
 - Operations that extend the provider (e.g. creating a new model against it) are refused with `provider_disabled`
 - Disabling does not delete or change the approval status of any model — re-enabling restores eval availability without re-approval

@@ -59,24 +59,41 @@ refreshed to current line numbers and the sub-items that *did* close called out.
      accident (19 call sites in `service.rs`, 12 in `integration.rs`, 1 in `model_repo.rs`).
    Verified: 296 unit + 24 integration + 36 SDK tests pass; `cargo fmt` / `clippy --all-targets`
    clean for both crates.
-8. [ ] **Error-mapping divergences** — one more sub-item closed, four still open. Code matches
-   DESIGN exactly (`api/rest/error.rs`), so every remaining row is a PRD-vs-DESIGN divergence.
-   - *Closed*: **duplicate `canonical_id`**. DESIGN.md:1577 documents the `Validation`/400 rationale
-     and the PRD's general `already_exists` framing is gone — the only `*_already_exists` row left
-     is `tag_already_exists` (PRD.md:941), which is P3 and genuinely a collision.
-   - `ModelDeprecated` is 404 in DESIGN (DESIGN.md:1558, rationale at :1572) vs 410 in PRD's error
-     table (PRD.md:938) and UC-001 AC (PRD.md:1016).
-   - `InvalidTransition` is 400/`invalid_argument` in DESIGN (DESIGN.md:1565) and in the code
-     (`api/rest/error.rs:81`) vs `invalid_transition` 409 in PRD's table (PRD.md:944). #10 corrected
-     that row's *description* — it no longer claims an approval state machine — but the status code
-     is still divergent, and here it is the PRD that disagrees with the shipped code.
-   - 503 `discovery_failed` appears only in a sequence diagram (DESIGN.md:1305) and in no error
-     table; the PRD's only 503 is `service_unavailable` for DB-down (PRD.md:947).
-   - `ProviderHasModels` → `already_exists` (DESIGN.md:1564) is still semantically wrong — nothing
-     already exists; it is a precondition conflict.
-   - **New**: PRD.md:942 says `provider_disabled` is "also returned by `get_tenant_model`/
-     `list_tenant_models`", but DESIGN.md:1575 is explicit that `list_tenant_models` has no such
-     error and silently drops those rows via the allow-list predicate — which is what the code does.
+8. [x] **Error-mapping divergences** — resolved 2026-08-20 in PRD, DESIGN, code and the demo. Two
+   rows were PRD-only alignments, two changed the shipped mapping, one filled a table gap.
+   - **`ModelDeprecated` 410 → 404 in the PRD** (table PRD.md:941, UC-001 AC PRD.md:1021). The
+     canonical category set has no gone-resource category, so 410 was never expressible and
+     DESIGN's rationale (DESIGN.md:1572) stands. `UPSTREAM_REQS.md:92` — the gear's only other 410,
+     in the rationale for `upreq-error-responses` — now states how the three cases stay
+     distinguishable instead of naming a status the registry never returns: by SDK error variant,
+     or by the problem detail over HTTP.
+   - **`InvalidTransition` 409 → 400 in the PRD** (PRD.md:947), and the *category* changed in
+     DESIGN and code from `invalid_argument` to `failed_precondition` (DESIGN.md:1565,
+     `api/rest/error.rs`). The status the PRD had to align with does not move; what changed is that
+     a state guard no longer reports itself as a malformed request body.
+   - **`ProviderHasModels` is no longer `already_exists`** — now `failed_precondition`, which also
+     moves its status 409 → 400 (DESIGN.md:1564, `api/rest/error.rs`), matching how
+     `account-management` maps `TenantHasChildren`. Consequences carried through: the reason travels
+     as a `violations[]` entry (`subject` = `provider` / `model`, `type` = `PROVIDER_HAS_MODELS` /
+     `INVALID_TRANSITION`) so callers dispatch on structure rather than a detail string;
+     `DELETE /providers/{id}` now registers `400` in OpenAPI, having advertised neither the new 400
+     nor the old 409 (`routes.rs`); the demo's final delete accepts 204-or-400 (`DEMO.md`,
+     `scripts/demo.sh`).
+   - **503 `discovery_failed` is in an error table now.** DESIGN §4 Error Handling gained a
+     deferred-errors table (DESIGN.md:1580-1586) carrying `discovery_failed`
+     (503 / `service_unavailable`, P2) and the two P3 tag errors, each with what raises it and the
+     note that none is a `DomainError` variant yet; the PRD gained the matching row (PRD.md:951).
+     DB-unavailability is deliberately left to #17, and DESIGN now says plainly that a DB outage
+     surfaces as 500 `internal` rather than a 503.
+   - **`provider_disabled`**: PRD.md:945 and UC-007's AC (PRD.md:1162) now say `get_tenant_model`
+     returns it while `list_tenant_models` silently omits those rows, matching DESIGN.md:1575 and
+     the code.
+   - The PRD's new `provider_has_models` row would have had no requirement behind it, so
+     `fr-provider-management` gained a one-line "Provider deletion" rule (PRD.md:570) mirroring the
+     constraint DESIGN already carried at DESIGN.md:1355.
+   Verified: 298 unit + 24 integration + 36 SDK tests pass (three new error-mapping tests replacing
+   one, plus the status row in `all_error_variants_have_valid_status`); `cargo fmt` /
+   `clippy --all-targets` clean for both crates.
 9. [x] **Stale `fr-model-pricing` driver line** — resolved (DESIGN.md:67).
 
 ## Critical
@@ -259,45 +276,3 @@ refreshed to current line numbers and the sub-items that *did* close called out.
     doc states neither.
 42. [ ] Dangling forward references: `DECOMPOSITION.md` "once it is generated" (DESIGN.md:1686,
     :1705, :1744), `features/` "to be created" (DESIGN.md:1762). Neither exists under `docs/`.
-
-43. [x] **DESIGN claimed a cache eviction the code deliberately does not do** — found while
-    specifying #7's gate, fixed in the same pass. DESIGN said `get_tenant_model` "deletes that key
-    on its way to returning `ModelDeprecated`" and marked it *(implemented)*; the code keeps the
-    entry on that gate with a comment explaining why (a terminal state cannot transition out, so
-    re-reading can only reproduce the same error — `service.rs:553-562`), and evicts on the two
-    gates whose verdict comes from outside the cached row instead. DESIGN now states that rule
-    per-gate (a table at §3.5 "Tenant Visibility Resolution", plus DESIGN.md:1596), which is also
-    what justifies the new approval gate keeping its entry.
-44. [x] **Stale "Designed, not yet implemented"** on the shared eval/management list query
-    (DESIGN §3.2) — the `ListVisibility::{Eval, Management}` parameterization ships
-    (`model_repo.rs:73-106`). Sentence removed.
-
-## Net-new implementation backlog — closed
-
-Everything the reconciliation added as P1 scope has since landed, or was superseded by a better
-design decision:
-
-- [x] `provider_not_owned` error variant + same-tenant `provider_slug` resolution in `create_model`
-  — `service.rs:806-841`, `domain/error.rs`, `api/rest/error.rs:48-54`.
-- [x] Shadow-hides-all-models exclusion in `get_tenant_model` / `list_tenant_models` — implemented
-  as `ChainProviders` + `provider_id ∈ allow_list` (`inheritance.rs:76-196`, `service.rs:487-500`,
-  `service.rs:604-668`, `model_repo.rs:87-95`).
-- [x] ~~`models.provider_disabled` shadow column, its sync-on-status-change write, its index and the
-  read-path check~~ — **superseded**. The column was dropped from the design: `providers.status` is
-  the single source of truth and is not denormalized (DESIGN.md:537), the disabled gate rides the
-  same `allow_list` predicate as shadowing, and there is no sync path to get wrong.
-- [x] The eleventh endpoint/method, `list_tenant_models_management` — SDK trait
-  (`model-registry-sdk/src/api.rs:82`), service (`service.rs:682`), `LocalClient`
-  (`local_client.rs:69`), route `GET /model-registry/v1/admin/models` (`routes.rs:246`) returning
-  `ModelManagementDto` with `shadowed` / `provider_disabled` / `available_for_eval`,
-  `include_deprecated` as an explicit query flag, and one repository query parameterized by
-  `ListVisibility::{Eval, Management}` (`model_repo.rs:73-106`), gated on the distinct
-  `list_management` PDP action (`service.rs:88`).
-- [x] Lifecycle-filter escape hatch removed. `model_repo.rs:87-95` ANDs the
-  `deprecated`/`sunset` exclusion unconditionally on the eval path — the string-matching branch is
-  gone, and `model_repo.rs:1215-1280` covers `$filter=lifecycle_status eq 'deprecated'` returning
-  an empty page.
-- [x] ~~`provider_disabled` joins the OData filter enum (15 → 16 fields)~~ — **superseded**.
-  DESIGN.md:715 rules it out with a reason: `shadowed` and `provider_disabled` are per-request
-  computations over `ChainProviders`, not columns, and `FieldToColumn` binds each filter field to
-  exactly one real `models` column. Management callers narrow on the flags client-side.
