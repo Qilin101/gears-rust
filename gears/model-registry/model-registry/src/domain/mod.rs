@@ -1,5 +1,7 @@
-// TODO: DE0301 - refactor to remove toolkit_db dependency from domain layer
-// This gear currently uses toolkit_db::DbError, DBRunner which violates DDD
+// The repository traits take `toolkit_db::secure::DBRunner` and `DomainError`
+// wraps `toolkit_db::DbError`, which DE0301 flags. This is the convention across
+// gears, not a deviation pending repair. `unknown_lints` covers plain rustc runs,
+// where the dylint lint is not registered.
 #![allow(unknown_lints)]
 #![allow(de0301_no_infra_in_domain)]
 
