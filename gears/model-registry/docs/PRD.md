@@ -201,9 +201,10 @@ Project-wide runtime, OS, architecture, lifecycle policy, and integration patter
 | Usage metering & billing | License Manager |
 | Tenant hierarchy management | Tenant Resolver |
 | Rate limiting (limit definition and enforcement) | Infrastructure / OAGW |
+| Discovery concurrency limits & staggering across providers | Caller / external scheduler (the module exposes a per-provider trigger and embeds no scheduler) |
 | Inference/routing health monitoring | OAGW (per-route, per-tenant-key availability) |
 | Approval workflow engine | Generic Approval Service (Model Registry integrates with it) |
-| Audit log storage & retention | Core platform |
+| Audit log storage & retention | Core platform (§16 Assumption 7) |
 | Model fine-tuning / training | Not in scope for v1 |
 | Provider API contracts | Each provider plugin |
 | Provider plugin architecture | DESIGN.md |
@@ -273,8 +274,8 @@ Represents an AI model in the catalog.
   - `architecture`: string — model architecture (e.g., `qwen`, `llama`, `mistral`, `gpt`)
   - `size_bytes`: integer — model size in bytes (for capacity planning)
   - `format`: string — model format (e.g., `gguf`, `mlx`, `safetensors`, `api-only`)
-- **Capabilities (Tier 1)**: Boolean flags for text/image/audio/video/document input/output, tools, structured_output, streaming, embeddings, realtime_audio, batch_api
-- **Limits (Tier 2)**: context_window, max_output_tokens, max_images_per_request, max_image_size_mb, max_audio_duration_sec
+- **Capabilities (Tier 1)**: vision (image input), image generation, audio input, audio output, document/file input, tools, structured_output, streaming, code interpreter, web search, and the reasoning controls. Media capabilities carry their accepted media types alongside the on/off flag. Which API surfaces a model exposes (completion, embedding, batch) is carried by `supported_api`, not by a capability flag
+- **Limits (Tier 2)**: context window — max_input_tokens, max_output_tokens, and output_vector_size for embedding models
 - **Provider Cost**: Part of the model's provider-specific settings; the field set follows the provider's own cost structure, denominated in AICredits — raw provider cost data, not user-facing pricing
 - **Status**: active, deprecated (soft-delete with deprecated_at timestamp)
 - **Version**: Provider's model version, stored as-is
@@ -439,8 +440,7 @@ The system must validate all input data.
 |-------|------------|
 | Canonical ID | Must match pattern `{provider_slug}::{model_id}`, provider with slug must exist. Parse on first `::`. |
 | Provider slug | 1-64 chars, lowercase alphanumeric + hyphen. Unique within tenant. Immutable. |
-| Provider name | 1-32 chars, lowercase alphanumeric + hyphen |
-| Capabilities | Must conform to GTS capability schema |
+| Provider name | 1-255 chars of free-form display text (bound matches the stored column) |
 | Cost values | Non-negative (AICredits); the field set is provider-specific and validated against the provider settings schema |
 
 #### Cache Isolation
@@ -485,7 +485,7 @@ Includes:
 
 Excludes models whose provider is disabled, and models hidden by provider shadowing (see Domain Model → Provider → Inheritance & Shadowing).
 
-Follows OData pagination standard. Supports OData `$filter` for filtering by capability, provider, approval_status, and tag (P3). Filtering only ever narrows the set this operation already grants — the exclusions above are unconditional and no `$filter` clause switches one off.
+Follows OData pagination standard. Supports OData `$filter` for filtering by capability, provider GTS type, approval_status, and tag (P3). Filtering only ever narrows the set this operation already grants — the exclusions above are unconditional and no `$filter` clause switches one off.
 
 Capability filtering uses subset matching: model must have AT LEAST requested capabilities.
 
@@ -608,8 +608,6 @@ The system must support discovery of available models from providers via Outboun
 - **Optional**: Can be automated via external scheduled workflow (e.g., platform scheduler, Kubernetes CronJob)
 
 Model Registry provides discovery API endpoint; scheduling is NOT built into Model Registry.
-
-**Concurrency**: Fixed concurrency limit + staggered intervals when multiple discoveries run.
 
 Per (tenant, provider) pair where discovery is enabled, a discovery plugin is selected and executed for that provider's GTS type, producing model definitions that are reconciled with the catalog (newly appearing models added as `pending`, existing models updated, absent models deprecated). The per-provider plugin boundary, GTS-typed discovery settings, and catalog reconciliation outcome are fully specified in the following sub-requirements:
 - `cpt-cf-model-registry-fr-discovery-plugins` — plugin selection and extensibility
@@ -876,6 +874,10 @@ The following operations MUST be logged for audit compliance:
 
 Read operations are not audited (high volume, low value).
 
+**Phase**: `p2`. Emission lands with the Approval Service integration, which owns the approval workflow's own audit trail. P1 emits structured logs only and operates no audit-sink integration.
+
+**Responsibility split**: Model Registry MUST emit these records; the sink that stores them — along with retention, tamper-proofing, and SIEM integration — is the platform's, per §4 Out of Scope ("Audit log storage & retention") and §16 Assumption 7. The MUST above is therefore a requirement to emit, not to operate an audit store.
+
 ## 8. Non-Functional Requirements
 
 ### Performance
@@ -887,7 +889,7 @@ Read operations are not audited (high volume, low value).
 | `get_tenant_model` | 2ms | 10ms |
 | `list_tenant_models` | 10ms | 50ms |
 | `approve_model` | - | 100ms |
-| Discovery job (per provider) | - | 30s |
+| Discovery call (per provider) | - | 30s |
 
 Caching: Reads are served from cache with a configurable TTL plus event-driven invalidation. The cache backend is pluggable.
 
@@ -909,10 +911,13 @@ Cache unavailable: Fallback to direct DB queries (higher latency).
 
 | Dimension | Target |
 |-----------|--------|
-| Models per provider | 100 |
-| Providers per tenant | 20 |
+| Models per provider (ceiling) | 100 |
+| Providers per tenant (ceiling) | 20 |
 | Tenants | 10,000 |
+| Models per tenant (planning basis) | ~200 |
 | Total models (worst case) | ~2,000,000 |
+
+The two ceilings are per-entity maxima, not simultaneous ones: a tenant sitting at both at once would hold 2,000 models, which is an outlier to be reviewed with the operator rather than the capacity basis. The planning basis is ~200 models per tenant, which is where the ~2,000,000 total comes from.
 | Read:Write ratio | 1000:1 |
 
 ### Discovery Plugin Isolation
@@ -1038,7 +1043,7 @@ Key interfaces:
 
 **Acceptance criteria**:
 - Follows OData pagination standard
-- Supports `$filter` by capability flags, provider slug, provider GTS type, approval_status, lifecycle_status, managed, architecture, format, tag (P3)
+- Supports `$filter` by capability flags, provider GTS type, approval_status, lifecycle_status, managed, architecture, format, tag (P3). Filtering by provider **slug** is not offered: provider identity lives on the `providers` side, and a caller that needs a single provider's models narrows on `canonical_id`, which is prefixed with the slug
 - Tag filtering uses subset matching: model must carry AT LEAST the requested tags
 - Returns only approved models, unconditionally — `$filter` narrows within that set but never widens it (`$filter=approval_status eq 'pending'` returns an empty page, not pending models)
 - Excludes models whose provider is disabled, unconditionally
@@ -1070,7 +1075,6 @@ Key interfaces:
 
 **Acceptance criteria**:
 - Discovery runs per (tenant, provider) pair
-- Fixed concurrency limit with staggered intervals when multiple discoveries run
 - Deprecated models are soft-deleted (hidden, not purged)
 - Discovery API is idempotent (safe to call multiple times)
 
@@ -1356,13 +1360,13 @@ Key interfaces:
 
 **Flow**:
 1. Admin (or external scheduler) calls discovery API for provider
-2. Registry queues discovery job
-3. Discovery executes and updates catalog
+2. Registry runs discovery for that provider and reconciles the result into the catalog
+3. Registry returns the outcome to the caller
 
 **Postconditions**: Provider catalog updated.
 
 **Acceptance criteria**:
-- Returns job status (queued/running/completed)
+- The call is synchronous: it returns the discovery outcome for that provider (models added / updated / deprecated, or the failure reason). There is no job entity and no separate status endpoint — the registry owns no work queue
 - Tenant admin can trigger discovery for own providers; Platform admin can trigger for any provider
 
 ### UC-025: Add a New Provider Discovery Plugin
@@ -1467,7 +1471,7 @@ Key interfaces:
 
 **Flow**:
 1. Admin submits a create / update / soft-delete request with model fields (`provider_slug`, `provider_model_id`, capabilities, limits, provider cost, lifecycle status)
-2. Registry validates input (canonical ID format derived from `provider_slug::provider_model_id`, capability schema, GTS lifecycle type, immutability of `canonical_id`)
+2. Registry validates input (canonical ID format derived from `provider_slug::provider_model_id`, GTS lifecycle type, immutability of `canonical_id`)
 3. Registry persists model entry
 4. For create: admin sets initial approval status — defaults to `pending`; admin may pass `status=approved` to approve in the same call
 5. For update of an existing model: admin may directly set status to `approved`, `rejected`, or `revoked` (P1 has no workflow engine)
@@ -1652,7 +1656,7 @@ Key interfaces:
 | 3 | Provider plugin retry policies | Deferred | DESIGN.md |
 | 4 | Tag access rights — who may create/delete tags (tenant admin only, platform admin only, or both)? Working default for P3 FRs: tenant admin manages own-tenant tags, platform admin manages root/global tags. Owner: Model Registry Tech Lead. Target resolution: 2026-07-15 | Open | Pending |
 | 5 | Discovery-settings GTS namespace: what is the root GTS schema-id chain for per-plugin discovery-settings types? The settings shape for each provider's plugin is structurally different from the model-info envelope (`gts.cf.genai.model.info.v1~`); should discovery-settings use a sibling chain (e.g. `gts.cf.genai.model.discovery-settings.v1~<vendor>.<provider>.v1~`) or a separate root namespace? The exact chain is a DESIGN/ADR concern; the PRD requires only that each plugin's settings be identified by a GTS type. Owner: Model Registry Tech Lead. Target resolution: before P2 DESIGN finalization. | Open | Pending |
-| 6 | Per-plugin failure isolation policy: when a discovery plugin exceeds its timeout or returns an unrecoverable error, should the registry automatically retry on the next scheduler tick, require manual re-trigger, or apply a backoff policy? The PRD requires that one plugin's failure not block others (`cpt-cf-model-registry-nfr-discovery-plugin-isolation`); the retry/backoff strategy is a DESIGN concern. Owner: Model Registry Tech Lead. Target resolution: before P2 DESIGN finalization. | Open | Pending |
+| 6 | Per-plugin failure isolation policy: when a discovery plugin exceeds its timeout or returns an unrecoverable error, should the registry automatically retry on the next scheduler tick, require manual re-trigger, or apply a backoff policy? The PRD requires that one plugin's failure not block others (`cpt-cf-model-registry-nfr-discovery-plugin-isolation`); the retry/backoff strategy is a DESIGN concern. Owner: Model Registry Tech Lead. | Resolved | Backoff, then manual or external re-trigger — DESIGN.md §4 Fault Tolerance Policies. A dependency call is retried 3 times with exponential backoff and jitter; a terminal plugin failure is recorded against that provider and returned for that call only, leaving every other provider's discovery unaffected. The registry embeds no scheduler, so the next attempt comes from an admin call or an external scheduler rather than an internal tick. |
 
 ## 19. Migration & Rollback
 

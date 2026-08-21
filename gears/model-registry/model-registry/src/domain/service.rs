@@ -264,15 +264,16 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
     /// Create a new provider.
     ///
-    /// Validates slug format, checks authorization, delegates to the repository,
-    /// and invalidates the own-tenant cache on success.
+    /// Validates slug and display-name format, checks authorization, delegates
+    /// to the repository, and invalidates the own-tenant cache on success.
     pub async fn create_provider(
         &self,
         ctx: &SecurityContext,
         req: &CreateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Validate slug format and discovery interval
+        // 1. Validate slug format, display name and discovery interval
         Self::validate_slug(req.slug())?;
+        Self::validate_name(req.name())?;
         Self::validate_discovery_interval(req.discovery_interval_seconds())?;
 
         // 2. Derive access scope (authorization check + DB scope)
@@ -306,7 +307,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         id: Uuid,
         req: &UpdateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Validate discovery interval (if being updated)
+        // 1. Validate the fields being updated
+        if let Some(name) = req.name.as_deref() {
+            Self::validate_name(name)?;
+        }
         Self::validate_discovery_interval(req.discovery_interval_seconds.flatten())?;
 
         // 2. Derive access scope (authorization check + DB scope)
@@ -371,6 +375,22 @@ impl<R, M, C> Service<R, M, C> {
         {
             return Err(DomainError::validation(
                 "provider slug must be lowercase alphanumeric with hyphens",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate provider display name.
+    ///
+    /// Free-form text, bounded by the stored column: 1-255 characters. Counted
+    /// in characters rather than bytes because that is what the column bounds.
+    fn validate_name(name: &str) -> Result<(), DomainError> {
+        if name.is_empty() {
+            return Err(DomainError::validation("provider name cannot be empty"));
+        }
+        if name.chars().count() > 255 {
+            return Err(DomainError::validation(
+                "provider name must be at most 255 characters",
             ));
         }
         Ok(())
@@ -1671,6 +1691,37 @@ mod tests {
 
         let err = TestService::validate_slug("open_ai").unwrap_err();
         assert!(err.to_string().contains("lowercase alphanumeric"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Name validation tests
+    // ═════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_validate_name_valid() {
+        // Free-form display text: mixed case, spaces and punctuation all pass.
+        assert!(TestService::validate_name("OpenAI").is_ok());
+        assert!(TestService::validate_name("Azure OpenAI (EU West)").is_ok());
+        assert!(TestService::validate_name(&"a".repeat(255)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_empty() {
+        let err = TestService::validate_name("").unwrap_err();
+        assert!(err.to_string().contains("name cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_name_too_long() {
+        let err = TestService::validate_name(&"a".repeat(256)).unwrap_err();
+        assert!(err.to_string().contains("at most 255 characters"));
+    }
+
+    #[test]
+    fn test_validate_name_counts_characters_not_bytes() {
+        // 255 multi-byte characters fit the column; 256 do not.
+        assert!(TestService::validate_name(&"\u{e9}".repeat(255)).is_ok());
+        assert!(TestService::validate_name(&"\u{e9}".repeat(256)).is_err());
     }
 
     // ═════════════════════════════════════════════════════════════════════════
