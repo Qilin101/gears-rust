@@ -1812,7 +1812,8 @@ Several Design checklist domains are intentionally **not addressed** by this DES
 - **Open questions** (PRD §18) — where this design answers them:
   - OQ#4 (tag access rights) — §4 Security Considerations, "Tag management": the access matrix encodes the working default and names the question as still open.
   - OQ#6 (per-plugin failure isolation / retry policy) — §4 Fault Tolerance Policies; recorded as resolved in the PRD.
-  - OQ#1 (approval concurrency), OQ#2 (per-endpoint QPS), OQ#3 (provider plugin retry policies), OQ#5 (discovery-settings GTS namespace) — **not answered here**. Each lands with the phase that needs it: OQ#1 and OQ#2 with the approval and load-testing work, OQ#3 and OQ#5 with P2 discovery.
+  - OQ#3 (provider plugin retry policies) — near-duplicate of OQ#6; same answer, §4 Fault Tolerance Policies; recorded as resolved in the PRD.
+  - OQ#1 (approval concurrency), OQ#2 (per-endpoint QPS), OQ#5 (discovery-settings GTS namespace) — **not answered here**. Each lands with the phase that needs it: OQ#1 and OQ#2 with the approval and load-testing work, OQ#5 with P2 discovery.
 - **Implementation (P1)**:
   - SDK — [`model-registry-sdk/`](../model-registry-sdk/) (`cf-gears-model-registry-sdk`)
   - Gear — [`model-registry/`](../model-registry/) (`cf-gears-model-registry`, lib `model_registry`)
