@@ -74,7 +74,7 @@ Checked drivers are implemented in the gear crate and covered by its unit and SQ
 - [ ] `p3` — `cpt-cf-model-registry-fr-alias-management` — Alias table with tenant hierarchy resolution
 - [ ] `p3` — `cpt-cf-model-registry-fr-tag-management` — `tags` table with tenant hierarchy resolution (same inheritance/shadowing model as aliases); managed independently of the model catalog
 - [ ] `p3` — `cpt-cf-model-registry-fr-model-tagging` — `model_tags` join table (many-to-many, tenant-scoped); OData `tag` filter via join; cascade removal on tag delete
-- [ ] `p3` — `cpt-cf-model-registry-fr-degraded-mode` — Tiered behavior: metadata from cache, approval check fails
+- [ ] `p3` — `cpt-cf-model-registry-fr-degraded-mode` — Tiered behavior when the **database** is unavailable: metadata from cache, approval check fails with `service_unavailable`. The metadata half is already what a warm `get_tenant_model` does today (§3.5 "Reads that complete without the database"); what P3 adds is the failing approval check and the 503 form of the failure (§4 Error Handling). Not to be confused with provider unreachability (§3.5 "Discovery Failure"), which is carried by `cpt-cf-model-registry-nfr-availability`
 - [ ] `p3` — `cpt-cf-model-registry-fr-tenant-reparenting` — Cache invalidation on `tenant.reparented` event
 - [ ] `p4` — `cpt-cf-model-registry-fr-user-group-approval` — Group-scoped approval restriction layer
 - [ ] `p4` — `cpt-cf-model-registry-fr-user-level-override` — User-level override takes precedence over group/tenant
@@ -1000,6 +1000,11 @@ Failure semantics are fail-closed: a provider query that errors at any hop fails
 
 `approval_status` is read from the `models` row and **enforced**: `pending`, `rejected` and `revoked` all fail closed with `ModelNotApproved` (403), so a successful return means "approved, live, on an active winning provider" and the LLM Gateway needs no second decision of its own. The gate makes no Approval Service call in any phase — the column is the source of truth for reads (§3.1 Invariants), which is what keeps a fail-closed gate off the critical path of the `<10ms P99` NFR and immune to an approval-service outage.
 
+**Reads that complete without the database.** Every hop on this path is cache-first, and acquiring a connection from the pool does not itself contact the server, so a `get_tenant_model` whose slug-ownership entries and model entry are all warm returns a `ModelV1` having issued **zero** queries. This is deliberate — it is what buys the `<10ms P99` NFR — and it means the read stays available across a database outage for up to `cache_ttl_seconds` (default 10 min) per entry. Two consequences are accepted as designed rather than mitigated:
+
+- The PRD's P1/P2 fail-closed contract — answer while cache suffices, fail as soon as the database must be read — lands as: `list_tenant_models` is uncached (§2.1) and therefore always queries, as do the management listing and every write path, while `get_tenant_model` on warm entries does not query at all. The P3 `cpt-cf-model-registry-fr-degraded-mode` formalizes for metadata what this path already does; what it adds is the failing approval check, which P1 cannot express because that check reads a column on the cached row rather than making a call.
+- `approval_status` is consequently served from cache, not re-verified against the DB per request. The staleness window is bounded by `cache_ttl_seconds` and closed early by write-time `invalidate_tenant` on any status change this process performs (§4 "Cache Invalidation Strategy" item 1). A change the process never observes — another replica's write against the in-process cache backend, a direct DB edit, or the P2 `approval.status_changed` event before its handler lands — falls through to the TTL. Revocation is therefore eventually consistent within one TTL rather than immediate. The gate never fails open on an *absent* answer — an entry that is missing or undeserializable falls through to the DB (§4 Fault Tolerance Policies, "Cache is never load-bearing") — but a stale `approved` entry does keep answering for the remainder of its TTL, and a stale non-`approved` one keeps refusing for the same window.
+
 Approval is the last gate, so `ModelNotApproved` never doubles as a disclosure about a model the caller could not otherwise see: an unresolvable slug is `ProviderNotFoundBySlug`, a shadowed or absent row is `ModelNotFound`, a terminal row is `ModelDeprecated`, and a disabled winner is `ProviderDisabled` — all of them decided first. A model in a terminal lifecycle state yields `ModelDeprecated`. Neither that gate nor the approval gate evicts the cached row — both read columns the entry already carries — while the two provider-derived gates do; the table under "Tenant Visibility Resolution" above gives the rule and the reason for each.
 
 #### Management Model Listing
@@ -1272,7 +1277,7 @@ sequenceDiagram
 
 **Description**: Tag assignment validates every requested tag exists for the tenant (own or inherited) before writing the `model_tags` join rows, and needs no cache invalidation: tags are not carried on `ModelV1`, so no cached entity holds them, and tag-filtered reads are list reads, which are not cached. Assignment is idempotent on `(tenant_id, model_id, tag_id)`. Tag-filtered `list_tenant_models` compiles the OData `tag` predicate to a join/`EXISTS` over `model_tags` scoped to the tenant chain (subset matching). Tag lifecycle operations (create/update/delete) are cache-neutral for the same reason — deleting a tag cascades its `model_tags` rows and leaves no cached entry stale.
 
-#### Discovery Failure (Degraded-Mode Path)
+#### Discovery Failure (Provider Unreachable)
 
 **ID**: `cpt-cf-model-registry-seq-discovery-failure`
 
@@ -1308,10 +1313,10 @@ sequenceDiagram
     LLMGateway->>MR: get_tenant_model(ctx, canonical_id)
     MR->>Cache: get(mr:{tenant}:model:{id})
     Cache-->>MR: cached Model (last successful sync)
-    MR-->>LLMGateway: Model (degraded-mode read)
+    MR-->>LLMGateway: Model (catalog read, unaffected by the provider outage)
 ```
 
-**Description**: When a provider call fails, OAGW surfaces the error to Model Registry, which records the failure on `provider_health` (`consecutive_failures`, `last_error`, `last_error_message`). No catalog rows are mutated and no cache entries are invalidated. Tenant reads (`get_tenant_model`, `list_tenant_models`) continue to serve cached and persisted catalog data — this is the degraded-mode contract from `cpt-cf-model-registry-fr-degraded-mode`. Repeated failures flip provider health to `unhealthy`, which is exposed via `GET /providers/{id}/health` so operators can see provider-level issues without inferring them from discovery latency. Reads are unaffected by an approval-service outage because `approval_status` is served from the `models` column, not fetched per request; only the future explicit access-gate path fails closed (§4 Fault Tolerance Policies).
+**Description**: When a provider call fails, OAGW surfaces the error to Model Registry, which records the failure on `provider_health` (`consecutive_failures`, `last_error`, `last_error_message`). No catalog rows are mutated and no cache entries are invalidated. Tenant reads (`get_tenant_model`, `list_tenant_models`) continue to serve cached and persisted catalog data: a provider being unreachable reaches neither the DB nor the cache, so the read path is untouched by it. That continuity is carried by `cpt-cf-model-registry-nfr-availability` and by the OAGW-outage mitigation in §4 "Technology Risks" — it is **not** `cpt-cf-model-registry-fr-degraded-mode`, which is scoped to *database* unavailability and stays P3 and unanswered (§4 Error Handling). Repeated failures flip provider health to `unhealthy`, which is exposed via `GET /providers/{id}/health` so operators can see provider-level issues without inferring them from discovery latency. Reads are unaffected by an approval-service outage because `approval_status` is served from the `models` column, not fetched per request; only the future explicit access-gate path fails closed (§4 Fault Tolerance Policies).
 
 #### Event Catalog
 
@@ -1539,7 +1544,7 @@ Three module-level technology risks are tracked:
 
 - **SeaORM major-version churn**: SeaORM has shipped breaking changes between minor releases historically. Mitigation: pin minor version in `Cargo.toml`, gate upgrades behind the integration test suite, encapsulate SeaORM behind the repository trait so call sites do not depend on SeaORM types.
 - **Distributed-cache operational cost at scale**: at the 10K+ tenants × 2M+ models target, whichever managed cache service is eventually chosen becomes a meaningful infra line item. Mitigation: pluggable cache (`cpt-cf-model-registry-adr-pluggable-cache`) lets small deployments run on `InMemoryCache` with no cache infrastructure at all; large deployments accept the cost as the documented trade-off. The backend is not selected yet (§4 Technical Debt & Roadmap), so the cost is not yet quantified.
-- **OAGW single point of egress**: every provider call routes through OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); an OAGW outage halts all discovery. Mitigation: degraded-mode catalog reads continue from cache and DB (§3.5 Discovery Failure); discovery resumes on the next manual trigger or external scheduler tick once OAGW recovers.
+- **OAGW single point of egress**: every provider call routes through OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); an OAGW outage halts all discovery. Mitigation: catalog reads continue from cache and DB (§3.5 Discovery Failure); discovery resumes on the next manual trigger or external scheduler tick once OAGW recovers.
 
 ## 4. Additional Context
 
@@ -1582,10 +1587,11 @@ Errors deferred to a later phase, listed here with the phase that introduces the
 | Error | HTTP Status | Canonical category | Phase | Raised by |
 |-------|-------------|--------------------|-------|-----------|
 | `discovery_failed` | 503 | `service_unavailable` | P2 | `trigger_discovery`, when the OAGW leg fails (§3.5 "Discovery Failure"). Scoped to the discovery call, not the module: catalog reads keep serving from cache and DB while it is returned. |
+| `database_unavailable` | 503 | `service_unavailable` | P3 | Any path whose query fails because the database is unreachable — the 503 form of the fail-closed contract, landing with `cpt-cf-model-registry-fr-degraded-mode`. P1 and P2 emit 500 `internal` for the same condition (see below). |
 | `tag_not_found` | 404 | `not_found` | P3 | The tag surface. |
 | `tag_already_exists` | 409 | `already_exists` | P3 | The tag surface. |
 
-A DB outage is out of both tables' scope: it surfaces as `DomainError::Database` → 500 `internal`, not as a 503 — the PRD's fail-closed DB-unavailability contract has no design response in this document yet.
+A DB outage surfaces as `DomainError::Database` → 500 `internal` in P1 and P2, not as a 503. That satisfies the PRD's fail-closed DB-unavailability contract in substance — the request fails rather than serving something a healthy DB would have refused — but not in form. The target posture is `service_unavailable` (503), recorded against the PostgreSQL row in §4 "Dependency SLAs" and landing as `database_unavailable` in the table above alongside the P3 tiered mode. One read path does not fail at all while its cache entries are warm — see §3.5 "Reads that complete without the database".
 
 ### Cache Invalidation Strategy
 
@@ -1689,7 +1695,7 @@ Targets are the design intent; the "P1 behavior" column records what the code do
 | `approval-service.get_status` | <100ms | Retry policy; terminal failure → the P2 admin/workflow surface reports the outage. It cannot deny an eval read, which gates on the `models.approval_status` column instead (§3.5) | Not called in any phase by the read path — approval status is a column; P2 adds the write-side integration only |
 | `outbound-api-gateway` (discovery) | <30s per provider | Discovery degrades to "last known" (§3.5 Discovery Failure); catalog reads unaffected | Not called (P2) |
 | Cache backend | <10ms | Fall through to DB; warm cache in background | In-process map behind an async `RwLock`; miss falls through to DB |
-| PostgreSQL | <50ms (point read), <200ms (filtered list) | Surface 503 to caller; no in-process retry on connection-pool exhaustion | `DbError` → `DomainError::Database` → 500; no in-process retry |
+| PostgreSQL | <50ms (point read), <200ms (filtered list) | Surface `database_unavailable` (503) to caller (§4 Error Handling); no in-process retry on connection-pool exhaustion | `DbError` → `DomainError::Database` → 500; no in-process retry. A warm `get_tenant_model` issues no query and so does not fail at all (§3.5) |
 
 ### Technical Debt & Roadmap
 

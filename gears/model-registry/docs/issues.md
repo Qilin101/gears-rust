@@ -4,15 +4,6 @@ Open items only. Every item below was verified against both the docs and the shi
 `7e3468fe8`. Resolved items have been removed from this list; the original numbering is preserved,
 so gaps in the sequence are removed-resolved items and references from elsewhere stay valid.
 
-## High — internal contradictions in the design
-
-17. [ ] **`fr-degraded-mode` is mis-cited; DB-unavailability is undesigned.** Unchanged.
-    DESIGN.md:1314 attributes provider-unreachability to `cpt-cf-model-registry-fr-degraded-mode`,
-    but that FR is about *database* unavailability (DESIGN.md:77; PRD.md:808-817). No 503 row exists
-    in any error table (see item 8), and the read path can still answer from cache without touching
-    the DB (`service.rs:461-540` probes the cache on every hop), contradicting PRD.md:817/:878
-    "DB unavailable = requests fail (fail-closed)".
-
 ## High — carried over
 
 18. [ ] **Discovery sequence diagram is logically broken.** Unchanged. DESIGN.md:1085:

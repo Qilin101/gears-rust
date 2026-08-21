@@ -817,7 +817,7 @@ The system must define tiered behavior when database is unavailable.
 - Model capabilities and metadata: serve from stale cache (up to the configured TTL)
 - Approval verification: fail request with `service_unavailable` error
 
-P1 and P2 behavior: DB unavailable = all requests fail (fail-closed). The tiered degraded mode above replaces fail-closed starting in P3.
+P1 and P2 behavior: DB unavailable = fail-closed. A request is answered while it can be served entirely from cache, and fails as soon as it must read the database. The tiered degraded mode above replaces fail-closed starting in P3, adding the explicit `service_unavailable` on the approval check.
 
 #### Tenant Re-parenting
 
@@ -897,7 +897,7 @@ Caching: Reads are served from cache with a configurable TTL plus event-driven i
 
 Target: 99.9% availability.
 
-P1 & P2: DB unavailable = requests fail (fail-closed).
+P1 & P2: DB unavailable = fail-closed — served from cache while cache suffices, failing as soon as the database must be read.
 
 P3: Tiered degraded mode (metadata from cache, approval check fails).
 
@@ -962,7 +962,7 @@ Error responses follow RFC 9457 Problem Details standard. Each status above is f
 | Cache poisoning | TTL-based expiry; cached entries are never keyed by user-controlled input |
 | Provider credential exposure | Credentials handled by OAGW, not stored in Model Registry |
 | Privilege escalation via hierarchy | Child tenants can only restrict, not expand parent permissions |
-| Stale approval served | Approval status always verified from DB (P1 & P2 fail-closed) |
+| Stale approval served | Approval status is enforced fail-closed on every read; cached entries are bounded by the cache TTL and dropped on write, so revocation is eventually consistent within one TTL rather than immediate |
 
 ## 11. Consumers
 
