@@ -9,8 +9,10 @@ use http_body::Body;
 use http_body_util::BodyStream;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use toolkit_canonical_errors::Problem;
+use toolkit_http::RequestBuilder;
 
 use crate::ir::binding::{HttpFieldBinding, HttpMethod, HttpMethodBindingIr};
+use crate::runtime::config::InternalTokenProvider;
 use crate::runtime::transport_error::TransportError;
 
 // RFC 3986 path-segment encode set: encode everything except unreserved
@@ -126,6 +128,24 @@ pub fn build_request_url(
     Ok(url)
 }
 
+/// Attach the platform-plane credential from `provider` (if any) to a REST
+/// [`RequestBuilder`] as the sensitive `X-ToolKit-Internal-Token` header.
+///
+/// The single audited REST emit point, shared by the unary-attempt closure and
+/// the SSE reconnect factory (so both re-resolve per attempt and pick up
+/// rotation). REST sibling of [`crate::grpc::attach_internal_token`]; both
+/// delegate the attach policy to [`InternalTokenProvider::resolve_for_attach`].
+pub fn attach_internal_token(
+    builder: RequestBuilder,
+    provider: Option<&InternalTokenProvider>,
+    rpc: &str,
+) -> RequestBuilder {
+    match InternalTokenProvider::resolve_for_attach(provider, rpc) {
+        Some(token) => builder.internal_token_auth(&token),
+        None => builder,
+    }
+}
+
 /// Map an HTTP method enum to [`http::Method`].
 #[must_use]
 pub fn to_http_method(method: HttpMethod) -> http::Method {
@@ -155,7 +175,10 @@ pub fn map_http_error(
     body: String,
     retry_after: Option<std::time::Duration>,
 ) -> TransportError {
-    if let Ok(problem) = serde_json::from_str::<Problem>(&body) {
+    if let Ok(mut problem) = serde_json::from_str::<Problem>(&body) {
+        // RFC 9457 §3.1 makes `status` advisory; if the peer omitted it,
+        // the real response status is right here.
+        problem.status.get_or_insert(status);
         return TransportError::Problem {
             problem: Box::new(problem),
             retry_after,
@@ -305,9 +328,36 @@ mod tests {
         let err = map_http_error(500, body, None);
         match err {
             TransportError::Problem { problem: p, .. } => {
-                assert_eq!(p.status, 500);
+                assert_eq!(p.status, Some(500));
                 assert_eq!(p.detail, "broke");
                 assert!(p.problem_type.contains("internal"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_a_minimal_spec_compliant_problem_envelope() {
+        // RFC 9457 §3.1 makes `detail` and `context` optional. A genuinely
+        // foreign peer's Problem can omit both and still be fully
+        // spec-compliant - it must still map to `TransportError::Problem`
+        // (preserving the real `type`/`title`), not silently degrade to the
+        // generic `HttpStatus` fallback meant for peers that don't speak the
+        // canonical-errors envelope at all.
+        let body = serde_json::json!({
+            "type": "https://example.com/probs/out-of-credit",
+            "title": "You do not have enough credit.",
+            "status": 409
+        })
+        .to_string();
+        let err = map_http_error(409, body, None);
+        match err {
+            TransportError::Problem { problem: p, .. } => {
+                assert_eq!(p.problem_type, "https://example.com/probs/out-of-credit");
+                assert_eq!(p.title, "You do not have enough credit.");
+                assert_eq!(p.status, Some(409));
+                assert_eq!(p.detail, "");
+                assert_eq!(p.context, serde_json::json!({}));
             }
             other => panic!("unexpected {other:?}"),
         }

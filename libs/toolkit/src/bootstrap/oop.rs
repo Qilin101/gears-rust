@@ -545,12 +545,22 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
         .oop_http
         .as_ref()
         .and_then(|h| h.internal_auth.as_ref());
-    let directory_client = if let Some(cfg) = internal_auth_cfg {
-        let interceptor = toolkit_transport_grpc::build_internal_auth_interceptor(cfg).await?;
+    // Build the outbound DirectoryService interceptor and the
+    // `InternalTokenProvider` (for `#[toolkit::provides]` clients) from one
+    // credential source so they can't diverge after a rotation — see
+    // `build_platform_credentials`. `None` => no outbound platform credential.
+    let (directory_client, internal_token_provider) = if let Some(cfg) = internal_auth_cfg {
+        let (interceptor, provider) = build_platform_credentials(cfg, &cancel).await?;
         info!("Attaching platform-plane credential to outbound DirectoryService calls");
-        DirectoryGrpcClient::connect_with_interceptor(&opts.directory_endpoint, interceptor).await?
+        let client =
+            DirectoryGrpcClient::connect_with_interceptor(&opts.directory_endpoint, interceptor)
+                .await?;
+        (client, provider)
     } else {
-        DirectoryGrpcClient::connect(&opts.directory_endpoint).await?
+        (
+            DirectoryGrpcClient::connect(&opts.directory_endpoint).await?,
+            None,
+        )
     };
     let directory_api: Arc<dyn DirectoryClient> = Arc::new(directory_client);
 
@@ -563,17 +573,17 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
     let config_provider = Arc::new(final_config);
 
     // The DirectoryClient (gRPC client) is injected into the ClientHub so gears can access it.
-    let run_options = RunOptions {
-        gears_cfg: config_provider,
-        db: db_options,
-        shutdown: ShutdownOptions::Token(cancel.clone()),
-        clients: vec![ClientRegistration::new::<dyn DirectoryClient>(Arc::clone(
-            &directory_api,
-        ))],
+    // `oop` is left unset: OoP gears don't spawn other OoP gears.
+    let run_options = RunOptions::new(
+        config_provider,
+        db_options,
+        ShutdownOptions::Token(cancel.clone()),
         instance_id,
-        oop: None, // OoP gears don't spawn other OoP gears
-        shutdown_deadline: None,
-    };
+    )
+    .with_clients(vec![ClientRegistration::new::<dyn DirectoryClient>(
+        Arc::clone(&directory_api),
+    )])
+    .with_internal_token_provider(internal_token_provider);
 
     // When `oop_http` is configured, run the HTTP-serving lifecycle:
     // Axum server + probes + directory presence (registration + heartbeat +
@@ -665,6 +675,22 @@ async fn build_oop_serve_options(
         .clone()
         .unwrap_or_else(|| default_advertise_uri(listen_addr));
 
+    // Fail fast on a malformed or unreachable advertise_uri rather than only
+    // when the directory rejects the registration — the same late-failure the
+    // label validation below avoids.
+    validate_advertise_uri(&advertise_uri, cfg.allow_loopback_advertise)?;
+
+    // Fail fast on a mis-configured label (bad charset, over-long, too many)
+    // at start-up, using the same shared rules the directory enforces. Without
+    // this the process would come up, attempt to register, and only then be
+    // permanently rejected by the directory — a confusing late failure for what
+    // is a static configuration error. Checked before authenticator init so a
+    // static config error is reported without any async backend setup.
+    cf_system_sdks::directory::validate_labels(&cfg.labels).with_context(|| {
+        "invalid oop_http.labels: label keys/values must be <=63 chars, <=64 entries, and use \
+         only ASCII alphanumerics plus '-', '_', '.' (starting and ending alphanumeric)"
+    })?;
+
     let internal_authenticator = build_internal_authenticator(cfg.internal_auth.as_ref()).await?;
 
     Ok(OopServeOptions {
@@ -680,6 +706,7 @@ async fn build_oop_serve_options(
         directory,
         bearer_authenticator: None,
         internal_authenticator,
+        labels: cfg.labels.clone(),
     })
 }
 
@@ -728,6 +755,84 @@ async fn build_internal_authenticator(
     Ok(None)
 }
 
+/// Build the platform-plane credential material from config: the **outbound**
+/// gRPC [`InternalAuthInterceptor`] (for `DirectoryService` calls) and the
+/// transport-agnostic
+/// [`InternalTokenProvider`](toolkit_contract::runtime::config::InternalTokenProvider)
+/// that `#[toolkit::provides]` clients attach as `X-ToolKit-Internal-Token` on
+/// platform-plane methods (`cpt-cf-adr-two-plane-auth`).
+///
+/// Both derive from ONE credential source so they never disagree after a
+/// rotation:
+/// - `shared_secret` → a static token for both.
+/// - `kube` with `token_path` → one [`ServiceAccountTokenReader`] drives both;
+///   its "no token yet" maps to [`CredentialState::Unavailable`] so an attach
+///   site warns rather than silently sending nothing.
+/// - `kube` without `token_path` → inbound-only: disabled interceptor + `None`
+///   provider (warned).
+///
+/// The `match` is exhaustive so a future variant fails to compile here rather
+/// than silently downgrading to no outbound credential.
+async fn build_platform_credentials(
+    cfg: &toolkit_security::InternalAuthConfig,
+    cancel: &CancellationToken,
+) -> Result<(
+    toolkit_transport_grpc::InternalAuthInterceptor,
+    Option<toolkit_contract::runtime::config::InternalTokenProvider>,
+)> {
+    use secrecy::SecretString;
+    use toolkit_contract::runtime::config::{CredentialState, InternalTokenProvider};
+    use toolkit_security::InternalAuthConfig;
+    use toolkit_transport_grpc::{
+        DEFAULT_REFRESH_INTERVAL, InternalAuthInterceptor, ServiceAccountTokenReader,
+    };
+
+    match cfg {
+        InternalAuthConfig::SharedSecret { secret, .. } => {
+            let token = SecretString::from(secret.clone());
+            Ok((
+                InternalAuthInterceptor::from_token(token.clone()),
+                Some(InternalTokenProvider::from_token(token)),
+            ))
+        }
+        InternalAuthConfig::Kube {
+            token_path: Some(path),
+            ..
+        } => {
+            let reader = ServiceAccountTokenReader::with_cancellation(
+                path,
+                DEFAULT_REFRESH_INTERVAL,
+                cancel.child_token(),
+            )
+            .await
+            .context("failed to read projected service-account token for outbound credential")?;
+            let interceptor = reader.interceptor();
+            // The reader yields `None` while the projected file is empty or the
+            // refresh has not populated it; surface that as `Unavailable` (warn)
+            // rather than `NotConfigured` (silent).
+            let token_fn = reader.token_provider();
+            let provider = InternalTokenProvider::new(move || match token_fn() {
+                Some(token) => CredentialState::Available(token),
+                None => CredentialState::Unavailable(
+                    "projected service-account token is currently unavailable \
+                     (file empty or not yet read)"
+                        .into(),
+                ),
+            });
+            Ok((interceptor, Some(provider)))
+        }
+        InternalAuthConfig::Kube {
+            token_path: None, ..
+        } => {
+            warn!(
+                "oop_http.internal_auth: provider=kube without token_path - this participant \
+                 validates inbound platform tokens but will attach NO outbound credential"
+            );
+            Ok((InternalAuthInterceptor::disabled(), None))
+        }
+    }
+}
+
 /// Derive a default advertise URI from the bind address. Unspecified hosts
 /// (`0.0.0.0` / `[::]`) are rewritten to loopback, and every IPv6 host is
 /// enclosed in brackets so the resulting URI is valid when registered as a
@@ -740,6 +845,46 @@ fn default_advertise_uri(listen_addr: std::net::SocketAddr) -> String {
         std::net::SocketAddr::V6(addr) => format!("[{}]", addr.ip()),
     };
     format!("http://{host}:{}", listen_addr.port())
+}
+
+/// Reject a malformed or unreachable `advertise_uri` at start-up (fail fast).
+///
+/// Checks shape (parseable `http`/`https` URL, non-empty host, no userinfo) and,
+/// unless `allow_loopback`, rejects a loopback / unspecified host - a
+/// registered-but-unreachable instance in multi-host Profile 2 / Profile 3
+/// (`cpt-cf-adr-instance-addressable-discovery` section 5). The default derives
+/// loopback from an unspecified bind, so this also covers an *unset* value. The
+/// directory enforces its full endpoint ruleset server-side.
+fn validate_advertise_uri(uri: &str, allow_loopback: bool) -> Result<()> {
+    let parsed = url::Url::parse(uri)
+        .with_context(|| format!("invalid oop_http.advertise_uri: not a valid URL: {uri}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "invalid oop_http.advertise_uri: scheme must be http or https (got '{}')",
+            parsed.scheme()
+        );
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        anyhow::bail!("invalid oop_http.advertise_uri: missing host: {uri}");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("invalid oop_http.advertise_uri: must not contain userinfo: {uri}");
+    }
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if !allow_loopback && is_loopback {
+        anyhow::bail!(
+            "invalid oop_http.advertise_uri: '{uri}' is a loopback/unspecified address, which is \
+             unreachable by other gears in multi-host Profile 2 / Profile 3 (a registered-but-\
+             unreachable instance). Set oop_http.advertise_uri to a routable host, or set \
+             oop_http.allow_loopback_advertise = true for single-host / local-dev."
+        );
+    }
+    Ok(())
 }
 
 #[allow(unknown_lints, de1301_no_print_macros)] // direct stdout config print before exit

@@ -198,6 +198,20 @@ impl HostRuntime {
         self
     }
 
+    /// Set the process-wide platform-plane credential source, applied to every
+    /// [`GearCtx`](crate::context::GearCtx) this runtime builds so
+    /// `#[toolkit::provides]`-generated clients attach `X-ToolKit-Internal-Token`
+    /// on platform-plane methods. `None` (Profile 1 / in-process, or no
+    /// credential configured) attaches nothing.
+    #[must_use]
+    pub fn with_internal_token_provider(
+        mut self,
+        provider: Option<toolkit_contract::runtime::config::InternalTokenProvider>,
+    ) -> Self {
+        self.ctx_builder = self.ctx_builder.with_internal_token_provider(provider);
+        self
+    }
+
     /// `PRE_INIT` phase: wire runtime internals into system gears.
     ///
     /// This phase runs before init and only for gears with the "system" capability.
@@ -512,11 +526,19 @@ impl HostRuntime {
                     (Arc::clone(&resolver), false)
                 };
 
-            let outcome = (reg.wire)(&self.client_hub, reg_resolver).map_err(|source| {
-                RegistryError::ProxyWiring {
-                    gear: reg.owner_gear,
-                    source,
-                }
+            // Thread the process's platform-plane credential onto the wired
+            // (directory-resolving) client so its platform-plane methods attach
+            // `X-ToolKit-Internal-Token` (`cpt-cf-adr-two-plane-auth`). This is
+            // the genuine remote inter-gear path (Profile 2/3); a co-located
+            // local impl short-circuits before the credential is used.
+            let outcome = (reg.wire)(
+                &self.client_hub,
+                reg_resolver,
+                self.ctx_builder.internal_token_provider(),
+            )
+            .map_err(|source| RegistryError::ProxyWiring {
+                gear: reg.owner_gear,
+                source,
             })?;
             self.dep_checker.register_dep(reg.dep_gear.to_owned());
             match outcome {
@@ -1143,26 +1165,44 @@ impl HostRuntime {
             // The directory keys instances by (gear, instance_id) and replaces
             // wholesale. grpc-hub may have already registered this same
             // (gear, instance_id) with gRPC services during the start phase, so
-            // carry those forward instead of clobbering them to empty — adding
-            // the REST endpoint must augment, not replace, the entry.
+            // carry the grpc services and version forward instead of clobbering
+            // them to empty — adding the REST endpoint must augment, not
+            // replace, the entry.
+            //
+            // Labels are deliberately NOT read-and-rewritten here. Carrying them
+            // through would make this a cross-process read-modify-write with no
+            // compare-and-set: any label change committed between the read and
+            // the write would be silently reverted. Instead we register with an
+            // empty label set, which `GearInstance::with_metadata_of` treats as
+            // "preserve the stored labels" — an atomic no-op on labels.
             let (grpc_services, version) = match dir.list_instances(gear).await {
                 Ok(insts) => insts
                     .into_iter()
                     .find(|i| i.instance_id == instance_id)
                     .map(|i| (i.grpc_services, i.version))
                     .unwrap_or_default(),
-                Err(_) => (Vec::new(), None),
+                Err(e) => {
+                    // A failed directory read must not silently drop the
+                    // carried-forward metadata: log it, then fall back to an
+                    // empty augmentation so REST registration still proceeds.
+                    tracing::warn!(
+                        gear,
+                        error = %e,
+                        "directory-register: failed to read existing registration; \
+                         re-registering with empty grpc_services/version"
+                    );
+                    (Vec::new(), None)
+                }
             };
-            let info = crate::RegisterInstanceInfo {
-                gear: gear.to_owned(),
-                instance_id: instance_id.clone(),
-                grpc_services,
-                version,
-                rest_endpoint: Some(crate::ServiceEndpoint::new(endpoint.clone())),
-                // OpenAPI spec is published separately (grpc-hub start phase);
-                // the REST-augmentation registration does not carry it.
-                openapi_spec: None,
-            };
+            // OpenAPI spec is published separately (grpc-hub start phase); the
+            // REST-augmentation registration does not carry it. Labels are
+            // omitted so the store preserves the stored set (see above).
+            let mut info = crate::RegisterInstanceInfo::new(gear.to_owned(), instance_id.clone())
+                .with_grpc_services(grpc_services)
+                .with_rest_endpoint(crate::ServiceEndpoint::new(endpoint.clone()));
+            if let Some(version) = version {
+                info = info.with_version(version);
+            }
             match dir.register_instance(info).await {
                 Ok(()) => {
                     tracing::info!(gear, endpoint = %endpoint, "registered REST provider in directory");
