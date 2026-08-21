@@ -73,29 +73,3 @@ so gaps in the sequence are removed-resolved items and references from elsewhere
     `ModelInfoV1`'s fields at length; Provider appears only as a one-line row in the Core Entities
     table. There is still no `#### Provider` field list to check PRD §5's Provider fields
     (PRD.md:221-242) against — only the DDL at DESIGN.md:1332-1349.
-
-## Minor
-
-34. [ ] DESIGN.md:265 "The six enums and `ModelRegistryError` remain `#[non_exhaustive]`". The count
-    is right — exactly six SDK enums besides `ModelRegistryError` carry the attribute
-    (`ApprovalStatus`, `LifecycleStatus`, `ProviderStatus`, `ReasoningEffort`, `ServiceTier`,
-    `SupportedApi`) — but the SDK has 26 enums in total, so "the six enums" still reads as the
-    whole set rather than the `#[non_exhaustive]` subset.
-35. [ ] `aliases.canonical_id VARCHAR(512)` (DESIGN.md:1487) vs `models.canonical_id VARCHAR(255)`
-    (DESIGN.md:1366) for the same identifier — still unreconciled.
-36. [ ] Tags unique index `(tenant_id, lower(name))` (DESIGN.md:1508) is a functional index — still
-    not portable to the MySQL support claimed at DESIGN.md:779 (needs 8.0.13+); no per-backend
-    dispatch note added.
-39. [ ] `BOOLEAN … DEFAULT 0` on `models` (DESIGN.md:1425, :1431-1434) vs `DEFAULT false` on
-    `providers` (DESIGN.md:1344, :1346) — same rendering, still inconsistent style. The migration
-    emits `DEFAULT 0` for both (`initial_001.rs`), so `providers` is the wrong one.
-40. [ ] `get_ancestors` (DESIGN.md:968, :1028, :1677) vs `get_ancestor_chain` (DESIGN.md:1667) —
-    still two names for the same call. The code says `get_ancestors`
-    (`inheritance.rs:557`), so :1645 is the wrong one.
-41. [ ] The PATCH wholesale-replacement list (DESIGN.md:678) still omits both stored sub-objects,
-    and the code shows they behave differently: `allow_extra_params` **is** replaced wholesale
-    (`UpdateModelRequestV1.allow_extra_params: Option<Vec<String>>`, `model_mapper.rs:405`), while
-    `additional_info` is **not patchable at all** — it has no field on `UpdateModelRequestV1`. The
-    doc states neither.
-42. [ ] Dangling forward references: `DECOMPOSITION.md` "once it is generated" (DESIGN.md:1686,
-    :1705, :1744), `features/` "to be created" (DESIGN.md:1762). Neither exists under `docs/`.

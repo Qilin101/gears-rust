@@ -262,7 +262,7 @@ The constraint families below are explicitly **not applicable** to Model Registr
 
 **Location**: [`model-registry-sdk/src/models/`](../model-registry-sdk/src/models/) — split per concern into `common.rs`, `info.rs`, `entity.rs`, `default_parameters.rs` (the unified `DefaultInferenceParametersV1` and its supporting types — `TextFormat`/`TextFormatKind`/`TextVerbosity`, `ReasoningConfig`/`ReasoningSummary`, `ToolChoice`, `TruncationStrategy`), `request.rs`, plus a `providers/` subdirectory with one file per shipped provider (current shipped set: `openai.rs`, `anthropic.rs`; the directory is the documented extension point — adding a new provider doesn't require touching anything else). The narrowed `ServiceTier` (`Auto | Default`) stays in `common.rs`; provider-specific helper enums (e.g. the five-variant `OpenAiServiceTier`) live next to their provider's file.
 
-The five entity structs (`ModelV1`, `ProviderV1`, `ModelInfoV1`, `ModelCapabilities`, `DisabledCapabilities`) are **not** `#[non_exhaustive]`, so downstream crates construct and destructure them with plain struct literals — this is what lets both the storage projections and the REST DTO conversions be exhaustive `From` impls that fail to compile when a field is added. The six enums and `ModelRegistryError` remain `#[non_exhaustive]`, so every `match` over them in the gear carries a `_ =>` arm.
+The entity structs (`ModelV1`, `ProviderV1`, `ModelInfoV1`, `ModelCapabilities`, `DisabledCapabilities`) are **not** `#[non_exhaustive]`, so downstream crates construct and destructure them with plain struct literals — this is what lets both the storage projections and the REST DTO conversions be exhaustive `From` impls that fail to compile when a field is added. `#[non_exhaustive]` is applied selectively, not SDK-wide: the shared status/enumeration types (`ApprovalStatus`, `LifecycleStatus`, `ProviderStatus`, `ReasoningEffort`, `ServiceTier`, `SupportedApi`) and `ModelRegistryError` carry it, so every `match` over one of them in the gear needs a `_ =>` arm; the provider-specific and default-parameter enums do not carry it and match exhaustively.
 
 **Core Entities**:
 
@@ -313,7 +313,7 @@ GtsTypeId (ModelInfoV1 chain — extensible; the providers shipped in the SDK to
 
 **`ModelInfoV1<P>`** is a [GTS-schema-typed](https://docs.rs/gts) struct generic over a provider settings payload `P: gts::GtsSchema`. It carries only the fields that are meaningful for **every** provider — display metadata, capabilities, the context window, performance, the GTS schema id (`gts_type`), a small slice of identity (`supported_api`, `provider_model_id`) that consumers (catalog UI, alias resolution, OData filtering) need without having to deserialize the variant payload, the **user-facing** default inference parameters (`default_parameters`), and the per-request override policy (`overrides`). Everything else (routing/auth, **provider-wire** default parameters, token pricing) lives in the `provider_settings: P` payload — one typed struct per provider, identified at runtime via `gts_type`.
 
-The split between `default_parameters` (on the envelope) and per-provider parameter fields (on `provider_settings`) is deliberate: the former mirrors the **client-facing** Open Responses request schema ([`gts.cf.llmgw.core.create_response_body.v1~`](../../llm-gateway/llm-gateway-sdk/schemas/core/create_response_body.v1.schema.json)) so the gateway has a uniform input contract; the latter captures the **provider-wire** defaults that ride alongside (different naming, mutually-exclusive variants, provider-only knobs). Field names that look universal — e.g. `temperature`, `top_p`, `max_output_tokens` — are intentionally duplicated across the two surfaces because they are rarely 1:1 in practice (e.g. OpenAI legacy `max_tokens` vs Responses `max_completion_tokens`; some providers require it on every request and reject defaults set elsewhere). The gateway merges request → `default_parameters` → per-provider defaults at send time.
+The split between `default_parameters` (on the envelope) and per-provider parameter fields (on `provider_settings`) is deliberate: the former mirrors the **client-facing** Open Responses request schema (`gts.cf.llmgw.core.create_response_body.v1~`) so the gateway has a uniform input contract; the latter captures the **provider-wire** defaults that ride alongside (different naming, mutually-exclusive variants, provider-only knobs). Field names that look universal — e.g. `temperature`, `top_p`, `max_output_tokens` — are intentionally duplicated across the two surfaces because they are rarely 1:1 in practice (e.g. OpenAI legacy `max_tokens` vs Responses `max_completion_tokens`; some providers require it on every request and reject defaults set elsewhere). The gateway merges request → `default_parameters` → per-provider defaults at send time.
 
 Common (provider-independent) fields:
 
@@ -675,7 +675,7 @@ Every P1 operation is registered with `.authenticated()` and a license-feature r
 | `GET` | `/model-registry/v1/models/{canonical_id}` | Get model by canonical ID — **eval-facing**: approved on an active provider, else `model_not_approved` / `provider_disabled` | P1 |
 | `GET` | `/model-registry/v1/admin/models` | Management listing → `Page<ModelManagementDto>`: any `approval_status`, disabled-provider models marked, shadowed-ancestor-provider models marked `shadowed` (read-only), deprecated models via `include_deprecated=true`. Tenant-admin/platform-admin only | P1 (implemented) |
 | `POST` | `/model-registry/v1/models` | Create model (manual catalog entry) | P1 |
-| `PATCH` | `/model-registry/v1/models/{canonical_id}` | Update model fields and `approval_status` (`pending`/`approved`/`rejected`/`revoked`). Scalar display/infrastructure fields patch individually (nullable ones accept explicit `null` to clear); the sub-objects `performance`, `capabilities`, `disabled_capabilities`, `context_window`, `default_parameters`, and `provider_settings` are **replaced wholesale**, not deep-merged. `canonical_id`, `provider_slug`, `provider_model_id`, and `gts_type` are immutable. P1: direct DB write; P2 onward: status changes route via Approval Service while other field updates remain direct | P1 |
+| `PATCH` | `/model-registry/v1/models/{canonical_id}` | Update model fields and `approval_status` (`pending`/`approved`/`rejected`/`revoked`). Scalar display/infrastructure fields patch individually (nullable ones accept explicit `null` to clear); the sub-objects `performance`, `capabilities`, `disabled_capabilities`, `context_window`, `default_parameters`, `allow_extra_params`, and `provider_settings` are **replaced wholesale**, not deep-merged. `canonical_id`, `provider_slug`, `provider_model_id`, and `gts_type` are immutable. `additional_info` is **not patchable**: the request body carries no field for it, so it is written on create and then preserved untouched by every subsequent PATCH — replacing it requires a soft-delete and recreate. P1: direct DB write; P2 onward: status changes route via Approval Service while other field updates remain direct | P1 |
 | `DELETE` | `/model-registry/v1/models/{canonical_id}` | Soft-delete model (mark `deprecated`) | P1 |
 | `GET` | `/model-registry/v1/providers` | List tenant providers | P1 |
 | `GET` | `/model-registry/v1/providers/{id}` | Get provider by ID | P1 |
@@ -776,7 +776,7 @@ The gear declares `deps = ["tenant-resolver", "authz-resolver"]` and `capabiliti
 **Direction**: bidirectional
 **Protocol / Driver**: SeaORM through `toolkit-db` (`SecureConn` / `DBRunner`), scoped by `AccessScope`
 **Data Format**: Relational schema (see 3.6)
-**Compatibility**: PostgreSQL 14+ in production. The migration dispatches column types per backend, so MySQL and SQLite are also supported; SQLite is the dev/test target and the reason the schema carries no `GIN` indexes and no `ALTER ADD NOT NULL` steps.
+**Compatibility**: PostgreSQL 14+ in production and SQLite for dev/test — the two supported backends. The migration dispatches column types per backend. SQLite being a first-class target is the reason the schema carries no `GIN` indexes and no `ALTER ADD NOT NULL` steps.
 
 ##### External Interface: Provider APIs (via OAGW)
 
@@ -1341,7 +1341,7 @@ Producers own the event schemas; Model Registry treats them as upstream contract
 
 ### 3.6 Database schemas & tables
 
-All P1 tables are created by the single migration `infra/storage/migrations/initial_001.rs`, which emits backend-dispatched raw SQL (`UUID`/`VARCHAR(36)`/`TEXT` for identifiers, `JSONB`/`JSON`/`TEXT` for JSON columns, `TIMESTAMPTZ`/`DATETIME(6)`/`TEXT` for timestamps, `BIGINT`/`BIGINT`/`INTEGER` for integers). The types shown below are the PostgreSQL rendering. Two tables exist in P1: `providers` and `models`. The `provider_health`, `aliases`, `tags`, and `model_tags` tables are P3 design and are **not created**.
+All P1 tables are created by the single migration `infra/storage/migrations/initial_001.rs`, which emits backend-dispatched raw SQL (`UUID`/`TEXT` for identifiers, `JSONB`/`TEXT` for JSON columns, `TIMESTAMPTZ`/`TEXT` for timestamps, `BIGINT`/`INTEGER` for integers). The types shown below are the PostgreSQL rendering. Two tables exist in P1: `providers` and `models`. The `provider_health`, `aliases`, `tags`, and `model_tags` tables are P3 design and are **not created**.
 
 #### Table: providers
 
@@ -1405,9 +1405,9 @@ There is **no `info` JSONB column**. Every `ModelInfoV1` field that promotes cle
 | ctx_max_input_tokens | BIGINT | NOT NULL, DEFAULT `0` | `context_window.max_input_tokens` |
 | ctx_max_output_tokens | BIGINT | NULL | `context_window.max_output_tokens` |
 | ctx_output_vector_size | BIGINT | NULL | `context_window.output_vector_size` |
-| allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT `0` | `allow_parameter_override` |
+| allow_parameter_override | BOOLEAN | NOT NULL, DEFAULT false | `allow_parameter_override` |
 
-The three `NOT NULL DEFAULT`s exist because SQLite cannot `ALTER ADD NOT NULL`, so the default has to be present at CREATE time; the application layer always writes real values on create/update. Every integer column is `BIGINT` on PostgreSQL and MySQL — their `INTEGER` is 32-bit and overflows `size_bytes` at 2 GiB, which is smaller than any modern weight file — and `INTEGER` on SQLite, which is already 8-byte. The bounded short-text columns render as `VARCHAR(64)` on PostgreSQL/MySQL and `TEXT` on SQLite. Because `ctx_max_input_tokens` is stored wider than the SDK's `u32`, a row outside `u32` range fails to lift and surfaces as `DomainError::Internal` rather than silently truncating.
+The three `NOT NULL DEFAULT`s exist because SQLite cannot `ALTER ADD NOT NULL`, so the default has to be present at CREATE time; the application layer always writes real values on create/update. Every integer column is `BIGINT` on PostgreSQL — its `INTEGER` is 32-bit and overflows `size_bytes` at 2 GiB, which is smaller than any modern weight file — and `INTEGER` on SQLite, which is already 8-byte. The bounded short-text columns render as `VARCHAR(64)` on PostgreSQL and `TEXT` on SQLite. Because `ctx_max_input_tokens` is stored wider than the SDK's `u32`, a row outside `u32` range fails to lift and surfaces as `DomainError::Internal` rather than silently truncating.
 
 #### JSONB sub-object columns (the rest of `ModelInfoV1`)
 
@@ -1436,16 +1436,16 @@ The OData filter surface (§3.3) maps to the columns below (`canonical_id` and `
 | gts_type | VARCHAR(255) | NULL | `gts_type` (scalar discriminator for `provider_settings`) |
 | vendor | VARCHAR(255) | NULL | `vendor` |
 | family | VARCHAR(255) | NULL | `family` |
-| managed | BOOLEAN | NOT NULL, DEFAULT 0 | Per-model managed flag from `managed` (distinct from per-provider `providers.managed`) |
+| managed | BOOLEAN | NOT NULL, DEFAULT false | Per-model managed flag from `managed` (distinct from per-provider `providers.managed`) |
 | architecture | VARCHAR(255) | NULL | `architecture` |
 | format | VARCHAR(255) | NULL | `format` |
 | provider_model_id | VARCHAR(255) | NULL | `provider_model_id` |
 | supported_api | VARCHAR(50) | NULL | `supported_api`, encoded as a **sorted comma-separated list** of the set's members (NULL for an empty set). Unknown members are dropped on read — the column is a filter shadow, not the source of truth for anything |
 | approval_status | VARCHAR(50) | NOT NULL, DEFAULT `'pending'` | `approval_status` field on `ModelV1`. Source of truth for both reads and writes, including the eval approval gate — `= 'approved'` is a mandatory predicate on the eval listing and an ordered gate on `get_tenant_model` (§3.5), served from this column with no Approval Service call in any phase. P1 updates flow through `update_model`, P2 swaps the write path to the Approval Service while the column continues to serve reads and OData filtering |
-| cap_vision | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.vision.enabled` |
-| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.function_calling` |
-| cap_streaming | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.streaming` |
-| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT 0 | `capabilities.reasoning.effort` |
+| cap_vision | BOOLEAN | NOT NULL, DEFAULT false | `capabilities.vision.enabled` |
+| cap_function_calling | BOOLEAN | NOT NULL, DEFAULT false | `capabilities.function_calling` |
+| cap_streaming | BOOLEAN | NOT NULL, DEFAULT false | `capabilities.streaming` |
+| cap_reasoning_effort | BOOLEAN | NOT NULL, DEFAULT false | `capabilities.reasoning.effort` |
 
 Scalar columns are the source of truth; the five additional JSONB columns (`capabilities_full`, `default_parameters`, `additional_info`, `disabled_capabilities_full`, `allow_extra_params`) hold sub-objects that don't promote cleanly; `provider_settings` is the only polymorphic JSONB column, identified by `gts_type`.
 
@@ -1498,7 +1498,7 @@ Consequently neither flag is an OData filter field: `FieldToColumn` binds each f
 | id | UUID | PK | Primary key |
 | tenant_id | UUID | NOT NULL, INDEX | Owner tenant |
 | name | VARCHAR(64) | NOT NULL | Alias name |
-| canonical_id | VARCHAR(512) | NOT NULL | Target canonical model ID |
+| canonical_id | VARCHAR(255) | NOT NULL | Target canonical model ID — same width as `models.canonical_id`, which it points at |
 | created_at | TIMESTAMPTZ | NOT NULL | Creation timestamp |
 | created_by | UUID | NOT NULL | Actor who created |
 
@@ -1520,6 +1520,8 @@ Consequently neither flag is an OData filter field: `FieldToColumn` binds each f
 | created_by | UUID | NOT NULL | Actor who created |
 
 **Indexes**: (tenant_id, lower(name)) UNIQUE — case-insensitive uniqueness within tenant
+
+**Backend dispatch for the case-insensitive key**: this is an expression index. Both supported backends accept it directly, so the migration that creates this table emits it as written on each. A backend without expression-index support would carry a stored lowercase-name column with an ordinary unique key instead; the constraint semantics are the same either way. No P1 table needs an expression index — this is the first one, and it arrives with the P3 tag surface.
 
 **Constraints**: name is the tag's identity within a tenant; renaming is modeled as delete + create. Tags inherit down the tenant hierarchy and a child tenant may shadow an inherited tag by creating one with the same name (same resolution model as `aliases`).
 
@@ -1689,7 +1691,7 @@ There is no in-module bulkhead. The approval gate on the eval reads **is** fail-
 **Target posture** for the outbound calls that arrive with P2 (discovery and provider health probes, both routed through OAGW):
 
 - **Retries on dependency calls**: ClientHub-mediated calls to `tenant-resolver`, `approval-service`, and `outbound-api-gateway` use 3 attempts with exponential backoff (50ms → 200ms → 800ms) and ±25% jitter. Reads are always retryable; writes are retried only on transport-level failures (connection reset, 5xx with `Retry-After`) — never on 4xx, never on `ApprovalService` 409 conflicts.
-- **Timeouts**: `tenant-resolver.get_ancestor_chain` 200ms; `approval-service.get_status` 200ms; OAGW discovery 30s per provider with circuit-breaking delegated to OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); cache `get` 50ms with DB fallback.
+- **Timeouts**: `tenant-resolver.get_ancestors` 200ms; `approval-service.get_status` 200ms; OAGW discovery 30s per provider with circuit-breaking delegated to OAGW (`cpt-cf-model-registry-constraint-oagw-dependency`); cache `get` 50ms with DB fallback.
 - **Bulkheads**: The per-provider distributed lock on discovery is the explicit bulkhead — at most one in-flight discovery per provider per cluster, regardless of caller (admin or external scheduler). Cache-write fan-out on tenant-deletion is bounded by an N-key batch invalidation rather than a per-key loop.
 - **Fail-closed on approval check**: the eval reads deny on anything other than `approved`. Because the decision is a column on the model row rather than a call, an approval-service outage cannot affect it in either direction — a cached row keeps answering with the status it was cached with, bounded by `cache_ttl_seconds`, and the P2 Approval Service integration replaces the *write* path only (§2.1 "Approval Service Delegation").
 
@@ -1708,7 +1710,7 @@ Targets are the design intent; the "P1 behavior" column records what the code do
 
 ### Technical Debt & Roadmap
 
-Known module-level debt is tracked here for visibility; phase-by-phase remediation lives in `DECOMPOSITION.md` once it is generated.
+Known module-level debt is tracked here for visibility. Each item names what closing it requires; the phase that carries the remediation is scheduled with the phase that needs the capability, not tracked separately here.
 
 Carried out of the P1 implementation:
 
@@ -1722,12 +1724,13 @@ Carried out of the P1 implementation:
 - **OData filter coverage**: per-provider settings fields and `default_parameters` are not filterable in v1 (§3.3); revisit when consumers request it. Cleanup: introduce per-provider OData mappings and the matching promoted columns / indexes.
 - **Cross-replica cache TTL trade-off**: within a process, owner-prefixed keys mean a write reaches descendants without a subtree walk — including the write that installs a shadow, which drops the shadowing tenant's slug tombstone and so takes effect on a descendant's next read. Across replicas nothing propagates, so any reader trails by up to `cache_ttl_seconds`. That window matters most for a new shadow, which is a compliance-isolation lever rather than an ordinary catalog edit. Closing it needs a distributed backend — not yet chosen (§4 Technical Debt & Roadmap) — rather than an O(tenant-tree) walk.
 - **Distributed-lock stability (P2)**: the per-provider discovery lock relies on a healthy lock service; degraded lock service serializes calls through the lock-lease window. The lock service is platform-owned; this module does not run its own scheduler.
+- **MySQL backend — future work**: PostgreSQL and SQLite are the supported backends (§3.3 Compatibility). Adding MySQL means extending the migration's per-backend type dispatch and DDL rendering, and giving the gear a MySQL test target alongside the SQLite one.
 
 ### Documentation Strategy
 
 The module follows the platform documentation model:
 
-- **Architecture / specification docs** (PRD, DESIGN, ADR, UPSTREAM_REQS, and DECOMPOSITION/FEATURE once generated) live under [`gears/model-registry/docs/`](.) and are validated by `cfs validate --artifact <path>`.
+- **Architecture / specification docs** (PRD, DESIGN, ADR, UPSTREAM_REQS) live under [`gears/model-registry/docs/`](.) and are validated by `cfs validate --artifact <path>`.
 - **REST API contract** is auto-generated via `utoipa` from the `OperationBuilder` registrations; published to the platform OpenAPI catalog at deploy time and checkable locally with `make openapi`.
 - **GTS schemas** are emitted by `#[struct_to_gts_schema]` and published to the platform schema registry — no hand-maintained schema duplicates.
 - **Runbooks** for operator procedures (credential rotation via OAGW, discovery failure triage, tenant cache invalidation) live in the platform ops repository alongside other module runbooks.
@@ -1766,7 +1769,7 @@ Several Design checklist domains are intentionally **not addressed** by this DES
 - **Recovery architecture — Not applicable at module level**: Backup, point-in-time recovery, disaster-recovery RTO/RPO, and cross-region failover are properties of the platform's PostgreSQL deployment, not of Model Registry. The module is stateless application-layer code; restoring it amounts to redeploying from CI plus restoring the underlying database. RTO/RPO targets, when set, will live in the platform recovery plan.
 - **Threat-model — Not applicable at module level**: A module-scoped threat model is not produced for v1. The platform-level threat model covers transport, identity, tenant isolation, and outbound provider access (the OAGW boundary). Module-specific threat surfaces — discovery responses parsed as untrusted JSON, JSONB injection via provider settings, cache-key collision across tenants — are addressed by the §2.1 isolation principles, the §4 Data Protection contract, and the OAGW boundary; revisit when this module gains a non-platform-mediated trust boundary.
 - **Frontend session management — Not applicable**: This module owns no frontend, no cookies, no CSRF surface, and no browser session state.
-- **Observability (OPS-DESIGN-001/002) — Deferred to platform**: Logs, metrics, traces, and alerting integration follow the platform observability stack — structured tracing via the platform's OpenTelemetry pipeline, metrics exported through the platform's Prometheus endpoint, and dashboards/alerts defined alongside the platform's other modules. Module-specific signal taxonomy (per-tenant cache hit rate, discovery latency P99 per provider, approval-check fail-closed counter) will be documented during DECOMPOSITION when the FEATUREs that emit those signals are scoped.
+- **Observability (OPS-DESIGN-001/002) — Deferred to platform**: Logs, metrics, traces, and alerting integration follow the platform observability stack — structured tracing via the platform's OpenTelemetry pipeline, metrics exported through the platform's Prometheus endpoint, and dashboards/alerts defined alongside the platform's other modules. Module-specific signal taxonomy (per-tenant cache hit rate, discovery latency P99 per provider, approval-check fail-closed counter) is defined with the phase that emits those signals.
 - **Dead-letter / poison-message handling — Not applicable**: Model Registry consumes no events at all in P1, and the planned inbound surface (`tenant.reparented`, `approval.status_changed`, `tenant.deleted`) is a small set of handlers that are idempotent and re-deliverable by design. There is no module-owned message bus and no work queue in any phase; DLQ semantics are owned by the producer SDKs (Approval Service, tenant lifecycle) and the platform event bus.
 - **Resource pooling, vertical scaling limits, fine-grained CPU/memory/storage/bandwidth efficiency (PERF-DESIGN-001/002/004 details) — Deferred to platform**: connection pooling is provided by `toolkit-db`'s `SecureConn` pool; horizontal scaling is the documented strategy (§4 Capacity & Cost) and vertical limits are dictated by the platform's instance-class catalog. Resource-efficiency tuning (per-allocation profiling, page-cache sizing, storage tiering) is owned by the platform deployment plan rather than this module.
 - **Rate limiting — Deferred to platform/infrastructure**: the gear defines and enforces no request-rate limits on any surface. Admin- and discovery-endpoint throttling is applied at `api-gateway` / ingress, and aggregate provider load is bounded by OAGW's own rate-limit configuration (see PRD §4 Out of Scope). The module's only internal throughput bound is the per-provider distributed lock on discovery (§3.5). No `nfr` in the PRD allocates rate limiting to this module.
@@ -1784,7 +1787,6 @@ Several Design checklist domains are intentionally **not addressed** by this DES
   - `cpt-cf-model-registry-adr-tenant-inheritance` — [0004-cpt-cf-model-registry-adr-tenant-inheritance.md](./ADR/0004-cpt-cf-model-registry-adr-tenant-inheritance.md)
   - `cpt-cf-model-registry-adr-gts-typed-provider-settings` — [0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md](./ADR/0005-cpt-cf-model-registry-adr-gts-typed-provider-settings.md)
 - **Upstream requirements**: [UPSTREAM_REQS.md](./UPSTREAM_REQS.md)
-- **Features**: [features/](./features/) (to be created for detailed specs)
 - **Implementation (P1)**:
   - SDK — [`model-registry-sdk/`](../model-registry-sdk/) (`cf-gears-model-registry-sdk`)
   - Gear — [`model-registry/`](../model-registry/) (`cf-gears-model-registry`, lib `model_registry`)
