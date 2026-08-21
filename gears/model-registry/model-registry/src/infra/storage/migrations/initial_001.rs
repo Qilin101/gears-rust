@@ -128,6 +128,12 @@ CREATE TABLE IF NOT EXISTS models (
     FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT
 );
 
+CREATE INDEX IF NOT EXISTS idx_providers_name              ON providers (name);
+CREATE INDEX IF NOT EXISTS idx_providers_status            ON providers (status);
+CREATE INDEX IF NOT EXISTS idx_providers_gts_type          ON providers (gts_type);
+CREATE INDEX IF NOT EXISTS idx_providers_managed           ON providers (managed);
+CREATE INDEX IF NOT EXISTS idx_providers_discovery_enabled ON providers (discovery_enabled);
+
 CREATE INDEX IF NOT EXISTS idx_models_lifecycle_status ON models (lifecycle_status);
 CREATE INDEX IF NOT EXISTS idx_models_approval_status  ON models (approval_status);
 CREATE INDEX IF NOT EXISTS idx_models_gts_type         ON models (gts_type);
@@ -141,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_models_cap_vision       ON models (cap_vision);
 CREATE INDEX IF NOT EXISTS idx_models_cap_fn_call      ON models (cap_function_calling);
 CREATE INDEX IF NOT EXISTS idx_models_cap_streaming    ON models (cap_streaming);
 CREATE INDEX IF NOT EXISTS idx_models_cap_reasoning    ON models (cap_reasoning_effort);
+CREATE INDEX IF NOT EXISTS idx_models_managed          ON models (managed);
 CREATE INDEX IF NOT EXISTS idx_models_tenant_provider ON models (tenant_id, provider_id);
 ",
         );
@@ -360,47 +367,85 @@ mod tests {
         }
     }
 
-    /// Verify the existing 11 indexes still exist after the migration rewrite.
+    /// Collect every index on `table` as an ordered list of its column names.
+    async fn index_columns(
+        conn: &sea_orm::DatabaseConnection,
+        table: &str,
+    ) -> Vec<(String, Vec<String>)> {
+        let idx_rows = conn
+            .query_all(sea_orm::Statement::from_string(
+                DbBackend::Sqlite,
+                format!("SELECT name FROM pragma_index_list('{table}');"),
+            ))
+            .await
+            .expect("query index list");
+
+        let mut out = Vec::new();
+        for row in &idx_rows {
+            let Ok(idx) = row.try_get_by::<String, _>("name") else {
+                continue;
+            };
+            let col_rows = conn
+                .query_all(sea_orm::Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("SELECT name FROM pragma_index_info('{idx}') ORDER BY seqno;"),
+                ))
+                .await
+                .expect("query index info");
+            let cols = col_rows
+                .iter()
+                .filter_map(|r| r.try_get_by::<String, _>("name").ok())
+                .collect();
+            out.push((idx, cols));
+        }
+        out
+    }
+
+    /// A column is usable by a tenant-scoped `$filter` when it leads an index,
+    /// or follows `tenant_id` in a composite (every list query is tenant-scoped).
+    fn is_indexed(indexes: &[(String, Vec<String>)], column: &str) -> bool {
+        indexes.iter().any(|(_, cols)| {
+            cols.first().is_some_and(|c| c == column)
+                || (cols.first().is_some_and(|c| c == "tenant_id")
+                    && cols.get(1).is_some_and(|c| c == column))
+        })
+    }
+
+    /// Every `OData`-filterable column carries a B-tree index. The expectation is
+    /// derived from the filter surface itself, so adding a filter field without
+    /// its index fails here rather than silently degrading to a scan.
     #[tokio::test]
-    async fn models_indexes_preserved() {
+    async fn every_filterable_column_is_indexed() {
+        use model_registry_sdk::odata::{ModelFilterField, ProviderFilterField};
+        use toolkit_odata::filter::FilterField;
+
+        use crate::infra::storage::model_odata_mapper::ModelODataMapper;
+        use crate::infra::storage::provider_odata_mapper::ProviderODataMapper;
+        use toolkit_db::odata::sea_orm_filter::FieldToColumn;
+
         let conn = sea_orm::Database::connect("sqlite::memory:")
             .await
             .expect("in-memory SQLite connection");
         let manager = SchemaManager::new(&conn);
         Migration::up(&Migration, &manager).await.unwrap();
 
-        let rows = conn
-            .query_all(sea_orm::Statement::from_string(
-                DbBackend::Sqlite,
-                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='models' AND name LIKE 'idx_models_%';".to_owned(),
-            ))
-            .await
-            .expect("query indexes");
-
-        let names: Vec<String> = rows
-            .iter()
-            .filter_map(|row| row.try_get_by::<String, _>("name").ok())
-            .collect();
-
-        for expected in [
-            "idx_models_lifecycle_status",
-            "idx_models_approval_status",
-            "idx_models_gts_type",
-            "idx_models_vendor",
-            "idx_models_family",
-            "idx_models_architecture",
-            "idx_models_format",
-            "idx_models_provider_model_id",
-            "idx_models_supported_api",
-            "idx_models_cap_vision",
-            "idx_models_cap_fn_call",
-            "idx_models_cap_streaming",
-            "idx_models_cap_reasoning",
-            "idx_models_tenant_provider",
-        ] {
+        let model_indexes = index_columns(&conn, "models").await;
+        for field in ModelFilterField::FIELDS {
+            let column = ModelODataMapper::map_field(*field).to_string();
             assert!(
-                names.iter().any(|n| n == expected),
-                "expected index `{expected}`; got indexes: {names:?}"
+                is_indexed(&model_indexes, &column),
+                "models.$filter field `{}` maps to unindexed column `{column}`; indexes: {model_indexes:?}",
+                field.name()
+            );
+        }
+
+        let provider_indexes = index_columns(&conn, "providers").await;
+        for field in ProviderFilterField::FIELDS {
+            let column = ProviderODataMapper::map_field(*field).to_string();
+            assert!(
+                is_indexed(&provider_indexes, &column),
+                "providers.$filter field `{}` maps to unindexed column `{column}`; indexes: {provider_indexes:?}",
+                field.name()
             );
         }
     }

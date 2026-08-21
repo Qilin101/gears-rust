@@ -6,13 +6,6 @@ so gaps in the sequence are removed-resolved items and references from elsewhere
 
 ## High — internal contradictions in the design
 
-14. [ ] **"B-tree index on every filterable column" is false.** Unchanged, now verified against the
-    migration. DESIGN.md:88 still makes the claim. `models` has thirteen single-column indexes
-    (DESIGN.md:1442 = `initial_001.rs:131-143`) for **fifteen** filter fields
-    (`odata/models.rs`): `canonical_id` rides the `(tenant_id, canonical_id)` unique key, but
-    `managed` has no index at all. `providers` has only PK + `(tenant_id, slug)`
-    (DESIGN.md:1353 = `initial_001.rs:60-61`) for **six** filter fields — `name`, `status`,
-    `gts_type`, `managed`, `discovery_enabled` are all unindexed.
 17. [ ] **`fr-degraded-mode` is mis-cited; DB-unavailability is undesigned.** Unchanged.
     DESIGN.md:1314 attributes provider-unreachability to `cpt-cf-model-registry-fr-degraded-mode`,
     but that FR is about *database* unavailability (DESIGN.md:77; PRD.md:808-817). No 503 row exists
