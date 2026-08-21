@@ -1087,7 +1087,13 @@ sequenceDiagram
     MR->>DB: SELECT provider WHERE id
     DB-->>MR: provider config (gts_type, discovery settings)
     MR->>Registry: select(gts_type)
-    alt auto discovert plugin found
+    alt no plugin registered for provider gts_type
+        Registry-->>MR: none
+        MR-->>Admin: 400 validation_error (no plugin invocation, no network call)
+    else discovery_settings fail accepts_settings_gts_type
+        Registry-->>MR: DiscoveryPlugin
+        MR-->>Admin: 400 validation_error (no network call)
+    else plugin selected and settings valid
         Registry-->>MR: DiscoveryPlugin
         MR->>Plugin: discover(settings, oagw_context)
         Plugin->>OAGW: GET /models (via OAGW)
@@ -1095,23 +1101,24 @@ sequenceDiagram
         Provider-->>OAGW: models list
         OAGW-->>Plugin: models list
         Plugin-->>MR: model definitions
-    end
 
-    loop For each model definition
-        alt New Model
-            MR->>DB: INSERT model (approval_status=pending)
-        else Existing Model
-            MR->>DB: UPDATE model metadata (approval_status unchanged)
-        else Missing Model
-            MR->>DB: UPDATE model (deprecated_at=now)
+        loop For each model definition
+            alt New Model
+                MR->>DB: INSERT model (approval_status=pending, lifecycle_status=preview)
+                MR->>Approval: register_approvable(tenant_id, model_id)
+            else Existing Model
+                MR->>DB: UPDATE model metadata (approval_status unchanged)
+            else Missing Model
+                MR->>DB: UPDATE model (lifecycle_status=deprecated, deprecated_at=now)
+            end
         end
-    end
 
-    MR->>Cache: invalidate_tenant(owner) - drops mr:{owner}:*
-    MR-->>Admin: discovery_result
+        MR->>Cache: invalidate_tenant(owner) - drops mr:{owner}:*
+        MR-->>Admin: discovery_result
+    end
 ```
 
-**Description**: Discovers models via the registered discovery plugin matching the provider's GTS type, then reconciles the plugin's model definitions against the catalog (new models as `pending`, existing models updated, absent models deprecated), and invalidates the owner tenant's cache prefix. No subtree walk is needed to reach descendants: keys are prefixed by the owning tenant, so the entries a descendant reads are the very entries this drops. The TTL backstops only what that invalidation cannot reach — another replica's cache (§4 Technical Debt & Roadmap).
+**Description**: Discovers models via the registered discovery plugin matching the provider's GTS type, then reconciles the plugin's model definitions against the catalog (new models as `pending` / `preview`, existing models updated, absent models deprecated), and invalidates the owner tenant's cache prefix. Two pre-flight checks reject the call before anything is invoked, which is why the diagram has no path from either into the reconciliation loop: no plugin registered for the provider's GTS type, and a `discovery_settings` payload that does not validate against the plugin's `accepts_settings_gts_type`. Each returns `validation_error` (400) with no plugin invocation and no network call ("Discovery Plugin Architecture" below, "Selection rule" and "Settings validation"). A newly inserted model is registered with the Approval Service as an approvable resource (§2.1 "Approval Service Delegation"); the call is idempotent on `(tenant_id, model_id)`, so a re-run does not duplicate it (§4 Consistency Model). Existing and deprecated rows are not re-registered. No subtree walk is needed to reach descendants: keys are prefixed by the owning tenant, so the entries a descendant reads are the very entries this drops. The TTL backstops only what that invalidation cannot reach — another replica's cache (§4 Technical Debt & Roadmap).
 
 **Failure isolation** (per `cpt-cf-model-registry-nfr-discovery-plugin-isolation`): a panic, timeout, or unrecoverable error from one plugin MUST NOT terminate the surrounding discovery flow. The registry catches the failure, records it on the audit log for the affected provider, and returns an error response for that call. Concurrent or subsequent calls for other `(tenant, provider)` pairs proceed independently. Whether the caller is an admin or an external scheduler, one provider's plugin failure does not block discovery for any other provider.
 
@@ -1146,13 +1153,15 @@ A plugin returns a set of `model definitions`. Each definition MUST carry at min
 2. `display_name` — human-readable label.
 3. The capability flags and metadata fields required to produce a complete `ModelInfoV1` catalog entry.
 
+Plugin output carries neither `lifecycle_status` nor `approval_status` — discovery reports what the provider serves, not how this registry has classified or vetted it. Both are set by reconciliation below.
+
 ##### Catalog Reconciliation
 
 The registry reconciles plugin output against the current catalog per `(tenant_id, provider_id)`:
 
 | Catalog state | Reconciliation action |
 |---------------|----------------------|
-| New model (not in catalog) | Insert with `approval_status = pending` |
+| New model (not in catalog) | Insert with `approval_status = pending` and `lifecycle_status = preview` — the registry's default for a model it has just learned about and not yet vetted, since plugin output carries no lifecycle |
 | Existing model (in catalog) | Update mutable metadata. **`approval_status` is never changed by discovery.** |
 | Missing model (in catalog, not in plugin output) | Soft-delete: set `lifecycle_status = deprecated` and `deprecated_at = now` |
 
@@ -1657,7 +1666,7 @@ The registry serves a high read:write ratio and chooses a deliberate consistency
 
 - **Overall model — eventual consistency, TTL-bounded**: cache values trail authoritative state by at most `cache_ttl_seconds` (default 10 minutes, §2.1 "Cache-First Reads"), for own and inherited views alike. Read-after-write within the same instance is strongly consistent because every write drops the owning tenant's whole cache prefix before returning success — and since keys are owner-prefixed, that covers descendants reading the row as inherited data, not just the owner. **In P1 the cache is per-replica**, so read-after-write across instances is bounded by the TTL rather than by an invalidation-propagation delay: a second replica can serve a stale read for up to the TTL after another replica's write. A single-replica deployment does not have this window, which is why the in-memory backend is the documented posture for small deployments and a distributed backend is the prerequisite for multi-replica scale-out. The §3.5 sequences ("Get Tenant Model", "Model Approval Integration") encode this behavior.
 - **Idempotency of the P1 write paths**: `create_model` rejects a duplicate derived `canonical_id` within the tenant rather than upserting, so creates are not idempotent by design — a repeated create is a `Validation` error, not a silent overwrite. `update_model` and `delete_model` are idempotent in effect: a PATCH re-applying the same values converges, and soft-deleting an already-deprecated model leaves it deprecated. The discovery upsert loop below is P2.
-- **Idempotency — discovery upsert loop (P2)**: Each iteration of the discovery loop in `cpt-cf-model-registry-seq-model-discovery` performs an upsert keyed on the natural key `(provider_id, provider_model_id)`, with the canonical id `{provider_slug}::{provider_model_id}` serving as the user-visible alias. Re-running discovery is therefore idempotent on the catalog: a model that already exists is updated in place, a model that disappears from the provider's response is marked `deprecated_at = now()`, and a new model is inserted with `lifecycle_status = preview`. Approval registrations (`Approval.register_approvable`) are also idempotent on `(tenant_id, model_id)` per the Approval Service contract.
+- **Idempotency — discovery upsert loop (P2)**: Each iteration of the discovery loop in `cpt-cf-model-registry-seq-model-discovery` performs an upsert keyed on `(tenant_id, canonical_id)` — the unique index declared on `models` in §3.6 — where `canonical_id = {provider_slug}::{provider_model_id}`. That key is equivalent to the natural key `(provider_id, provider_model_id)` and needs no second unique index to enforce it: `providers` is `UNIQUE (tenant_id, slug)`, and a model's `tenant_id` always equals its provider's (§3.1 Invariants), so one `(tenant_id, canonical_id)` pair can only ever denote one `(provider_id, provider_model_id)` pair. Re-running discovery is therefore idempotent on the catalog, per the reconciliation table in §3.5: a model that already exists is updated in place, a model that disappears from the provider's response is marked `lifecycle_status = deprecated` / `deprecated_at = now()`, and a new model is inserted `pending` / `preview`. Approval registrations (`Approval.register_approvable`) are also idempotent on `(tenant_id, model_id)` per the Approval Service contract.
 - **Transaction boundaries**: every P1 operation is a single-row write, so no operation spans a multi-statement transaction; the repositories take the connection per call and leave transaction control to the caller, which keeps the seam available for P2. Cache invalidation happens after the write returns success — a write that fails leaves the cache untouched, and the coarse prefix drop means a partially-applied invalidation cannot leave one entity stale while a sibling is fresh. P2 adds a single transaction per provider per discovery run so inserts, updates, and deprecation marks for one catalog snapshot commit together, with the cache invalidation deferred to commit. Cross-tenant writes (e.g. a parent's provider change reflected in a child's read view) are not transactional in any phase — child views reconcile through the TTL described above.
 
 ### Capacity & Cost

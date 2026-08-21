@@ -4,19 +4,6 @@ Open items only. Every item below was verified against both the docs and the shi
 `7e3468fe8`. Resolved items have been removed from this list; the original numbering is preserved,
 so gaps in the sequence are removed-resolved items and references from elsewhere stay valid.
 
-## High — carried over
-
-18. [ ] **Discovery sequence diagram is logically broken.** Unchanged. DESIGN.md:1085:
-    `alt auto discovert plugin found` (typo), and the `alt` still has no `else` — the flow falls
-    into the reconciliation loop even when no plugin was found, contradicting the
-    reject-before-invocation rule at DESIGN.md:1132.
-19. [ ] **P2 discovery upsert has no supporting constraint, plus a stray rule.** Unchanged.
-    DESIGN.md:1644 keys the upsert on `(provider_id, provider_model_id)` with no declared unique
-    index on that pair (only `(tenant_id, canonical_id)` exists, DESIGN.md:1442 =
-    `initial_001.rs:127`), and still asserts a newly discovered model inserts with
-    `lifecycle_status = preview`, which appears nowhere else — the reconciliation diagram
-    (DESIGN.md:1096-1102) only sets `approval_status = pending`.
-
 ## Medium — gaps
 
 20. [ ] **UC-017 job/status mismatch.** Unchanged. PRD.md:1353-1360 still has the registry "queue a
