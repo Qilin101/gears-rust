@@ -1,0 +1,77 @@
+[package]
+name = "cf-gears-model-registry"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Model Registry gear: AI model catalog with tenant-aware provider and model management"
+repository.workspace = true
+readme = "README.md"
+keywords = ["constructorfabric", "cf-gears", "model-registry"]
+categories = ["web-programming"]
+
+[lib]
+name = "model_registry"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+redis = []
+
+[dependencies]
+model-registry-sdk = { package = "cf-gears-model-registry-sdk", version = "0.1.0", path = "../model-registry-sdk" }
+
+# System SDKs
+tenant-resolver-sdk = { workspace = true }
+authz-resolver-sdk = { workspace = true }
+authz-resolver = { workspace = true }
+tenant-resolver = { workspace = true }
+
+# Toolkit framework
+toolkit = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite"] }
+toolkit-db-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-odata = { workspace = true, features = ["with-utoipa"] }
+toolkit-odata-macros = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum"] }
+toolkit-macros = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+
+# Web framework
+axum = { workspace = true, features = ["macros"] }
+
+# Database
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+
+# Time & identity
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# GTS
+gts = { workspace = true }
+
+# Async & error handling
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync"] }
+
+# Gear registration
+inventory = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -16,6 +16,8 @@
 //!   [`TruncationStrategy`])
 //! - Domain entities ([`ModelV1`], [`ProviderV1`])
 //! - Error type ([`ModelRegistryError`])
+//! - `OData` filter / order allowlists for the listing methods
+//!   ([`ModelFilterField`], [`ProviderFilterField`]) — see [`odata`]
 //!
 //! Consumers obtain the client from `ClientHub`:
 //! ```ignore
@@ -38,6 +40,7 @@
 pub mod api;
 pub mod errors;
 pub mod models;
+pub mod odata;
 
 pub use api::ModelRegistryClientV1;
 pub use errors::ModelRegistryError;
@@ -72,6 +75,7 @@ pub use models::{
     ModelCapabilities,
     // info / entities
     ModelInfoV1,
+    ModelManagementV1,
     ModelPerformance,
     ModelV1,
     // tagged-object form of `ToolChoice` (`{"type":"function","name":"…"}`)
@@ -104,3 +108,4 @@ pub use models::{
     UpdateProviderRequestV1,
     WebSearchCapability,
 };
+pub use odata::{ModelFilterField, ProviderFilterField};

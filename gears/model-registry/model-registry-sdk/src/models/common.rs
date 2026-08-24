@@ -5,9 +5,9 @@
 //!
 //! These types live on `ModelInfo<P>` directly (not on the per-provider
 //! settings) because their shape is meaningful for every provider. The
-//! per-model override policy is no longer a struct in this module — its
-//! two fields (`allow_parameter_override`, `allow_extra_params`) are now
-//! flat fields on [`crate::models::ModelInfoV1`].
+//! per-model override policy is expressed as flat fields
+//! (`allow_parameter_override`, `allow_extra_params`) on
+//! [`crate::models::ModelInfoV1`].
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -31,6 +31,44 @@ pub enum LifecycleStatus {
     Sunset,
 }
 
+impl LifecycleStatus {
+    /// Every variant, in declaration order. Lets callers render the accepted
+    /// domain (e.g. in a validation error) without restating it.
+    pub const ALL: &[Self] = &[
+        Self::Production,
+        Self::Preview,
+        Self::Experimental,
+        Self::Deprecated,
+        Self::Sunset,
+    ];
+
+    /// Lowercase wire/storage string — identical to the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Preview => "preview",
+            Self::Experimental => "experimental",
+            Self::Deprecated => "deprecated",
+            Self::Sunset => "sunset",
+        }
+    }
+
+    /// Parse from the lowercase wire/storage string. `None` for any value
+    /// outside the documented domain.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "production" => Some(Self::Production),
+            "preview" => Some(Self::Preview),
+            "experimental" => Some(Self::Experimental),
+            "deprecated" => Some(Self::Deprecated),
+            "sunset" => Some(Self::Sunset),
+            _ => None,
+        }
+    }
+}
+
 /// Approval status of a model for a tenant.
 ///
 /// Wire format is lowercase to match `DESIGN.md §3.1` and `OData` filters
@@ -47,6 +85,35 @@ pub enum ApprovalStatus {
     Revoked,
 }
 
+impl ApprovalStatus {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Pending, Self::Approved, Self::Rejected, Self::Revoked];
+
+    /// Lowercase wire/storage string — identical to the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    /// Parse from the lowercase wire/storage string. `None` for any value
+    /// outside the documented domain.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            "revoked" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
+}
+
 /// Operational status of a provider.
 ///
 /// Wire format is lowercase to match `DESIGN.md §3.1`.
@@ -58,6 +125,31 @@ pub enum ApprovalStatus {
 pub enum ProviderStatus {
     Active,
     Disabled,
+}
+
+impl ProviderStatus {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Active, Self::Disabled];
+
+    /// Lowercase wire/storage string — identical to the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Parse from the lowercase wire/storage string. `None` for any value
+    /// outside the documented domain.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
 }
 
 /// API kind that a model exposes.
@@ -90,6 +182,33 @@ pub enum SupportedApi {
     /// Asynchronous batch API (see `gts.cf.llmgw.async.batch.v1~`). May
     /// coexist with `Completion` / `Embedding` on the same model.
     Batch,
+}
+
+impl SupportedApi {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Completion, Self::Embedding, Self::Batch];
+
+    /// Lowercase wire/storage string — identical to the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completion => "completion",
+            Self::Embedding => "embedding",
+            Self::Batch => "batch",
+        }
+    }
+
+    /// Parse from the lowercase wire/storage string. `None` for any value
+    /// outside the documented domain.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "completion" => Some(Self::Completion),
+            "embedding" => Some(Self::Embedding),
+            "batch" => Some(Self::Batch),
+            _ => None,
+        }
+    }
 }
 
 /// Unified reasoning effort level used by `default_parameters.reasoning.effort`.
@@ -142,7 +261,15 @@ pub enum ServiceTier {
 /// accepts.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct ReasoningCapability {
     /// Supports `reasoning_effort` parameter (low/medium/high).
@@ -158,7 +285,15 @@ pub struct ReasoningCapability {
 /// Web search capability flags.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct WebSearchCapability {
     /// Whether web search is available.
@@ -201,9 +336,8 @@ pub struct MediaCapability {
 /// `Vec<String>`, so the struct is `Clone` only.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
-    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-#[non_exhaustive]
 pub struct ModelCapabilities {
     /// Supports image/vision input.
     pub vision: MediaCapability,
@@ -302,7 +436,6 @@ pub struct DisabledWebSearchCapability {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-#[non_exhaustive]
 pub struct DisabledCapabilities {
     /// Image / vision input is disabled.
     pub vision: DisabledMediaCapability,
@@ -342,7 +475,15 @@ impl DisabledCapabilities {
 
 /// Token limits for the model's context window.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct ContextWindow {
     pub max_input_tokens: u32,
@@ -359,7 +500,15 @@ pub struct ContextWindow {
 
 /// Estimated performance characteristics.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct ModelPerformance {
     /// Expected response latency in milliseconds.
@@ -376,67 +525,100 @@ pub struct ModelPerformance {
 mod tests {
     use super::*;
 
+    /// `ALL` is the domain the API layer renders in "expected one of …"
+    /// validation messages, so it must list exactly the variants the
+    /// wire-format cases below enumerate, in the same order.
+    fn assert_all_lists_every_variant<T: Copy + PartialEq + std::fmt::Debug>(
+        all: &[T],
+        cases: &[(T, &str)],
+    ) {
+        let from_cases: Vec<T> = cases.iter().map(|(v, _)| *v).collect();
+        assert_eq!(all, from_cases.as_slice(), "ALL drifted from the variants");
+    }
+
     #[test]
     fn lifecycle_status_wire_format_is_lowercase() {
         // Pinned to match DESIGN.md §3.1 — lifecycle_status is queryable via
         // OData on the catalog list endpoint and must match the JSONB-stored
         // string casing.
-        for (variant, expected) in [
+        let cases = [
             (LifecycleStatus::Production, "\"production\""),
             (LifecycleStatus::Preview, "\"preview\""),
             (LifecycleStatus::Experimental, "\"experimental\""),
             (LifecycleStatus::Deprecated, "\"deprecated\""),
             (LifecycleStatus::Sunset, "\"sunset\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(LifecycleStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: LifecycleStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, variant);
+            // `as_str` / `from_wire` are the storage-layer twins of the serde
+            // representation — pinned together so they cannot drift apart.
+            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
+            assert_eq!(LifecycleStatus::from_wire(variant.as_str()), Some(variant));
         }
+        assert_eq!(LifecycleStatus::from_wire("Production"), None);
     }
 
     #[test]
     fn approval_status_wire_format_is_lowercase() {
-        for (variant, expected) in [
+        let cases = [
             (ApprovalStatus::Pending, "\"pending\""),
             (ApprovalStatus::Approved, "\"approved\""),
             (ApprovalStatus::Rejected, "\"rejected\""),
             (ApprovalStatus::Revoked, "\"revoked\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(ApprovalStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: ApprovalStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, variant);
+            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
+            assert_eq!(ApprovalStatus::from_wire(variant.as_str()), Some(variant));
         }
+        assert_eq!(ApprovalStatus::from_wire("unknown"), None);
     }
 
     #[test]
     fn provider_status_wire_format_is_lowercase() {
-        for (variant, expected) in [
+        let cases = [
             (ProviderStatus::Active, "\"active\""),
             (ProviderStatus::Disabled, "\"disabled\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(ProviderStatus::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: ProviderStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, variant);
+            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
+            assert_eq!(ProviderStatus::from_wire(variant.as_str()), Some(variant));
         }
+        assert_eq!(ProviderStatus::from_wire(""), None);
     }
 
     #[test]
     fn supported_api_wire_format_is_lowercase() {
         // Pinned to match DESIGN.md §3.1; OData filters on
         // `info.supported_api` (DESIGN.md §3.3) compare against these strings.
-        for (variant, expected) in [
+        let cases = [
             (SupportedApi::Completion, "\"completion\""),
             (SupportedApi::Embedding, "\"embedding\""),
             (SupportedApi::Batch, "\"batch\""),
-        ] {
+        ];
+        assert_all_lists_every_variant(SupportedApi::ALL, &cases);
+        for (variant, expected) in cases {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "wire format drift on {variant:?}");
             let back: SupportedApi = serde_json::from_str(&s).unwrap();
             assert_eq!(back, variant);
+            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
+            assert_eq!(SupportedApi::from_wire(variant.as_str()), Some(variant));
         }
+        assert_eq!(SupportedApi::from_wire("images"), None);
     }
 
     #[test]

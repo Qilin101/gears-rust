@@ -60,7 +60,7 @@ pub use providers::{
 
 pub use info::ModelInfoV1;
 
-pub use entity::{ModelV1, ProviderV1};
+pub use entity::{ModelManagementV1, ModelV1, ProviderV1};
 
 pub use request::{
     CreateModelRequestV1, CreateProviderRequestV1, CreateProviderRequestV1Builder,
