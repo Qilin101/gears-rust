@@ -48,12 +48,10 @@ impl ODataFieldMapping<ProviderFilterField> for ProviderODataMapper {
         field: ProviderFilterField,
     ) -> sea_orm::Value {
         match field {
-            ProviderFilterField::Slug => sea_orm::Value::String(Some(Box::new(m.slug.clone()))),
-            ProviderFilterField::Name => sea_orm::Value::String(Some(Box::new(m.name.clone()))),
-            ProviderFilterField::Status => sea_orm::Value::String(Some(Box::new(m.status.clone()))),
-            ProviderFilterField::GtsType => {
-                sea_orm::Value::String(Some(Box::new(m.gts_type.clone())))
-            }
+            ProviderFilterField::Slug => sea_orm::Value::String(Some(m.slug.clone())),
+            ProviderFilterField::Name => sea_orm::Value::String(Some(m.name.clone())),
+            ProviderFilterField::Status => sea_orm::Value::String(Some(m.status.clone())),
+            ProviderFilterField::GtsType => sea_orm::Value::String(Some(m.gts_type.clone())),
             ProviderFilterField::Managed => sea_orm::Value::Bool(Some(m.managed)),
             ProviderFilterField::DiscoveryEnabled => {
                 sea_orm::Value::Bool(Some(m.discovery_enabled))
@@ -112,7 +110,7 @@ mod tests {
 
         assert_eq!(
             ProviderODataMapper::extract_cursor_value(&m, ProviderFilterField::Slug),
-            sea_orm::Value::String(Some(Box::new("openai".to_owned())))
+            sea_orm::Value::String(Some("openai".to_owned()))
         );
         assert_eq!(
             ProviderODataMapper::extract_cursor_value(&m, ProviderFilterField::Managed),

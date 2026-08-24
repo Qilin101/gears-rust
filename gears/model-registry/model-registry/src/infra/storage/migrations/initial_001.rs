@@ -22,6 +22,7 @@ impl MigrationTrait for Migration {
                 "DATETIME(6)",
             ),
             sea_orm::DatabaseBackend::Sqlite => ("TEXT", "BOOLEAN", "TEXT", "TEXT", "TEXT"),
+            _ => panic!("unsupported database backend: {backend:?}"),
         };
 
         // VARCHAR(64) / TEXT — used for bounded short text fields (region, hosted_by,
@@ -30,6 +31,7 @@ impl MigrationTrait for Migration {
         let varch = match backend {
             sea_orm::DatabaseBackend::Sqlite => "TEXT",
             sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => "VARCHAR(64)",
+            _ => panic!("unsupported database backend: {backend:?}"),
         };
 
         // INT type — used for all integer columns. SQLite INTEGER is 8-byte and
@@ -40,6 +42,7 @@ impl MigrationTrait for Migration {
         let int = match backend {
             sea_orm::DatabaseBackend::Sqlite => "INTEGER",
             sea_orm::DatabaseBackend::MySql | sea_orm::DatabaseBackend::Postgres => "BIGINT",
+            _ => panic!("unsupported database backend: {backend:?}"),
         };
 
         let sql = format!(
@@ -215,7 +218,7 @@ mod tests {
 
         // Query sqlite_master / pragma table_info for `models` columns.
         let rows = conn
-            .query_all(sea_orm::Statement::from_string(
+            .query_all_raw(sea_orm::Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA table_info(models);".to_owned(),
             ))
@@ -244,7 +247,7 @@ mod tests {
         Migration::up(&Migration, &manager).await.unwrap();
 
         let rows = conn
-            .query_all(sea_orm::Statement::from_string(
+            .query_all_raw(sea_orm::Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA table_info(models);".to_owned(),
             ))
@@ -344,7 +347,7 @@ mod tests {
         Migration::up(&Migration, &manager).await.unwrap();
 
         let rows = conn
-            .query_all(sea_orm::Statement::from_string(
+            .query_all_raw(sea_orm::Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA table_info(models);".to_owned(),
             ))
@@ -373,7 +376,7 @@ mod tests {
         table: &str,
     ) -> Vec<(String, Vec<String>)> {
         let idx_rows = conn
-            .query_all(sea_orm::Statement::from_string(
+            .query_all_raw(sea_orm::Statement::from_string(
                 DbBackend::Sqlite,
                 format!("SELECT name FROM pragma_index_list('{table}');"),
             ))
@@ -386,7 +389,7 @@ mod tests {
                 continue;
             };
             let col_rows = conn
-                .query_all(sea_orm::Statement::from_string(
+                .query_all_raw(sea_orm::Statement::from_string(
                     DbBackend::Sqlite,
                     format!("SELECT name FROM pragma_index_info('{idx}') ORDER BY seqno;"),
                 ))

@@ -59,37 +59,23 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
         field: ModelFilterField,
     ) -> sea_orm::Value {
         match field {
-            ModelFilterField::CanonicalId => {
-                sea_orm::Value::String(Some(Box::new(m.canonical_id.clone())))
-            }
+            ModelFilterField::CanonicalId => sea_orm::Value::String(Some(m.canonical_id.clone())),
             ModelFilterField::LifecycleStatus => {
-                sea_orm::Value::String(Some(Box::new(m.lifecycle_status.clone())))
+                sea_orm::Value::String(Some(m.lifecycle_status.clone()))
             }
             ModelFilterField::ApprovalStatus => {
-                sea_orm::Value::String(Some(Box::new(m.approval_status.clone())))
+                sea_orm::Value::String(Some(m.approval_status.clone()))
             }
-            ModelFilterField::GtsType => {
-                sea_orm::Value::String(m.gts_type.as_ref().map(|s| Box::new(s.clone())))
-            }
-            ModelFilterField::SupportedApi => {
-                sea_orm::Value::String(m.supported_api.as_ref().map(|s| Box::new(s.clone())))
-            }
+            ModelFilterField::GtsType => sea_orm::Value::String(m.gts_type.clone()),
+            ModelFilterField::SupportedApi => sea_orm::Value::String(m.supported_api.clone()),
             ModelFilterField::ProviderModelId => {
-                sea_orm::Value::String(m.provider_model_id.as_ref().map(|s| Box::new(s.clone())))
+                sea_orm::Value::String(m.provider_model_id.clone())
             }
-            ModelFilterField::Vendor => {
-                sea_orm::Value::String(m.vendor.as_ref().map(|s| Box::new(s.clone())))
-            }
-            ModelFilterField::Family => {
-                sea_orm::Value::String(m.family.as_ref().map(|s| Box::new(s.clone())))
-            }
+            ModelFilterField::Vendor => sea_orm::Value::String(m.vendor.clone()),
+            ModelFilterField::Family => sea_orm::Value::String(m.family.clone()),
             ModelFilterField::Managed => sea_orm::Value::Bool(Some(m.managed)),
-            ModelFilterField::Architecture => {
-                sea_orm::Value::String(m.architecture.as_ref().map(|s| Box::new(s.clone())))
-            }
-            ModelFilterField::Format => {
-                sea_orm::Value::String(m.format.as_ref().map(|s| Box::new(s.clone())))
-            }
+            ModelFilterField::Architecture => sea_orm::Value::String(m.architecture.clone()),
+            ModelFilterField::Format => sea_orm::Value::String(m.format.clone()),
             ModelFilterField::Vision => sea_orm::Value::Bool(Some(m.cap_vision)),
             ModelFilterField::FunctionCalling => sea_orm::Value::Bool(Some(m.cap_function_calling)),
             ModelFilterField::Streaming => sea_orm::Value::Bool(Some(m.cap_streaming)),
@@ -190,15 +176,15 @@ mod tests {
         // String fields
         assert_eq!(
             ModelODataMapper::extract_cursor_value(&m, ModelFilterField::LifecycleStatus),
-            sea_orm::Value::String(Some(Box::new("production".to_owned())))
+            sea_orm::Value::String(Some("production".to_owned()))
         );
         assert_eq!(
             ModelODataMapper::extract_cursor_value(&m, ModelFilterField::ApprovalStatus),
-            sea_orm::Value::String(Some(Box::new("approved".to_owned())))
+            sea_orm::Value::String(Some("approved".to_owned()))
         );
         assert_eq!(
             ModelODataMapper::extract_cursor_value(&m, ModelFilterField::GtsType),
-            sea_orm::Value::String(Some(Box::new("gts.cf.genai.model.info.v1~".to_owned())))
+            sea_orm::Value::String(Some("gts.cf.genai.model.info.v1~".to_owned()))
         );
 
         // Bool fields
