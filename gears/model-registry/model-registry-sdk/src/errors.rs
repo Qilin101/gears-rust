@@ -23,6 +23,9 @@ pub enum ModelRegistryError {
     #[error("provider not found: {id}")]
     ProviderNotFound { id: Uuid },
 
+    #[error("provider with slug `{slug}` not found")]
+    ProviderNotFoundBySlug { slug: String },
+
     #[error("provider disabled: {id}")]
     ProviderDisabled { id: Uuid },
 
@@ -38,8 +41,14 @@ pub enum ModelRegistryError {
     #[error("forbidden: {detail}")]
     Forbidden { detail: String },
 
+    #[error("provider with slug `{slug}` not owned by caller's tenant")]
+    ProviderNotOwned { slug: String },
+
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
+
+    #[error("provider has {model_count} existing model(s): {id}")]
+    ProviderHasModels { id: Uuid, model_count: u64 },
 
     /// Catch-all for unexpected failures (DB/cache/OAGW/etc.). `detail` is a
     /// short human-readable summary; `source` carries the underlying error
@@ -80,6 +89,11 @@ impl ModelRegistryError {
     }
 
     #[must_use]
+    pub fn provider_not_found_by_slug(slug: impl Into<String>) -> Self {
+        Self::ProviderNotFoundBySlug { slug: slug.into() }
+    }
+
+    #[must_use]
     pub fn provider_disabled(id: Uuid) -> Self {
         Self::ProviderDisabled { id }
     }
@@ -113,8 +127,18 @@ impl ModelRegistryError {
     }
 
     #[must_use]
+    pub fn provider_not_owned(slug: impl Into<String>) -> Self {
+        Self::ProviderNotOwned { slug: slug.into() }
+    }
+
+    #[must_use]
     pub fn provider_conflict(slug: impl Into<String>) -> Self {
         Self::ProviderConflict { slug: slug.into() }
+    }
+
+    #[must_use]
+    pub fn provider_has_models(id: Uuid, model_count: u64) -> Self {
+        Self::ProviderHasModels { id, model_count }
     }
 
     /// Construct an `Internal` error with a free-form detail string and no

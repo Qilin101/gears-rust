@@ -14,8 +14,8 @@ use toolkit_odata::{ODataQuery, Page};
 
 use crate::errors::ModelRegistryError;
 use crate::models::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelV1, ProviderV1, UpdateModelRequestV1,
-    UpdateProviderRequestV1,
+    CreateModelRequestV1, CreateProviderRequestV1, ModelManagementV1, ModelV1, ProviderV1,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 /// Public API trait for the Model Registry (Version 1).
@@ -33,9 +33,8 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// Get a model by canonical ID within the caller's tenant context.
     ///
-    /// Returns the model with its approval status resolved from
-    /// `ModelApproval` (P1: written directly by admins; P2 onward: routed
-    /// through Approval Service). Uses cache-first lookup with DB fallback.
+    /// Returns the model with its approval status. Uses cache-first lookup
+    /// with DB fallback.
     async fn get_tenant_model(
         &self,
         ctx: &SecurityContext,
@@ -44,23 +43,48 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// List models available to the caller's tenant with `OData` filtering.
     ///
-    /// Supports `$filter` on: `lifecycle_status`, `approval_status`,
-    /// `info.gts_type`, `info.supported_api`, `info.provider_model_id`,
-    /// `info.capabilities.*` (e.g. `vision`, `function_calling`, `streaming`,
-    /// `reasoning.effort`), `info.vendor`, `info.family`. Per-provider
-    /// parameter and cost fields are not filterable in v1 — see
-    /// `docs/DESIGN.md` §3.3.
+    /// Build `query` with [`QueryBuilder`](crate::odata::QueryBuilder) over
+    /// [`ModelSchema`](crate::odata::ModelSchema) and the `MODEL_*` field
+    /// references in [`crate::odata`] — that route needs no `$filter` text and
+    /// computes the cursor `filter_hash` for you.
+    ///
+    /// `query.filter` and `query.order` accept exactly the fields enumerated
+    /// by [`ModelFilterField`](crate::odata::ModelFilterField); anything
+    /// outside that allowlist is rejected as an unknown-field validation
+    /// error. Field names are flat (`gts_type`, `vision`), not nested under
+    /// `info.`. Per-provider parameter and cost fields are not filterable in
+    /// v1 — see `docs/DESIGN.md` §3.3.
+    ///
+    /// `query.select` is **not supported**: this method always returns whole
+    /// [`ModelV1`] values, and a query carrying one is rejected with
+    /// [`ModelRegistryError::Validation`] rather than silently ignored.
     ///
     /// Returns `ModelV1` (the default `P = serde_json::Value` for
     /// heterogeneous lists). Consumers narrowed to a specific provider (e.g.
     /// when they've already filtered on
-    /// `info.gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`)
+    /// `gts_type eq 'gts.cf.genai.model.info.v1~cf.genai._.openai.v1~'`)
     /// can call [`ModelV1::try_into_typed`] on each result.
     async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ModelV1>, ModelRegistryError>;
+
+    /// List models with management flags (admin endpoint).
+    ///
+    /// Like [`Self::list_tenant_models`], but:
+    /// - Returns [`ModelManagementV1`] rows that include `shadowed`,
+    ///   `provider_disabled`, and `available_for_eval` flags.
+    /// - Merges ancestor rows **without** `canonical_id` dedupe — two chain
+    ///   tenants owning the same slug is the exact case this endpoint exists
+    ///   to display.
+    /// - Supports `include_deprecated` to include terminal-lifecycle models.
+    async fn list_tenant_models_management(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+        include_deprecated: bool,
+    ) -> Result<Page<ModelManagementV1>, ModelRegistryError>;
 
     // ==================== Models — manual management (P1) ====================
     //
@@ -69,9 +93,9 @@ pub trait ModelRegistryClientV1: Send + Sync {
     // (`approve` / `reject` / `revoke`) flow through `update_model` with
     // `UpdateModelRequestV1::approval_status` — no dedicated action endpoints.
     //
-    // Same SDK methods continue to work in P2; only the implementation of
-    // status writes shifts from a direct DB update to an Approval Service
-    // workflow call (DESIGN §1.2 driver `fr-model-approval`).
+    // The same SDK methods continue to work in P2; only the implementation
+    // shifts so approval status writes route through the Approval Service
+    // (DESIGN §1.2 driver `fr-model-approval`).
 
     /// Manually register a new model in the catalog.
     ///
@@ -79,10 +103,8 @@ pub trait ModelRegistryClientV1: Send + Sync {
     /// or inherited from an ancestor tenant). The `canonical_id` is derived
     /// from `req.provider_slug` + `req.info.provider_model_id`.
     ///
-    /// In P1 the optional `req.approval_status` is written directly to
-    /// `ModelApproval`; defaults to [`crate::models::ApprovalStatus::Pending`]
-    /// when `None`. In P2 the same field initiates the Approval Service
-    /// workflow.
+    /// The optional `req.approval_status` is written to `models.approval_status`;
+    /// defaults to [`crate::models::ApprovalStatus::Pending`] when `None`.
     async fn create_model(
         &self,
         ctx: &SecurityContext,
@@ -95,11 +117,7 @@ pub trait ModelRegistryClientV1: Send + Sync {
     /// `info.gts_type` are immutable — to change them, soft-delete and
     /// recreate.
     ///
-    /// The `req.approval_status` field is the unified entry point for
-    /// approve / reject / revoke transitions:
-    /// - **P1**: writes directly to `ModelApproval`.
-    /// - **P2 onward**: routes through the Approval Service workflow while
-    ///   non-status field updates remain direct.
+    /// Setting `req.approval_status` updates `models.approval_status`.
     async fn update_model(
         &self,
         ctx: &SecurityContext,
@@ -129,10 +147,17 @@ pub trait ModelRegistryClientV1: Send + Sync {
     ) -> Result<ProviderV1, ModelRegistryError>;
 
     /// List providers for the caller's tenant with `OData` filtering.
+    ///
+    /// `query.filter` and `query.order` accept exactly the fields enumerated
+    /// by [`ProviderFilterField`](crate::odata::ProviderFilterField); build it
+    /// with [`QueryBuilder`](crate::odata::QueryBuilder) over
+    /// [`ProviderSchema`](crate::odata::ProviderSchema) and the `PROVIDER_*`
+    /// field references. `query.select` is not supported and is rejected with
+    /// [`ModelRegistryError::Validation`].
     async fn list_providers(
         &self,
         ctx: &SecurityContext,
-        query: ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, ModelRegistryError>;
 
     /// Register a new provider for the caller's tenant.

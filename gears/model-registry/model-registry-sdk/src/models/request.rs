@@ -166,13 +166,9 @@ pub struct UpdateProviderRequestV1 {
 /// — both are immutable after creation. Provider must exist for the caller's
 /// tenant (or be inherited from an ancestor).
 ///
-/// **Phase semantics for `approval_status`**:
-/// - **P1**: written directly to `ModelApproval` by Model Registry — defaults
-///   to [`ApprovalStatus::Pending`]; admins can pass [`ApprovalStatus::Approved`]
-///   to approve in the same call as a convenience.
-/// - **P2 onward**: registered as an approvable resource with the Approval
-///   Service; the `approval_status` field initiates the workflow rather than
-///   writing directly.
+/// The optional `approval_status` defaults to [`ApprovalStatus::Pending`];
+/// admins can pass [`ApprovalStatus::Approved`] to approve in the same call
+/// as a convenience.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateModelRequestV1 {
     /// Provider slug (1-64 chars, lowercase alphanumeric + hyphen). Combined
@@ -201,9 +197,7 @@ pub struct CreateModelRequestV1 {
 ///
 /// **Approval status changes** also flow through this PATCH endpoint (see
 /// `cpt-cf-model-registry-fr-manual-model-management` in DESIGN §1.2):
-/// - **P1**: status writes go directly to `ModelApproval`.
-/// - **P2 onward**: status writes route through the Approval Service; other
-///   field updates remain direct DB writes.
+/// setting `approval_status` updates `models.approval_status`.
 ///
 /// Nullable columns use tri-state `Option<Option<T>>` to distinguish "field
 /// omitted — leave unchanged" (`None`) from "explicitly clear to null"
@@ -289,7 +283,7 @@ mod tests {
 
     #[test]
     fn provider_builder_threads_required_fields_and_applies_overrides() {
-        let gts = gts::GtsTypeId::new(gts_id!("cf.genai.models.provider.v1~cf.genai._.openai.v1~"));
+        let gts = gts::GtsTypeId::new(gts_id!("cf.genai.model.provider.v1~cf.genai._.openai.v1~"));
 
         let full = CreateProviderRequestV1::builder("openai", "OpenAI", gts.clone())
             .managed(true)

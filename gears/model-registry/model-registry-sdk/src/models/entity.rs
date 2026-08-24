@@ -20,9 +20,16 @@ use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus
 /// provider settings ride as opaque JSON until the consumer narrows via
 /// [`ModelV1::try_into_typed`], which reads `info.gts_type` for dispatch.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
 pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub id: Uuid,
+    /// Tenant that owns this model. Always equal to the owning provider's
+    /// tenant — a model is never created against an ancestor's provider (§2.1).
+    /// For an inherited model this is an ancestor tenant, not the reader's.
+    pub tenant_id: Uuid,
+    /// Foreign key to the provider that owns this model.
+    /// The visibility key (§3.6): a model is visible in eval listings only
+    /// when `provider_id` is in the tenant's allow-list.
+    pub provider_id: Uuid,
     /// Format: `{provider_slug}::{provider_model_id}`.
     pub canonical_id: String,
     pub lifecycle_status: LifecycleStatus,
@@ -46,7 +53,7 @@ impl ModelV1<serde_json::Value> {
     ///
     /// let model: ModelV1 = client.get_tenant_model(&ctx, "openai::gpt-4o").await?;
     /// let typed: ModelV1<OpenAiSettingsV1> = model.try_into_typed()?;
-    /// // now `typed.info.provider_settings.parameters.temperature` is typed
+    /// // now `typed.info.provider_settings.temperature` is typed
     /// ```
     ///
     /// # Errors
@@ -62,6 +69,8 @@ impl ModelV1<serde_json::Value> {
     {
         Ok(ModelV1 {
             id: self.id,
+            tenant_id: self.tenant_id,
+            provider_id: self.provider_id,
             canonical_id: self.canonical_id,
             lifecycle_status: self.lifecycle_status,
             approval_status: self.approval_status,
@@ -71,14 +80,52 @@ impl ModelV1<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
+// ModelManagementV1<P>
+// ---------------------------------------------------------------------------
+
+/// A model row as returned by the `list_tenant_models_management` endpoint.
+///
+/// Augments [`ModelV1<P>`] with three management-only flags computed from
+/// [`ChainProviders`](crate::domain::inheritance::ChainProviders):
+///
+/// - `shadowed` — the provider slug is owned by a closer tenant (the model is
+///   hidden from eval listings by a shadow provider).
+/// - `provider_disabled` — the provider's status is `disabled`; the model
+///   is hidden from eval listings.
+/// - `available_for_eval` — the model would be returned by
+///   `list_tenant_models` (visible, active provider, approved, non-terminal
+///   lifecycle).
+///
+/// Generic over `P` with the same semantics as [`ModelV1<P>`].
+///
+/// Three bool flags inline is intentional — these map one-to-one to an admin
+/// UI's three labelled columns. A two-variant enum per flag would add
+/// ceremony without clarity.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelManagementV1<P: gts::GtsSchema = serde_json::Value> {
+    /// The underlying model data.
+    pub model: ModelV1<P>,
+    /// The provider slug is shadowed by a closer tenant.
+    pub shadowed: bool,
+    /// The provider is disabled.
+    pub provider_disabled: bool,
+    /// The model would be visible in the eval (`list_tenant_models`) result.
+    pub available_for_eval: bool,
+}
+
+// ---------------------------------------------------------------------------
 // ProviderV1
 // ---------------------------------------------------------------------------
 
 /// A configured AI provider instance for a tenant.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderV1 {
     pub id: Uuid,
+    /// Tenant that owns this provider. For an inherited provider this is an
+    /// ancestor tenant, not the reader's — it is the tenant whose cache prefix
+    /// and write scope govern the row.
+    pub tenant_id: Uuid,
     /// Human-readable identifier (immutable after creation).
     /// Format: 1-64 chars, lowercase alphanumeric + hyphen.
     pub slug: String,
@@ -146,6 +193,8 @@ mod tests {
     fn raw_model(gts_type: &str, provider_settings_json: serde_json::Value) -> ModelV1 {
         ModelV1 {
             id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            provider_id: Uuid::nil(),
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: LifecycleStatus::Production,
             approval_status: ApprovalStatus::Approved,
@@ -314,6 +363,10 @@ mod tests {
             serde_json::Value::String("transformer".into()),
         );
         let typed: ModelV1<OpenAiSettingsV1> = m.try_into_typed().expect("openai matches");
+        // provider_id survives narrowing.
+        assert_eq!(typed.provider_id, Uuid::nil());
+        // canonical_id survives narrowing.
+        assert_eq!(typed.canonical_id, "openai::gpt-4o");
         assert_eq!(
             typed.info.additional_info.get("architecture"),
             Some(&serde_json::Value::String("transformer".into()))

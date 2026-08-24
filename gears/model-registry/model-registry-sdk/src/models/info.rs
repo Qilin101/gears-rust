@@ -47,7 +47,6 @@ use crate::models::{
     properties = "gts_type,display_name,family,vendor,managed,architecture,format,supported_api,provider_model_id,capabilities,context_window,default_parameters"
 )]
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct ModelInfoV1<P: gts::GtsSchema = serde_json::Value> {
     // ── GTS schema identity ───────────────────────────────────────────
     /// Full GTS schema chain identifying this model's settings shape. Mirrors
@@ -115,15 +114,15 @@ pub struct ModelInfoV1<P: gts::GtsSchema = serde_json::Value> {
     /// fields on `provider_settings` are preferred.
     pub additional_info: HashMap<String, serde_json::Value>,
 
-    // ── Promoted from the old `ApiResolution` ─────────────────────────
+    // ── Common API-resolution fields ──────────────────────────────────
     /// Which API kinds this model exposes (completion, embedding).
-    /// Promoted to common so consumers can filter on completion vs
-    /// embedding without unwrapping the variant.
+    /// Top-level so consumers can filter on completion vs embedding
+    /// without unwrapping provider settings.
     pub supported_api: HashSet<SupportedApi>,
     /// Provider's model identifier — used both in `canonical_id`
     /// (`{provider_slug}::{provider_model_id}`) and sent to the provider in
-    /// API requests. Promoted to common so the catalog UI / alias logic
-    /// doesn't have to reach into `provider_settings`.
+    /// API requests. Top-level so the catalog UI / alias logic doesn't have
+    /// to reach into `provider_settings`.
     pub provider_model_id: String,
 
     // ── Capabilities ───────────────────────────────────────────────────
