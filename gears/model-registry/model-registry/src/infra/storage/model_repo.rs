@@ -233,7 +233,7 @@ impl ModelRepository for ModelRepositoryImpl {
         conn: &impl DBRunner,
         scope: &AccessScope,
         canonical_id: &str,
-    ) -> Result<ModelV1, DomainError> {
+    ) -> Result<(), DomainError> {
         // Fetch existing entity (scope-checked).
         let existing = model::Entity::find()
             .secure()
@@ -251,11 +251,11 @@ impl ModelRepository for ModelRepositoryImpl {
         am.deprecated_at = Set(Some(now));
         am.updated_at = Set(now);
 
-        let updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
+        secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
             .await
             .map_err(map_scope_error)?;
 
-        model_mapper::model_entity_to_v1(updated)
+        Ok(())
     }
 }
 

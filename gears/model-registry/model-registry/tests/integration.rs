@@ -1,7 +1,7 @@
 //! End-to-end integration tests for the Model Registry gear.
 //!
 //! These tests construct a full service stack (real `ProviderRepositoryImpl` /
-//! `ModelRepositoryImpl` over in-memory `SQLite`, real `InMemoryCache`, real
+//! `ModelRepositoryImpl` over in-memory `SQLite`, a stub `ResolutionCache`, real
 //! `PolicyEnforcer` backed by a
 //! mock `AuthZResolverClient`, and configurable mock `TenantResolverClient`)
 //! and drive the complete provider→model→approval→soft-delete lifecycle.
@@ -14,7 +14,8 @@
 //! | `tenant_isolation` | two tenants, data created in A only | B cannot see A's data |
 //! | `inheritance_parent_child` | parent owns provider + model; child has no data | child inherits via ancestor chain |
 //! | `child_shadows_parent` | parent + child own same `canonical_id` | child shadows parent |
-//! | `cache_first_get` | second read hits cache | cache-first read behaviour |
+//! | `warm_chain_skips_tenant_resolver` | two reads behind a counting stub cache | the chain is resolved once and served warm after |
+//! | `writes_never_touch_the_cache` | provider + model writes behind a counting stub cache | no write performs a cache operation |
 //!
 //! All tests run against an in-memory `SQLite` database with the production
 //! migration applied, giving high confidence the storage layer works
@@ -24,14 +25,15 @@
 #![allow(clippy::expect_used)]
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use authz_resolver_sdk::{
     AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
 };
 use model_registry::config::ModelRegistryConfig;
-use model_registry::domain::cache::InMemoryCache;
+use model_registry::domain::cache::{NoopResolutionCache, ResolutionCache};
 use model_registry::domain::error::DomainError;
 use model_registry::domain::repo::{ModelRepository, ProviderRepository};
 use model_registry::domain::service::Service;
@@ -254,6 +256,119 @@ impl TenantResolverClient for OneAncestorResolver {
     }
 }
 
+/// Wraps a resolver and counts its `get_ancestors` calls, so a test can prove a
+/// warm chain never reaches `tenant-resolver`.
+struct CountingResolver<R> {
+    inner: R,
+    calls: Arc<AtomicUsize>,
+}
+
+impl<R> CountingResolver<R> {
+    /// Returns the wrapper alongside a handle to its counter, so the counter
+    /// stays readable after the resolver is moved into the `Service`.
+    fn new(inner: R) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                inner,
+                calls: Arc::clone(&calls),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait]
+impl<R: TenantResolverClient + Send + Sync> TenantResolverClient for CountingResolver<R> {
+    async fn get_ancestors(
+        &self,
+        ctx: &SecurityContext,
+        id: TenantId,
+        options: &GetAncestorsOptions,
+    ) -> Result<GetAncestorsResponse, TenantResolverError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_ancestors(ctx, id, options).await
+    }
+
+    async fn get_tenant(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_root_tenant(
+        &self,
+        _: &SecurityContext,
+    ) -> Result<TenantInfo, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_tenants(
+        &self,
+        _: &SecurityContext,
+        _: &[TenantId],
+        _: &GetTenantsOptions,
+    ) -> Result<Vec<TenantInfo>, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn get_descendants(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: &GetDescendantsOptions,
+    ) -> Result<GetDescendantsResponse, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+    async fn is_ancestor(
+        &self,
+        _: &SecurityContext,
+        _: TenantId,
+        _: TenantId,
+        _: &IsAncestorOptions,
+    ) -> Result<bool, TenantResolverError> {
+        unimplemented!("not used in tests")
+    }
+}
+
+/// An in-process [`ResolutionCache`] that counts every operation, standing in
+/// for a live cluster backend.
+#[derive(Default)]
+struct StubCache {
+    entries: Mutex<HashMap<Uuid, Vec<Uuid>>>,
+    gets: AtomicUsize,
+    puts: AtomicUsize,
+}
+
+impl StubCache {
+    fn gets(&self) -> usize {
+        self.gets.load(Ordering::SeqCst)
+    }
+
+    fn puts(&self) -> usize {
+        self.puts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ResolutionCache for StubCache {
+    async fn get_chain(&self, tenant_id: Uuid) -> Option<Vec<Uuid>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&tenant_id)
+            .cloned()
+    }
+
+    async fn put_chain(&self, tenant_id: Uuid, chain: &[Uuid]) {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tenant_id, chain.to_vec());
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -398,11 +513,12 @@ fn make_create_approved_model_req(
     }
 }
 
-/// Build a full `Service` instance for integration testing.
+/// Build a full `Service` instance for integration testing, with the chain
+/// cache disabled so every read resolves its ancestors through the resolver.
 fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
-) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
     build_service_with_config(db, tenant_resolver, ModelRegistryConfig::default())
 }
 
@@ -412,14 +528,25 @@ fn build_service_with_config<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
     cfg: ModelRegistryConfig,
-) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
+    build_service_with_cache(db, tenant_resolver, cfg, Arc::new(NoopResolutionCache))
+}
+
+/// Build a `Service` over an explicit [`ResolutionCache`], for the tests whose
+/// subject is the cache itself.
+fn build_service_with_cache<R: TenantResolverClient + Send + Sync + 'static>(
+    db: DBProvider<DbError>,
+    tenant_resolver: R,
+    cfg: ModelRegistryConfig,
+    cache: Arc<dyn ResolutionCache>,
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
     let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZ));
     let limits = cfg.page_limits();
     Service::new(
         Arc::new(db),
         Arc::new(ProviderRepositoryImpl::new(limits)),
         Arc::new(ModelRepositoryImpl::new(limits)),
-        Arc::new(InMemoryCache::new()),
+        cache,
         Arc::new(tenant_resolver),
         enforcer,
         cfg,
@@ -548,18 +675,12 @@ async fn full_lifecycle_single_tenant() {
         .expect("approve model");
     assert_eq!(approved.approval_status, ApprovalStatus::Approved);
 
-    // ── Step 7: the approval opens the gate — read back twice, DB then cache ─
+    // ── Step 7: the approval opens the gate on the very next read ───────────
     let refetched = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
         .expect("get approved model");
-    // After cache invalidation from update, the read comes from DB.
     assert_eq!(refetched.approval_status, ApprovalStatus::Approved);
-    let cached = service
-        .get_tenant_model(&ctx, "openai::gpt-4o")
-        .await
-        .expect("get approved model from cache");
-    assert_eq!(cached.canonical_id, "openai::gpt-4o");
     let listed = service
         .list_tenant_models(&ctx, &ODataQuery::default())
         .await
@@ -700,7 +821,7 @@ async fn child_inherits_provider_and_model_from_parent() {
     let model_repo = ModelRepositoryImpl::default();
 
     // Create provider and model in the parent tenant (via direct repo calls
-    // to isolate from service-layer cache interactions).
+    // to isolate from the service and authz layers).
     let (provider_id, provider_slug) =
         create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
     create_model_direct(
@@ -951,71 +1072,6 @@ async fn disabled_provider_hides_models_from_eval_listing() {
     assert!(
         after.items.is_empty(),
         "model must be hidden after provider is disabled"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 5. Cache-first read: second get_tenant_model hits cache
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn cache_first_get_returns_cached_model() {
-    // Clone the DBProvider so we can get a raw connection for direct repo
-    // mutations after the service is built (Arc<Db> behind the scenes).
-    let db = setup_db().await;
-    let db2 = db.clone();
-    let provider_repo = ProviderRepositoryImpl::default();
-    let model_repo = ModelRepositoryImpl::default();
-
-    // Create data directly via repo connection.
-    {
-        let conn = db2.conn().expect("db connection");
-        let (_pid, slug) =
-            create_provider_direct(&provider_repo, &conn, tenant_a(), "openai").await;
-        let _original = create_model_direct(&model_repo, &conn, tenant_a(), &slug, "gpt-4o").await;
-    }
-
-    // Build service (consumes original db, stored in Arc inside).
-    let service = build_service(db, NoAncestorsResolver);
-    let ctx = security_context(tenant_a());
-
-    // First read: cache miss, populates cache.
-    let first = service
-        .get_tenant_model(&ctx, "openai::gpt-4o")
-        .await
-        .expect("first get (cache miss)");
-    assert_eq!(first.canonical_id, "openai::gpt-4o");
-    assert_eq!(first.lifecycle_status, LifecycleStatus::Production);
-
-    // Update the model via repo directly to bypass cache invalidation.
-    // We use the cloned DBProvider to get a fresh connection.
-    let conn2 = db2.conn().expect("db connection");
-    ModelRepository::update(
-        &model_repo,
-        &conn2,
-        &scope_for(tenant_a()),
-        "openai::gpt-4o",
-        &UpdateModelRequestV1 {
-            lifecycle_status: Some(LifecycleStatus::Preview),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("direct update bypassing cache invalidation");
-
-    // Second read: cache hit, returns stale data (not the updated Preview).
-    let second = service
-        .get_tenant_model(&ctx, "openai::gpt-4o")
-        .await
-        .expect("second get (cache hit)");
-    assert_eq!(
-        second.lifecycle_status,
-        LifecycleStatus::Production,
-        "cache hit should return stale (Production) value, not updated Preview"
-    );
-    assert_eq!(
-        second.canonical_id, "openai::gpt-4o",
-        "canonical_id should still match"
     );
 }
 
@@ -1485,7 +1541,7 @@ async fn patch_reprojects_all_promoted_columns() {
     assert_eq!(patched.info.context_window.max_input_tokens, 200_000);
     assert_eq!(patched.info.context_window.max_output_tokens, Some(32_768),);
 
-    // Read back from DB (bypass cache) to confirm the columns were written.
+    // Read back from the DB directly to confirm the columns were written.
     let refetched = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
@@ -1601,7 +1657,7 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 7. Shadowed provider: child shadows parent's slug, cached ancestor model
+// 7. Shadowed provider: child shadows parent's slug, the ancestor's model
 //    must NOT be served
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1620,7 +1676,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
     let service = build_service(db, OneAncestorResolver);
     let ctx = security_context(child_tenant());
 
-    // Step 2: Child gets the inherited model (populates cache).
+    // Step 2: Child gets the inherited model.
     let inherited = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
@@ -1628,7 +1684,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
     assert_eq!(inherited.canonical_id, "openai::gpt-4o");
 
     // Step 3: Child creates their OWN provider with the SAME slug "openai",
-    // shadowing the parent's provider. This invalidates the child's cache.
+    // shadowing the parent's provider.
     let child_provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "Child OpenAI"))
         .await
@@ -1636,7 +1692,7 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
 
     // Step 4: Child's get_tenant_model should fail with ModelNotFound
     // (child owns the slug but has NO model for "gpt-4o"). The parent's model
-    // must NOT be served even though it was cached from Step 2.
+    // must NOT be served even though Step 2 returned it.
     let err = service
         .get_tenant_model(&ctx, "openai::gpt-4o")
         .await
@@ -1690,7 +1746,6 @@ async fn create_provider_drops_slug_tombstone() {
     );
 
     // Step 2: Child creates their own provider with slug "openai".
-    // This invalidates the child's tenant cache (dropping any tombstone).
     let _child_provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "Child OpenAI"))
         .await
@@ -1870,12 +1925,12 @@ fn build_service_with_enforcer<R: TenantResolverClient + Send + Sync + 'static>(
     db: DBProvider<DbError>,
     tenant_resolver: R,
     enforcer: authz_resolver_sdk::pep::PolicyEnforcer,
-) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
     Service::new(
         Arc::new(db),
         Arc::new(ProviderRepositoryImpl::default()),
         Arc::new(ModelRepositoryImpl::default()),
-        Arc::new(InMemoryCache::new()),
+        Arc::new(NoopResolutionCache),
         Arc::new(tenant_resolver),
         enforcer,
         ModelRegistryConfig::default(),
@@ -2063,4 +2118,121 @@ async fn management_listing_shows_disabled_provider_rows() {
         mgmt.model.id, model.id,
         "management listing must reference the correct model"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. Resolution cache: the chain is cached, nothing else is
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The first read resolves the chain through `tenant-resolver` and stores it;
+/// every later read is served warm. A root tenant's empty ancestor list is a
+/// hit, not a miss — so it must not trigger a second resolver call either.
+#[tokio::test]
+async fn warm_chain_skips_tenant_resolver() {
+    let db = setup_db().await;
+    let cache = Arc::new(StubCache::default());
+    let (resolver, resolver_calls) = CountingResolver::new(NoAncestorsResolver);
+    let service = build_service_with_cache(
+        db,
+        resolver,
+        ModelRegistryConfig::default(),
+        Arc::clone(&cache) as Arc<dyn ResolutionCache>,
+    );
+    let ctx = security_context(tenant_a());
+
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    service
+        .create_model(
+            &ctx,
+            &make_create_approved_model_req(&provider.slug, "gpt-4o"),
+        )
+        .await
+        .expect("create model");
+
+    // Writes resolved no chain, so the first read is the cold one.
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        0,
+        "writes resolve no ancestor chain"
+    );
+
+    service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("cold read");
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        1,
+        "the cold read resolves the chain"
+    );
+    assert_eq!(cache.puts(), 1, "the cold read stores the chain");
+
+    for _ in 0..3 {
+        service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("warm read");
+    }
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        1,
+        "a root tenant's empty ancestor list is a hit, not a miss"
+    );
+    assert_eq!(cache.puts(), 1, "a warm read rewrites nothing");
+}
+
+/// No write of any kind performs a cache operation — the only cached entity is
+/// the ancestor chain, which no provider or model write can change.
+#[tokio::test]
+async fn writes_never_touch_the_cache() {
+    let db = setup_db().await;
+    let cache = Arc::new(StubCache::default());
+    let service = build_service_with_cache(
+        db,
+        NoAncestorsResolver,
+        ModelRegistryConfig::default(),
+        Arc::clone(&cache) as Arc<dyn ResolutionCache>,
+    );
+    let ctx = security_context(tenant_a());
+
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    service
+        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+        .await
+        .expect("create model");
+    service
+        .update_model(
+            &ctx,
+            "openai::gpt-4o",
+            &UpdateModelRequestV1 {
+                approval_status: Some(ApprovalStatus::Rejected),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update model");
+    service
+        .delete_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect("delete model");
+    service
+        .update_provider(
+            &ctx,
+            provider.id,
+            &UpdateProviderRequestV1 {
+                name: Some("renamed".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update provider");
+
+    assert_eq!(cache.gets(), 0, "no write reads a cache entry");
+    assert_eq!(cache.puts(), 0, "no write writes a cache entry");
 }

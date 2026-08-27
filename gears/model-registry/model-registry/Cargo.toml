@@ -17,14 +17,11 @@ name = "model_registry"
 [lints]
 workspace = true
 
-[features]
-default = []
-redis = []
-
 [dependencies]
 model-registry-sdk = { package = "cf-gears-model-registry-sdk", version = "0.1.0", path = "../model-registry-sdk" }
 
 # System SDKs
+cluster-sdk = { workspace = true }
 tenant-resolver-sdk = { workspace = true }
 authz-resolver-sdk = { workspace = true }
 authz-resolver = { workspace = true }

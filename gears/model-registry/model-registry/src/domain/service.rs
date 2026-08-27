@@ -1,15 +1,16 @@
 //! Application service for the Model Registry gear.
 //!
-//! Orchestrates authorization, caching, inheritance resolution, and
-//! persistence for providers and models. Generic over the two repository
-//! traits and the cache backend so unit tests can inject mocks.
+//! Orchestrates authorization, inheritance resolution, and persistence for
+//! providers and models. Generic over the two repository traits so unit tests
+//! can inject mocks; the cache is a trait object, since which implementation is
+//! installed is a runtime decision.
 //!
 //! ## Provider operations
 //!
 //! All five provider CRUD methods with:
 //! - Authz via [`PolicyEnforcer`]
-//! - Cache read-through for reads / invalidation on writes
-//! - Inheritance resolution for reads (ancestor tenant visibility)
+//! - Inheritance resolution for reads (ancestor tenant visibility), with the
+//!   resolved ancestor chain served from the [`ResolutionCache`]
 //! - Slug format validation on create
 //!
 //! ## Model operations (Tasks 12-13)
@@ -26,7 +27,7 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
-use super::cache::{CacheService, SlugOwnership, cache_key};
+use super::cache::ResolutionCache;
 use super::error::DomainError;
 use super::inheritance::{
     AncestorFailure, build_chain_providers, find_in_chain, merge_inherited_page, resolve_ancestors,
@@ -92,25 +93,29 @@ pub(crate) mod actions {
 // Service
 // ---------------------------------------------------------------------------
 
-/// Application service orchestrating authorization, caching, inheritance
-/// resolution, and persistence.
+/// Application service orchestrating authorization, chain resolution,
+/// inheritance resolution, and persistence.
 ///
 /// Generic over:
 /// - `R`: repository implementing [`ProviderRepository`]
 /// - `M`: repository implementing [`ModelRepository`]
-/// - `C`: cache backend implementing [`CacheService`]
+///
+/// The cache is held as `Arc<dyn ResolutionCache>` rather than a type
+/// parameter: its concrete type is a runtime choice between
+/// `ClusterResolutionCache` and `NoopResolutionCache`, so a parameter would
+/// force two `Service` instantiations in the gear for no benefit.
 #[domain_model]
-pub struct Service<R, M, C> {
+pub struct Service<R, M> {
     db: Arc<DBProvider<toolkit_db::DbError>>,
     provider_repo: Arc<R>,
     model_repo: Arc<M>,
-    cache: Arc<C>,
+    cache: Arc<dyn ResolutionCache>,
     tenant_resolver: Arc<dyn TenantResolverClient>,
     policy_enforcer: PolicyEnforcer,
     config: ModelRegistryConfig,
 }
 
-impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C> {
+impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     /// Validate that `discovery_interval_seconds` fits within `i32` range.
     ///
     /// The DB column is `i32`, so values exceeding `i32::MAX` must be rejected
@@ -133,7 +138,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         db: Arc<DBProvider<toolkit_db::DbError>>,
         provider_repo: Arc<R>,
         model_repo: Arc<M>,
-        cache: Arc<C>,
+        cache: Arc<dyn ResolutionCache>,
         tenant_resolver: Arc<dyn TenantResolverClient>,
         policy_enforcer: PolicyEnforcer,
         config: ModelRegistryConfig,
@@ -169,11 +174,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
     // ── Provider operations ──────────────────────────────────────────────
 
-    /// Get a provider by ID with cache-first lookup and inheritance resolution.
+    /// Get a provider by ID with inheritance resolution.
     ///
-    /// Searches the own tenant first (cache then DB), then falls back to each
-    /// ancestor tenant. The closest match wins (child shadows parent). The row
-    /// is cached under the tenant that owns it, for `cache_ttl_seconds`.
+    /// Walks the tenant chain closest-first in the database, so the closest
+    /// match wins (child shadows parent). Provider rows are not cached.
     pub async fn get_provider(
         &self,
         ctx: &SecurityContext,
@@ -185,19 +189,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 2. Resolve ancestor chain
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let inheritance =
+            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
 
-        // 3. Try cache for each tenant in chain (closest first). Provider ids
-        //    are globally unique and entries are keyed under the owning tenant,
-        //    so at most one of these keys can exist.
-        for tenant_id in inheritance.chain_ids() {
-            let key = cache_key(tenant_id, "provider", &id.to_string());
-            if let Some(provider) = self.cache.get::<ProviderV1>(&key).await {
-                return Ok(provider);
-            }
-        }
-
-        // 4. Cache miss — walk the chain in the DB, closest tenant first.
+        // 3. Walk the chain in the DB, closest tenant first.
         let conn = self.db.conn().map_err(DomainError::from)?;
         let conn = &conn;
         let found = find_in_chain(
@@ -208,15 +203,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         )
         .await?;
 
-        let Some((owner_tenant_id, provider)) = found else {
+        let Some((_owner_tenant_id, provider)) = found else {
             return Err(DomainError::provider_not_found(id));
         };
-
-        // 5. Cache under the owning tenant.
-        let key = cache_key(&owner_tenant_id, "provider", &id.to_string());
-        self.cache
-            .set(&key, &provider, self.config.cache_ttl_seconds)
-            .await;
 
         Ok(provider)
     }
@@ -239,7 +228,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 2. Resolve ancestor chain
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let inheritance =
+            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Get own tenant providers with OData
@@ -264,8 +254,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
     /// Create a new provider.
     ///
-    /// Validates slug and display-name format, checks authorization, delegates
-    /// to the repository, and invalidates the own-tenant cache on success.
+    /// Validates slug and display-name format, checks authorization, and
+    /// delegates to the repository.
     pub async fn create_provider(
         &self,
         ctx: &SecurityContext,
@@ -289,18 +279,12 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .create(&conn, &scope, tenant_id, req)
             .await?;
 
-        // 4. Invalidate the owning tenant's cache. Equal to the caller's tenant
-        //    here by construction — `create` stamps the row with it — but read
-        //    from the row so all six write paths invalidate the same way.
-        self.cache.invalidate_tenant(provider.tenant_id).await;
-
         Ok(provider)
     }
 
     /// Update a provider (PATCH semantics).
     ///
-    /// Slug is immutable — the repository rejects changes to it. Cache is
-    /// invalidated on success.
+    /// Slug is immutable — the repository rejects changes to it.
     pub async fn update_provider(
         &self,
         ctx: &SecurityContext,
@@ -322,17 +306,10 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
         let conn = self.db.conn().map_err(DomainError::from)?;
         let provider = self.provider_repo.update(&conn, &scope, id, req).await?;
 
-        // 4. Invalidate the cache of the tenant that owns the row, which is not
-        //    necessarily the caller's: the PDP scope may permit writes across a
-        //    subtree, and cache keys are prefixed by the owning tenant.
-        self.cache.invalidate_tenant(provider.tenant_id).await;
-
         Ok(provider)
     }
 
     /// Delete a provider.
-    ///
-    /// Removes the provider and invalidates the own-tenant cache.
     pub async fn delete_provider(
         &self,
         ctx: &SecurityContext,
@@ -345,10 +322,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
         // 2. Delete via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let deleted = self.provider_repo.delete(&conn, &scope, id).await?;
-
-        // 3. Invalidate the owning tenant's cache (see `update_provider`).
-        self.cache.invalidate_tenant(deleted.tenant_id).await;
+        self.provider_repo.delete(&conn, &scope, id).await?;
 
         Ok(())
     }
@@ -356,7 +330,7 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
 // ── Validation (no trait bounds) ─────────────────────────────────────
 
-impl<R, M, C> Service<R, M, C> {
+impl<R, M> Service<R, M> {
     /// Validate provider slug format.
     ///
     /// Rules: 1-64 characters, lowercase alphanumeric + hyphens only.
@@ -418,55 +392,14 @@ impl<R, M, C> Service<R, M, C> {
 
 // ── Model read operations ──────────────────────────────────────────────
 
-impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C> {
-    /// Resolve a single `(tenant_id, slug)` hop, cache-first with tombstones.
-    ///
-    /// Returns:
-    /// - `Ok(SlugOwnership::Owned(p))` when the tenant owns a provider with this slug
-    /// - `Ok(SlugOwnership::None)` when the tenant has no provider with this slug
-    ///   (a tombstone from a prior DB miss, so the caller skips a round-trip)
-    /// - `Err(e)` on any non-not-found query error (fail-closed — a skipped
-    ///   ancestor hop would un-shadow an earlier ancestor)
-    ///
-    /// Both polarities take `cache_ttl_seconds`.
-    async fn resolve_slug_ownership(
-        &self,
-        conn: &impl toolkit_db::secure::DBRunner,
-        tenant_id: Uuid,
-        slug: &str,
-    ) -> Result<SlugOwnership, DomainError> {
-        let key = cache_key(&tenant_id, "provider_slug", slug);
-        let ttl = self.config.cache_ttl_seconds;
-
-        // Cache-first.
-        if let Some(result) = self.cache.get::<SlugOwnership>(&key).await {
-            return Ok(result);
-        }
-
-        // Cache miss — query DB.
-        let scope = AccessScope::for_tenant(tenant_id);
-        match self.provider_repo.find_by_slug(conn, &scope, slug).await {
-            Ok(provider) => {
-                let result = SlugOwnership::Owned(provider);
-                self.cache.set(&key, &result, ttl).await;
-                Ok(result)
-            }
-            Err(DomainError::ProviderNotFoundBySlug { .. }) => {
-                // Write a tombstone so the next lookup skips the DB round-trip.
-                self.cache.set(&key, &SlugOwnership::None, ttl).await;
-                Ok(SlugOwnership::None)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
+impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     /// Get a model by canonical ID via slug resolution (DESIGN §3.5).
     ///
     /// Resolves the provider slug from `canonical_id` (the segment before `::`)
     /// closest-first across the tenant chain, then reads the model only from
     /// the winning tenant. Applies gates in order (C2, C4):
     ///
-    /// 1. `provider_id` mismatch → `ModelNotFound` (stale cache row)
+    /// 1. `provider_id` mismatch → `ModelNotFound` (inconsistent data)
     /// 2. Terminal lifecycle → `ModelDeprecated`
     /// 3. Disabled provider → `ProviderDisabled`
     /// 4. Not `approved` → `ModelNotApproved`
@@ -492,7 +425,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 2. Resolve ancestor chain
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let inheritance =
+            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
 
         // 3. Split canonical_id on the first `::` to get slug and model id.
         let slug = canonical_id.split_once("::").map(|(s, _)| s);
@@ -500,23 +434,24 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             return Err(DomainError::model_not_found(canonical_id));
         };
 
-        // 4. Resolve the slug closest-first via the cache-first helper.
-        //    Stop at the first owner. Fail-closed on non-not-found errors.
+        // 4. Resolve the slug closest-first against the database. Stop at the
+        //    first owner. Fail-closed on non-not-found errors.
         let conn = self.db.conn().map_err(DomainError::from)?;
         let conn = &conn;
 
         let mut winner_tenant: Option<Uuid> = None;
         let mut winner_provider: Option<crate::ProviderV1> = None;
 
-        for tenant_id in inheritance.chain_ids() {
-            match self.resolve_slug_ownership(conn, *tenant_id, slug).await {
-                Ok(SlugOwnership::Owned(provider)) => {
-                    winner_tenant = Some(*tenant_id);
+        for tenant_id in inheritance.chain_ids().copied() {
+            let scope = AccessScope::for_tenant(tenant_id);
+            match self.provider_repo.find_by_slug(conn, &scope, slug).await {
+                Ok(provider) => {
+                    winner_tenant = Some(tenant_id);
                     winner_provider = Some(provider);
                     break;
                 }
-                Ok(SlugOwnership::None) => {
-                    // Tombstone — no provider with this slug in this tenant.
+                Err(DomainError::ProviderNotFoundBySlug { .. }) => {
+                    // No provider with this slug in this tenant — next hop.
                 }
                 Err(e) => {
                     // Fail-closed: a skipped ancestor provider query would
@@ -543,41 +478,27 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             AccessScope::for_tenant(winner_tenant_id)
         };
 
-        // 6. Read the model: cache under winner's tenant, then DB.
-        let model_key = cache_key(&winner_tenant_id, "model", canonical_id);
-        let model = if let Some(model) = self.cache.get::<crate::ModelV1>(&model_key).await {
-            model
-        } else {
-            match self
-                .model_repo
-                .find_by_canonical(conn, &model_scope, canonical_id)
-                .await
-            {
-                Ok(model) => {
-                    self.cache
-                        .set(&model_key, &model, self.config.cache_ttl_seconds)
-                        .await;
-                    model
-                }
-                Err(DomainError::ModelNotFound { .. }) => {
-                    return Err(DomainError::model_not_found(canonical_id));
-                }
-                Err(e) => return Err(e),
+        // 6. Read the model from the winner's tenant.
+        let model = match self
+            .model_repo
+            .find_by_canonical(conn, &model_scope, canonical_id)
+            .await
+        {
+            Ok(model) => model,
+            Err(DomainError::ModelNotFound { .. }) => {
+                return Err(DomainError::model_not_found(canonical_id));
             }
+            Err(e) => return Err(e),
         };
 
         // 7. Apply gates in order (C2, C4).
-        //    Gate 1: provider_id must match the winning provider.
+        //    Gate 1: provider_id must match the winning provider. A defensive
+        //    fail-closed guard — unreachable in a consistent database.
         if model.provider_id != winner.id {
-            // Stale cache row or inconsistent data — do not serve.
-            self.cache.delete(&model_key).await;
             return Err(DomainError::model_not_found(canonical_id));
         }
 
         //    Gate 2: terminal lifecycle → ModelDeprecated.
-        //    NOTE: We keep the cached entry even though the model is deprecated
-        //    — the state is terminal, so re-fetching from DB every time just to
-        //    return the same error wastes a round-trip.
         if matches!(
             model.lifecycle_status,
             crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
@@ -585,18 +506,14 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             return Err(DomainError::model_deprecated(canonical_id));
         }
 
-        //    Gate 3: disabled winning provider → ProviderDisabled.
+        //    Gate 3: disabled winning provider → ProviderDisabled. Ordered
+        //    after the model lookup so `ProviderDisabled` cannot leak for a
+        //    `canonical_id` that names no model of that provider.
         if !matches!(winner.status, crate::ProviderStatus::Active) {
-            self.cache.delete(&model_key).await;
             return Err(DomainError::provider_disabled(winner.id));
         }
 
         //    Gate 4: not approved → ModelNotApproved.
-        //    NOTE: We keep the cached entry, unlike gates 1 and 3. Their verdict
-        //    comes from outside the cached row (the provider chain, the provider
-        //    row), so the entry may be stale; this one reads a column the entry
-        //    already carries, and every write that changes it invalidates the
-        //    owning tenant's whole prefix (DESIGN §3.5).
         if !matches!(model.approval_status, ApprovalStatus::Approved) {
             return Err(DomainError::model_not_approved(canonical_id));
         }
@@ -629,7 +546,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 2. Resolve ancestor chain
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let inheritance =
+            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
@@ -725,7 +643,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .await?;
 
         // 2. Resolve ancestor chain.
-        let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+        let inheritance =
+            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
@@ -807,8 +726,8 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     ///
     /// Validates the provider slug, checks that the provider exists (own tenant
     /// or inherited from an ancestor), derives `canonical_id` from
-    /// `provider_slug::info.provider_model_id`, writes the initial approval
-    /// status (defaults to `Pending`), and invalidates the own-tenant cache.
+    /// `provider_slug::info.provider_model_id`, and writes the initial approval
+    /// status (defaults to `Pending`).
     pub async fn create_model(
         &self,
         ctx: &SecurityContext,
@@ -850,7 +769,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
                 // The slug does not exist in the caller's tenant. Check ancestors
                 // to decide whether it is "not found anywhere" (E3 → 404) or
                 // "found in an ancestor" (E1/E2 → 403).
-                let inheritance = resolve_ancestors(self.tenant_resolver.as_ref(), ctx).await?;
+                let inheritance =
+                    resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx)
+                        .await?;
                 match find_in_chain(
                     &inheritance,
                     &own_scope,
@@ -883,9 +804,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .create(conn, &own_scope, tenant_id, req)
             .await?;
 
-        // 5. Invalidate the owning tenant's cache (see `create_provider`).
-        self.cache.invalidate_tenant(model.tenant_id).await;
-
         Ok(model)
     }
 
@@ -893,7 +811,6 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
     ///
     /// Applies non-status field patches and `approval_status` transitions in a
     /// single repository call. Validates lifecycle state transitions.
-    /// Invalidates cache on success.
     pub async fn update_model(
         &self,
         ctx: &SecurityContext,
@@ -938,16 +855,13 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
             .update(&conn, &scope, canonical_id, req)
             .await?;
 
-        // 5. Invalidate the owning tenant's cache (see `update_provider`).
-        self.cache.invalidate_tenant(model.tenant_id).await;
-
         Ok(model)
     }
 
     /// Soft-delete a model by canonical ID.
     ///
     /// Sets `lifecycle_status` to `Deprecated` and records the deprecation
-    /// timestamp. Invalidates the own-tenant cache on success.
+    /// timestamp.
     pub async fn delete_model(
         &self,
         ctx: &SecurityContext,
@@ -960,13 +874,9 @@ impl<R: ProviderRepository, M: ModelRepository, C: CacheService> Service<R, M, C
 
         // 2. Soft-delete via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let deprecated = self
-            .model_repo
+        self.model_repo
             .soft_delete(&conn, &scope, canonical_id)
             .await?;
-
-        // 3. Invalidate the owning tenant's cache (see `update_provider`).
-        self.cache.invalidate_tenant(deprecated.tenant_id).await;
 
         Ok(())
     }
@@ -1002,7 +912,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::cache::{InMemoryCache, SlugOwnership};
+    use crate::domain::cache::NoopResolutionCache;
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::model_repo::ModelRepositoryImpl;
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
@@ -1334,7 +1244,7 @@ mod tests {
             _conn: &impl DBRunner,
             _scope: &AccessScope,
             _id: Uuid,
-        ) -> Result<ProviderV1, DomainError> {
+        ) -> Result<(), DomainError> {
             unimplemented!("not used in list_providers test")
         }
     }
@@ -1453,81 +1363,6 @@ mod tests {
         }
     }
 
-    /// Helper: build a fully-deprecated `ModelInfoV1` for cache tests.
-    /// Constructs directly via struct literal — no JSON round-trip.
-    fn make_deprecated_info(provider_model_id: &str) -> model_registry_sdk::ModelInfoV1 {
-        model_registry_sdk::ModelInfoV1 {
-            gts_type: gts::GtsTypeId::new("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~"),
-            display_name: "deprecated".to_owned(),
-            description: None,
-            family: None,
-            vendor: None,
-            managed: false,
-            architecture: None,
-            size_bytes: None,
-            format: None,
-            region: None,
-            hosted_by: None,
-            last_release_at: None,
-            reasoning_level: None,
-            version: None,
-            sort_order: None,
-            icon: None,
-            multiplier_display: None,
-            performance: ModelPerformance {
-                response_latency_ms: None,
-                tokens_per_second: None,
-            },
-            additional_info: HashMap::new(),
-            supported_api: HashSet::from([SupportedApi::Completion]),
-            provider_model_id: provider_model_id.to_owned(),
-            capabilities: ModelCapabilities {
-                vision: MediaCapability::default(),
-                reasoning: ReasoningCapability {
-                    effort: false,
-                    toggle: false,
-                    resume: false,
-                    budget: false,
-                },
-                function_calling: false,
-                response_schema: false,
-                streaming: false,
-                file_input: MediaCapability::default(),
-                image_generation: MediaCapability::default(),
-                audio_input: MediaCapability::default(),
-                audio_output: MediaCapability::default(),
-                code_interpreter: false,
-                web_search: WebSearchCapability {
-                    enabled: false,
-                    allowed_domains: false,
-                    excluded_domains: false,
-                },
-            },
-            disabled_capabilities: DisabledCapabilities {
-                vision: DisabledMediaCapability::default(),
-                reasoning: DisabledReasoningCapability::default(),
-                function_calling: false,
-                response_schema: false,
-                streaming: false,
-                file_input: DisabledMediaCapability::default(),
-                image_generation: DisabledMediaCapability::default(),
-                audio_input: DisabledMediaCapability::default(),
-                audio_output: DisabledMediaCapability::default(),
-                code_interpreter: false,
-                web_search: DisabledWebSearchCapability::default(),
-            },
-            context_window: ContextWindow {
-                max_input_tokens: 0,
-                max_output_tokens: None,
-                output_vector_size: None,
-            },
-            default_parameters: DefaultInferenceParametersV1::default(),
-            allow_parameter_override: false,
-            allow_extra_params: Vec::new(),
-            provider_settings: serde_json::Value::Null,
-        }
-    }
-
     /// Set up an in-memory `SQLite` database with all migrations applied.
     async fn setup_db() -> DBProvider<DbError> {
         let opts = ConnectOpts {
@@ -1599,25 +1434,22 @@ mod tests {
 
     /// Build a full `Service` instance for testing.
     ///
-    /// Sets up real DB + `ProviderRepositoryImpl` + `ModelRepositoryImpl` + `InMemoryCache` with mocks for
-    /// tenant-resolver and authz-resolver.
-    #[allow(clippy::type_complexity)]
     /// Build a full `Service` instance for testing, using the provided cache.
     ///
-    /// Most test callers pass `InMemoryCache::new()` to start with an empty cache.
-    /// Tests that pre-populate the cache pass their prepared cache instead.
+    /// Sets up real DB + `ProviderRepositoryImpl` + `ModelRepositoryImpl` with
+    /// mocks for tenant-resolver and authz-resolver.
     fn build_service_with_cache<R: TenantResolverClient + Send + Sync + 'static>(
         db: DBProvider<DbError>,
         tenant_resolver: R,
         config: ModelRegistryConfig,
-        cache: InMemoryCache,
-    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+        cache: Arc<dyn ResolutionCache>,
+    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
         Service {
             db: Arc::new(db),
             provider_repo: Arc::new(ProviderRepositoryImpl::default()),
             model_repo: Arc::new(ModelRepositoryImpl::default()),
-            cache: Arc::new(cache),
+            cache,
             tenant_resolver: Arc::new(tenant_resolver),
             policy_enforcer: enforcer,
             config,
@@ -1633,34 +1465,34 @@ mod tests {
         db: DBProvider<DbError>,
         tenant_resolver: R,
         config: ModelRegistryConfig,
-        cache: InMemoryCache,
+        cache: Arc<dyn ResolutionCache>,
         authz: A,
-    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
+    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
         Service {
             db: Arc::new(db),
             provider_repo: Arc::new(ProviderRepositoryImpl::default()),
             model_repo: Arc::new(ModelRepositoryImpl::default()),
-            cache: Arc::new(cache),
+            cache,
             tenant_resolver: Arc::new(tenant_resolver),
             policy_enforcer: PolicyEnforcer::new(Arc::new(authz)),
             config,
         }
     }
 
-    /// Build a full `Service` instance with a fresh `InMemoryCache`.
+    /// Build a full `Service` instance whose chain is never served warm.
     fn build_service<R: TenantResolverClient + Send + Sync + 'static>(
         db: DBProvider<DbError>,
         tenant_resolver: R,
         config: ModelRegistryConfig,
-    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache> {
-        build_service_with_cache(db, tenant_resolver, config, InMemoryCache::new())
+    ) -> Service<ProviderRepositoryImpl, ModelRepositoryImpl> {
+        build_service_with_cache(db, tenant_resolver, config, Arc::new(NoopResolutionCache))
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // Slug validation tests
     // ═════════════════════════════════════════════════════════════════════════
 
-    type TestService = super::Service<(), (), InMemoryCache>;
+    type TestService = super::Service<(), ()>;
 
     #[test]
     fn test_validate_slug_valid() {
@@ -1779,7 +1611,7 @@ mod tests {
             _conn: &impl DBRunner,
             _scope: &AccessScope,
             _canonical_id: &str,
-        ) -> Result<crate::ModelV1, DomainError> {
+        ) -> Result<(), DomainError> {
             unimplemented!("not used in list_providers tests")
         }
     }
@@ -1791,21 +1623,19 @@ mod tests {
         let db = setup_db().await;
         let provider_repo = Arc::new(FailingAncestorProviderRepo::new());
         let model_repo = Arc::new(PanicModelRepo);
-        let cache = Arc::new(InMemoryCache::new());
         let tenant_resolver: Arc<dyn TenantResolverClient> = Arc::new(TwoAncestorsResolver);
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
         let config = ModelRegistryConfig::default();
 
-        let service: Service<FailingAncestorProviderRepo, PanicModelRepo, InMemoryCache> =
-            Service {
-                db: Arc::new(db),
-                provider_repo,
-                model_repo,
-                cache,
-                tenant_resolver,
-                policy_enforcer: enforcer,
-                config,
-            };
+        let service: Service<FailingAncestorProviderRepo, PanicModelRepo> = Service {
+            db: Arc::new(db),
+            provider_repo,
+            model_repo,
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver,
+            policy_enforcer: enforcer,
+            config,
+        };
 
         // When: listing providers with ancestors that fail to query.
         let ctx = SecurityContext::builder()
@@ -1920,112 +1750,6 @@ mod tests {
         );
     }
 
-    // get_tenant_model — cache hit path
-    // ═════════════════════════════════════════════════════════════════════════
-
-    #[tokio::test]
-    async fn test_get_tenant_model_cache_hit_own_tenant() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        // Create a model in the test tenant.
-        let provider_repo = ProviderRepositoryImpl::default();
-        let model_repo = ModelRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let model = create_test_approved_model(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &provider_slug,
-            "gpt-4o",
-        )
-        .await;
-
-        // Pre-populate cache.
-        let cache = InMemoryCache::new();
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        cache.set(&key, &model, 1800).await;
-
-        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
-
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(tenant_id)
-            .build()
-            .expect("ctx");
-        let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(
-            result.is_ok(),
-            "cache hit should succeed, got: {:?}",
-            result.err()
-        );
-
-        let found = result.unwrap();
-        assert_eq!(found.canonical_id, "openai::gpt-4o");
-        // The cached row carries its approval status, and clears the approval
-        // gate because the fixture is approved.
-        assert_eq!(found.approval_status, crate::ApprovalStatus::Approved);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // get_tenant_model — cache miss → DB populate
-    // ═════════════════════════════════════════════════════════════════════════
-
-    #[tokio::test]
-    async fn test_get_tenant_model_cache_miss_populates_cache() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let model_repo = ModelRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let _model = create_test_approved_model(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &provider_slug,
-            "gpt-4o",
-        )
-        .await;
-
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(tenant_id)
-            .build()
-            .expect("ctx");
-        let result = service.get_tenant_model(&ctx, "openai::gpt-4o").await;
-        assert!(
-            result.is_ok(),
-            "cache miss + DB populate should succeed, got: {:?}",
-            result.err()
-        );
-
-        let found = result.unwrap();
-        assert_eq!(found.canonical_id, "openai::gpt-4o");
-
-        // Verify cache was populated.
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        let cached: Option<crate::ModelV1> = cache.get(&key).await;
-        assert!(cached.is_some(), "model should be cached after DB hit");
-        assert_eq!(cached.unwrap().canonical_id, "openai::gpt-4o");
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     // get_tenant_model — not found
     // ═════════════════════════════════════════════════════════════════════════
@@ -2107,46 +1831,46 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // get_tenant_model — deprecated from cache also returns error
+    // get_tenant_model — sunset is terminal too
     // ═════════════════════════════════════════════════════════════════════════
 
+    /// `Sunset` is the second terminal lifecycle state, and gate 2 must treat
+    /// it exactly like `Deprecated`.
     #[tokio::test]
-    async fn test_get_tenant_model_deprecated_in_cache_returns_error() {
+    async fn test_get_tenant_model_sunset_returns_deprecated_error() {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
-        let tenant_id = test_tenant();
-        let cache = InMemoryCache::new();
-
-        // Create a real provider so the slug resolution succeeds and the model
-        // can be found in cache. The cached model's provider_id must match the
-        // winner to reach the lifecycle gate.
         let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
+        let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
-        let (provider_id, _slug) =
+        let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-
-        // Build a deprecated ModelV1 directly via struct literal with the
-        // real provider_id so the gate check passes.
-        let deprecated_model: crate::ModelV1 = crate::ModelV1 {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
+        create_test_approved_model(
+            &model_repo,
+            &conn,
+            &scope,
             tenant_id,
-            provider_id,
-            canonical_id: "openai::gpt-4o-old".to_owned(),
-            lifecycle_status: crate::LifecycleStatus::Deprecated,
-            approval_status: crate::ApprovalStatus::Pending,
-            info: make_deprecated_info("openai::gpt-4o-old"),
-        };
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
 
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4o-old");
-        cache.set(&key, &deprecated_model, 1800).await;
+        crate::domain::repo::ModelRepository::update(
+            &model_repo,
+            &conn,
+            &scope,
+            "openai::gpt-4o",
+            &crate::UpdateModelRequestV1 {
+                lifecycle_status: Some(crate::LifecycleStatus::Sunset),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("sunset the model");
 
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache,
-        );
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
@@ -2154,12 +1878,12 @@ mod tests {
             .build()
             .expect("ctx");
         let err = service
-            .get_tenant_model(&ctx, "openai::gpt-4o-old")
+            .get_tenant_model(&ctx, "openai::gpt-4o")
             .await
-            .expect_err("deprecated in cache should return ModelDeprecated");
+            .expect_err("a sunset model should return ModelDeprecated");
 
         assert!(
-            matches!(&err, DomainError::ModelDeprecated { canonical_id } if canonical_id == "openai::gpt-4o-old"),
+            matches!(&err, DomainError::ModelDeprecated { canonical_id } if canonical_id == "openai::gpt-4o"),
             "expected ModelDeprecated, got: {err:?}"
         );
     }
@@ -2331,11 +2055,7 @@ mod tests {
         .await;
 
         // Child tenant should inherit parent's model.
-        let config = ModelRegistryConfig {
-            cache_ttl_seconds: 600,
-            ..Default::default()
-        };
-        let service = build_service(db, TwoAncestorsResolver, config);
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
@@ -3165,65 +2885,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_tenant_model_stale_cache_provider_id_mismatch() {
-        // A stale cached row whose provider_id no longer matches the winning
-        // provider should yield ModelNotFound, not the row.
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        let tenant_id = test_tenant();
-        let cache = InMemoryCache::new();
-
-        // Create a provider.
-        let provider_repo = ProviderRepositoryImpl::default();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, _slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-
-        // Pre-populate the model cache with a row whose provider_id does NOT
-        // match the winning provider (simulate a stale entry).
-        let stale_model: crate::ModelV1 = crate::ModelV1 {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
-            tenant_id,
-            provider_id: Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap(), // wrong!
-            canonical_id: "openai::gpt-4o".to_owned(),
-            lifecycle_status: crate::LifecycleStatus::Production,
-            approval_status: crate::ApprovalStatus::Pending,
-            info: make_deprecated_info("gpt-4o"),
-        };
-        let model_key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        cache.set(&model_key, &stale_model, 1800).await;
-
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(tenant_id)
-            .build()
-            .expect("ctx");
-        let err = service
-            .get_tenant_model(&ctx, "openai::gpt-4o")
-            .await
-            .expect_err("stale cached row should fail gate C2");
-
-        assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound for stale provider_id, got: {err:?}"
-        );
-
-        // The stale cache entry should have been deleted.
-        assert!(
-            cache.get::<crate::ModelV1>(&model_key).await.is_none(),
-            "stale cache entry should have been deleted"
-        );
-    }
-
-    #[tokio::test]
     async fn test_get_tenant_model_disabled_winner_provider() {
         // A winning provider that is disabled should yield ProviderDisabled.
         let db = setup_db().await;
@@ -3548,7 +3209,7 @@ mod tests {
                 _conn: &impl DBRunner,
                 _scope: &AccessScope,
                 _id: Uuid,
-            ) -> Result<ProviderV1, DomainError> {
+            ) -> Result<(), DomainError> {
                 unimplemented!()
             }
         }
@@ -3558,14 +3219,13 @@ mod tests {
             call_count: Arc::clone(&call_count),
         });
         let model_repo = Arc::new(PanicModelRepo);
-        let cache = Arc::new(InMemoryCache::new());
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
 
-        let service: Service<FailingSlugRepo, PanicModelRepo, InMemoryCache> = Service {
+        let service: Service<FailingSlugRepo, PanicModelRepo> = Service {
             db: Arc::new(setup_db().await),
             provider_repo,
             model_repo,
-            cache,
+            cache: Arc::new(NoopResolutionCache),
             tenant_resolver: Arc::new(NoAncestorsResolver),
             policy_enforcer: enforcer,
             config: ModelRegistryConfig::default(),
@@ -3584,283 +3244,6 @@ mod tests {
         assert!(
             matches!(&err, DomainError::Internal { detail, .. } if detail.contains("slug resolution unavailable")),
             "expected Internal error from slug resolution, got: {err:?}"
-        );
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // resolve_slug_ownership — cache-first slug resolution with tombstones
-    // ═════════════════════════════════════════════════════════════════════════
-
-    /// Create a `ProviderV1` struct literal for test cache pre-population.
-    fn make_test_provider(tenant_id: Uuid, slug: &str) -> ProviderV1 {
-        use chrono::Utc;
-        use gts::GtsTypeId;
-        ProviderV1 {
-            id: Uuid::new_v4(),
-            tenant_id,
-            slug: slug.to_owned(),
-            name: slug.to_owned(),
-            gts_type: GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~"),
-            status: crate::ProviderStatus::Active,
-            managed: false,
-            metadata: None,
-            discovery_enabled: false,
-            discovery_interval_seconds: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_slug_ownership_cache_hit_owned() {
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            setup_db().await,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        let tenant_id = test_tenant();
-        let slug = "openai";
-
-        // Pre-populate cache with a slug ownership.
-        let provider = make_test_provider(tenant_id, slug);
-        let key = cache_key(&tenant_id, "provider_slug", slug);
-        cache.set(&key, &SlugOwnership::Owned(provider), 60).await;
-
-        let conn = service.db.conn().expect("conn");
-        let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug)
-            .await
-            .expect("cache hit should succeed");
-
-        match result {
-            SlugOwnership::Owned(p) => assert_eq!(p.slug, slug),
-            SlugOwnership::None => panic!("expected Owned, got None tombstone"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_slug_ownership_cache_hit_tombstone() {
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            setup_db().await,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        let tenant_id = test_tenant();
-        let slug = "nonexistent";
-
-        // Pre-populate cache with a tombstone.
-        let key = cache_key(&tenant_id, "provider_slug", slug);
-        cache.set(&key, &SlugOwnership::None, 60).await;
-
-        let conn = service.db.conn().expect("conn");
-        let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug)
-            .await
-            .expect("tombstone hit should succeed");
-
-        // The tombstone means we skip the DB and get None back.
-        match result {
-            SlugOwnership::Owned(_) => panic!("expected None tombstone, got Owned"),
-            SlugOwnership::None => { /* expected - no DB query was made */ }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_slug_ownership_db_miss_writes_tombstone() {
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            setup_db().await,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        let tenant_id = test_tenant();
-        let slug = "nonexistent";
-
-        // First call: cache miss → DB miss → tombstone written.
-        let conn = service.db.conn().expect("conn");
-        let result = service
-            .resolve_slug_ownership(&conn, tenant_id, slug)
-            .await
-            .expect("DB miss should succeed");
-
-        match result {
-            SlugOwnership::Owned(_) => panic!("expected None for nonexistent slug"),
-            SlugOwnership::None => { /* expected — no provider exists */ }
-        }
-
-        // Verify tombstone was written.
-        let key = cache_key(&tenant_id, "provider_slug", slug);
-        let cached: Option<SlugOwnership> = cache.get(&key).await;
-        match cached {
-            Some(SlugOwnership::None) => { /* tombstone confirmed */ }
-            other => panic!("expected tombstone (SlugOwnership::None) in cache, got: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_slug_ownership_db_hit_populates_cache() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        // Create a provider in the DB.
-        let provider_repo = ProviderRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let slug = "openai";
-        create_test_provider(&provider_repo, &conn, &scope, tenant_id, slug).await;
-
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        // First call: cache miss → DB hit → cache populated.
-        let svc_conn = service.db.conn().expect("conn");
-        let result = service
-            .resolve_slug_ownership(&svc_conn, tenant_id, slug)
-            .await
-            .expect("DB hit should succeed");
-
-        match result {
-            SlugOwnership::Owned(p) => assert_eq!(p.slug, slug),
-            SlugOwnership::None => panic!("expected Owned for existing provider"),
-        }
-
-        // Verify cache was populated.
-        let key = cache_key(&tenant_id, "provider_slug", slug);
-        let cached: Option<SlugOwnership> = cache.get(&key).await;
-        match cached {
-            Some(SlugOwnership::Owned(p)) => assert_eq!(p.slug, slug),
-            other => panic!("expected Owned in cache, got: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_resolve_slug_ownership_tombstone_avoids_second_db_query() {
-        // Use a mock provider repo that counts calls.
-        use std::sync::atomic::AtomicUsize;
-
-        #[domain_model]
-        struct CountingProviderRepo {
-            call_count: Arc<AtomicUsize>,
-        }
-
-        #[async_trait]
-        impl ProviderRepository for CountingProviderRepo {
-            async fn find_by_id(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn find_by_slug(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _slug: &str,
-            ) -> Result<ProviderV1, DomainError> {
-                self.call_count.fetch_add(1, Ordering::SeqCst);
-                Err(DomainError::provider_not_found_by_slug("stub"))
-            }
-            async fn list(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _query: &ODataQuery,
-            ) -> Result<Page<ProviderV1>, DomainError> {
-                unimplemented!()
-            }
-            async fn list_all_for_tenant(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-            ) -> Result<Vec<ProviderV1>, DomainError> {
-                unimplemented!()
-            }
-            async fn create(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _tenant_id: Uuid,
-                _req: &CreateProviderRequestV1,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn update(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-                _req: &UpdateProviderRequestV1,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn delete(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-        }
-
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let provider_repo = Arc::new(CountingProviderRepo {
-            call_count: Arc::clone(&call_count),
-        });
-
-        let cache = Arc::new(InMemoryCache::new());
-        let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
-        let model_repo = Arc::new(PanicModelRepo);
-
-        let service: Service<CountingProviderRepo, PanicModelRepo, InMemoryCache> = Service {
-            db: Arc::new(setup_db().await),
-            provider_repo,
-            model_repo,
-            cache: Arc::clone(&cache),
-            tenant_resolver: Arc::new(NoAncestorsResolver),
-            policy_enforcer: enforcer,
-            config: ModelRegistryConfig::default(),
-        };
-
-        let tenant_id = test_tenant();
-        let slug = "no-such-slug";
-        let conn = service.db.conn().expect("conn");
-
-        // First call: cache miss → DB miss → tombstone written.
-        service
-            .resolve_slug_ownership(&conn, tenant_id, slug)
-            .await
-            .expect("first call should succeed");
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "first call should hit the DB once"
-        );
-
-        // Second call: cache hit (tombstone) — no DB query.
-        service
-            .resolve_slug_ownership(&conn, tenant_id, slug)
-            .await
-            .expect("second call should succeed");
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "second call should NOT hit the DB - tombstone is a cache hit"
         );
     }
 
@@ -4062,64 +3445,6 @@ mod tests {
         assert!(
             matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "nonexistent"),
             "expected ProviderNotFoundBySlug('nonexistent'), got: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_model_cache_invalidation() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-
-        // Pre-populate cache with a stale entry.
-        let cache = InMemoryCache::new();
-        let mut stale_info = make_deprecated_info("gpt-4o-old");
-        stale_info.display_name = "stale".to_owned();
-        let stale_model: crate::ModelV1 = crate::ModelV1 {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
-            tenant_id,
-            provider_id: Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap(),
-            canonical_id: "openai::gpt-4o".to_owned(),
-            lifecycle_status: crate::LifecycleStatus::Production,
-            approval_status: crate::ApprovalStatus::Pending,
-            info: stale_info,
-        };
-        let stale_key = cache_key(&tenant_id, "model", "stale-key");
-        cache.set(&stale_key, &stale_model, 1800).await;
-
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        // The stale key should still be in cache before create.
-        assert!(
-            cache.get::<crate::ModelV1>(&stale_key).await.is_some(),
-            "stale entry should be present before create"
-        );
-
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(tenant_id)
-            .build()
-            .expect("ctx");
-        let _model = service
-            .create_model(&ctx, &req)
-            .await
-            .expect("create model");
-
-        // After create, all tenant entries should be invalidated (including the stale key).
-        assert!(
-            cache.get::<crate::ModelV1>(&stale_key).await.is_none(),
-            "stale entry should be invalidated after create"
         );
     }
 
@@ -4373,78 +3698,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_update_model_cache_invalidation() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let model_repo = ModelRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_approved_model(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &provider_slug,
-            "gpt-4o",
-        )
-        .await;
-
-        let cache = InMemoryCache::new();
-        let service = build_service_with_cache(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-        );
-
-        // Pre-populate cache with the model
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        let _model_ref = service
-            .get_tenant_model(
-                &SecurityContext::builder()
-                    .subject_id(Uuid::new_v4())
-                    .subject_tenant_id(tenant_id)
-                    .build()
-                    .expect("ctx"),
-                "openai::gpt-4o",
-            )
-            .await
-            .expect("get model to populate cache");
-        assert!(
-            cache.get::<crate::ModelV1>(&key).await.is_some(),
-            "model should be cached"
-        );
-
-        // Update the model
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(tenant_id)
-            .build()
-            .expect("ctx");
-        let _updated = service
-            .update_model(
-                &ctx,
-                "openai::gpt-4o",
-                &crate::UpdateModelRequestV1 {
-                    lifecycle_status: Some(crate::LifecycleStatus::Preview),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("update model");
-
-        // Cache should be invalidated
-        assert!(
-            cache.get::<crate::ModelV1>(&key).await.is_none(),
-            "cache should be invalidated after update"
-        );
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     // delete_model
     // ═════════════════════════════════════════════════════════════════════════
@@ -4516,101 +3769,100 @@ mod tests {
         );
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // Writes never touch the cache
+    //
+    // The only cached entity is a tenant's ancestor chain, which no provider or
+    // model write can change. A counting stub proves it: not one cache
+    // operation is issued on any write path, cross-tenant writes included.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// A [`ResolutionCache`] that counts every operation it is asked to
+    /// perform, and serves whatever it was seeded with.
+    #[derive(Default)]
+    struct CountingCache {
+        entries: std::sync::Mutex<HashMap<Uuid, Vec<Uuid>>>,
+        gets: AtomicUsize,
+        puts: AtomicUsize,
+    }
+
+    impl CountingCache {
+        fn gets(&self) -> usize {
+            self.gets.load(Ordering::SeqCst)
+        }
+
+        fn puts(&self) -> usize {
+            self.puts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ResolutionCache for CountingCache {
+        async fn get_chain(&self, tenant_id: Uuid) -> Option<Vec<Uuid>> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&tenant_id)
+                .cloned()
+        }
+
+        async fn put_chain(&self, tenant_id: Uuid, chain: &[Uuid]) {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(tenant_id, chain.to_vec());
+        }
+    }
+
     #[tokio::test]
-    async fn test_delete_model_cache_invalidation() {
+    async fn test_provider_writes_do_not_touch_the_cache() {
         let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_approved_model(
-            &model_repo,
-            &conn,
-            &scope,
-            tenant_id,
-            &provider_slug,
-            "gpt-4o",
-        )
-        .await;
-
-        let cache = InMemoryCache::new();
+        let cache = Arc::new(CountingCache::default());
         let service = build_service_with_cache(
             db,
             NoAncestorsResolver,
             ModelRegistryConfig::default(),
-            cache.clone(),
+            Arc::clone(&cache) as Arc<dyn ResolutionCache>,
         );
 
-        // Pre-populate cache with the model via get
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(tenant_id)
             .build()
             .expect("ctx");
-        let _model_ref = service
-            .get_tenant_model(&ctx, "openai::gpt-4o")
+
+        let created = service
+            .create_provider(&ctx, &make_create_req("openai", "OpenAI"))
             .await
-            .expect("get model to populate cache");
-
-        let key = cache_key(&tenant_id, "model", "openai::gpt-4o");
-        assert!(
-            cache.get::<crate::ModelV1>(&key).await.is_some(),
-            "model should be cached before delete"
-        );
-
-        // Delete the model
+            .expect("create");
         service
-            .delete_model(&ctx, "openai::gpt-4o")
-            .await
-            .expect("delete model");
-
-        // Cache should be invalidated
-        assert!(
-            cache.get::<crate::ModelV1>(&key).await.is_none(),
-            "cache should be invalidated after delete"
-        );
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Cross-tenant writes invalidate the row's tenant, not the caller's
-    //
-    // Cache keys are prefixed by the tenant that *owns* the row. When the PDP
-    // hands back a scope spanning more than the caller's own tenant, a write can
-    // land on a row owned by someone else — and invalidating
-    // `ctx.subject_tenant_id()` would then clear the wrong prefix and leave the
-    // stale entry serving for the rest of its TTL.
-    // ═════════════════════════════════════════════════════════════════════════
-
-    /// Seed one cache entry under each tenant so both directions are observable:
-    /// the owner's entry must be dropped, the caller's must survive.
-    async fn seed_two_tenant_cache(
-        cache: &InMemoryCache,
-        owner_tenant: Uuid,
-        caller_tenant: Uuid,
-        owner_key: &str,
-    ) -> String {
-        cache
-            .set(owner_key, &make_test_provider(owner_tenant, "openai"), 1800)
-            .await;
-
-        let caller_key = cache_key(&caller_tenant, "provider", &Uuid::new_v4().to_string());
-        cache
-            .set(
-                &caller_key,
-                &make_test_provider(caller_tenant, "unrelated"),
-                1800,
+            .update_provider(
+                &ctx,
+                created.id,
+                &crate::UpdateProviderRequestV1 {
+                    name: Some("renamed".to_owned()),
+                    ..Default::default()
+                },
             )
-            .await;
+            .await
+            .expect("update");
+        service
+            .delete_provider(&ctx, created.id)
+            .await
+            .expect("delete");
 
-        caller_key
+        assert_eq!(cache.gets(), 0, "a provider write reads no cache entry");
+        assert_eq!(cache.puts(), 0, "a provider write writes no cache entry");
     }
 
+    /// A cross-tenant write lands on a row the caller does not own. Under the
+    /// old design that made *whose* prefix to invalidate load-bearing; now no
+    /// prefix exists and the write must still leave the cache alone.
     #[tokio::test]
-    async fn test_update_provider_invalidates_owner_tenant_not_caller() {
+    async fn test_cross_tenant_provider_write_does_not_touch_the_cache() {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
         let owner_tenant = other_tenant();
@@ -4627,16 +3879,12 @@ mod tests {
         )
         .await;
 
-        let cache = InMemoryCache::new();
-        let owner_key = cache_key(&owner_tenant, "provider", &provider_id.to_string());
-        let caller_key =
-            seed_two_tenant_cache(&cache, owner_tenant, caller_tenant, &owner_key).await;
-
+        let cache = Arc::new(CountingCache::default());
         let service = build_service_with_authz(
             db,
             NoAncestorsResolver,
             ModelRegistryConfig::default(),
-            cache.clone(),
+            Arc::clone(&cache) as Arc<dyn ResolutionCache>,
             MockAuthZTenants(vec![caller_tenant, owner_tenant]),
         );
 
@@ -4657,70 +3905,133 @@ mod tests {
             )
             .await
             .expect("cross-tenant update should be permitted by this PDP");
-
         assert_eq!(
             updated.tenant_id, owner_tenant,
             "the updated row belongs to the owner tenant, not the caller"
         );
-        assert!(
-            cache.get::<ProviderV1>(&owner_key).await.is_none(),
-            "the owning tenant's cache prefix must be invalidated"
-        );
-        assert!(
-            cache.get::<ProviderV1>(&caller_key).await.is_some(),
-            "the caller's unrelated entries must survive: invalidation follows \
-             the row, not the caller"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_delete_provider_invalidates_owner_tenant_not_caller() {
-        let db = setup_db().await;
-        let conn = db.conn().expect("conn");
-        let owner_tenant = other_tenant();
-        let caller_tenant = test_tenant();
-
-        let provider_repo = ProviderRepositoryImpl::default();
-        let (provider_id, _slug) = create_test_provider(
-            &provider_repo,
-            &conn,
-            &scope_for(owner_tenant),
-            owner_tenant,
-            "openai",
-        )
-        .await;
-
-        let cache = InMemoryCache::new();
-        let owner_key = cache_key(&owner_tenant, "provider", &provider_id.to_string());
-        let caller_key =
-            seed_two_tenant_cache(&cache, owner_tenant, caller_tenant, &owner_key).await;
-
-        let service = build_service_with_authz(
-            db,
-            NoAncestorsResolver,
-            ModelRegistryConfig::default(),
-            cache.clone(),
-            MockAuthZTenants(vec![caller_tenant, owner_tenant]),
-        );
-
-        let ctx = SecurityContext::builder()
-            .subject_id(Uuid::new_v4())
-            .subject_tenant_id(caller_tenant)
-            .build()
-            .expect("ctx");
 
         service
             .delete_provider(&ctx, provider_id)
             .await
             .expect("cross-tenant delete should be permitted by this PDP");
 
-        assert!(
-            cache.get::<ProviderV1>(&owner_key).await.is_none(),
-            "the owning tenant's cache prefix must be invalidated"
+        assert_eq!(cache.gets(), 0);
+        assert_eq!(cache.puts(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_model_writes_do_not_touch_the_cache() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let provider_repo = ProviderRepositoryImpl::default();
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+
+        let cache = Arc::new(CountingCache::default());
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            Arc::clone(&cache) as Arc<dyn ResolutionCache>,
         );
-        assert!(
-            cache.get::<ProviderV1>(&caller_key).await.is_some(),
-            "the caller's unrelated entries must survive"
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+
+        service
+            .create_model(&ctx, &make_create_model_req(&provider_slug, "gpt-4o"))
+            .await
+            .expect("create");
+        service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    approval_status: Some(crate::ApprovalStatus::Approved),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update");
+        service
+            .delete_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("delete");
+
+        assert_eq!(cache.gets(), 0, "a model write reads no cache entry");
+        assert_eq!(cache.puts(), 0, "a model write writes no cache entry");
+    }
+
+    /// The property the old row-caching design could not offer: an approval
+    /// flip is visible to the very next read, with no invalidation step.
+    #[tokio::test]
+    async fn test_approval_flip_is_visible_on_the_next_read() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let tenant_id = test_tenant();
+        let scope = scope_for(tenant_id);
+
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
+        let (_provider_id, provider_slug) =
+            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        create_test_model(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &provider_slug,
+            "gpt-4o",
+        )
+        .await;
+
+        // A warm chain, so the read path is exercised with the cache in play.
+        let cache = Arc::new(CountingCache::default());
+        cache.put_chain(tenant_id, &[]).await;
+        let service = build_service_with_cache(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            Arc::clone(&cache) as Arc<dyn ResolutionCache>,
         );
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx");
+
+        let err = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("a pending model is not readable");
+        assert!(
+            matches!(&err, DomainError::ModelNotApproved { .. }),
+            "expected ModelNotApproved, got: {err:?}"
+        );
+
+        service
+            .update_model(
+                &ctx,
+                "openai::gpt-4o",
+                &crate::UpdateModelRequestV1 {
+                    approval_status: Some(crate::ApprovalStatus::Approved),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("approve");
+
+        let model = service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect("the approval is visible immediately");
+        assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
     }
 }

@@ -14,14 +14,15 @@ use model_registry_sdk::ModelRegistryClientV1;
 
 use crate::api::rest::routes;
 use crate::config::ModelRegistryConfig;
-use crate::domain::cache::InMemoryCache;
+use crate::domain::cache::{NoopResolutionCache, ResolutionCache};
 use crate::domain::local_client::LocalClient;
 use crate::domain::service::Service;
+use crate::infra::cache::ClusterResolutionCache;
 use crate::infra::storage::model_repo::ModelRepositoryImpl;
 use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
 /// Concrete service type used by the gear.
-type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl, InMemoryCache>;
+type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl>;
 
 #[toolkit::gear(
     name = "model-registry",
@@ -62,8 +63,19 @@ impl Gear for ModelRegistryGear {
         let provider_repo = Arc::new(ProviderRepositoryImpl::new(limits));
         let model_repo = Arc::new(ModelRepositoryImpl::new(limits));
 
-        // In-memory cache (Redis is a feature-gated follow-up)
-        let cache = Arc::new(InMemoryCache::new());
+        // Resolution cache. The `ClusterCacheV1` facade is NOT resolved here:
+        // the `cluster` gear registers its backends during `start` and the
+        // toolkit runs every `init` first, so resolution is deferred to the
+        // first cache use.
+        let cache: Arc<dyn ResolutionCache> = if cfg.cache_enabled {
+            Arc::new(ClusterResolutionCache::new(
+                ctx.client_hub(),
+                cfg.chain_cache_ttl_seconds,
+            ))
+        } else {
+            info!("model-registry resolution cache disabled by config");
+            Arc::new(NoopResolutionCache)
+        };
 
         // Fetch TenantResolver from ClientHub
         let tenant_resolver = ctx

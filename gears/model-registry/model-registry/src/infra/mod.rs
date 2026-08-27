@@ -1,3 +1,4 @@
-//! Infrastructure layer: database storage, mappers, and caching backends.
+//! Infrastructure layer: database storage, mappers, and the cache binding.
 
+pub mod cache;
 pub mod storage;

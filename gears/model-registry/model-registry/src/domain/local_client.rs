@@ -12,7 +12,6 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use super::cache::CacheService;
 use super::repo::{ModelRepository, ProviderRepository};
 use super::service::Service;
 use crate::{
@@ -26,21 +25,21 @@ use crate::{
 /// corresponding service method, mapping [`DomainError`] → [`ModelRegistryError`]
 /// via the existing `From` impl.
 #[domain_model]
-pub struct LocalClient<R, M, C> {
-    service: Arc<Service<R, M, C>>,
+pub struct LocalClient<R, M> {
+    service: Arc<Service<R, M>>,
 }
 
-impl<R: ProviderRepository, M: ModelRepository, C: CacheService> LocalClient<R, M, C> {
+impl<R: ProviderRepository, M: ModelRepository> LocalClient<R, M> {
     /// Create a new `LocalClient` wrapping the given service.
     #[must_use]
-    pub fn new(service: Arc<Service<R, M, C>>) -> Self {
+    pub fn new(service: Arc<Service<R, M>>) -> Self {
         Self { service }
     }
 }
 
 #[async_trait]
-impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync, C: CacheService>
-    ModelRegistryClientV1 for LocalClient<R, M, C>
+impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync> ModelRegistryClientV1
+    for LocalClient<R, M>
 {
     // ── Models — read ────────────────────────────────────────────────────
 
@@ -184,7 +183,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::cache::InMemoryCache;
+    use crate::domain::cache::NoopResolutionCache;
     use crate::domain::error::DomainError;
     use crate::domain::repo::{ListVisibility, ModelRepository, ProviderRepository};
     use crate::{
@@ -256,7 +255,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
-        ) -> Result<ProviderV1, DomainError> {
+        ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }
     }
@@ -306,7 +305,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
-        ) -> Result<ModelV1, DomainError> {
+        ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }
     }
@@ -489,7 +488,7 @@ mod tests {
             Arc::new(db),
             Arc::new(MockProviderRepo),
             Arc::new(MockModelRepo),
-            Arc::new(InMemoryCache::new()),
+            Arc::new(NoopResolutionCache),
             Arc::new(MockNoAncestors),
             enforcer,
             crate::config::ModelRegistryConfig::default(),

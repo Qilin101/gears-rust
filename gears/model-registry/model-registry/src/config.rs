@@ -6,15 +6,19 @@ use toolkit_db::odata::sea_orm_filter::LimitCfg;
 /// Configuration for the Model Registry gear.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRegistryConfig {
-    /// TTL in seconds for every cache entry (default: 600 = 10 min).
+    /// TTL in seconds for the `chain/{tenant_id}` entry (default: 30).
     ///
-    /// One value for every entry: keys are prefixed by the owning tenant, so a
-    /// single entry is shared by that tenant and its whole subtree and cannot
-    /// carry two expiries. Within a process every write drops the owning
-    /// tenant's prefix, reaching owner and descendants alike, so the TTL only
-    /// backstops cross-replica and out-of-band changes.
-    #[serde(default = "default_cache_ttl")]
-    pub cache_ttl_seconds: u64,
+    /// The entry is never invalidated, so this is the whole staleness bound on
+    /// a reparent or a `self_managed` barrier flip.
+    #[serde(default = "default_chain_cache_ttl")]
+    pub chain_cache_ttl_seconds: u64,
+
+    /// Whether resolution caching is enabled (default: `true`).
+    ///
+    /// When `false` the gear installs `NoopResolutionCache` and every request
+    /// resolves its ancestor chain through `tenant-resolver`.
+    #[serde(default = "default_cache_enabled")]
+    pub cache_enabled: bool,
 
     /// Page size for `OData` list endpoints when the request omits `$top`
     /// (default: 20).
@@ -29,15 +33,20 @@ pub struct ModelRegistryConfig {
 impl Default for ModelRegistryConfig {
     fn default() -> Self {
         Self {
-            cache_ttl_seconds: default_cache_ttl(),
+            chain_cache_ttl_seconds: default_chain_cache_ttl(),
+            cache_enabled: default_cache_enabled(),
             default_page_size: default_page_size(),
             max_page_size: default_max_page_size(),
         }
     }
 }
 
-const fn default_cache_ttl() -> u64 {
-    600
+const fn default_chain_cache_ttl() -> u64 {
+    30
+}
+
+const fn default_cache_enabled() -> bool {
+    true
 }
 
 const fn default_page_size() -> u32 {
@@ -104,7 +113,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ModelRegistryConfig::default();
-        assert_eq!(config.cache_ttl_seconds, 600);
+        assert_eq!(config.chain_cache_ttl_seconds, 30);
+        assert!(config.cache_enabled);
         assert_eq!(config.default_page_size, 20);
         assert_eq!(config.max_page_size, 100);
     }
@@ -113,16 +123,18 @@ mod tests {
     fn test_deserialize_empty_json() {
         let json = "{}";
         let config: ModelRegistryConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.cache_ttl_seconds, 600);
+        assert_eq!(config.chain_cache_ttl_seconds, 30);
+        assert!(config.cache_enabled);
         assert_eq!(config.default_page_size, 20);
         assert_eq!(config.max_page_size, 100);
     }
 
     #[test]
     fn test_deserialize_partial_json() {
-        let json = r#"{"cache_ttl_seconds": 3600}"#;
+        let json = r#"{"chain_cache_ttl_seconds": 3600}"#;
         let config: ModelRegistryConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.cache_ttl_seconds, 3600);
+        assert_eq!(config.chain_cache_ttl_seconds, 3600);
+        assert!(config.cache_enabled);
         assert_eq!(config.default_page_size, 20);
         assert_eq!(config.max_page_size, 100);
     }
@@ -130,12 +142,14 @@ mod tests {
     #[test]
     fn test_deserialize_full_json() {
         let json = r#"{
-            "cache_ttl_seconds": 120,
+            "chain_cache_ttl_seconds": 120,
+            "cache_enabled": false,
             "default_page_size": 10,
             "max_page_size": 50
         }"#;
         let config: ModelRegistryConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.cache_ttl_seconds, 120);
+        assert_eq!(config.chain_cache_ttl_seconds, 120);
+        assert!(!config.cache_enabled);
         assert_eq!(config.default_page_size, 10);
         assert_eq!(config.max_page_size, 50);
     }
@@ -144,21 +158,23 @@ mod tests {
     /// config carrying stale TTL keys starts on the default rather than failing.
     #[test]
     fn test_unknown_ttl_keys_are_ignored() {
-        let json = r#"{"own_ttl_seconds": 1800, "inherited_ttl_seconds": 300}"#;
+        let json = r#"{"cache_ttl_seconds": 600, "inherited_ttl_seconds": 300}"#;
         let config: ModelRegistryConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.cache_ttl_seconds, 600);
+        assert_eq!(config.chain_cache_ttl_seconds, 30);
     }
 
     #[test]
     fn test_serde_round_trip() {
         let config = ModelRegistryConfig {
-            cache_ttl_seconds: 7200,
+            chain_cache_ttl_seconds: 7200,
+            cache_enabled: false,
             default_page_size: 25,
             max_page_size: 200,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: ModelRegistryConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.cache_ttl_seconds, 7200);
+        assert_eq!(deserialized.chain_cache_ttl_seconds, 7200);
+        assert!(!deserialized.cache_enabled);
         assert_eq!(deserialized.default_page_size, 25);
         assert_eq!(deserialized.max_page_size, 200);
     }

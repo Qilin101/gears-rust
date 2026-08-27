@@ -17,6 +17,10 @@ simple-user-settings = ["dep:simple_user_settings"]
 nodes-registry = ["dep:nodes_registry"]
 resource-group = ["dep:resource_group"]
 grpc-hub = ["dep:grpc_hub"]
+# The cluster gear: binds the coordination primitives (cache, lock, leader
+# election) an operator configures per profile. Implied by `model-registry`,
+# which degrades to an uncached ancestor-chain resolution without it.
+cluster = ["dep:cluster"]
 oagw = ["dep:api_egress"]
 credstore = ["dep:credstore"]
 # FIPS-140-3: use the AWS-LC FIPS-validated crypto module for all cryptographic operations
@@ -46,7 +50,7 @@ bss-rate-provider = [
     "dep:bss_rate_provider_http_json_plugin",
 ]
 bss-ledger = ["dep:bss_ledger"]
-model-registry = ["dep:model_registry"]
+model-registry = ["dep:model_registry", "cluster"]
 usage-collector = ["dep:usage_collector"]
 timescaledb-usage-collector = ["dep:timescaledb_usage_collector_plugin"]
 # Content-based file type detection in file-parser (see that crate's `magika`
@@ -62,6 +66,7 @@ toolkit = { workspace = true, features = ["bootstrap"] }
 api_gateway = { package = "cf-gears-api-gateway", path = "../../gears/system/api-gateway" }
 api_egress = { package = "cf-gears-oagw", path = "../../gears/system/oagw/oagw", optional = true }
 grpc_hub = { package = "cf-gears-grpc-hub", path = "../../gears/system/grpc-hub", optional = true }
+cluster = { package = "cf-gears-cluster", path = "../../gears/system/cluster/cluster", optional = true }
 gear_orchestrator = { package = "cf-gears-gear-orchestrator", path = "../../gears/system/gear-orchestrator" }
 types_registry = { package = "cf-gears-types-registry", path = "../../gears/system/types-registry/types-registry" }
 tenant-resolver = { package = "cf-gears-tenant-resolver", path = "../../gears/system/tenant-resolver/tenant-resolver" }
