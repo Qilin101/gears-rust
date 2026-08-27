@@ -6,13 +6,14 @@ use async_trait::async_trait;
 use llm_gateway_sdk::models::content::{OutputContentPart, OutputText};
 use llm_gateway_sdk::models::core::ResponseResource;
 use llm_gateway_sdk::models::core::{
-    InputTokensDetails, OutputTokensDetails, ReasoningConfig, ResponseInput, ResponseStatus, Role,
+    InputTokensDetails, OutputTokensDetails, ReasoningConfig, ResponseInput, ResponseStatus,
     TextFormat, ToolChoice, ToolChoiceMode, TruncationStrategy, Usage,
 };
 use llm_gateway_sdk::models::items::{ItemStatus, MessageOutput, OutputItem};
 use llm_gateway_sdk::models::plugin::{
     MediaInputMode, ProviderCallCtx, ProviderPluginCapabilities,
 };
+use llm_gateway_sdk::models::role::Role;
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
     LlmGatewayProviderPluginClientV1, ResponseEventStream,
