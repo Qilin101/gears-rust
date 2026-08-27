@@ -12,14 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::Hash;
 
-use tenant_resolver_sdk::{
-    BarrierMode, GetAncestorsOptions, TenantId, TenantRef, TenantResolverClient,
-};
+use tenant_resolver_sdk::{BarrierMode, GetAncestorsOptions, TenantId, TenantResolverClient};
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page, PageInfo};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
+use super::cache::ResolutionCache;
 use super::error::DomainError;
 use crate::ProviderV1;
 use model_registry_sdk::models::ProviderStatus;
@@ -31,9 +30,9 @@ use model_registry_sdk::models::ProviderStatus;
 /// Classification of a resource's ownership relative to the requesting tenant.
 ///
 /// Carried by [`InheritanceContext::apply_additive_visibility`] so callers can
-/// tell an own row from an inherited one. It drives visibility merging only:
-/// every entry expires after `ModelRegistryConfig::cache_ttl_seconds`, since one
-/// entry is shared by the owning tenant and its whole subtree.
+/// tell an own row from an inherited one. It drives visibility merging only and
+/// has no bearing on caching: the only cached entity holds tenant IDs and
+/// carries no rows at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[domain_model]
 pub enum Ownership {
@@ -157,8 +156,7 @@ where
     }
 
     // Ancestors in chain order.
-    for ancestor in &inheritance.ancestors {
-        let ancestor_id = ancestor.id.0;
+    for ancestor_id in inheritance.chain_ids().skip(1).copied() {
         let scope = AccessScope::for_tenant(ancestor_id);
         let providers = list_all(scope).await?;
         all_providers.extend(providers.into_iter().map(|p| (ancestor_id, p)));
@@ -203,8 +201,6 @@ where
 #[derive(Debug, Clone)]
 #[domain_model]
 pub struct InheritanceContext {
-    /// Ancestor tenant chain from direct parent to root.
-    pub ancestors: Vec<TenantRef>,
     /// The requesting tenant's ID.
     tenant_id: Uuid,
     /// Full chain from closest (self) to root: `[self, parent, grandparent, ...]`.
@@ -216,15 +212,15 @@ pub struct InheritanceContext {
 }
 
 impl InheritanceContext {
-    /// Build a new context from the requesting tenant's ID and its ancestor chain.
+    /// Build a new context from the requesting tenant's ID and its ancestor IDs.
     ///
-    /// `ancestors` should be ordered from direct parent to root (as returned by
-    /// [`TenantResolverClient::get_ancestors`]).
+    /// `ancestor_ids` should be ordered from direct parent to root (as returned
+    /// by [`TenantResolverClient::get_ancestors`]).
     #[must_use]
-    pub fn new(tenant_id: Uuid, ancestors: Vec<TenantRef>) -> Self {
-        let mut chain_ids = Vec::with_capacity(1 + ancestors.len());
+    pub fn new(tenant_id: Uuid, ancestor_ids: Vec<Uuid>) -> Self {
+        let mut chain_ids = Vec::with_capacity(1 + ancestor_ids.len());
         chain_ids.push(tenant_id);
-        chain_ids.extend(ancestors.iter().map(|a| a.id.0));
+        chain_ids.extend(ancestor_ids);
 
         // Keep the *first* (closest) position for each tenant, so a malformed
         // chain that repeats a tenant cannot demote it to a farther position.
@@ -234,7 +230,6 @@ impl InheritanceContext {
         }
 
         Self {
-            ancestors,
             tenant_id,
             chain_ids,
             pos_in_chain,
@@ -366,9 +361,9 @@ where
 {
     let candidates = std::iter::once((inheritance.tenant_id(), own_scope.clone())).chain(
         inheritance
-            .ancestors
-            .iter()
-            .map(|a| (a.id.0, AccessScope::for_tenant(a.id.0))),
+            .chain_ids()
+            .skip(1)
+            .map(|&id| (id, AccessScope::for_tenant(id))),
     );
 
     for (tenant_id, scope) in candidates {
@@ -450,8 +445,7 @@ where
     let own_tenant_id = inheritance.tenant_id();
     let mut tagged: Vec<(Uuid, T)> = items.into_iter().map(|it| (own_tenant_id, it)).collect();
 
-    for ancestor in &inheritance.ancestors {
-        let ancestor_id = ancestor.id.0;
+    for ancestor_id in inheritance.chain_ids().skip(1).copied() {
         // Same filter/order/select as the caller, without pagination.
         let ancestor_query = ODataQuery {
             filter: query.filter.clone(),
@@ -536,27 +530,42 @@ where
 // ---------------------------------------------------------------------------
 
 /// Resolve the ancestor chain for the tenant identified by
-/// `ctx.subject_tenant_id()` using the given `resolver`.
+/// `ctx.subject_tenant_id()`, cache-first.
 ///
-/// Respects barrier boundaries (self-managed tenants). The returned
-/// [`InheritanceContext`] can be used to classify resources and apply
-/// additive visibility with child-shadowing.
+/// On a [`ResolutionCache`] hit the chain is rebuilt from the cached IDs with
+/// no `tenant-resolver` call. On a miss the resolver is queried with
+/// [`BarrierMode::Respect`] and the resulting ancestor IDs are stored.
+///
+/// Only IDs are cached: `status` / `self_managed` / `tenant_type` are mutable
+/// and unused here. [`BarrierMode::Respect`] is hardcoded at this single call
+/// site, which is what makes keying by `tenant_id` alone correct — if a second
+/// call site ever varies it, the key must include it.
 ///
 /// # Errors
 ///
 /// Returns [`DomainError::Internal`] when the tenant-resolver call fails
-/// (network error, invalid response, etc.).
-pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
+/// (network error, invalid response, etc.). A cache failure is never an error:
+/// it degrades to a resolver call.
+pub async fn resolve_ancestors<T, C>(
     resolver: &T,
+    cache: &C,
     ctx: &SecurityContext,
-) -> Result<InheritanceContext, DomainError> {
+) -> Result<InheritanceContext, DomainError>
+where
+    T: TenantResolverClient + ?Sized,
+    C: ResolutionCache + ?Sized,
+{
     let tenant_id = ctx.subject_tenant_id();
-    let tenant_id_sdk = TenantId(tenant_id);
+
+    // An empty `Vec` is a hit (a root tenant), not a miss.
+    if let Some(ancestor_ids) = cache.get_chain(tenant_id).await {
+        return Ok(InheritanceContext::new(tenant_id, ancestor_ids));
+    }
 
     let response = resolver
         .get_ancestors(
             ctx,
-            tenant_id_sdk,
+            TenantId(tenant_id),
             &GetAncestorsOptions {
                 barrier_mode: BarrierMode::Respect,
             },
@@ -564,7 +573,10 @@ pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
         .await
         .map_err(|e| DomainError::internal_from("tenant-resolver ancestors call failed", e))?;
 
-    Ok(InheritanceContext::new(tenant_id, response.ancestors))
+    let ancestor_ids: Vec<Uuid> = response.ancestors.into_iter().map(|a| a.id.0).collect();
+    cache.put_chain(tenant_id, &ancestor_ids).await;
+
+    Ok(InheritanceContext::new(tenant_id, ancestor_ids))
 }
 
 // ---------------------------------------------------------------------------
@@ -574,9 +586,11 @@ pub async fn resolve_ancestors<T: TenantResolverClient + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::cache::NoopResolutionCache;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tenant_resolver_sdk::TenantRef;
     use tenant_resolver_sdk::{
         GetAncestorsResponse, GetDescendantsOptions, GetDescendantsResponse, GetTenantsOptions,
         IsAncestorOptions, TenantInfo, TenantResolverError, TenantStatus,
@@ -587,6 +601,20 @@ mod tests {
     #[domain_model]
     struct MockTenantResolver {
         ancestors: Vec<TenantRef>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl MockTenantResolver {
+        fn new(ancestors: Vec<TenantRef>) -> Self {
+            Self {
+                ancestors,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
@@ -621,6 +649,7 @@ mod tests {
             _id: TenantId,
             _options: &GetAncestorsOptions,
         ) -> Result<GetAncestorsResponse, TenantResolverError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(GetAncestorsResponse {
                 tenant: TenantRef {
                     id: _id,
@@ -653,6 +682,51 @@ mod tests {
         }
     }
 
+    // ── Stub ResolutionCache ──────────────────────────────────────────────
+
+    /// In-process [`ResolutionCache`] that counts writes, so a test can assert
+    /// *which* side of the cache a chain came from.
+    #[derive(Default)]
+    struct StubCache {
+        entries: std::sync::Mutex<HashMap<Uuid, Vec<Uuid>>>,
+        puts: AtomicUsize,
+    }
+
+    impl StubCache {
+        fn warm(tenant_id: Uuid, chain: Vec<Uuid>) -> Self {
+            let stub = Self::default();
+            stub.insert(tenant_id, chain);
+            stub
+        }
+
+        fn insert(&self, tenant_id: Uuid, chain: Vec<Uuid>) {
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(tenant_id, chain);
+        }
+
+        fn puts(&self) -> usize {
+            self.puts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ResolutionCache for StubCache {
+        async fn get_chain(&self, tenant_id: Uuid) -> Option<Vec<Uuid>> {
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&tenant_id)
+                .cloned()
+        }
+
+        async fn put_chain(&self, tenant_id: Uuid, chain: &[Uuid]) {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.insert(tenant_id, chain.to_vec());
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     fn parent_id() -> Uuid {
@@ -665,6 +739,12 @@ mod tests {
 
     fn child_id() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
+    }
+
+    /// The same chain as [`make_ancestors`], as the IDs `InheritanceContext`
+    /// now carries.
+    fn make_ancestor_ids() -> Vec<Uuid> {
+        vec![parent_id(), grandparent_id()]
     }
 
     fn make_ancestors() -> Vec<TenantRef> {
@@ -690,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_new_context_sets_chain_correctly() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert_eq!(ctx.tenant_id(), child_id());
         assert_eq!(ctx.chain_ids.len(), 3);
         assert_eq!(ctx.chain_ids[0], child_id());
@@ -703,25 +783,24 @@ mod tests {
         let ctx = InheritanceContext::new(child_id(), vec![]);
         assert_eq!(ctx.chain_ids.len(), 1);
         assert_eq!(ctx.chain_ids[0], child_id());
-        assert!(ctx.ancestors.is_empty());
     }
 
     #[test]
     fn test_is_ancestor_returns_true_for_ancestors() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert!(ctx.is_ancestor(parent_id()));
         assert!(ctx.is_ancestor(grandparent_id()));
     }
 
     #[test]
     fn test_is_ancestor_returns_false_for_self() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert!(!ctx.is_ancestor(child_id()));
     }
 
     #[test]
     fn test_is_ancestor_returns_false_for_unknown() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert!(!ctx.is_ancestor(Uuid::nil()));
     }
 
@@ -729,20 +808,20 @@ mod tests {
 
     #[test]
     fn test_classify_own_when_tenant_matches() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert_eq!(ctx.classify(child_id()), Ownership::Own);
     }
 
     #[test]
     fn test_classify_inherited_when_ancestor() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         assert_eq!(ctx.classify(parent_id()), Ownership::Inherited);
         assert_eq!(ctx.classify(grandparent_id()), Ownership::Inherited);
     }
 
     #[test]
     fn test_classify_inherited_when_unknown() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         // Unknown tenants default to inherited for safety.
         assert_eq!(ctx.classify(Uuid::nil()), Ownership::Inherited);
     }
@@ -765,14 +844,14 @@ mod tests {
 
     #[test]
     fn test_additive_visibility_empty() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let result = ctx.apply_additive_visibility::<&str, _, _>(vec![], |s| *s);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_additive_visibility_own_only() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let items = vec![(child_id(), "openai"), (child_id(), "anthropic")];
         let result = ctx.apply_additive_visibility(items, |s| *s);
         assert_eq!(result.len(), 2);
@@ -784,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_additive_visibility_union_with_ancestors() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let items = vec![
             // Child's own providers
             (child_id(), "child-only"),
@@ -803,7 +882,7 @@ mod tests {
 
     #[test]
     fn test_additive_visibility_child_shadows_parent_by_slug() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let items = vec![
             // Parent has "openai"
             (parent_id(), "openai"),
@@ -825,14 +904,7 @@ mod tests {
     #[test]
     fn test_additive_visibility_child_cannot_expand_beyond_parent() {
         // Setup: child has only one ancestor (parent).
-        let parent = TenantRef {
-            id: TenantId(parent_id()),
-            status: TenantStatus::Active,
-            tenant_type: None,
-            parent_id: None,
-            self_managed: false,
-        };
-        let ctx = InheritanceContext::new(child_id(), vec![parent]);
+        let ctx = InheritanceContext::new(child_id(), vec![parent_id()]);
 
         // Parent has "openai", child has nothing.
         let items = vec![(parent_id(), "openai")];
@@ -878,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_in_chain_stops_at_own_tenant() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let calls = AtomicUsize::new(0);
 
         let found = find_in_chain(
@@ -903,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_in_chain_falls_through_to_closest_ancestor() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let found = find_in_chain(
             &ctx,
@@ -928,7 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_in_chain_returns_none_when_chain_is_exhausted() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let calls = AtomicUsize::new(0);
 
         let found = find_in_chain(
@@ -953,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_in_chain_aborts_on_unrelated_error() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let calls = AtomicUsize::new(0);
 
         let result = find_in_chain(
@@ -1047,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_unions_with_closest_wins() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let result = merge_inherited_page(
             &ctx,
@@ -1078,7 +1150,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_keeps_partial_results_on_ancestor_failure() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let result = merge_inherited_page(
             &ctx,
@@ -1102,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_fail_closed_propagates_ancestor_error() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let result = merge_inherited_page(
             &ctx,
@@ -1131,7 +1203,7 @@ mod tests {
     async fn test_merge_inherited_page_fail_closed_stops_at_first_failure() {
         // When FailClosed is used, only the first ancestor failure should be
         // propagated — the grandparent should never be queried.
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let parent_queried = Arc::new(AtomicUsize::new(0));
         let grandparent_queried = Arc::new(AtomicUsize::new(0));
@@ -1180,7 +1252,7 @@ mod tests {
     async fn test_merge_inherited_page_skip_logs_and_continues_after_failure() {
         // With Skip, a failing parent does not stop the grandparent from being
         // queried.
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         let result = merge_inherited_page(
             &ctx,
@@ -1205,7 +1277,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_strips_ancestor_pagination_then_truncates() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         let query = ODataQuery {
             limit: Some(3),
             cursor: None,
@@ -1237,7 +1309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_truncates_to_default_limit_without_top() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
 
         // No `$top`: the own page still carries the repository's default limit,
         // and the unpaginated ancestor fan-out must not escape it.
@@ -1257,7 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_inherited_page_truncates_to_clamped_limit_not_requested_top() {
-        let ctx = InheritanceContext::new(child_id(), make_ancestors());
+        let ctx = InheritanceContext::new(child_id(), make_ancestor_ids());
         // `$top=100` above the configured maximum: the repository clamped the own
         // page to 3, so the merged page must not exceed 3 either.
         let query = ODataQuery {
@@ -1284,7 +1356,6 @@ mod tests {
     #[test]
     fn test_single_tenant_no_ancestors_resolve_correctly() {
         let ctx = InheritanceContext::new(child_id(), vec![]);
-        assert!(ctx.ancestors.is_empty());
         assert_eq!(ctx.chain_ids.len(), 1);
         assert_eq!(ctx.chain_ids[0], child_id());
         assert!(!ctx.is_ancestor(parent_id()));
@@ -1295,30 +1366,116 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_ancestors_with_mock() {
-        let resolver = MockTenantResolver {
-            ancestors: make_ancestors(),
-        };
+        let resolver = MockTenantResolver::new(make_ancestors());
         let ctx = SecurityContext::anonymous();
-        let result = resolve_ancestors(&resolver, &ctx).await;
+        let result = resolve_ancestors(&resolver, &NoopResolutionCache, &ctx).await;
         assert!(result.is_ok());
 
         let inheritance = result.unwrap();
-        assert_eq!(inheritance.ancestors.len(), 2);
-        // ancestors are ordered direct-parent-first
-        assert_eq!(inheritance.ancestors[0].id.0, parent_id());
-        assert_eq!(inheritance.ancestors[1].id.0, grandparent_id());
+        let chain: Vec<Uuid> = inheritance.chain_ids().copied().collect();
+        // ancestors are ordered direct-parent-first, behind the requestor
+        assert_eq!(
+            chain,
+            vec![ctx.subject_tenant_id(), parent_id(), grandparent_id()]
+        );
     }
 
     #[tokio::test]
     async fn test_resolve_ancestors_no_ancestors() {
-        let resolver = MockTenantResolver { ancestors: vec![] };
+        let resolver = MockTenantResolver::new(vec![]);
         let ctx = SecurityContext::anonymous();
-        let result = resolve_ancestors(&resolver, &ctx).await;
+        let result = resolve_ancestors(&resolver, &NoopResolutionCache, &ctx).await;
         assert!(result.is_ok());
 
         let inheritance = result.unwrap();
-        assert!(inheritance.ancestors.is_empty());
         assert_eq!(inheritance.chain_ids.len(), 1);
+    }
+
+    /// A warm entry serves the chain without a `tenant-resolver` call.
+    #[tokio::test]
+    async fn test_resolve_ancestors_warm_chain_skips_resolver() {
+        let ctx = SecurityContext::anonymous();
+        let cache = StubCache::warm(ctx.subject_tenant_id(), make_ancestor_ids());
+        let resolver = MockTenantResolver::new(make_ancestors());
+
+        let inheritance = resolve_ancestors(&resolver, &cache, &ctx)
+            .await
+            .expect("a warm chain resolves");
+
+        let chain: Vec<Uuid> = inheritance.chain_ids().copied().collect();
+        assert_eq!(
+            chain,
+            vec![ctx.subject_tenant_id(), parent_id(), grandparent_id()]
+        );
+        assert_eq!(
+            resolver.calls(),
+            0,
+            "a warm chain must not call the resolver"
+        );
+        assert_eq!(cache.puts(), 0, "a warm chain must not rewrite the entry");
+    }
+
+    /// A cold entry calls the resolver exactly once and stores the result, so
+    /// the next resolution is warm.
+    #[tokio::test]
+    async fn test_resolve_ancestors_cold_chain_populates_cache() {
+        let ctx = SecurityContext::anonymous();
+        let cache = StubCache::default();
+        let resolver = MockTenantResolver::new(make_ancestors());
+
+        let first = resolve_ancestors(&resolver, &cache, &ctx)
+            .await
+            .expect("a cold chain resolves");
+        assert_eq!(resolver.calls(), 1);
+        assert_eq!(cache.puts(), 1, "the cold chain is stored");
+
+        let second = resolve_ancestors(&resolver, &cache, &ctx)
+            .await
+            .expect("the second resolution is warm");
+        assert_eq!(resolver.calls(), 1, "the second resolution is served warm");
+        assert_eq!(
+            first.chain_ids().copied().collect::<Vec<_>>(),
+            second.chain_ids().copied().collect::<Vec<_>>()
+        );
+    }
+
+    /// A root tenant caches an empty ancestor list. `Option::None` is the only
+    /// miss — an empty `Vec` is a hit and must not re-call the resolver.
+    #[tokio::test]
+    async fn test_resolve_ancestors_empty_chain_is_a_hit_not_a_miss() {
+        let ctx = SecurityContext::anonymous();
+        let cache = StubCache::default();
+        let resolver = MockTenantResolver::new(vec![]);
+
+        resolve_ancestors(&resolver, &cache, &ctx)
+            .await
+            .expect("a root tenant resolves");
+        assert_eq!(resolver.calls(), 1);
+
+        let warm = resolve_ancestors(&resolver, &cache, &ctx)
+            .await
+            .expect("the empty chain is served warm");
+        assert_eq!(
+            resolver.calls(),
+            1,
+            "an empty ancestor list is a hit, not a miss"
+        );
+        assert_eq!(warm.chain_ids().count(), 1);
+    }
+
+    /// `NoopResolutionCache` resolves correctly and never spares a call.
+    #[tokio::test]
+    async fn test_resolve_ancestors_noop_cache_always_calls_resolver() {
+        let ctx = SecurityContext::anonymous();
+        let resolver = MockTenantResolver::new(make_ancestors());
+
+        for expected_calls in 1..=3 {
+            let inheritance = resolve_ancestors(&resolver, &NoopResolutionCache, &ctx)
+                .await
+                .expect("the uncached path resolves");
+            assert_eq!(inheritance.chain_ids().count(), 3);
+            assert_eq!(resolver.calls(), expected_calls);
+        }
     }
 
     // ── Tests: Error path (resolver failure) ───────────────────────────────
@@ -1385,7 +1542,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_ancestors_failure_returns_internal_error() {
         let ctx = SecurityContext::anonymous();
-        let result = resolve_ancestors(&FailingResolver, &ctx).await;
+        let result = resolve_ancestors(&FailingResolver, &NoopResolutionCache, &ctx).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         let err_str = err.to_string();
@@ -1435,14 +1592,8 @@ mod tests {
         }
     }
 
-    fn single_ancestor() -> Vec<TenantRef> {
-        vec![TenantRef {
-            id: TenantId(parent_id()),
-            status: TenantStatus::Active,
-            tenant_type: None,
-            parent_id: None,
-            self_managed: false,
-        }]
+    fn single_ancestor() -> Vec<Uuid> {
+        vec![parent_id()]
     }
 
     #[tokio::test]
@@ -1510,16 +1661,7 @@ mod tests {
     async fn test_chain_providers_parent_shadows_grandparent() {
         let parent_id = parent_id();
         let grandparent_id = grandparent_id();
-        let ctx = InheritanceContext::new(
-            parent_id,
-            vec![TenantRef {
-                id: TenantId(grandparent_id),
-                status: TenantStatus::Active,
-                tenant_type: None,
-                parent_id: None,
-                self_managed: false,
-            }],
-        );
+        let ctx = InheritanceContext::new(parent_id, vec![grandparent_id]);
 
         let parent_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c1").unwrap();
         let gp_prov_id = Uuid::parse_str("00000000-0000-0000-0000-0000000000c2").unwrap();
