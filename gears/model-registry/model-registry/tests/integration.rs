@@ -59,7 +59,7 @@ use tenant_resolver_sdk::{
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::DBRunner;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
-use toolkit_odata::{ODataQuery, parse_filter_string};
+use toolkit_odata::{CursorV1, ODataQuery, parse_filter_string};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
@@ -112,6 +112,33 @@ impl AuthZResolverClient for MockAuthZ {
                             property: "owner_tenant_id".to_owned(),
                             value: serde_json::json!(tenant_id.to_string()),
                         },
+                    )],
+                }],
+                deny_reason: None,
+            },
+        })
+    }
+}
+
+/// A PDP that grants access across a fixed set of tenants, regardless of the
+/// caller's own tenant — the shape a platform-admin policy produces.
+struct MockAuthZTenants(Vec<Uuid>);
+
+#[async_trait]
+impl AuthZResolverClient for MockAuthZTenants {
+    async fn evaluate(
+        &self,
+        _request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        Ok(EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::EvaluationResponseContext {
+                constraints: vec![authz_resolver_sdk::constraints::Constraint {
+                    predicates: vec![authz_resolver_sdk::constraints::Predicate::In(
+                        authz_resolver_sdk::constraints::InPredicate::new(
+                            "owner_tenant_id",
+                            self.0.iter().map(ToString::to_string),
+                        ),
                     )],
                 }],
                 deny_reason: None,
@@ -411,7 +438,7 @@ fn make_create_provider_req(slug: &str, name: &str) -> CreateProviderRequestV1 {
     CreateProviderRequestV1::builder(slug, name, make_provider_gts()).build()
 }
 
-fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> CreateModelRequestV1 {
+fn make_create_model_req(provider_id: Uuid, provider_model_id: &str) -> CreateModelRequestV1 {
     let gts_leaf = "cf.genai._.openai.v1~";
     let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
 
@@ -490,7 +517,7 @@ fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> Create
     };
 
     CreateModelRequestV1 {
-        provider_slug: provider_slug.to_owned(),
+        provider_id,
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
@@ -504,12 +531,12 @@ fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> Create
 /// inheritance, provider status — needs an approved fixture to reach the
 /// behavior it is actually asserting.
 fn make_create_approved_model_req(
-    provider_slug: &str,
+    provider_id: Uuid,
     provider_model_id: &str,
 ) -> CreateModelRequestV1 {
     CreateModelRequestV1 {
         approval_status: Some(ApprovalStatus::Approved),
-        ..make_create_model_req(provider_slug, provider_model_id)
+        ..make_create_model_req(provider_id, provider_model_id)
     }
 }
 
@@ -588,9 +615,22 @@ async fn create_model_direct(
     provider_model_id: &str,
 ) -> ModelV1 {
     let scope = scope_for(tenant_id);
-    let mut req = make_create_model_req(provider_slug, provider_model_id);
+    // The repository takes an already-resolved provider (the service owns the
+    // ownership check), but a test names its provider by slug, so the fixture
+    // does the lookup the production write path no longer performs.
+    let provider = ProviderRepository::find_all_by_slug(
+        &ProviderRepositoryImpl::default(),
+        conn,
+        &scope,
+        provider_slug,
+    )
+    .await
+    .expect("provider lookup succeeds in test setup")
+    .pop()
+    .expect("provider exists in test setup");
+    let mut req = make_create_model_req(provider.id, provider_model_id);
     req.approval_status = Some(ApprovalStatus::Approved);
-    ModelRepository::create(repo, conn, &scope, tenant_id, &req)
+    ModelRepository::create(repo, conn, &scope, tenant_id, &provider, &req)
         .await
         .expect("create model in test setup")
 }
@@ -616,10 +656,12 @@ async fn full_lifecycle_single_tenant() {
 
     // ── Step 2: Create a model ──────────────────────────────────────────────
     let model = service
-        .create_model(&ctx, &make_create_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
+    // canonical_id is derived server-side from the provider's slug.
     assert_eq!(model.canonical_id, "openai::gpt-4o");
+    assert_eq!(model.provider_id, provider.id);
     assert_eq!(model.lifecycle_status, LifecycleStatus::Production);
     assert_eq!(model.approval_status, ApprovalStatus::Pending);
 
@@ -665,7 +707,7 @@ async fn full_lifecycle_single_tenant() {
     let approved = service
         .update_model(
             &ctx,
-            "openai::gpt-4o",
+            model.id,
             &UpdateModelRequestV1 {
                 approval_status: Some(ApprovalStatus::Approved),
                 ..Default::default()
@@ -693,7 +735,7 @@ async fn full_lifecycle_single_tenant() {
 
     // ── Step 8: Soft-delete the model ───────────────────────────────────────
     service
-        .delete_model(&ctx, "openai::gpt-4o")
+        .delete_model(&ctx, model.id)
         .await
         .expect("soft-delete model");
 
@@ -734,8 +776,8 @@ async fn tenant_isolation() {
         .create_provider(&ctx_a, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider in tenant A");
-    let _model = service
-        .create_model(&ctx_a, &make_create_model_req("openai", "gpt-4o"))
+    let model = service
+        .create_model(&ctx_a, &make_create_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model in tenant A");
 
@@ -771,6 +813,17 @@ async fn tenant_isolation() {
         "expected ProviderNotFoundBySlug, got {get_err:?}"
     );
 
+    // Nor via the id-keyed management read, even holding the real UUID: the
+    // access scope, not the identifier's obscurity, is what isolates tenants.
+    let get_by_id_err = service
+        .get_model(&ctx_b, model.id)
+        .await
+        .expect_err("tenant B get_model should fail");
+    assert!(
+        matches!(get_by_id_err, DomainError::ModelNotFoundById { .. }),
+        "expected ModelNotFoundById, got {get_by_id_err:?}"
+    );
+
     // Tenant B should not be able to get the provider.
     let get_provider_err = service
         .get_provider(&ctx_b, provider.id)
@@ -785,7 +838,7 @@ async fn tenant_isolation() {
     let update_err = service
         .update_model(
             &ctx_b,
-            "openai::gpt-4o",
+            model.id,
             &UpdateModelRequestV1 {
                 approval_status: Some(ApprovalStatus::Approved),
                 ..Default::default()
@@ -794,18 +847,18 @@ async fn tenant_isolation() {
         .await
         .expect_err("tenant B update model should fail");
     assert!(
-        matches!(update_err, DomainError::ModelNotFound { .. }),
-        "expected ModelNotFound, got {update_err:?}"
+        matches!(update_err, DomainError::ModelNotFoundById { .. }),
+        "expected ModelNotFoundById, got {update_err:?}"
     );
 
     // Tenant B should not be able to delete the model.
     let delete_err = service
-        .delete_model(&ctx_b, "openai::gpt-4o")
+        .delete_model(&ctx_b, model.id)
         .await
         .expect_err("tenant B delete model should fail");
     assert!(
-        matches!(delete_err, DomainError::ModelNotFound { .. }),
-        "expected ModelNotFound, got {delete_err:?}"
+        matches!(delete_err, DomainError::ModelNotFoundById { .. }),
+        "expected ModelNotFoundById, got {delete_err:?}"
     );
 }
 
@@ -864,35 +917,34 @@ async fn child_inherits_provider_and_model_from_parent() {
         "inherited model should have populated approval_status"
     );
 
-    // ── Child can list inherited providers ──────────────────────────────────
+    // ── The admin provider reads stay inside the PDP scope ──────────────────
+    // Inheritance is an eval-path mechanism; the parent's provider row is not
+    // in the child's own-tenant scope.
     let providers_page = service
         .list_providers(&ctx, &ODataQuery::default())
         .await
-        .expect("child list inherited providers");
-    assert_eq!(
-        providers_page.items.len(),
-        1,
-        "child should inherit exactly 1 provider"
-    );
-    assert_eq!(
-        providers_page.items[0].slug, "openai",
-        "inherited provider slug must match"
+        .expect("child list providers");
+    assert!(
+        providers_page.items.is_empty(),
+        "the admin listing must not reach the parent's provider"
     );
 
-    // ── Child can get the inherited provider directly ───────────────────────
-    let inherited_provider = service
+    let err = service
         .get_provider(&ctx, provider_id)
         .await
-        .expect("child get inherited provider");
-    assert_eq!(inherited_provider.slug, "openai");
+        .expect_err("the parent's provider is outside the child's scope");
+    assert!(
+        matches!(&err, DomainError::ProviderNotFound { id } if *id == provider_id),
+        "expected ProviderNotFound({provider_id}), got: {err:?}"
+    );
 }
 
 /// Seed a parent tenant with one provider and three models, then assert the
 /// child's `$top`-less listing comes back bounded to two rows by `cfg`.
 ///
-/// The child owns no providers, so its own page is synthesized empty and every
-/// row arrives from the unpaginated ancestor query — the configured bound has to
-/// hold there too.
+/// The child owns no providers, so every row is inherited. The chain-wide query
+/// paginates those rows like any other, so the configured bound has to hold and
+/// the remaining row must stay reachable through the cursor.
 async fn assert_inherited_listing_bounded_to_two(cfg: ModelRegistryConfig) {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
@@ -921,6 +973,10 @@ async fn assert_inherited_listing_bounded_to_two(cfg: ModelRegistryConfig) {
         .expect("child list inherited models");
     assert_eq!(page.items.len(), 2, "merged page must be bounded by config");
     assert_eq!(page.page_info.limit, 2);
+    assert!(
+        page.page_info.next_cursor.is_some(),
+        "the third inherited model must stay reachable rather than be truncated away"
+    );
 }
 
 #[tokio::test]
@@ -939,6 +995,109 @@ async fn configured_default_page_size_bounds_inherited_listing() {
         ..Default::default()
     })
     .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3b. Inherited listing is one globally-ordered, fully-pageable set
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Seed the parent with `openai::a` / `openai::c` / `openai::e` and the child
+/// with `child-co::b` / `child-co::d`, so a correct global sort has to
+/// interleave the two tenants rather than concatenate them.
+async fn seed_interleaved_chain(db: &DBProvider<DbError>) {
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
+
+    create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    for model_id in ["a", "c", "e"] {
+        create_model_direct(&model_repo, &conn, parent_tenant(), "openai", model_id).await;
+    }
+
+    create_provider_direct(&provider_repo, &conn, child_tenant(), "child-co").await;
+    for model_id in ["b", "d"] {
+        create_model_direct(&model_repo, &conn, child_tenant(), "child-co", model_id).await;
+    }
+}
+
+/// Own and inherited rows must come back as one sorted sequence, not as
+/// own-rows-then-ancestor-rows.
+#[tokio::test]
+async fn inherited_listing_is_globally_ordered_not_own_first() {
+    let db = setup_db().await;
+    seed_interleaved_chain(&db).await;
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    let page = service
+        .list_tenant_models(&ctx, &ODataQuery::default())
+        .await
+        .expect("child lists the merged set");
+
+    let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "child-co::b",
+            "child-co::d",
+            "openai::a",
+            "openai::c",
+            "openai::e"
+        ],
+        "the merged set must be sorted by canonical_id across both tenants"
+    );
+}
+
+/// Walk the whole inherited catalog two rows at a time. Before the chain-wide
+/// query this was impossible: the cursor was suppressed as soon as any
+/// inherited row appeared, so page 2 could never be requested.
+#[tokio::test]
+async fn inherited_listing_pages_end_to_end() {
+    let db = setup_db().await;
+    seed_interleaved_chain(&db).await;
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    for page_number in 1..=4 {
+        let page = service
+            .list_tenant_models(
+                &ctx,
+                &ODataQuery {
+                    limit: Some(2),
+                    cursor: cursor.clone(),
+                    ..ODataQuery::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("page {page_number} must resolve: {e}"));
+
+        assert!(
+            page.items.len() <= 2,
+            "page {page_number} must respect $top"
+        );
+        seen.extend(page.items.iter().map(|m| m.canonical_id.clone()));
+
+        match page.page_info.next_cursor {
+            Some(token) => {
+                cursor = Some(CursorV1::decode(&token).expect("cursor decodes"));
+            }
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        seen,
+        [
+            "child-co::b",
+            "child-co::d",
+            "openai::a",
+            "openai::c",
+            "openai::e"
+        ],
+        "the walk must cover every visible row exactly once, in sort order"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1087,14 +1246,14 @@ async fn odata_filters_work_on_filterable_columns() {
     let ctx = security_context(tenant_id);
 
     // Create provider.
-    service
+    let openai = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
     // Create two models with different providers but same vendor/family.
     let _model1 = service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req(openai.id, "gpt-4o"))
         .await
         .expect("create model gpt-4o");
 
@@ -1104,9 +1263,8 @@ async fn odata_filters_work_on_filterable_columns() {
         .expect("create provider anthropic");
 
     // Create a second provider with different slug for second model.
-    // (The model's provider settings reference the provider slug;
-    //  the `gts_type` in the info drives the `gts_type` column.)
-    let mut model2_req = make_create_approved_model_req("openai", "gpt-4o-mini");
+    // (The `gts_type` in the info drives the `gts_type` column.)
+    let mut model2_req = make_create_approved_model_req(openai.id, "gpt-4o-mini");
     model2_req.info = {
         let mut info_val = serde_json::to_value(&model2_req.info).expect("serialize info");
         if let Some(obj) = info_val.as_object_mut() {
@@ -1265,12 +1423,12 @@ async fn create_and_read_round_trip_full_model_info() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
-    let mut req = make_create_approved_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req(provider.id, "gpt-4o");
     // Populate the fields that ride inside the JSONB sub-objects (rather than
     // in a promoted scalar column) so the whole-payload assertion at the end of
     // this test covers them too.
@@ -1368,12 +1526,12 @@ async fn additional_info_and_allow_extra_params_round_trip_non_empty() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
-    let mut req = make_create_approved_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req(provider.id, "gpt-4o");
     req.info.additional_info = serde_json::from_value(serde_json::json!({
         "team": "alpha",
         "trace_id": true,
@@ -1436,12 +1594,12 @@ async fn size_bytes_over_2gib_round_trips() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
-    let mut req = make_create_approved_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req(provider.id, "gpt-4o");
     req.info.size_bytes = Some(LARGE_MODEL_BYTES);
 
     service
@@ -1474,12 +1632,12 @@ async fn context_window_max_input_tokens_over_2gib_round_trips() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
-    let mut req = make_create_approved_model_req("openai", "gpt-4o");
+    let mut req = make_create_approved_model_req(provider.id, "gpt-4o");
     req.info.context_window.max_input_tokens = LARGE_CTX;
 
     service
@@ -1508,13 +1666,13 @@ async fn patch_reprojects_all_promoted_columns() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
-    service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+    let model = service
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
 
@@ -1523,7 +1681,7 @@ async fn patch_reprojects_all_promoted_columns() {
     let patched = service
         .update_model(
             &ctx,
-            "openai::gpt-4o",
+            model.id,
             &UpdateModelRequestV1 {
                 display_name: Some("GPT-4o (Updated)".to_owned()),
                 context_window: Some(model_registry_sdk::models::ContextWindow {
@@ -1577,14 +1735,14 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
     let service = build_service(db, NoAncestorsResolver);
     let ctx = security_context(tenant_a());
 
-    service
+    let provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
 
     // Seed: function_calling=true, vision enabled with jpeg mime types.
-    service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+    let model = service
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
 
@@ -1592,7 +1750,7 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
     // capabilities). `ModelCapabilities` is `#[non_exhaustive]` so we
     // round-trip through JSON.
     let original_caps = serde_json::to_value(
-        &make_create_approved_model_req("openai", "gpt-4o")
+        &make_create_approved_model_req(provider.id, "gpt-4o")
             .info
             .capabilities,
     )
@@ -1607,7 +1765,7 @@ async fn capability_flip_round_trips_with_jsonb_intact() {
     let patched = service
         .update_model(
             &ctx,
-            "openai::gpt-4o",
+            model.id,
             &UpdateModelRequestV1 {
                 capabilities: Some(patched_caps),
                 ..Default::default()
@@ -1704,9 +1862,14 @@ async fn child_shadows_provider_slug_blocks_ancestor_model_get() {
     );
 
     // Step 5: Create a model under the child's provider with the same
-    // canonical_id and verify the child's model IS returned.
+    // canonical_id and verify the child's model IS returned. The child names
+    // its OWN provider by id — with slugs this call was ambiguous between the
+    // child's provider and the parent's.
     service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+        .create_model(
+            &ctx,
+            &make_create_approved_model_req(child_provider.id, "gpt-4o"),
+        )
         .await
         .expect("child creates own model");
 
@@ -1746,14 +1909,17 @@ async fn create_provider_drops_slug_tombstone() {
     );
 
     // Step 2: Child creates their own provider with slug "openai".
-    let _child_provider = service
+    let child_provider = service
         .create_provider(&ctx, &make_create_provider_req("openai", "Child OpenAI"))
         .await
         .expect("child creates own openai provider");
 
     // Step 3: Create a model under the child's provider.
     service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+        .create_model(
+            &ctx,
+            &make_create_approved_model_req(child_provider.id, "gpt-4o"),
+        )
         .await
         .expect("child creates model");
 
@@ -1782,7 +1948,7 @@ async fn disabled_provider_hides_model_on_get() {
         .await
         .expect("create provider");
     service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
 
@@ -1961,7 +2127,7 @@ async fn list_management_denied_without_grant() {
 }
 
 #[tokio::test]
-async fn management_listing_shows_shadowed_rows_from_ancestor() {
+async fn management_listing_is_bounded_by_the_pdp_scope() {
     let db = setup_db().await;
     let conn = db.conn().expect("db connection");
     let provider_repo = ProviderRepositoryImpl::default();
@@ -1983,11 +2149,10 @@ async fn management_listing_shows_shadowed_rows_from_ancestor() {
     let ctx = security_context(child_tenant());
 
     // Approve the child's model so available_for_eval is correctly computed.
-    let child_canonical_id = String::from("openai::claude-4");
     service
         .update_model(
             &ctx,
-            &child_canonical_id,
+            child_model.id,
             &model_registry::UpdateModelRequestV1 {
                 approval_status: Some(model_registry::ApprovalStatus::Approved),
                 ..Default::default()
@@ -1996,7 +2161,7 @@ async fn management_listing_shows_shadowed_rows_from_ancestor() {
         .await
         .expect("approve child model");
 
-    // Eval listing must only show the child's model (parent's is shadowed).
+    // Eval listing resolves the chain: the parent's model is shadowed.
     let eval_page = service
         .list_tenant_models(&ctx, &ODataQuery::default())
         .await
@@ -2011,47 +2176,73 @@ async fn management_listing_shows_shadowed_rows_from_ancestor() {
         "eval listing must show child's model, not parent's"
     );
 
-    // Management listing must show BOTH rows, with correct shadowed flags.
+    // Management listing carries the PDP scope, which `MockAuthZ` pins to the
+    // caller's own tenant. The parent's row is out of scope.
     let mgmt_page = service
         .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
         .await
         .expect("management list");
 
-    // Both rows should be present (management does not dedupe by canonical_id).
     assert_eq!(
         mgmt_page.items.len(),
-        2,
-        "management listing must show both own and inherited models"
+        1,
+        "management listing must not reach the parent tenant"
     );
-
-    // Child's model: not shadowed, available for eval.
-    let child_mgmt = mgmt_page
-        .items
-        .iter()
-        .find(|m| m.model.id == child_model.id)
-        .expect("child's model must be in management listing");
+    assert_eq!(mgmt_page.items[0].model.id, child_model.id);
     assert!(
-        !child_mgmt.shadowed,
-        "child's own model must not be shadowed"
-    );
-    assert!(
-        child_mgmt.available_for_eval,
+        mgmt_page.items[0].available_for_eval,
         "child's own model must be available for eval"
     );
-
-    // Parent's model: shadowed, NOT available for eval.
-    let parent_mgmt = mgmt_page
-        .items
-        .iter()
-        .find(|m| m.model.id == parent_model.id)
-        .expect("parent's model must be in management listing");
     assert!(
-        parent_mgmt.shadowed,
-        "parent's model must be marked shadowed"
+        !mgmt_page
+            .items
+            .iter()
+            .any(|m| m.model.id == parent_model.id),
+        "the ancestor's model must not appear in the admin listing"
+    );
+}
+
+#[tokio::test]
+async fn management_listing_spans_every_tenant_the_pdp_grants() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
+
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    let parent_model =
+        create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    let (_child_provider_id, child_slug) =
+        create_provider_direct(&provider_repo, &conn, child_tenant(), "anthropic").await;
+    let child_model =
+        create_model_direct(&model_repo, &conn, child_tenant(), &child_slug, "claude-4").await;
+
+    // No ancestor relationship: reach comes from the PDP grant alone.
+    let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZTenants(vec![
+        child_tenant(),
+        parent_tenant(),
+    ])));
+    let service = build_service_with_enforcer(db, NoAncestorsResolver, enforcer);
+    let ctx = security_context(child_tenant());
+
+    let mgmt_page = service
+        .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+        .await
+        .expect("management list");
+
+    let mut ids: Vec<Uuid> = mgmt_page.items.iter().map(|m| m.model.id).collect();
+    ids.sort_unstable();
+    let mut expected = vec![parent_model.id, child_model.id];
+    expected.sort_unstable();
+    assert_eq!(
+        ids, expected,
+        "the admin listing must cover both granted tenants"
     );
     assert!(
-        !parent_mgmt.available_for_eval,
-        "parent's shadowed model must not be available for eval"
+        mgmt_page.items.iter().all(|m| !m.provider_disabled),
+        "both providers are active"
     );
 }
 
@@ -2145,10 +2336,7 @@ async fn warm_chain_skips_tenant_resolver() {
         .await
         .expect("create provider");
     service
-        .create_model(
-            &ctx,
-            &make_create_approved_model_req(&provider.slug, "gpt-4o"),
-        )
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
 
@@ -2202,14 +2390,14 @@ async fn writes_never_touch_the_cache() {
         .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
         .await
         .expect("create provider");
-    service
-        .create_model(&ctx, &make_create_approved_model_req("openai", "gpt-4o"))
+    let model = service
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
         .await
         .expect("create model");
     service
         .update_model(
             &ctx,
-            "openai::gpt-4o",
+            model.id,
             &UpdateModelRequestV1 {
                 approval_status: Some(ApprovalStatus::Rejected),
                 ..Default::default()
@@ -2218,7 +2406,7 @@ async fn writes_never_touch_the_cache() {
         .await
         .expect("update model");
     service
-        .delete_model(&ctx, "openai::gpt-4o")
+        .delete_model(&ctx, model.id)
         .await
         .expect("delete model");
     service
@@ -2235,4 +2423,266 @@ async fn writes_never_touch_the_cache() {
 
     assert_eq!(cache.gets(), 0, "no write reads a cache entry");
     assert_eq!(cache.puts(), 0, "no write writes a cache entry");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 12. get_model — the id-keyed management read
+//
+// The eval read (`get_tenant_model`) is a fail-closed access gate keyed by a
+// chain-relative `canonical_id`. `get_model` is neither: it is keyed by a stable
+// UUID and applies no eval gates, because an admin has to read a row before
+// acting on it. These tests pin the difference.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A `pending` model is refused by the eval read and returned by the management
+/// read — the same row, two answers, by design.
+#[tokio::test]
+async fn get_model_returns_a_pending_row_the_eval_read_refuses() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    // `make_create_model_req` leaves approval_status at its default (pending).
+    let created = service
+        .create_model(&ctx, &make_create_model_req(provider.id, "gpt-4o"))
+        .await
+        .expect("create model");
+    assert_eq!(created.approval_status, ApprovalStatus::Pending);
+
+    let eval_err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("the eval read gates on approval");
+    assert!(
+        matches!(&eval_err, DomainError::ModelNotApproved { .. }),
+        "expected ModelNotApproved, got: {eval_err:?}"
+    );
+
+    let managed = service
+        .get_model(&ctx, created.id)
+        .await
+        .expect("the management read applies no approval gate");
+    assert_eq!(managed.id, created.id);
+    assert_eq!(managed.approval_status, ApprovalStatus::Pending);
+}
+
+/// A soft-deleted (deprecated) model stays readable by id. Without this the
+/// admin UI could not display, or un-deprecate, what it just deleted.
+#[tokio::test]
+async fn get_model_returns_a_deprecated_row() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("create provider");
+    let created = service
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
+        .await
+        .expect("create model");
+
+    service
+        .delete_model(&ctx, created.id)
+        .await
+        .expect("soft-delete");
+
+    let eval_err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("the eval read gates on lifecycle");
+    assert!(
+        matches!(&eval_err, DomainError::ModelDeprecated { .. }),
+        "expected ModelDeprecated, got: {eval_err:?}"
+    );
+
+    let managed = service
+        .get_model(&ctx, created.id)
+        .await
+        .expect("a deprecated row is still readable by id");
+    assert_eq!(managed.lifecycle_status, LifecycleStatus::Deprecated);
+}
+
+/// The admin read is bounded by the PDP scope: an ancestor's row is out of
+/// reach under an own-tenant scope, and reachable under a scope that names its
+/// tenant — where it is writable too.
+#[tokio::test]
+async fn get_model_reaches_an_ancestor_row_only_when_the_pdp_grants_its_tenant() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
+
+    // Parent owns provider "openai" and a model under it.
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    let parent_model =
+        create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    // Child shadows the slug with its own provider and owns no model.
+    create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
+
+    let db2 = db.clone();
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // The eval read serves nothing: the child won the slug and owns no model.
+    let eval_err = service
+        .get_tenant_model(&ctx, "openai::gpt-4o")
+        .await
+        .expect_err("the shadowed ancestor row is not eval-visible");
+    assert!(
+        matches!(&eval_err, DomainError::ModelNotFound { .. }),
+        "expected ModelNotFound, got: {eval_err:?}"
+    );
+
+    // Under an own-tenant scope the admin read cannot reach it either.
+    let read_err = service
+        .get_model(&ctx, parent_model.id)
+        .await
+        .expect_err("an ancestor row is outside an own-tenant scope");
+    assert!(
+        matches!(&read_err, DomainError::ModelNotFoundById { id } if *id == parent_model.id),
+        "expected ModelNotFoundById, got: {read_err:?}"
+    );
+
+    // A PDP grant covering the parent tenant makes it both readable and
+    // writable — the ancestor relationship plays no part.
+    let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZTenants(vec![
+        child_tenant(),
+        parent_tenant(),
+    ])));
+    let admin = build_service_with_enforcer(db2, NoAncestorsResolver, enforcer);
+
+    let managed = admin
+        .get_model(&ctx, parent_model.id)
+        .await
+        .expect("a granted tenant's row is readable by id");
+    assert_eq!(managed.id, parent_model.id);
+    assert_eq!(managed.tenant_id, parent_tenant());
+
+    let updated = admin
+        .update_model(
+            &ctx,
+            parent_model.id,
+            &UpdateModelRequestV1 {
+                approval_status: Some(ApprovalStatus::Rejected),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a granted tenant's row is writable");
+    assert_eq!(updated.approval_status, ApprovalStatus::Rejected);
+
+    admin
+        .delete_model(&ctx, parent_model.id)
+        .await
+        .expect("a granted tenant's row is soft-deletable");
+}
+
+/// An unknown id is a plain 404 — no chain hop leaks anything.
+#[tokio::test]
+async fn get_model_unknown_id_is_not_found() {
+    let db = setup_db().await;
+    let service = build_service(db, NoAncestorsResolver);
+    let ctx = security_context(tenant_a());
+
+    let missing = Uuid::new_v4();
+    let err = service
+        .get_model(&ctx, missing)
+        .await
+        .expect_err("unknown id");
+    assert!(
+        matches!(&err, DomainError::ModelNotFoundById { id } if *id == missing),
+        "expected ModelNotFoundById({missing}), got: {err:?}"
+    );
+}
+
+/// `create_model` addresses its provider by id, so the child/parent ambiguity a
+/// slug carried is gone: an out-of-scope provider is a 404, and the caller's own
+/// provider of the same slug succeeds.
+#[tokio::test]
+async fn create_model_provider_id_disambiguates_a_shadowed_slug() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+
+    let (parent_provider_id, _parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    let (child_provider_id, _child_slug) =
+        create_provider_direct(&provider_repo, &conn, child_tenant(), "openai").await;
+
+    let service = build_service(db, OneAncestorResolver);
+    let ctx = security_context(child_tenant());
+
+    // The parent's provider is outside the caller's scope -> 404.
+    let err = service
+        .create_model(
+            &ctx,
+            &make_create_approved_model_req(parent_provider_id, "gpt-4o"),
+        )
+        .await
+        .expect_err("an out-of-scope provider is not a valid target");
+    assert!(
+        matches!(&err, DomainError::ProviderNotFound { id } if *id == parent_provider_id),
+        "expected ProviderNotFound({parent_provider_id}), got: {err:?}"
+    );
+
+    // The child's own provider of the same slug: succeeds.
+    let model = service
+        .create_model(
+            &ctx,
+            &make_create_approved_model_req(child_provider_id, "gpt-4o"),
+        )
+        .await
+        .expect("the child's own provider is a valid target");
+    assert_eq!(model.provider_id, child_provider_id);
+    assert_eq!(model.tenant_id, child_tenant());
+    // Both tenants now own a row named `openai::gpt-4o`; the id, not the
+    // canonical_id, is what distinguishes them.
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+}
+
+/// The per-tenant uniqueness pre-checks must not fire against a sibling tenant's
+/// row when the PDP scope spans both. Slug and `canonical_id` are unique per
+/// tenant, not per scope.
+#[tokio::test]
+async fn uniqueness_pre_checks_do_not_collide_across_tenants_in_scope() {
+    let db = setup_db().await;
+    let conn = db.conn().expect("db connection");
+    let provider_repo = ProviderRepositoryImpl::default();
+    let model_repo = ModelRepositoryImpl::default();
+
+    // The parent already owns provider "openai" and model "openai::gpt-4o".
+    let (_parent_provider_id, parent_slug) =
+        create_provider_direct(&provider_repo, &conn, parent_tenant(), "openai").await;
+    create_model_direct(&model_repo, &conn, parent_tenant(), &parent_slug, "gpt-4o").await;
+
+    // A grant spanning both tenants.
+    let enforcer = authz_resolver_sdk::pep::PolicyEnforcer::new(Arc::new(MockAuthZTenants(vec![
+        child_tenant(),
+        parent_tenant(),
+    ])));
+    let service = build_service_with_enforcer(db, NoAncestorsResolver, enforcer);
+    let ctx = security_context(child_tenant());
+
+    // The child may still create its own "openai" provider.
+    let provider = service
+        .create_provider(&ctx, &make_create_provider_req("openai", "OpenAI"))
+        .await
+        .expect("a sibling tenant's slug must not block this create");
+    assert_eq!(provider.tenant_id, child_tenant());
+
+    // And its own "openai::gpt-4o" model under it.
+    let model = service
+        .create_model(&ctx, &make_create_approved_model_req(provider.id, "gpt-4o"))
+        .await
+        .expect("a sibling tenant's canonical_id must not block this create");
+    assert_eq!(model.canonical_id, "openai::gpt-4o");
+    assert_eq!(model.tenant_id, child_tenant());
 }

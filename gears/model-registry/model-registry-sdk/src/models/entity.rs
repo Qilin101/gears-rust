@@ -23,8 +23,8 @@ use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus
 pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub id: Uuid,
     /// Tenant that owns this model. Always equal to the owning provider's
-    /// tenant — a model is never created against an ancestor's provider (§2.1).
-    /// For an inherited model this is an ancestor tenant, not the reader's.
+    /// tenant (§2.1). Not necessarily the reader's: an ancestor's on the eval
+    /// path, or any tenant the reader's access scope covers on the admin path.
     pub tenant_id: Uuid,
     /// Foreign key to the provider that owns this model.
     /// The visibility key (§3.6): a model is visible in eval listings only
@@ -85,32 +85,27 @@ impl ModelV1<serde_json::Value> {
 
 /// A model row as returned by the `list_tenant_models_management` endpoint.
 ///
-/// Augments [`ModelV1<P>`] with three management-only flags computed from
-/// [`ChainProviders`](crate::domain::inheritance::ChainProviders):
+/// Augments [`ModelV1<P>`] with two management-only flags computed from the
+/// model's own provider:
 ///
-/// - `shadowed` — the provider slug is owned by a closer tenant (the model is
-///   hidden from eval listings by a shadow provider).
-/// - `provider_disabled` — the provider's status is `disabled`; the model
-///   is hidden from eval listings.
-/// - `available_for_eval` — the model would be returned by
-///   `list_tenant_models` (visible, active provider, approved, non-terminal
-///   lifecycle).
+/// - `provider_disabled` — the provider's status is `disabled`; the model is
+///   hidden from eval listings.
+/// - `available_for_eval` — the model is approved, on a non-terminal
+///   lifecycle, and its provider is active.
+///
+/// `available_for_eval` does not account for provider shadowing, which is
+/// relative to a requester's tenant chain. A model marked
+/// `available_for_eval` may still be hidden from a given tenant's eval
+/// listing by a closer provider owning the same slug.
 ///
 /// Generic over `P` with the same semantics as [`ModelV1<P>`].
-///
-/// Three bool flags inline is intentional — these map one-to-one to an admin
-/// UI's three labelled columns. A two-variant enum per flag would add
-/// ceremony without clarity.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelManagementV1<P: gts::GtsSchema = serde_json::Value> {
     /// The underlying model data.
     pub model: ModelV1<P>,
-    /// The provider slug is shadowed by a closer tenant.
-    pub shadowed: bool,
     /// The provider is disabled.
     pub provider_disabled: bool,
-    /// The model would be visible in the eval (`list_tenant_models`) result.
+    /// The model passes every eval predicate except provider shadowing.
     pub available_for_eval: bool,
 }
 
@@ -122,9 +117,9 @@ pub struct ModelManagementV1<P: gts::GtsSchema = serde_json::Value> {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderV1 {
     pub id: Uuid,
-    /// Tenant that owns this provider. For an inherited provider this is an
-    /// ancestor tenant, not the reader's — it is the tenant whose cache prefix
-    /// and write scope govern the row.
+    /// Tenant that owns this provider. Not necessarily the reader's: an
+    /// ancestor's on the eval path, or any tenant the reader's access scope
+    /// covers on the admin path.
     pub tenant_id: Uuid,
     /// Human-readable identifier (immutable after creation).
     /// Format: 1-64 chars, lowercase alphanumeric + hyphen.

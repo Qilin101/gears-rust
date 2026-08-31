@@ -42,7 +42,7 @@ use std::collections::HashSet;
 
 use model_registry_sdk::models::{
     ApprovalStatus, ContextWindow, CreateModelRequestV1, LifecycleStatus, ModelCapabilities,
-    ModelInfoV1, ModelPerformance, ModelV1, SupportedApi, UpdateModelRequestV1,
+    ModelInfoV1, ModelPerformance, ModelV1, ProviderV1, SupportedApi, UpdateModelRequestV1,
 };
 use sea_orm::Set;
 use uuid::Uuid;
@@ -266,25 +266,28 @@ fn project_info(info: &ModelInfoV1, am: &mut entity::model::ActiveModel) {
     am.cap_reasoning_effort = Set(info.capabilities.reasoning.effort);
 }
 
-/// Build a `model::ActiveModel` from a create request.
+/// Build a `model::ActiveModel` from a create request against a resolved
+/// provider.
 ///
 /// Projects every `ModelInfoV1` field into the corresponding promoted column
 /// via [`project_info`] and derives `canonical_id` as
-/// `{provider_slug}::{info.provider_model_id}`.
+/// `{provider.slug}::{info.provider_model_id}`. The slug comes from the
+/// resolved provider, never from the request — the request carries only
+/// `provider_id`.
 #[must_use]
 pub fn model_create_active_model(
     tenant_id: Uuid,
-    provider_id: Uuid,
+    provider: &ProviderV1,
     req: &CreateModelRequestV1,
     initial_approval_status: ApprovalStatus,
 ) -> entity::model::ActiveModel {
-    let canonical_id = format!("{}::{}", req.provider_slug, req.info.provider_model_id);
+    let canonical_id = format!("{}::{}", provider.slug, req.info.provider_model_id);
     // Single timestamp for both created_at and updated_at so they match exactly.
     let now = chrono::Utc::now();
 
     let mut active = entity::model::ActiveModel {
         id: Set(Uuid::new_v4()),
-        provider_id: Set(provider_id),
+        provider_id: Set(provider.id),
         tenant_id: Set(tenant_id),
         canonical_id: Set(canonical_id),
         lifecycle_status: Set(req.lifecycle_status.as_str().to_owned()),

@@ -196,30 +196,50 @@ fn create_model_request_deserializes() {
         "provider_model_id": "claude-sonnet-4-5",
     });
 
+    let provider_id = Uuid::parse_str("2f3d5a7b-1c9e-4d6f-8a0b-1e2c3d4f5a6b").expect("uuid");
     let json = json!({
-        "provider_slug": "anthropic",
+        "provider_id": provider_id,
         "lifecycle_status": "production",
         "approval_status": "approved",
         "info": info,
     });
 
     let dto: CreateModelRequestDto = serde_json::from_value(json).expect("deserialize");
-    assert_eq!(dto.provider_slug, "anthropic");
+    assert_eq!(dto.provider_id, provider_id);
     assert_eq!(dto.lifecycle_status, "production");
     assert_eq!(dto.approval_status, Some("approved".into()));
 }
 
 #[test]
-fn create_model_request_defaults_approval_status() {
+fn create_model_request_rejects_a_non_uuid_provider() {
+    // The wire type is a Uuid, so a slug in `provider_id` is a deserialization
+    // failure rather than a value the service has to resolve.
     let json = json!({
-        "provider_slug": "openai",
+        "provider_id": "anthropic",
+        "lifecycle_status": "production",
+        "info": {"provider_model_id": "claude-sonnet-4-5"},
+    });
+
+    let err = serde_json::from_value::<CreateModelRequestDto>(json)
+        .expect_err("slug is not a valid provider_id");
+    assert!(
+        err.to_string().contains("UUID"),
+        "expected a uuid parse failure, got: {err}"
+    );
+}
+
+#[test]
+fn create_model_request_defaults_approval_status() {
+    let provider_id = Uuid::parse_str("6b5a4f3e-2d1c-4b0a-9e8d-7c6b5a4f3e2d").expect("uuid");
+    let json = json!({
+        "provider_id": provider_id,
         "lifecycle_status": "experimental",
         "info": {"key": "value"},
     });
 
     let dto: CreateModelRequestDto = serde_json::from_value(json).expect("deserialize");
     assert!(dto.approval_status.is_none());
-    assert_eq!(dto.provider_slug, "openai");
+    assert_eq!(dto.provider_id, provider_id);
     assert_eq!(dto.lifecycle_status, "experimental");
     assert_eq!(dto.info, json!({"key": "value"}));
 }
@@ -691,8 +711,7 @@ fn model_management_dto_serializes() {
         lifecycle_status: "production".into(),
         approval_status: "approved".into(),
         info: json!({"display_name": "GPT-4o"}),
-        shadowed: true,
-        provider_disabled: false,
+        provider_disabled: true,
         available_for_eval: false,
     };
 
@@ -702,13 +721,12 @@ fn model_management_dto_serializes() {
     assert_eq!(json["canonical_id"], "openai::gpt-4o");
     assert_eq!(json["lifecycle_status"], "production");
     assert_eq!(json["approval_status"], "approved");
-    assert_eq!(json["shadowed"], true);
-    assert_eq!(json["provider_disabled"], false);
+    assert_eq!(json["provider_disabled"], true);
     assert_eq!(json["available_for_eval"], false);
 }
 
 #[test]
-fn model_management_dto_serializes_all_flags_false() {
+fn model_management_dto_serializes_with_flags_clear() {
     let dto = ModelManagementDto {
         id: Uuid::nil(),
         provider_id: Uuid::nil(),
@@ -716,13 +734,11 @@ fn model_management_dto_serializes_all_flags_false() {
         lifecycle_status: "production".into(),
         approval_status: "approved".into(),
         info: json!({}),
-        shadowed: false,
         provider_disabled: false,
         available_for_eval: true,
     };
 
     let json = serde_json::to_value(&dto).expect("serialize");
-    assert_eq!(json["shadowed"], false);
     assert_eq!(json["provider_disabled"], false);
     assert_eq!(json["available_for_eval"], true);
 }
@@ -737,7 +753,6 @@ fn model_management_list_dto_serializes() {
             lifecycle_status: "production".into(),
             approval_status: "approved".into(),
             info: json!({}),
-            shadowed: false,
             provider_disabled: false,
             available_for_eval: true,
         }],
@@ -750,25 +765,26 @@ fn model_management_list_dto_serializes() {
 
     let json = serde_json::to_value(&dto).expect("serialize");
     assert!(json["items"].is_array());
-    assert_eq!(json["items"][0]["shadowed"], false);
+    assert_eq!(json["items"][0]["provider_disabled"], false);
     assert_eq!(json["items"][0]["available_for_eval"], true);
     assert_eq!(json["page_info"]["next_cursor"], "cursor-abc");
     assert_eq!(json["page_info"]["limit"], 20);
 }
 
-/// Regression guard: `shadowed` must NOT be a valid `ModelFilterField`.
+/// Regression guard: the management flags must NOT be `ModelFilterField`s.
 ///
-/// If `shadowed` were added to `ModelFilterField`, it would be accepted as an
-/// `OData` `$filter` / `$orderby` parameter, but the three management flags are
-/// response-only and §3.3 explicitly forbids adding them to the filterable
-/// fields. This test asserts that `ModelFilterField::from_name` rejects the
-/// field, proving it is absent from the generated SDK schema.
+/// They are response-only and §3.3 forbids adding them to the filterable
+/// fields; as `ModelFilterField` variants they would be accepted as `OData`
+/// `$filter` / `$orderby` parameters. `shadowed` is included because it was a
+/// management flag and must not reappear as one.
 #[test]
-fn shadowed_is_not_an_odata_filter_field() {
+fn management_flags_are_not_odata_filter_fields() {
     use toolkit_odata::filter::FilterField;
 
-    assert!(
-        ModelFilterField::from_name("shadowed").is_none(),
-        "shadowed must not be a valid ModelFilterField"
-    );
+    for name in ["shadowed", "provider_disabled", "available_for_eval"] {
+        assert!(
+            ModelFilterField::from_name(name).is_none(),
+            "{name} must not be a valid ModelFilterField"
+        );
+    }
 }

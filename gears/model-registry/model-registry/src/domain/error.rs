@@ -12,9 +12,13 @@ use uuid::Uuid;
 #[derive(Debug, thiserror::Error)]
 #[domain_model]
 pub enum DomainError {
-    /// Model not found by canonical ID.
+    /// Model not found by canonical ID (eval read path).
     #[error("model not found: {canonical_id}")]
     ModelNotFound { canonical_id: String },
+
+    /// Model not found by `Uuid` (management read and CRUD paths).
+    #[error("model not found: {id}")]
+    ModelNotFoundById { id: Uuid },
 
     /// Provider not found by ID.
     #[error("provider not found: {id}")]
@@ -39,10 +43,6 @@ pub enum DomainError {
     /// Provider is disabled.
     #[error("provider disabled: {id}")]
     ProviderDisabled { id: Uuid },
-
-    /// Provider not owned by the caller's tenant (exists only in an ancestor).
-    #[error("provider with slug `{slug}` not owned by caller's tenant")]
-    ProviderNotOwned { slug: String },
 
     /// Provider slug already exists (unique constraint).
     #[error("provider slug already exists: {slug}")]
@@ -82,6 +82,11 @@ impl DomainError {
     }
 
     #[must_use]
+    pub fn model_not_found_by_id(id: Uuid) -> Self {
+        Self::ModelNotFoundById { id }
+    }
+
+    #[must_use]
     pub fn provider_not_found(id: Uuid) -> Self {
         Self::ProviderNotFound { id }
     }
@@ -118,11 +123,6 @@ impl DomainError {
     #[must_use]
     pub fn provider_conflict(slug: impl Into<String>) -> Self {
         Self::ProviderConflict { slug: slug.into() }
-    }
-
-    #[must_use]
-    pub fn provider_not_owned(slug: impl Into<String>) -> Self {
-        Self::ProviderNotOwned { slug: slug.into() }
     }
 
     #[must_use]
@@ -174,6 +174,7 @@ impl From<DomainError> for crate::ModelRegistryError {
     fn from(e: DomainError) -> Self {
         match e {
             DomainError::ModelNotFound { canonical_id } => Self::model_not_found(canonical_id),
+            DomainError::ModelNotFoundById { id } => Self::model_not_found_by_id(id),
             DomainError::ProviderNotFound { id } => Self::provider_not_found(id),
             DomainError::ProviderNotFoundBySlug { slug } => Self::provider_not_found_by_slug(slug),
             DomainError::ModelDeprecated { canonical_id } => Self::model_deprecated(canonical_id),
@@ -182,7 +183,6 @@ impl From<DomainError> for crate::ModelRegistryError {
             }
             DomainError::Forbidden(msg) => Self::forbidden(msg),
             DomainError::ProviderDisabled { id } => Self::provider_disabled(id),
-            DomainError::ProviderNotOwned { slug } => Self::provider_not_owned(slug),
             DomainError::ProviderConflict { slug } => Self::provider_conflict(slug),
             DomainError::ProviderHasModels { id, model_count } => {
                 Self::provider_has_models(id, model_count)
@@ -281,16 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_not_owned_converts() {
-        let domain = DomainError::provider_not_owned("openai");
-        let sdk: ModelRegistryError = domain.into();
-        assert_eq!(
-            sdk.to_string(),
-            "provider with slug `openai` not owned by caller's tenant"
-        );
-    }
-
-    #[test]
     fn provider_conflict_converts() {
         let domain = DomainError::provider_conflict("openai");
         let sdk = ModelRegistryError::provider_conflict("openai");
@@ -382,13 +372,17 @@ mod tests {
         assert_eq!(err.to_string(), "forbidden: no access");
     }
 
+    /// The two not-found variants are distinct by design: the eval read reports
+    /// the `canonical_id` the caller supplied, the id-keyed paths report the
+    /// `Uuid`. Neither should ever render the other's identifier.
     #[test]
-    fn provider_not_owned_display() {
-        let err = DomainError::provider_not_owned("openai");
-        assert_eq!(
-            err.to_string(),
-            "provider with slug `openai` not owned by caller's tenant"
-        );
+    fn model_not_found_by_id_converts_and_displays_the_uuid() {
+        let id = Uuid::new_v4();
+        let domain = DomainError::model_not_found_by_id(id);
+        assert_eq!(domain.to_string(), format!("model not found: {id}"));
+        let sdk: ModelRegistryError = domain.into();
+        assert_eq!(sdk.to_string(), format!("model not found: {id}"));
+        assert!(matches!(sdk, ModelRegistryError::ModelNotFoundById { .. }));
     }
 
     #[test]

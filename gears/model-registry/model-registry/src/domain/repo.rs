@@ -15,7 +15,7 @@ use super::error::DomainError;
 /// Controls which models are visible in a repository `list` query.
 ///
 /// Separates the eval path (mandatory predicates: provider visibility + lifecycle
-/// exclusion) from the management path (no mandatory predicates beyond an optional
+/// exclusion) from the admin path (no mandatory predicates beyond an optional
 /// deprecated/sunset exclusion).
 ///
 /// The enum is deliberately a sum type rather than an options struct — "forgot
@@ -35,7 +35,7 @@ pub enum ListVisibility<'a> {
     },
     /// Management visibility: no mandatory predicates. `include_deprecated`
     /// controls whether terminal-lifecycle models (`deprecated` / `sunset`) are
-    /// returned; when `false`, they are excluded (the default for the management
+    /// returned; when `false`, they are excluded (the default for the admin
     /// listing).
     Management {
         /// When `false`, models whose `lifecycle_status` is `deprecated` or
@@ -59,17 +59,21 @@ pub trait ProviderRepository: Send + Sync {
         id: Uuid,
     ) -> Result<ProviderV1, DomainError>;
 
-    /// Find a provider by slug within the given access scope.
+    /// Find every provider carrying `slug` within the given access scope,
+    /// **unpaginated**.
     ///
-    /// Used by the service layer to resolve provider identity when creating
-    /// models. Returns [`DomainError::ProviderNotFound`] when the slug does
-    /// not exist within the scope.
-    async fn find_by_slug(
+    /// Serves [`get_tenant_model`](crate::domain::service::Service::get_tenant_model)'s
+    /// slug resolution: one query over the whole tenant chain replaces a
+    /// per-hop fan-out. Bounded by the scope and by `UNIQUE (tenant_id, slug)`,
+    /// so it returns at most one row per chain tenant. An unresolved slug is an
+    /// empty vector, not an error — the caller owns the
+    /// [`DomainError::ProviderNotFoundBySlug`] decision.
+    async fn find_all_by_slug(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         slug: &str,
-    ) -> Result<ProviderV1, DomainError>;
+    ) -> Result<Vec<ProviderV1>, DomainError>;
 
     /// List providers matching the `OData` query within the given access scope.
     async fn list(
@@ -79,12 +83,26 @@ pub trait ProviderRepository: Send + Sync {
         query: &ODataQuery,
     ) -> Result<Page<ProviderV1>, DomainError>;
 
-    /// Return every provider for a tenant, **unpaginated**.
+    /// Fetch the providers carrying any of `ids` that fall within the scope,
+    /// **unpaginated**.
     ///
-    /// Used by [`build_chain_providers`](crate::domain::inheritance::build_chain_providers)
-    /// which needs each tenant's **complete** provider set. `list` is paginated
-    /// (default 20 / max 100), and a truncated fetch silently corrupts the
-    /// allow-list — the exact predicate this method exists to prevent.
+    /// Bounded by the caller's id list. An empty `ids` slice returns an empty
+    /// vector without querying. Ids with no in-scope row are simply absent from
+    /// the result.
+    async fn find_by_ids(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProviderV1>, DomainError>;
+
+    /// Return every provider in the scope, **unpaginated**.
+    ///
+    /// Serves [`build_chain_providers`](crate::domain::inheritance::build_chain_providers)
+    /// on the eval path, called once with a scope spanning the whole tenant
+    /// chain: that path needs every chain tenant's **complete** provider set,
+    /// and `list` is paginated (default 20 / max 100), so a truncated fetch
+    /// corrupts the allow-list.
     async fn list_all_for_tenant(
         &self,
         conn: &impl DBRunner,
@@ -131,9 +149,28 @@ pub trait ProviderRepository: Send + Sync {
 /// Every method accepts a [`DBRunner`] connection and an [`AccessScope`] for
 /// tenant-scoped access. Approval status is patched via the same `update`
 /// flow as other model fields.
+///
+/// Writes are keyed by `Uuid`. `find_by_canonical` exists for one caller —
+/// [`get_tenant_model`](crate::domain::service::Service::get_tenant_model),
+/// whose input is a `canonical_id` — and is never a write key: a `canonical_id`
+/// is chain-relative, so it does not identify a row independently of the
+/// requester.
 #[async_trait]
 pub trait ModelRepository: Send + Sync {
+    /// Find a model by `Uuid` within the given access scope.
+    ///
+    /// Returns [`DomainError::ModelNotFoundById`] when no in-scope model
+    /// carries `id`.
+    async fn find_by_id(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<ModelV1, DomainError>;
+
     /// Find a model by canonical ID within the given access scope.
+    ///
+    /// Read-only helper for the eval path; see the trait-level note.
     async fn find_by_canonical(
         &self,
         conn: &impl DBRunner,
@@ -159,40 +196,43 @@ pub trait ModelRepository: Send + Sync {
         visibility: ListVisibility<'_>,
     ) -> Result<Page<ModelV1>, DomainError>;
 
-    /// Create a new model.
+    /// Create a new model against an already-resolved provider.
     ///
-    /// Derives `canonical_id` from `req.provider_slug` + `req.info.provider_model_id`.
-    /// Returns [`DomainError::ModelNotFound`] when the provider is not found
-    /// (pre-check should be done by the service layer).
+    /// `provider` is resolved by the service layer; the repository does not
+    /// look it up again. `canonical_id` is derived as
+    /// `{provider.slug}::{req.info.provider_model_id}` and `provider_id` is
+    /// taken from `provider.id`. `tenant_id` is the provider's tenant.
     async fn create(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
+        provider: &ProviderV1,
         req: &CreateModelRequestV1,
     ) -> Result<ModelV1, DomainError>;
 
-    /// Update a model (PATCH semantics).
+    /// Update a model by `Uuid` (PATCH semantics).
     ///
     /// Only non-`None` fields in `req` are applied. Identity fields
-    /// (`canonical_id`, `provider_slug`, `info.provider_model_id`,
+    /// (`canonical_id`, `provider_id`, `info.provider_model_id`,
     /// `info.gts_type`) are immutable. Approval status is patched in place
     /// alongside other fields when `req.approval_status` is `Some(...)`.
     async fn update(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
-        canonical_id: &str,
+        id: Uuid,
         req: &UpdateModelRequestV1,
     ) -> Result<ModelV1, DomainError>;
 
-    /// Soft-delete a model by setting `lifecycle_status` to `Deprecated`.
+    /// Soft-delete a model by `Uuid`, setting `lifecycle_status` to
+    /// `Deprecated`.
     ///
-    /// Fails with `ModelNotFound` when no in-scope model carries `canonical_id`.
+    /// Fails with `ModelNotFoundById` when no in-scope model carries `id`.
     async fn soft_delete(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
-        canonical_id: &str,
+        id: Uuid,
     ) -> Result<(), DomainError>;
 }

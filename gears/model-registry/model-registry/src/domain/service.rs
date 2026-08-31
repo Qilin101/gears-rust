@@ -1,22 +1,20 @@
 //! Application service for the Model Registry gear.
 //!
-//! Orchestrates authorization, inheritance resolution, and persistence for
-//! providers and models. Generic over the two repository traits so unit tests
-//! can inject mocks; the cache is a trait object, since which implementation is
-//! installed is a runtime decision.
+//! Orchestrates authorization and persistence for providers and models.
+//! Generic over the two repository traits so unit tests can inject mocks; the
+//! cache is a trait object, since which implementation is installed is a
+//! runtime decision.
 //!
-//! ## Provider operations
+//! Every method derives an [`AccessScope`] from the PDP via [`PolicyEnforcer`]
+//! and applies it to each query.
 //!
-//! All five provider CRUD methods with:
-//! - Authz via [`PolicyEnforcer`]
-//! - Inheritance resolution for reads (ancestor tenant visibility), with the
-//!   resolved ancestor chain served from the [`ResolutionCache`]
-//! - Slug format validation on create
-//!
-//! ## Model operations (Tasks 12-13)
-//!
-//! Stubs only — placeholders until the model-read and model-CRUD tasks.
+//! The two eval reads — [`Service::get_tenant_model`] and
+//! [`Service::list_tenant_models`] — additionally resolve the caller's tenant
+//! ancestor chain (served from the [`ResolutionCache`]) to apply additive
+//! inheritance and provider shadowing. The admin surface does not: it reads and
+//! writes exactly what the PDP scope covers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use authz_resolver_sdk::pep::{PolicyEnforcer, ResourceType};
@@ -29,9 +27,7 @@ use uuid::Uuid;
 
 use super::cache::ResolutionCache;
 use super::error::DomainError;
-use super::inheritance::{
-    AncestorFailure, build_chain_providers, find_in_chain, merge_inherited_page, resolve_ancestors,
-};
+use super::inheritance::{build_chain_providers, chain_read_scope, resolve_ancestors};
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
 use crate::config::ModelRegistryConfig;
@@ -87,6 +83,13 @@ pub(crate) mod actions {
     pub const DELETE: &str = "delete";
     /// List / search resources with management flags (admin endpoint).
     pub const LIST_MANAGEMENT: &str = "list_management";
+    /// Read a single resource without the eval gates (admin endpoint).
+    ///
+    /// Distinct from [`GET`] for the same reason [`LIST_MANAGEMENT`] is
+    /// distinct from [`LIST`]: the management read returns rows the eval read
+    /// refuses (pending, rejected, deprecated, shadowed, disabled-provider), so
+    /// it must be grantable separately.
+    pub const GET_MANAGEMENT: &str = "get_management";
 }
 
 // ---------------------------------------------------------------------------
@@ -160,61 +163,46 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ///
     /// Calls the PDP to evaluate the given action against the resource type,
     /// returning the compiled scope. The caller must have been authenticated.
+    ///
+    /// `resource_id` is `Some(id)` for every point operation (get / update /
+    /// delete) and `None` for collection operations (list, create), where no
+    /// single resource is addressed yet. Both resource types declare
+    /// `pep_properties::RESOURCE_ID`, so a policy may return `id`-scoped
+    /// constraints — which is only useful if the id is actually supplied.
     async fn derive_access_scope(
         &self,
         ctx: &SecurityContext,
         resource: &ResourceType,
         action: &str,
+        resource_id: Option<Uuid>,
     ) -> Result<AccessScope, DomainError> {
         Ok(self
             .policy_enforcer
-            .access_scope(ctx, resource, action, None)
+            .access_scope(ctx, resource, action, resource_id)
             .await?)
     }
 
     // ── Provider operations ──────────────────────────────────────────────
 
-    /// Get a provider by ID with inheritance resolution.
+    /// Get a provider by ID within the caller's PDP access scope.
     ///
-    /// Walks the tenant chain closest-first in the database, so the closest
-    /// match wins (child shadows parent). Provider rows are not cached.
+    /// A provider outside that scope yields
+    /// [`DomainError::ProviderNotFound`].
     pub async fn get_provider(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<ProviderV1, DomainError> {
-        // 1. Derive access scope (authorization check + DB scope)
-        let own_scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET)
+        let scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET, Some(id))
             .await?;
 
-        // 2. Resolve ancestor chain
-        let inheritance =
-            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
-
-        // 3. Walk the chain in the DB, closest tenant first.
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let conn = &conn;
-        let found = find_in_chain(
-            &inheritance,
-            &own_scope,
-            |e| matches!(e, DomainError::ProviderNotFound { .. }),
-            |scope| async move { self.provider_repo.find_by_id(conn, &scope, id).await },
-        )
-        .await?;
-
-        let Some((_owner_tenant_id, provider)) = found else {
-            return Err(DomainError::provider_not_found(id));
-        };
-
-        Ok(provider)
+        self.provider_repo.find_by_id(&conn, &scope, id).await
     }
 
-    /// List providers visible to the caller's tenant with `OData` filtering.
-    ///
-    /// Returns providers from the own tenant (with full `OData` support) merged
-    /// with providers inherited from ancestor tenants. Child-tenant providers
-    /// shadow ancestor providers with the same slug.
+    /// List the providers in the caller's PDP access scope, with `OData`
+    /// filtering.
     pub async fn list_providers(
         &self,
         ctx: &SecurityContext,
@@ -222,34 +210,12 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ) -> Result<Page<ProviderV1>, DomainError> {
         reject_select(query)?;
 
-        // 1. Derive access scope (authorization check + DB scope)
-        let own_scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST)
+        let scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::LIST, None)
             .await?;
 
-        // 2. Resolve ancestor chain
-        let inheritance =
-            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-
-        // 3. Get own tenant providers with OData
-        let own_page = self.provider_repo.list(&conn, &own_scope, query).await?;
-
-        // 4. Merge the inherited set, shadowing ancestor providers by slug.
-        //    Fail closed on ancestor query errors: skipping an ancestor
-        //    provider row would un-shadow an ancestor and widen the caller's view.
-        let conn = &conn;
-        merge_inherited_page(
-            &inheritance,
-            own_page,
-            query,
-            |p| p.slug.clone(),
-            AncestorFailure::FailClosed,
-            |_tenant_id, scope, ancestor_query| async move {
-                Some(self.provider_repo.list(conn, &scope, &ancestor_query).await)
-            },
-        )
-        .await
+        self.provider_repo.list(&conn, &scope, query).await
     }
 
     /// Create a new provider.
@@ -268,7 +234,7 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
         // 2. Derive access scope (authorization check + DB scope)
         let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::CREATE)
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::CREATE, None)
             .await?;
 
         // 3. Create via repo
@@ -299,7 +265,7 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
         // 2. Derive access scope (authorization check + DB scope)
         let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE)
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::UPDATE, Some(id))
             .await?;
 
         // 3. Update via repo
@@ -317,7 +283,7 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ) -> Result<(), DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let scope = self
-            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::DELETE)
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::DELETE, Some(id))
             .await?;
 
         // 2. Delete via repo
@@ -421,7 +387,7 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ) -> Result<crate::ModelV1, DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET)
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET, None)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -434,39 +400,31 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
             return Err(DomainError::model_not_found(canonical_id));
         };
 
-        // 4. Resolve the slug closest-first against the database. Stop at the
-        //    first owner. Fail-closed on non-not-found errors.
+        // 4. Resolve the slug against the database with one chain-wide query,
+        //    then rank the rows by chain distance. Fail-closed: the `?` covers
+        //    the whole chain, so no hop can be silently skipped and un-shadow
+        //    an ancestor.
         let conn = self.db.conn().map_err(DomainError::from)?;
         let conn = &conn;
 
-        let mut winner_tenant: Option<Uuid> = None;
-        let mut winner_provider: Option<crate::ProviderV1> = None;
+        // Provider resolution carries no PDP scope on this path — the per-hop
+        // fan-out this replaces used a plain `for_tenant` at every hop, own
+        // tenant included, so the chain-wide scope is exactly their union.
+        let chain_ids: Vec<Uuid> = inheritance.chain_ids().copied().collect();
+        let rows = self
+            .provider_repo
+            .find_all_by_slug(conn, &AccessScope::for_tenants(chain_ids), slug)
+            .await?;
 
-        for tenant_id in inheritance.chain_ids().copied() {
-            let scope = AccessScope::for_tenant(tenant_id);
-            match self.provider_repo.find_by_slug(conn, &scope, slug).await {
-                Ok(provider) => {
-                    winner_tenant = Some(tenant_id);
-                    winner_provider = Some(provider);
-                    break;
-                }
-                Err(DomainError::ProviderNotFoundBySlug { .. }) => {
-                    // No provider with this slug in this tenant — next hop.
-                }
-                Err(e) => {
-                    // Fail-closed: a skipped ancestor provider query would
-                    // un-shadow an earlier ancestor.
-                    return Err(e);
-                }
-            }
-        }
-
-        let Some(winner) = winner_provider else {
+        // The same primitive the listing path builds, over at most one row per
+        // chain tenant. `winner_for_slug` returns a disabled winner too, so the
+        // gate order below can report `ProviderDisabled` only after the model
+        // is found (DESIGN §3.5).
+        let chain = build_chain_providers(&inheritance, rows);
+        let Some(winner) = chain.winner_for_slug(slug) else {
             return Err(DomainError::provider_not_found_by_slug(slug));
         };
-        let Some(winner_tenant_id) = winner_tenant else {
-            return Err(DomainError::provider_not_found_by_slug(slug));
-        };
+        let winner_tenant_id = winner.owner_tenant;
 
         // 5. Scope the model read:
         //    - Winner is own tenant → use the PDP-derived own_scope (preserves
@@ -528,11 +486,17 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     /// ancestor models with the same `canonical_id`. Deprecated models are
     /// excluded from the eval list (filtered by the repository layer).
     ///
-    /// The eval path builds `ChainProviders(T0)` and queries each chain tenant
-    /// with `ListVisibility::Eval`, passing only the winning active provider ids
-    /// for that tenant. Ancestors whose allow-list slice is empty are skipped.
-    /// The `canonical_id` dedupe in `merge_inherited_page` is kept as a
-    /// redundant safety net.
+    /// Builds `ChainProviders(T0)` from one chain-wide provider query, then
+    /// issues **one** model query scoped to the whole chain with
+    /// `ListVisibility::Eval` carrying the chain-wide allow-list. The database
+    /// therefore applies `$filter`, `$orderby` and cursor pagination across
+    /// own and inherited rows alike — there is no in-memory merge.
+    ///
+    /// No dedupe step is needed: `allow_list` admits at most one provider per
+    /// slug across the chain, and `canonical_id` is `{slug}::{provider_model_id}`
+    /// over a `UNIQUE (tenant_id, canonical_id)` table, so two admitted rows
+    /// cannot share one (DESIGN §3.5 Corollary). That uniqueness is also what
+    /// makes `canonical_id` a valid keyset tiebreaker over the merged set.
     pub async fn list_tenant_models(
         &self,
         ctx: &SecurityContext,
@@ -542,7 +506,7 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
         // 1. Derive access scope (authorization check + DB scope)
         let own_scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST)
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST, None)
             .await?;
 
         // 2. Resolve ancestor chain
@@ -550,85 +514,50 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
             resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
-        //    query error. A skipped ancestor would un-shadow an earlier one.
-        let conn = &conn;
-        let chain = build_chain_providers(&inheritance, |scope| async move {
-            self.provider_repo.list_all_for_tenant(conn, &scope).await
-        })
-        .await?;
+        // 3. Build ChainProviders(T0) from one chain-wide provider query.
+        //    Fail closed: a provider query that failed would un-shadow an
+        //    ancestor, so the error propagates rather than narrowing the view.
+        let chain_ids: Vec<Uuid> = inheritance.chain_ids().copied().collect();
+        let providers = self
+            .provider_repo
+            .list_all_for_tenant(&conn, &AccessScope::for_tenants(chain_ids))
+            .await?;
+        let chain = build_chain_providers(&inheritance, providers);
 
-        // 4. Get own-tenant models with ListVisibility::Eval.
-        //    Skip own tenant when its allow-list slice is empty —
-        //    synthesize an empty page rather than querying with an empty list.
-        let own_slice = chain.allow_slice_for(inheritance.tenant_id());
-        let own_page = if own_slice.is_empty() {
-            Page {
+        // 4. No active winning provider anywhere in the chain: nothing can
+        //    match. Synthesize the page rather than issuing a query whose
+        //    `IN ()` predicate has no portable rendering.
+        let allow_list = chain.allow_list();
+        if allow_list.is_empty() {
+            return Ok(Page {
                 items: vec![],
                 page_info: toolkit_odata::PageInfo {
-                    // The same effective limit the repository would have
-                    // resolved — `merge_inherited_page` truncates the inherited
-                    // rows to it, so reporting 0 here would empty the page.
+                    // The effective limit the repository would have resolved.
                     limit: self.config.page_limits().clamp(query.limit),
                     next_cursor: None,
                     prev_cursor: None,
                 },
-            }
-        } else {
-            self.model_repo
-                .list(
-                    conn,
-                    &own_scope,
-                    query,
-                    ListVisibility::Eval {
-                        allow_list: &own_slice,
-                    },
-                )
-                .await?
-        };
+            });
+        }
 
-        // 5. Merge the inherited set, shadowing ancestor models by canonical_id.
-        //    Skip ancestor query errors (model queries narrow, never widen).
-        //    Inside the closure, check each tenant's allow-list slice and
-        //    return None to skip tenants with nothing to contribute.
-        merge_inherited_page(
-            &inheritance,
-            own_page,
-            query,
-            |m| m.canonical_id.clone(),
-            AncestorFailure::Skip,
-            |tenant_id, scope, ancestor_query| {
-                let slice = chain.allow_slice_for(tenant_id);
-                async move {
-                    if slice.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            self.model_repo
-                                .list(
-                                    conn,
-                                    &scope,
-                                    &ancestor_query,
-                                    ListVisibility::Eval { allow_list: &slice },
-                                )
-                                .await,
-                        )
-                    }
-                }
-            },
-        )
-        .await
+        // 5. One chain-wide model query: the database applies the caller's
+        //    filter, ordering and cursor over own and inherited rows together.
+        let scope = chain_read_scope(&own_scope, &inheritance);
+        self.model_repo
+            .list(&conn, &scope, query, ListVisibility::Eval { allow_list })
+            .await
     }
 
     /// List models with management flags for the admin endpoint.
     ///
-    /// Builds `ChainProviders(T0)` (fail-closed), then queries every chain tenant
-    /// with `ListVisibility::Management` and merges in chain order **without**
-    /// `canonical_id` dedupe — two chain tenants owning the same slug is the
-    /// exact case this endpoint exists to display.
+    /// Returns every model in the caller's PDP access scope, with no eval
+    /// gates: rows that are `pending`, `rejected`, or sit on a disabled
+    /// provider all come back. `include_deprecated` controls whether
+    /// terminal-lifecycle rows are included.
     ///
-    /// Each returned row carries `shadowed`, `provider_disabled`, and
-    /// `available_for_eval` flags computed from the same `ChainProviders`.
+    /// Each row carries `provider_disabled` and `available_for_eval`, computed
+    /// from the model's own provider. A provider that cannot be read leaves
+    /// both flags `false`.
     pub async fn list_tenant_models_management(
         &self,
         ctx: &SecurityContext,
@@ -637,70 +566,50 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ) -> Result<Page<crate::ModelManagementV1>, DomainError> {
         reject_select(query)?;
 
-        // 1. Derive access scope (authorization check + DB scope).
-        let own_scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST_MANAGEMENT)
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::LIST_MANAGEMENT, None)
             .await?;
 
-        // 2. Resolve ancestor chain.
-        let inheritance =
-            resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx).await?;
         let conn = self.db.conn().map_err(DomainError::from)?;
-
-        // 3. Build ChainProviders(T0) — fail closed on any ancestor provider
-        //    query error.
-        let conn = &conn;
-        let chain = build_chain_providers(&inheritance, |scope| async move {
-            self.provider_repo.list_all_for_tenant(conn, &scope).await
-        })
-        .await?;
-
-        // 4. Get own-tenant models with ListVisibility::Management.
-        let own_page = self
+        let page = self
             .model_repo
             .list(
-                conn,
-                &own_scope,
+                &conn,
+                &scope,
                 query,
                 ListVisibility::Management { include_deprecated },
             )
             .await?;
 
-        // 5. Merge inherited models in chain order WITHOUT canonical_id dedupe.
-        //    Pass key_fn = |m| m.id so that apply_additive_visibility collapses
-        //    nothing (model ids are unique) while chain ordering is preserved.
-        let merged = merge_inherited_page(
-            &inheritance,
-            own_page,
-            query,
-            |m| m.id,
-            AncestorFailure::Skip,
-            |_tenant_id, scope, ancestor_query| async move {
-                Some(
-                    self.model_repo
-                        .list(
-                            conn,
-                            &scope,
-                            &ancestor_query,
-                            ListVisibility::Management { include_deprecated },
-                        )
-                        .await,
-                )
-            },
-        )
-        .await?;
+        // A model's tenant always equals its provider's (§3.1 Invariants), so
+        // the providers backing this page are reachable under a scope built
+        // from the tenants of the rows the caller was already authorized to
+        // read. The model scope itself cannot be reused: its constraints bind
+        // to `models` columns.
+        let mut tenant_ids: Vec<Uuid> = page.items.iter().map(|m| m.tenant_id).collect();
+        tenant_ids.sort_unstable();
+        tenant_ids.dedup();
 
-        // 6. Annotate each row with management flags from ChainProviders.
-        let items: Vec<crate::ModelManagementV1> = merged
+        let mut provider_ids: Vec<Uuid> = page.items.iter().map(|m| m.provider_id).collect();
+        provider_ids.sort_unstable();
+        provider_ids.dedup();
+
+        let provider_scope = AccessScope::for_tenants(tenant_ids);
+        let providers: HashMap<Uuid, ProviderStatus> = self
+            .provider_repo
+            .find_by_ids(&conn, &provider_scope, &provider_ids)
+            .await?
+            .into_iter()
+            .map(|p| (p.id, p.status))
+            .collect();
+
+        let items: Vec<crate::ModelManagementV1> = page
             .items
             .into_iter()
             .map(|model| {
-                let provider = chain.get(model.provider_id);
-                let shadowed = provider.is_some_and(|p| !p.winner);
-                let provider_disabled =
-                    provider.is_some_and(|p| p.status != ProviderStatus::Active);
-                let available_for_eval = provider
-                    .is_some_and(|p| p.winner && p.status == ProviderStatus::Active)
+                let status = providers.get(&model.provider_id);
+                let provider_disabled = status.is_some_and(|s| *s != ProviderStatus::Active);
+                let available_for_eval = status.is_some_and(|s| *s == ProviderStatus::Active)
                     && !matches!(
                         model.lifecycle_status,
                         LifecycleStatus::Deprecated | LifecycleStatus::Sunset
@@ -709,7 +618,6 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
                 ModelManagementV1 {
                     model,
-                    shadowed,
                     provider_disabled,
                     available_for_eval,
                 }
@@ -718,25 +626,51 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
         Ok(Page {
             items,
-            page_info: merged.page_info,
+            page_info: page.page_info,
         })
     }
 
-    /// Create a new model.
+    /// Get a model by `Uuid` with management semantics.
     ///
-    /// Validates the provider slug, checks that the provider exists (own tenant
-    /// or inherited from an ancestor), derives `canonical_id` from
-    /// `provider_slug::info.provider_model_id`, and writes the initial approval
-    /// status (defaults to `Pending`).
+    /// The management counterpart of [`Self::get_tenant_model`]: it applies
+    /// **no** eval gates — lifecycle, provider status, and approval status are
+    /// not consulted — and reads within the caller's PDP access scope. A model
+    /// outside that scope yields [`DomainError::ModelNotFoundById`].
+    ///
+    /// Authorized under [`actions::GET_MANAGEMENT`] rather than
+    /// [`actions::GET`], so a plain tenant member holding only the eval read
+    /// grant cannot use it to observe rows the eval read hides.
+    pub async fn get_model(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<crate::ModelV1, DomainError> {
+        let scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::GET_MANAGEMENT, Some(id))
+            .await?;
+
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        self.model_repo.find_by_id(&conn, &scope, id).await
+    }
+
+    /// Create a new model against a provider addressed by `Uuid`.
+    ///
+    /// The provider is resolved under its own PDP decision
+    /// (`model_registry.provider` / [`actions::GET`]); the model is written
+    /// under the `model_registry.model` [`actions::CREATE`] scope and takes the
+    /// resolved provider's `tenant_id`, since a model's tenant MUST equal its
+    /// provider's (§3.1 Invariants). `canonical_id` is derived from the
+    /// resolved provider's slug.
+    ///
+    /// A `provider_id` outside the provider read scope yields
+    /// [`DomainError::ProviderNotFound`]. A provider whose tenant lies outside
+    /// the model create scope is refused by the repository as `Forbidden`.
     pub async fn create_model(
         &self,
         ctx: &SecurityContext,
         req: &crate::CreateModelRequestV1,
     ) -> Result<crate::ModelV1, DomainError> {
-        // 1. Validate provider_slug format
-        Self::validate_slug(&req.provider_slug)?;
-
-        // 1b. Reject models created directly in a terminal lifecycle state.
+        // 1. Reject models created directly in a terminal lifecycle state.
         if matches!(
             req.lifecycle_status,
             crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
@@ -747,88 +681,60 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
             )));
         }
 
-        // 2. Verify authorization
-        let tenant_id = ctx.subject_tenant_id();
-        self.derive_access_scope(ctx, &MODEL_RESOURCE, actions::CREATE)
+        // 2. Two decisions: one to write the model, one to read the provider it
+        //    attaches to. The model scope's constraints bind to `models`
+        //    columns, so it cannot scope the provider lookup.
+        let model_scope = self
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::CREATE, None)
+            .await?;
+        let provider_scope = self
+            .derive_access_scope(ctx, &PROVIDER_RESOURCE, actions::GET, Some(req.provider_id))
             .await?;
 
-        // 3. Resolve the provider **own-tenant-only** (E1). If the slug exists
-        //    only in an ancestor tenant, the caller does not own it and may not
-        //    create models against it (§3.1 Invariants).
+        // 3. Resolve the provider; it carries the slug `canonical_id` is built
+        //    from, so the repository does not look it up again.
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let conn = &conn;
-
-        let own_scope = AccessScope::for_tenant(tenant_id);
-        let provider = match self
+        let provider = self
             .provider_repo
-            .find_by_slug(conn, &own_scope, &req.provider_slug)
-            .await
-        {
-            Ok(provider) => provider,
-            Err(e @ DomainError::ProviderNotFoundBySlug { .. }) => {
-                // The slug does not exist in the caller's tenant. Check ancestors
-                // to decide whether it is "not found anywhere" (E3 → 404) or
-                // "found in an ancestor" (E1/E2 → 403).
-                let inheritance =
-                    resolve_ancestors(self.tenant_resolver.as_ref(), self.cache.as_ref(), ctx)
-                        .await?;
-                match find_in_chain(
-                    &inheritance,
-                    &own_scope,
-                    |e| matches!(e, DomainError::ProviderNotFoundBySlug { .. }),
-                    |scope| async move {
-                        self.provider_repo
-                            .find_by_slug(conn, &scope, &req.provider_slug)
-                            .await
-                    },
-                )
-                .await?
-                {
-                    Some((_, _)) => {
-                        return Err(DomainError::provider_not_owned(&req.provider_slug));
-                    }
-                    None => return Err(e),
-                }
-            }
-            Err(e) => return Err(e),
-        };
+            .find_by_id(&conn, &provider_scope, req.provider_id)
+            .await?;
 
         if !matches!(provider.status, crate::ProviderStatus::Active) {
             return Err(DomainError::ProviderDisabled { id: provider.id });
         }
 
-        // 4. Create via repo with own-tenant scope only (no cross-tenant
-        //    widening — model.tenant_id MUST equal provider.tenant_id).
+        // 4. Create under the model scope, owned by the provider's tenant.
         let model = self
             .model_repo
-            .create(conn, &own_scope, tenant_id, req)
+            .create(&conn, &model_scope, provider.tenant_id, &provider, req)
             .await?;
 
         Ok(model)
     }
 
-    /// Update a model (PATCH semantics) including approval status.
+    /// Update a model by `Uuid` (PATCH semantics) including approval status.
     ///
     /// Applies non-status field patches and `approval_status` transitions in a
     /// single repository call. Validates lifecycle state transitions.
+    ///
+    /// Own-tenant-only: the caller's PDP-derived scope is the only scope used,
+    /// so an inherited model — readable via [`Self::get_model`] — is not
+    /// writable here.
     pub async fn update_model(
         &self,
         ctx: &SecurityContext,
-        canonical_id: &str,
+        id: Uuid,
         req: &crate::UpdateModelRequestV1,
     ) -> Result<crate::ModelV1, DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE)
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::UPDATE, Some(id))
             .await?;
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
         // 2. Fetch existing model to validate state transitions.
-        let existing = self
-            .model_repo
-            .find_by_canonical(&conn, &scope, canonical_id)
-            .await?;
+        let existing = self.model_repo.find_by_id(&conn, &scope, id).await?;
 
         // 3. Validate lifecycle state transitions
         if let Some(new_lifecycle) = &req.lifecycle_status {
@@ -850,33 +756,24 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
 
         // 4. Update via repo (mapper projects approval_status alongside other
         //    fields).
-        let model = self
-            .model_repo
-            .update(&conn, &scope, canonical_id, req)
-            .await?;
+        let model = self.model_repo.update(&conn, &scope, id, req).await?;
 
         Ok(model)
     }
 
-    /// Soft-delete a model by canonical ID.
+    /// Soft-delete a model by `Uuid`.
     ///
     /// Sets `lifecycle_status` to `Deprecated` and records the deprecation
-    /// timestamp.
-    pub async fn delete_model(
-        &self,
-        ctx: &SecurityContext,
-        canonical_id: &str,
-    ) -> Result<(), DomainError> {
+    /// timestamp. Own-tenant-only, like [`Self::update_model`].
+    pub async fn delete_model(&self, ctx: &SecurityContext, id: Uuid) -> Result<(), DomainError> {
         // 1. Derive access scope (authorization check + DB scope)
         let scope = self
-            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE)
+            .derive_access_scope(ctx, &MODEL_RESOURCE, actions::DELETE, Some(id))
             .await?;
 
         // 2. Soft-delete via repo
         let conn = self.db.conn().map_err(DomainError::from)?;
-        self.model_repo
-            .soft_delete(&conn, &scope, canonical_id)
-            .await?;
+        self.model_repo.soft_delete(&conn, &scope, id).await?;
 
         Ok(())
     }
@@ -986,6 +883,47 @@ mod tests {
                                 self.0.iter().map(ToString::to_string),
                             ),
                         )],
+                    }],
+                    deny_reason: None,
+                },
+            })
+        }
+    }
+
+    /// PDP that pins the caller to its own tenant **and** a single row id — the
+    /// shape a row-level policy produces. Used to prove the eval listing keeps
+    /// enforcing PDP constraints on own-tenant rows after the chain-wide query
+    /// collapsed the per-tenant fan-out.
+    #[domain_model]
+    struct MockAuthZRowScoped {
+        tenant_id: Uuid,
+        resource_id: Uuid,
+    }
+
+    #[async_trait]
+    impl AuthZResolverClient for MockAuthZRowScoped {
+        async fn evaluate(
+            &self,
+            _request: EvaluationRequest,
+        ) -> Result<EvaluationResponse, AuthZResolverError> {
+            Ok(EvaluationResponse {
+                decision: true,
+                context: authz_resolver_sdk::EvaluationResponseContext {
+                    constraints: vec![authz_resolver_sdk::constraints::Constraint {
+                        predicates: vec![
+                            authz_resolver_sdk::constraints::Predicate::Eq(
+                                authz_resolver_sdk::constraints::EqPredicate {
+                                    property: "owner_tenant_id".to_owned(),
+                                    value: serde_json::json!(self.tenant_id.to_string()),
+                                },
+                            ),
+                            authz_resolver_sdk::constraints::Predicate::In(
+                                authz_resolver_sdk::constraints::InPredicate::new(
+                                    "id",
+                                    [self.resource_id.to_string()],
+                                ),
+                            ),
+                        ],
                     }],
                     deny_reason: None,
                 },
@@ -1149,28 +1087,61 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // FailingAncestorProviderRepo — mock ProviderRepository that fails on
-    // ancestor queries (succeeds only on the first `list` call)
+    // CountingProviderRepo — mock ProviderRepository whose first `list` call
+    // succeeds and every later one fails, so a fan-out is observable
     // ═════════════════════════════════════════════════════════════════════════
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use toolkit_odata::PageInfo as OdataPageInfo;
 
     #[domain_model]
-    struct FailingAncestorProviderRepo {
+    struct CountingProviderRepo {
         call_count: AtomicUsize,
+        list_all_count: AtomicUsize,
+        /// Rows the chain-wide `list_all_for_tenant` hands back. Empty by
+        /// default, which drives the eval listing down its empty-allow-list
+        /// short-circuit.
+        chain_providers: Vec<ProviderV1>,
     }
 
-    impl FailingAncestorProviderRepo {
+    impl CountingProviderRepo {
         fn new() -> Self {
             Self {
                 call_count: AtomicUsize::new(0),
+                list_all_count: AtomicUsize::new(0),
+                chain_providers: Vec::new(),
+            }
+        }
+
+        fn with_chain_providers(providers: Vec<ProviderV1>) -> Self {
+            Self {
+                chain_providers: providers,
+                ..Self::new()
             }
         }
     }
 
+    /// Build a `ProviderV1` in memory, for mocks that never touch the database.
+    fn provider_v1(id: Uuid, tenant_id: Uuid, slug: &str) -> ProviderV1 {
+        let now = chrono::Utc::now();
+        ProviderV1 {
+            id,
+            tenant_id,
+            slug: slug.to_owned(),
+            name: slug.to_owned(),
+            gts_type: gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
+            status: ProviderStatus::Active,
+            managed: false,
+            metadata: None,
+            discovery_enabled: false,
+            discovery_interval_seconds: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[async_trait]
-    impl ProviderRepository for FailingAncestorProviderRepo {
+    impl ProviderRepository for CountingProviderRepo {
         async fn find_by_id(
             &self,
             _conn: &impl DBRunner,
@@ -1180,12 +1151,12 @@ mod tests {
             unimplemented!("not used in list_providers test")
         }
 
-        async fn find_by_slug(
+        async fn find_all_by_slug(
             &self,
             _conn: &impl DBRunner,
             _scope: &AccessScope,
             _slug: &str,
-        ) -> Result<ProviderV1, DomainError> {
+        ) -> Result<Vec<ProviderV1>, DomainError> {
             unimplemented!("not used in list_providers test")
         }
 
@@ -1215,6 +1186,16 @@ mod tests {
             &self,
             _conn: &impl DBRunner,
             _scope: &AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            self.list_all_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.chain_providers.clone())
+        }
+
+        async fn find_by_ids(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _ids: &[Uuid],
         ) -> Result<Vec<ProviderV1>, DomainError> {
             Ok(vec![])
         }
@@ -1275,7 +1256,7 @@ mod tests {
     }
 
     fn make_create_model_req(
-        provider_slug: &str,
+        provider_id: Uuid,
         provider_model_id: &str,
     ) -> crate::CreateModelRequestV1 {
         let gts_leaf = "cf.genai._.openai.v1~";
@@ -1356,7 +1337,7 @@ mod tests {
         };
 
         crate::CreateModelRequestV1 {
-            provider_slug: provider_slug.to_owned(),
+            provider_id,
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: None,
             info,
@@ -1401,6 +1382,30 @@ mod tests {
         (p.id, p.slug)
     }
 
+    /// Resolve a provider by slug for the model helpers below.
+    ///
+    /// The repository `create` takes an already-resolved provider — the service
+    /// owns the ownership check — but a test names its provider by slug, so the
+    /// helper does the lookup the production path no longer performs.
+    /// `ProviderRepositoryImpl` is a zero-state unit struct, so building one
+    /// here costs nothing.
+    async fn resolve_test_provider(
+        conn: &impl toolkit_db::secure::DBRunner,
+        scope: &AccessScope,
+        provider_slug: &str,
+    ) -> ProviderV1 {
+        crate::domain::repo::ProviderRepository::find_all_by_slug(
+            &ProviderRepositoryImpl::default(),
+            conn,
+            scope,
+            provider_slug,
+        )
+        .await
+        .expect("test provider lookup succeeds")
+        .pop()
+        .expect("test provider exists")
+    }
+
     /// Create a test model owned by `tenant_id`, returning the model.
     async fn create_test_model(
         repo: &ModelRepositoryImpl,
@@ -1410,8 +1415,9 @@ mod tests {
         provider_slug: &str,
         provider_model_id: &str,
     ) -> crate::ModelV1 {
-        let req = make_create_model_req(provider_slug, provider_model_id);
-        crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &req)
+        let provider = resolve_test_provider(conn, scope, provider_slug).await;
+        let req = make_create_model_req(provider.id, provider_model_id);
+        crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &provider, &req)
             .await
             .expect("create test model")
     }
@@ -1425,9 +1431,10 @@ mod tests {
         provider_slug: &str,
         provider_model_id: &str,
     ) -> crate::ModelV1 {
-        let mut req = make_create_model_req(provider_slug, provider_model_id);
+        let provider = resolve_test_provider(conn, scope, provider_slug).await;
+        let mut req = make_create_model_req(provider.id, provider_model_id);
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &req)
+        crate::domain::repo::ModelRepository::create(repo, conn, scope, tenant_id, &provider, &req)
             .await
             .expect("create test approved model")
     }
@@ -1567,6 +1574,15 @@ mod tests {
 
     #[async_trait]
     impl ModelRepository for PanicModelRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in list_providers tests")
+        }
+
         async fn find_by_canonical(
             &self,
             _conn: &impl DBRunner,
@@ -1591,6 +1607,7 @@ mod tests {
             _conn: &impl DBRunner,
             _scope: &AccessScope,
             _tenant_id: Uuid,
+            _provider: &ProviderV1,
             _req: &crate::CreateModelRequestV1,
         ) -> Result<crate::ModelV1, DomainError> {
             unimplemented!("not used in list_providers tests")
@@ -1600,7 +1617,7 @@ mod tests {
             &self,
             _conn: &impl DBRunner,
             _scope: &AccessScope,
-            _canonical_id: &str,
+            _id: Uuid,
             _req: &crate::UpdateModelRequestV1,
         ) -> Result<crate::ModelV1, DomainError> {
             unimplemented!("not used in list_providers tests")
@@ -1610,26 +1627,257 @@ mod tests {
             &self,
             _conn: &impl DBRunner,
             _scope: &AccessScope,
-            _canonical_id: &str,
+            _id: Uuid,
         ) -> Result<(), DomainError> {
             unimplemented!("not used in list_providers tests")
         }
     }
 
+    /// A `ModelRepository` that counts `list` calls, so a test can pin the
+    /// query count of the chain-wide listing.
+    #[domain_model]
+    struct CountingModelRepo {
+        list_count: AtomicUsize,
+    }
+
+    impl CountingModelRepo {
+        fn new() -> Self {
+            Self {
+                list_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelRepository for CountingModelRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in query-count tests")
+        }
+
+        async fn find_by_canonical(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _canonical_id: &str,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in query-count tests")
+        }
+
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+            _visibility: ListVisibility<'_>,
+        ) -> Result<Page<crate::ModelV1>, DomainError> {
+            self.list_count.fetch_add(1, Ordering::SeqCst);
+            Ok(Page {
+                items: vec![],
+                page_info: OdataPageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit: 20,
+                },
+            })
+        }
+
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _provider: &ProviderV1,
+            _req: &crate::CreateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in query-count tests")
+        }
+
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+            _req: &crate::UpdateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in query-count tests")
+        }
+
+        async fn soft_delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used in query-count tests")
+        }
+    }
+
+    /// A `ModelRepository` whose `list` always fails, to pin the fail-fast
+    /// behavior of the single chain-wide model query.
+    #[domain_model]
+    struct FailingModelListRepo;
+
+    #[async_trait]
+    impl ModelRepository for FailingModelListRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn find_by_canonical(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _canonical_id: &str,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+            _visibility: ListVisibility<'_>,
+        ) -> Result<Page<crate::ModelV1>, DomainError> {
+            Err(DomainError::internal("model listing unavailable"))
+        }
+
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _provider: &ProviderV1,
+            _req: &crate::CreateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+            _req: &crate::UpdateModelRequestV1,
+        ) -> Result<crate::ModelV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn soft_delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+    }
+
+    /// A `ProviderRepository` whose chain-wide query always fails, to pin the
+    /// fail-closed behavior of provider resolution.
+    #[domain_model]
+    struct FailingListAllRepo;
+
+    #[async_trait]
+    impl ProviderRepository for FailingListAllRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn find_all_by_slug(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _slug: &str,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+        ) -> Result<Page<ProviderV1>, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn list_all_for_tenant(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            Err(DomainError::internal("provider set unavailable"))
+        }
+
+        async fn find_by_ids(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _ids: &[Uuid],
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _req: &CreateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+            _req: &UpdateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+
+        async fn delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used in failure tests")
+        }
+    }
+
     #[tokio::test]
-    async fn test_list_providers_fails_closed_on_ancestor_query_error() {
-        // Given: a provider repo that fails on ancestor queries (only the first
-        // own-tenant list call succeeds), two ancestors, and no own providers.
+    async fn test_list_providers_issues_one_query_and_never_fans_out() {
+        // Given: a provider repo whose second and later `list` calls fail, two
+        // ancestors, and no own providers.
         let db = setup_db().await;
-        let provider_repo = Arc::new(FailingAncestorProviderRepo::new());
+        let provider_repo = Arc::new(CountingProviderRepo::new());
         let model_repo = Arc::new(PanicModelRepo);
         let tenant_resolver: Arc<dyn TenantResolverClient> = Arc::new(TwoAncestorsResolver);
         let enforcer = PolicyEnforcer::new(Arc::new(MockAuthZ));
         let config = ModelRegistryConfig::default();
 
-        let service: Service<FailingAncestorProviderRepo, PanicModelRepo> = Service {
+        let service: Service<CountingProviderRepo, PanicModelRepo> = Service {
             db: Arc::new(db),
-            provider_repo,
+            provider_repo: Arc::clone(&provider_repo),
             model_repo,
             cache: Arc::new(NoopResolutionCache),
             tenant_resolver,
@@ -1637,31 +1885,31 @@ mod tests {
             config,
         };
 
-        // When: listing providers with ancestors that fail to query.
+        // When: listing providers as a tenant that has two ancestors.
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(child_tenant())
             .build()
             .expect("ctx");
-        let err = service
+        let page = service
             .list_providers(&ctx, &ODataQuery::default())
             .await
-            .expect_err("ancestor query failure should propagate");
+            .expect("the listing must not query any ancestor");
 
-        // Then: the error must be an Internal with the failure detail.
-        assert!(
-            matches!(&err, DomainError::Internal { detail, .. }
-                if detail.contains("ancestor provider query failed")),
-            "expected Internal error with ancestor failure detail, got: {err:?}"
+        // Then: exactly one query was issued, under the PDP scope alone.
+        assert!(page.items.is_empty());
+        assert_eq!(
+            provider_repo.call_count.load(Ordering::SeqCst),
+            1,
+            "the admin listing must issue exactly one provider query"
         );
     }
 
     #[tokio::test]
-    async fn test_list_tenant_models_skips_ancestor_with_empty_page() {
+    async fn test_list_tenant_models_returns_own_rows_when_ancestors_have_none() {
         // Given: a service with real repos and TwoAncestorsResolver where the
-        // parent has no provider/models. The ancestor query succeeds but returns
-        // empty — this proves Skip returns partial results even with empty
-        // ancestor pages.
+        // ancestors own no providers at all. The chain-wide query still resolves
+        // and the child's own rows come back untouched.
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -1692,7 +1940,7 @@ mod tests {
         let page = service
             .list_tenant_models(&ctx, &ODataQuery::default())
             .await
-            .expect("Skip should allow partial results");
+            .expect("a chain whose ancestors own nothing still lists own rows");
 
         // The child's own model should be visible regardless of ancestor data.
         assert_eq!(page.items.len(), 1);
@@ -1700,53 +1948,378 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    // list_tenant_models — chain-wide query shape
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// No chain tenant owns an active winning provider, so nothing can match.
+    /// The service must synthesize the empty page rather than issue a model
+    /// query whose `provider_id IN ()` predicate has no portable rendering.
     #[tokio::test]
-    async fn test_list_tenant_models_empty_allow_list_no_query() {
-        // Given: a child tenant with NO providers of its own. The
-        // allow-list slice for the child is empty — the own-tenant query
-        // is skipped and replaced with an empty synthetic page.
+    async fn test_list_tenant_models_empty_allow_list_skips_the_model_query() {
         let db = setup_db().await;
-        let conn = db.conn().expect("conn");
+        let provider_repo = Arc::new(CountingProviderRepo::new());
 
-        let provider_repo = ProviderRepositoryImpl::default();
-        let model_repo = ModelRepositoryImpl::default();
+        // PanicModelRepo panics on any call, so reaching the model query fails
+        // the test outright rather than silently passing.
+        let service: Service<CountingProviderRepo, PanicModelRepo> = Service {
+            db: Arc::new(db),
+            provider_repo: Arc::clone(&provider_repo),
+            model_repo: Arc::new(PanicModelRepo),
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver: Arc::new(TwoAncestorsResolver),
+            policy_enforcer: PolicyEnforcer::new(Arc::new(MockAuthZ)),
+            config: ModelRegistryConfig::default(),
+        };
 
-        // Parent has a provider and model that the child WOULD inherit,
-        // but the child shadows the slug with no provider of its own.
-        let parent_tid = test_tenant();
-        let parent_scope = scope_for(parent_tid);
-        let (_parent_pid, parent_slug) =
-            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
-        create_test_model(
-            &model_repo,
-            &conn,
-            &parent_scope,
-            parent_tid,
-            &parent_slug,
-            "gpt-4o",
-        )
-        .await;
-
-        // Child tenant — NO provider, so allow_slice_for returns empty.
-        let child_tid = child_tenant();
-
-        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
-            .subject_tenant_id(child_tid)
+            .subject_tenant_id(child_tenant())
             .build()
             .expect("ctx");
         let page = service
             .list_tenant_models(&ctx, &ODataQuery::default())
             .await
-            .expect("empty allow-list must not error");
+            .expect("an empty allow-list must not error");
 
-        // The child shadows "openai" (no `register_provider` for that
-        // slug) so the ancestor model is hidden, and the child has
-        // no own model — the result is empty.
+        assert!(page.items.is_empty());
+        assert_eq!(
+            page.page_info.limit,
+            ModelRegistryConfig::default().page_limits().clamp(None),
+            "the synthetic page carries the limit the repository would have resolved"
+        );
+    }
+
+    /// The whole point of the change: one provider query and one model query,
+    /// regardless of how deep the chain is.
+    #[tokio::test]
+    async fn test_list_tenant_models_issues_one_query_per_entity() {
+        let db = setup_db().await;
+
+        // One active provider owned by the caller, so the listing gets past the
+        // empty-allow-list short-circuit and actually issues the model query.
+        let provider_repo = Arc::new(CountingProviderRepo::with_chain_providers(vec![
+            provider_v1(Uuid::new_v4(), child_tenant(), "openai"),
+        ]));
+        let model_repo = Arc::new(CountingModelRepo::new());
+
+        let service: Service<CountingProviderRepo, CountingModelRepo> = Service {
+            db: Arc::new(db),
+            provider_repo: Arc::clone(&provider_repo),
+            model_repo: Arc::clone(&model_repo),
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver: Arc::new(TwoAncestorsResolver),
+            policy_enforcer: PolicyEnforcer::new(Arc::new(MockAuthZ)),
+            config: ModelRegistryConfig::default(),
+        };
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tenant())
+            .build()
+            .expect("ctx");
+        service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+
+        assert_eq!(
+            provider_repo.list_all_count.load(Ordering::SeqCst),
+            1,
+            "a 3-tenant chain must still cost exactly one provider query"
+        );
+        assert_eq!(
+            model_repo.list_count.load(Ordering::SeqCst),
+            1,
+            "a 3-tenant chain must still cost exactly one model query"
+        );
+    }
+
+    /// Fail-closed: a provider query that failed would un-shadow an ancestor,
+    /// so the error propagates rather than narrowing the caller's view.
+    #[tokio::test]
+    async fn test_list_tenant_models_fails_closed_when_the_provider_query_fails() {
+        let db = setup_db().await;
+
+        let service: Service<FailingListAllRepo, PanicModelRepo> = Service {
+            db: Arc::new(db),
+            provider_repo: Arc::new(FailingListAllRepo),
+            model_repo: Arc::new(PanicModelRepo),
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver: Arc::new(TwoAncestorsResolver),
+            policy_enforcer: PolicyEnforcer::new(Arc::new(MockAuthZ)),
+            config: ModelRegistryConfig::default(),
+        };
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tenant())
+            .build()
+            .expect("ctx");
+        let err = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect_err("a failing provider query must fail the request");
         assert!(
-            page.items.is_empty(),
-            "child with empty allow-list must see no models"
+            err.to_string().contains("provider set unavailable"),
+            "expected the provider error to propagate, got: {err}"
+        );
+    }
+
+    /// With one chain-wide query there is no partial outcome to degrade to: a
+    /// failing model query fails the request rather than dropping an ancestor's
+    /// rows silently, as the per-ancestor fan-out used to.
+    #[tokio::test]
+    async fn test_list_tenant_models_fails_when_the_model_query_fails() {
+        let db = setup_db().await;
+        let child_tid = child_tenant();
+        {
+            let conn = db.conn().expect("conn");
+            let provider_repo = ProviderRepositoryImpl::default();
+            let child_scope = scope_for(child_tid);
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
+        }
+
+        let service: Service<ProviderRepositoryImpl, FailingModelListRepo> = Service {
+            db: Arc::new(db),
+            provider_repo: Arc::new(ProviderRepositoryImpl::default()),
+            model_repo: Arc::new(FailingModelListRepo),
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver: Arc::new(TwoAncestorsResolver),
+            policy_enforcer: PolicyEnforcer::new(Arc::new(MockAuthZ)),
+            config: ModelRegistryConfig::default(),
+        };
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let err = service
+            .list_tenant_models(&ctx, &ODataQuery::default())
+            .await
+            .expect_err("a failing model query must fail the request");
+        assert!(
+            err.to_string().contains("model listing unavailable"),
+            "expected the model error to propagate, got: {err}"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // list_tenant_models — ordering and pagination across the chain
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Child owns `child-co::b`; the parent owns `openai::a` and `openai::c`.
+    /// Under the default `canonical_id asc` order the inherited rows must
+    /// interleave with the own row, not follow it as a block.
+    async fn seed_interleaved_chain(db: &DBProvider<DbError>) {
+        let conn = db.conn().expect("conn");
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
+
+        let parent_tid = parent_id();
+        let parent_scope = scope_for(parent_tid);
+        create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+        for model_id in ["a", "c"] {
+            create_test_approved_model(
+                &model_repo,
+                &conn,
+                &parent_scope,
+                parent_tid,
+                "openai",
+                model_id,
+            )
+            .await;
+        }
+
+        let child_tid = child_tenant();
+        let child_scope = scope_for(child_tid);
+        create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "child-co").await;
+        create_test_approved_model(&model_repo, &conn, &child_scope, child_tid, "child-co", "b")
+            .await;
+    }
+
+    fn child_ctx() -> SecurityContext {
+        SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tenant())
+            .build()
+            .expect("ctx")
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_orders_inherited_rows_inline_with_own_rows() {
+        let db = setup_db().await;
+        seed_interleaved_chain(&db).await;
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["child-co::b", "openai::a", "openai::c"],
+            "the merged set must be globally sorted, not own-rows-first"
+        );
+    }
+
+    /// Paging across inherited rows was structurally impossible before: the
+    /// cursor was nulled whenever any inherited row was present.
+    #[tokio::test]
+    async fn test_list_tenant_models_pages_across_inherited_rows() {
+        let db = setup_db().await;
+        seed_interleaved_chain(&db).await;
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let ctx = child_ctx();
+
+        let first = service
+            .list_tenant_models(
+                &ctx,
+                &ODataQuery {
+                    limit: Some(2),
+                    ..ODataQuery::default()
+                },
+            )
+            .await
+            .expect("first page");
+
+        let first_ids: Vec<&str> = first
+            .items
+            .iter()
+            .map(|m| m.canonical_id.as_str())
+            .collect();
+        assert_eq!(first_ids, ["child-co::b", "openai::a"]);
+        let token = first
+            .page_info
+            .next_cursor
+            .clone()
+            .expect("inherited rows must not suppress the cursor");
+        let cursor = toolkit_odata::CursorV1::decode(&token).expect("cursor decodes");
+
+        let second = service
+            .list_tenant_models(
+                &ctx,
+                &ODataQuery {
+                    limit: Some(2),
+                    cursor: Some(cursor),
+                    ..ODataQuery::default()
+                },
+            )
+            .await
+            .expect("second page");
+
+        let second_ids: Vec<&str> = second
+            .items
+            .iter()
+            .map(|m| m.canonical_id.as_str())
+            .collect();
+        assert_eq!(
+            second_ids,
+            ["openai::c"],
+            "the walk must continue past the inherited rows with no overlap"
+        );
+        assert!(
+            second.page_info.next_cursor.is_none(),
+            "the walk is complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_honours_an_explicit_orderby_across_the_chain() {
+        let db = setup_db().await;
+        seed_interleaved_chain(&db).await;
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+
+        let query = ODataQuery {
+            order: toolkit_odata::ODataOrderBy(vec![toolkit_odata::OrderKey {
+                field: "canonical_id".to_owned(),
+                dir: toolkit_odata::SortDir::Desc,
+            }]),
+            ..ODataQuery::default()
+        };
+        let page = service
+            .list_tenant_models(&child_ctx(), &query)
+            .await
+            .expect("list should succeed");
+
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert_eq!(ids, ["openai::c", "openai::a", "child-co::b"]);
+    }
+
+    /// The PDP scope must keep binding own-tenant rows. A flat
+    /// `for_tenants(chain)` scope would subsume it and silently stop enforcing
+    /// every row-level constraint the PDP compiled.
+    #[tokio::test]
+    async fn test_list_tenant_models_keeps_pdp_constraints_on_own_rows() {
+        let db = setup_db().await;
+        let child_tid = child_tenant();
+        let visible = {
+            let conn = db.conn().expect("conn");
+            let provider_repo = ProviderRepositoryImpl::default();
+            let model_repo = ModelRepositoryImpl::default();
+
+            // Parent owns one inheritable model.
+            let parent_tid = parent_id();
+            let parent_scope = scope_for(parent_tid);
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+            create_test_approved_model(
+                &model_repo,
+                &conn,
+                &parent_scope,
+                parent_tid,
+                "openai",
+                "gpt-4o",
+            )
+            .await;
+
+            // Child owns two, but the PDP grants only one of them by id.
+            let child_scope = scope_for(child_tid);
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "child-co").await;
+            let visible = create_test_approved_model(
+                &model_repo,
+                &conn,
+                &child_scope,
+                child_tid,
+                "child-co",
+                "a",
+            )
+            .await;
+            create_test_approved_model(
+                &model_repo,
+                &conn,
+                &child_scope,
+                child_tid,
+                "child-co",
+                "z",
+            )
+            .await;
+            visible
+        };
+
+        let service = build_service_with_authz(
+            db,
+            TwoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            Arc::new(NoopResolutionCache),
+            MockAuthZRowScoped {
+                tenant_id: child_tid,
+                resource_id: visible.id,
+            },
+        );
+
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["child-co::a", "openai::gpt-4o"],
+            "the PDP's row constraint must still hide `child-co::z`, while the \
+             inherited row is admitted by the ancestor branch"
         );
     }
 
@@ -1792,7 +2365,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -1803,14 +2376,9 @@ mod tests {
         .await;
 
         // Soft-delete the model.
-        crate::domain::repo::ModelRepository::soft_delete(
-            &model_repo,
-            &conn,
-            &scope,
-            "openai::gpt-4o",
-        )
-        .await
-        .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, model.id)
+            .await
+            .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -1847,7 +2415,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_approved_model(
+        let model = create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -1861,7 +2429,7 @@ mod tests {
             &model_repo,
             &conn,
             &scope,
-            "openai::gpt-4o",
+            model.id,
             &crate::UpdateModelRequestV1 {
                 lifecycle_status: Some(crate::LifecycleStatus::Sunset),
                 ..Default::default()
@@ -1905,13 +2473,15 @@ mod tests {
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create model with initial approved status
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let provider = resolve_test_provider(&conn, &scope, &provider_slug).await;
+        let mut req = make_create_model_req(provider.id, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Pending);
         let _model = crate::domain::repo::ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
+            &provider,
             &req,
         )
         .await
@@ -1954,13 +2524,15 @@ mod tests {
             let (_provider_id, provider_slug) =
                 create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
-            let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+            let provider = resolve_test_provider(&conn, &scope, &provider_slug).await;
+            let mut req = make_create_model_req(provider.id, "gpt-4o");
             req.approval_status = Some(status);
             crate::domain::repo::ModelRepository::create(
                 &model_repo,
                 &conn,
                 &scope,
                 tenant_id,
+                &provider,
                 &req,
             )
             .await
@@ -1996,13 +2568,15 @@ mod tests {
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let provider = resolve_test_provider(&conn, &scope, &provider_slug).await;
+        let mut req = make_create_model_req(provider.id, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
         let _model = crate::domain::repo::ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
+            &provider,
             &req,
         )
         .await
@@ -2149,7 +2723,7 @@ mod tests {
             "gpt-4o",
         )
         .await;
-        create_test_approved_model(
+        let mini = create_test_approved_model(
             &model_repo,
             &conn,
             &scope,
@@ -2160,14 +2734,9 @@ mod tests {
         .await;
 
         // Soft-delete gpt-4o-mini
-        crate::domain::repo::ModelRepository::soft_delete(
-            &model_repo,
-            &conn,
-            &scope,
-            "openai::gpt-4o-mini",
-        )
-        .await
-        .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, mini.id)
+            .await
+            .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -2490,7 +3059,7 @@ mod tests {
     // ═════════════════════════════════════════════════════════════════════════
 
     #[tokio::test]
-    async fn test_list_tenant_models_management_shadowed_ancestor() {
+    async fn test_list_tenant_models_management_returns_only_scoped_rows() {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -2499,7 +3068,8 @@ mod tests {
         let child_tid = child_tenant();
         let parent_tid = parent_id();
 
-        // Create provider "openai" in parent and child (child shadows parent).
+        // Provider "openai" in parent and child; the child shadows the parent
+        // on the eval path.
         let child_scope = scope_for(child_tid);
         let parent_scope = scope_for(parent_tid);
 
@@ -2508,8 +3078,6 @@ mod tests {
         let (_parent_provider_id, parent_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
-        // Create a model in each tenant with DIFFERENT canonical IDs,
-        // both approved so available_for_eval reflects the provider/winner state.
         create_test_approved_model(
             &model_repo,
             &conn,
@@ -2537,39 +3105,23 @@ mod tests {
             .build()
             .expect("ctx");
 
-        // 1. Management listing shows both models with correct flags.
+        // 1. The admin listing is bounded by the PDP scope, which `MockAuthZ`
+        //    pins to the caller's own tenant. The parent row is out of scope.
         let mgmt = service
             .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
             .await
             .expect("management list should succeed");
 
-        assert_eq!(mgmt.items.len(), 2, "management should return both models");
-
-        let parent_row = mgmt
-            .items
-            .iter()
-            .find(|r| r.model.canonical_id.as_str() == "openai::gpt-4o-parent")
-            .expect("parent model should be in management listing");
-        assert!(parent_row.shadowed, "parent model should be shadowed");
-        assert!(
-            !parent_row.available_for_eval,
-            "shadowed model should not be available for eval"
+        assert_eq!(
+            mgmt.items.len(),
+            1,
+            "admin listing must not reach the parent tenant"
         );
-        assert!(!parent_row.provider_disabled, "parent provider is active");
+        assert_eq!(mgmt.items[0].model.canonical_id, "openai::gpt-4o-child");
+        assert!(mgmt.items[0].available_for_eval);
+        assert!(!mgmt.items[0].provider_disabled);
 
-        let child_row = mgmt
-            .items
-            .iter()
-            .find(|r| r.model.canonical_id.as_str() == "openai::gpt-4o-child")
-            .expect("child model should be in management listing");
-        assert!(!child_row.shadowed, "child model should not be shadowed");
-        assert!(
-            child_row.available_for_eval,
-            "child model should be available for eval"
-        );
-        assert!(!child_row.provider_disabled, "child provider is active");
-
-        // 2. Eval listing shows only the child model.
+        // 2. The eval listing still resolves the chain and shadows the parent.
         let eval = service
             .list_tenant_models(&ctx, &ODataQuery::default())
             .await
@@ -2577,6 +3129,82 @@ mod tests {
 
         assert_eq!(eval.items.len(), 1, "eval should only show child model");
         assert_eq!(eval.items[0].canonical_id, "openai::gpt-4o-child");
+    }
+
+    #[tokio::test]
+    async fn test_list_tenant_models_management_spans_every_tenant_the_pdp_grants() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl::default();
+        let model_repo = ModelRepositoryImpl::default();
+        let child_tid = child_tenant();
+        let parent_tid = parent_id();
+
+        let child_scope = scope_for(child_tid);
+        let parent_scope = scope_for(parent_tid);
+
+        let (_child_provider_id, child_slug) =
+            create_test_provider(&provider_repo, &conn, &child_scope, child_tid, "openai").await;
+        let (_parent_provider_id, parent_slug) = create_test_provider(
+            &provider_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            "anthropic",
+        )
+        .await;
+
+        create_test_approved_model(
+            &model_repo,
+            &conn,
+            &child_scope,
+            child_tid,
+            &child_slug,
+            "gpt-4o",
+        )
+        .await;
+        create_test_approved_model(
+            &model_repo,
+            &conn,
+            &parent_scope,
+            parent_tid,
+            &parent_slug,
+            "claude",
+        )
+        .await;
+
+        // A PDP grant spanning both tenants — no ancestor resolution involved.
+        let service = build_service_with_authz(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            Arc::new(NoopResolutionCache),
+            MockAuthZTenants(vec![child_tid, parent_tid]),
+        );
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+
+        let mgmt = service
+            .list_tenant_models_management(&ctx, &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+
+        let mut ids: Vec<&str> = mgmt
+            .items
+            .iter()
+            .map(|r| r.model.canonical_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["anthropic::claude", "openai::gpt-4o"]);
+        assert!(
+            mgmt.items.iter().all(|r| r.available_for_eval),
+            "both providers are active and both models approved"
+        );
     }
 
     #[tokio::test]
@@ -2640,7 +3268,6 @@ mod tests {
             !mgmt.items[0].available_for_eval,
             "model should not be available for eval"
         );
-        assert!(!mgmt.items[0].shadowed, "own-tenant model is not shadowed");
 
         // 2. Eval listing should NOT show the model (provider is disabled).
         let eval = service
@@ -2669,13 +3296,14 @@ mod tests {
             create_test_provider(&provider_repo, &conn, &scope, tid, "openai").await;
 
         // Create a model with Pending approval status.
+        let provider = resolve_test_provider(&conn, &scope, &provider_slug).await;
         let req = {
-            let mut r = make_create_model_req(&provider_slug, "gpt-4o");
+            let mut r = make_create_model_req(provider.id, "gpt-4o");
             r.approval_status = Some(ApprovalStatus::Pending);
             r
         };
         let _ = model_repo
-            .create(&conn, &scope, tid, &req)
+            .create(&conn, &scope, tid, &provider, &req)
             .await
             .expect("create model");
 
@@ -2698,7 +3326,6 @@ mod tests {
             !mgmt.items[0].available_for_eval,
             "pending model should not be available for eval"
         );
-        assert!(!mgmt.items[0].shadowed, "own-tenant model is not shadowed");
         assert!(
             !mgmt.items[0].provider_disabled,
             "provider is active, not disabled"
@@ -2759,13 +3386,14 @@ mod tests {
         .await;
 
         // Create a model with Deprecated lifecycle.
+        let provider = resolve_test_provider(&conn, &scope, &provider_slug).await;
         let req = {
-            let mut r = make_create_model_req(&provider_slug, "gpt-4o-deprecated");
+            let mut r = make_create_model_req(provider.id, "gpt-4o-deprecated");
             r.lifecycle_status = LifecycleStatus::Deprecated;
             r
         };
         let _ = model_repo
-            .create(&conn, &scope, tid, &req)
+            .create(&conn, &scope, tid, &provider, &req)
             .await
             .expect("create deprecated model");
 
@@ -2956,7 +3584,7 @@ mod tests {
         // Create a provider and model.
         let (provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -2967,14 +3595,9 @@ mod tests {
         .await;
 
         // Soft-delete the model (sets lifecycle to Deprecated).
-        crate::domain::repo::ModelRepository::soft_delete(
-            &model_repo,
-            &conn,
-            &scope,
-            "openai::gpt-4o",
-        )
-        .await
-        .expect("soft delete model");
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, model.id)
+            .await
+            .expect("soft delete model");
 
         // Disable the provider.
         crate::domain::repo::ProviderRepository::update(
@@ -3142,78 +3765,84 @@ mod tests {
         );
     }
 
+    #[domain_model]
+    struct FailingSlugRepo {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProviderRepository for FailingSlugRepo {
+        async fn find_by_id(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!()
+        }
+        async fn find_all_by_slug(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _slug: &str,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(DomainError::internal("slug resolution unavailable"))
+        }
+        async fn list(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _query: &ODataQuery,
+        ) -> Result<Page<ProviderV1>, DomainError> {
+            unimplemented!()
+        }
+        async fn list_all_for_tenant(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            unimplemented!()
+        }
+        async fn find_by_ids(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _ids: &[Uuid],
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            unimplemented!()
+        }
+        async fn create(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _tenant_id: Uuid,
+            _req: &CreateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!()
+        }
+        async fn update(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+            _req: &UpdateProviderRequestV1,
+        ) -> Result<ProviderV1, DomainError> {
+            unimplemented!()
+        }
+        async fn delete(
+            &self,
+            _conn: &impl DBRunner,
+            _scope: &AccessScope,
+            _id: Uuid,
+        ) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+    }
+
     #[tokio::test]
     async fn test_get_tenant_model_fail_closed_on_slug_query_error() {
         // A non-not-found error during slug resolution must propagate.
-        use std::sync::atomic::AtomicUsize;
-
-        #[domain_model]
-        struct FailingSlugRepo {
-            call_count: Arc<AtomicUsize>,
-        }
-
-        #[async_trait]
-        impl ProviderRepository for FailingSlugRepo {
-            async fn find_by_id(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn find_by_slug(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _slug: &str,
-            ) -> Result<ProviderV1, DomainError> {
-                self.call_count.fetch_add(1, Ordering::SeqCst);
-                Err(DomainError::internal("slug resolution unavailable"))
-            }
-            async fn list(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _query: &ODataQuery,
-            ) -> Result<Page<ProviderV1>, DomainError> {
-                unimplemented!()
-            }
-            async fn list_all_for_tenant(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-            ) -> Result<Vec<ProviderV1>, DomainError> {
-                unimplemented!()
-            }
-            async fn create(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _tenant_id: Uuid,
-                _req: &CreateProviderRequestV1,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn update(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-                _req: &UpdateProviderRequestV1,
-            ) -> Result<ProviderV1, DomainError> {
-                unimplemented!()
-            }
-            async fn delete(
-                &self,
-                _conn: &impl DBRunner,
-                _scope: &AccessScope,
-                _id: Uuid,
-            ) -> Result<(), DomainError> {
-                unimplemented!()
-            }
-        }
-
         let call_count = Arc::new(AtomicUsize::new(0));
         let provider_repo = Arc::new(FailingSlugRepo {
             call_count: Arc::clone(&call_count),
@@ -3245,6 +3874,45 @@ mod tests {
             matches!(&err, DomainError::Internal { detail, .. } if detail.contains("slug resolution unavailable")),
             "expected Internal error from slug resolution, got: {err:?}"
         );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "slug resolution is a single query"
+        );
+    }
+
+    /// The chain-wide slug query costs one round trip no matter how deep the
+    /// chain is — the per-hop `find_by_slug` walk it replaced cost one per hop.
+    #[tokio::test]
+    async fn test_get_tenant_model_issues_one_provider_query_for_a_deep_chain() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let service: Service<FailingSlugRepo, PanicModelRepo> = Service {
+            db: Arc::new(setup_db().await),
+            provider_repo: Arc::new(FailingSlugRepo {
+                call_count: Arc::clone(&call_count),
+            }),
+            model_repo: Arc::new(PanicModelRepo),
+            cache: Arc::new(NoopResolutionCache),
+            tenant_resolver: Arc::new(TwoAncestorsResolver),
+            policy_enforcer: PolicyEnforcer::new(Arc::new(MockAuthZ)),
+            config: ModelRegistryConfig::default(),
+        };
+
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tenant())
+            .build()
+            .expect("ctx");
+        service
+            .get_tenant_model(&ctx, "openai::gpt-4o")
+            .await
+            .expect_err("the stub repo always fails");
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "a 3-tenant chain must still cost exactly one provider query"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -3259,12 +3927,12 @@ mod tests {
         let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
+        let (provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let req = make_create_model_req(provider_id, "gpt-4o");
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(tenant_id)
@@ -3275,7 +3943,10 @@ mod tests {
             .await
             .expect("create model");
 
+        // canonical_id is derived server-side from the resolved provider's slug
+        // plus the requested provider_model_id; the caller never supplied it.
         assert_eq!(model.canonical_id, "openai::gpt-4o");
+        assert_eq!(model.provider_id, provider_id);
         assert_eq!(model.lifecycle_status, crate::LifecycleStatus::Production);
         assert_eq!(model.approval_status, crate::ApprovalStatus::Pending);
     }
@@ -3288,12 +3959,12 @@ mod tests {
         let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
+        let (provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let mut req = make_create_model_req(provider_id, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
@@ -3316,7 +3987,7 @@ mod tests {
         let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
-        let (provider_id, provider_slug) =
+        let (provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Disable the provider via the repository.
@@ -3331,7 +4002,7 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let req = make_create_model_req(provider_id, "gpt-4o");
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(tenant_id)
@@ -3356,12 +4027,12 @@ mod tests {
         let provider_repo = ProviderRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
-        let (_provider_id, provider_slug) =
+        let (provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let mut req = make_create_model_req(provider_id, "gpt-4o");
         req.lifecycle_status = crate::LifecycleStatus::Deprecated;
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
@@ -3392,7 +4063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_model_with_inherited_provider() {
+    async fn test_create_model_ancestor_provider_out_of_scope_is_not_found() {
         let db = setup_db().await;
         let conn = db.conn().expect("conn");
 
@@ -3400,15 +4071,16 @@ mod tests {
         let parent_tid = parent_id();
         let child_tid = child_tenant();
 
-        // Create provider in the parent tenant only.
+        // Provider exists in the parent tenant only.
         let parent_scope = scope_for(parent_tid);
-        let (_provider_id, provider_slug) =
+        let (parent_provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
 
+        // `MockAuthZ` pins the scope to the caller's own tenant, so the parent's
+        // provider is unreachable even though it is an ancestor.
         let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
 
-        // Child tenant must NOT create a model referencing a parent's provider (E1).
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
+        let req = make_create_model_req(parent_provider_id, "gpt-4o");
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(child_tid)
@@ -3417,12 +4089,53 @@ mod tests {
         let err = service
             .create_model(&ctx, &req)
             .await
-            .expect_err("inherited provider should be rejected");
+            .expect_err("out-of-scope provider should be rejected");
 
         assert!(
-            matches!(&err, DomainError::ProviderNotOwned { slug } if slug == "openai"),
-            "expected ProviderNotOwned('openai'), got: {err:?}"
+            matches!(&err, DomainError::ProviderNotFound { id } if *id == parent_provider_id),
+            "expected ProviderNotFound({parent_provider_id}), got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_model_takes_the_providers_tenant() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        let provider_repo = ProviderRepositoryImpl::default();
+        let parent_tid = parent_id();
+        let child_tid = child_tenant();
+
+        let parent_scope = scope_for(parent_tid);
+        let (parent_provider_id, _provider_slug) =
+            create_test_provider(&provider_repo, &conn, &parent_scope, parent_tid, "openai").await;
+
+        // A PDP grant covering both tenants; no ancestor resolution involved.
+        let service = build_service_with_authz(
+            db,
+            NoAncestorsResolver,
+            ModelRegistryConfig::default(),
+            Arc::new(NoopResolutionCache),
+            MockAuthZTenants(vec![child_tid, parent_tid]),
+        );
+
+        let req = make_create_model_req(parent_provider_id, "gpt-4o");
+        let ctx = SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(child_tid)
+            .build()
+            .expect("ctx");
+        let model = service
+            .create_model(&ctx, &req)
+            .await
+            .expect("in-scope provider should be accepted");
+
+        assert_eq!(
+            model.tenant_id, parent_tid,
+            "a model takes its provider's tenant, not the caller's"
+        );
+        assert_eq!(model.provider_id, parent_provider_id);
+        assert_eq!(model.canonical_id, "openai::gpt-4o");
     }
 
     #[tokio::test]
@@ -3431,7 +4144,8 @@ mod tests {
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
-        let req = make_create_model_req("nonexistent", "gpt-4o");
+        let missing = Uuid::new_v4();
+        let req = make_create_model_req(missing, "gpt-4o");
         let ctx = SecurityContext::builder()
             .subject_id(Uuid::new_v4())
             .subject_tenant_id(test_tenant())
@@ -3442,9 +4156,11 @@ mod tests {
             .await
             .expect_err("nonexistent provider should fail");
 
+        // 404 (not 403): the id resolves in no tenant of the chain, so there is
+        // nothing to withhold.
         assert!(
-            matches!(&err, DomainError::ProviderNotFoundBySlug { slug } if slug == "nonexistent"),
-            "expected ProviderNotFoundBySlug('nonexistent'), got: {err:?}"
+            matches!(&err, DomainError::ProviderNotFound { id } if *id == missing),
+            "expected ProviderNotFound({missing}), got: {err:?}"
         );
     }
 
@@ -3463,7 +4179,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -3483,7 +4199,7 @@ mod tests {
         let updated = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     lifecycle_status: Some(crate::LifecycleStatus::Preview),
                     ..Default::default()
@@ -3507,7 +4223,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -3529,7 +4245,7 @@ mod tests {
         let updated = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     approval_status: Some(crate::ApprovalStatus::Approved),
                     ..Default::default()
@@ -3543,7 +4259,7 @@ mod tests {
         let updated = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     approval_status: Some(crate::ApprovalStatus::Rejected),
                     ..Default::default()
@@ -3557,7 +4273,7 @@ mod tests {
         let updated = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     approval_status: Some(crate::ApprovalStatus::Revoked),
                     ..Default::default()
@@ -3579,7 +4295,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -3599,7 +4315,7 @@ mod tests {
         let updated = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     lifecycle_status: Some(crate::LifecycleStatus::Preview),
                     approval_status: Some(crate::ApprovalStatus::Approved),
@@ -3624,10 +4340,11 @@ mod tests {
             .subject_tenant_id(test_tenant())
             .build()
             .expect("ctx");
+        let missing = Uuid::new_v4();
         let err = service
             .update_model(
                 &ctx,
-                "nonexistent::model",
+                missing,
                 &crate::UpdateModelRequestV1 {
                     lifecycle_status: Some(crate::LifecycleStatus::Preview),
                     ..Default::default()
@@ -3637,8 +4354,8 @@ mod tests {
             .expect_err("nonexistent model should fail");
 
         assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound, got: {err:?}"
+            matches!(&err, DomainError::ModelNotFoundById { id } if *id == missing),
+            "expected ModelNotFoundById({missing}), got: {err:?}"
         );
     }
 
@@ -3653,7 +4370,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -3664,14 +4381,9 @@ mod tests {
         .await;
 
         // Soft-delete (deprecate) the model manually via the repo.
-        crate::domain::repo::ModelRepository::soft_delete(
-            &model_repo,
-            &conn,
-            &scope,
-            "openai::gpt-4o",
-        )
-        .await
-        .expect("soft delete");
+        crate::domain::repo::ModelRepository::soft_delete(&model_repo, &conn, &scope, model.id)
+            .await
+            .expect("soft delete");
 
         let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
 
@@ -3683,7 +4395,7 @@ mod tests {
         let err = service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                model.id,
                 &crate::UpdateModelRequestV1 {
                     lifecycle_status: Some(crate::LifecycleStatus::Production),
                     ..Default::default()
@@ -3713,7 +4425,7 @@ mod tests {
         let scope = scope_for(tenant_id);
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let model = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -3731,7 +4443,7 @@ mod tests {
             .build()
             .expect("ctx");
         service
-            .delete_model(&ctx, "openai::gpt-4o")
+            .delete_model(&ctx, model.id)
             .await
             .expect("delete model");
 
@@ -3758,14 +4470,15 @@ mod tests {
             .subject_tenant_id(test_tenant())
             .build()
             .expect("ctx");
+        let missing = Uuid::new_v4();
         let err = service
-            .delete_model(&ctx, "nonexistent::model")
+            .delete_model(&ctx, missing)
             .await
             .expect_err("nonexistent model should fail");
 
         assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound, got: {err:?}"
+            matches!(&err, DomainError::ModelNotFoundById { id } if *id == missing),
+            "expected ModelNotFoundById({missing}), got: {err:?}"
         );
     }
 
@@ -3927,7 +4640,7 @@ mod tests {
         let scope = scope_for(tenant_id);
 
         let provider_repo = ProviderRepositoryImpl::default();
-        let (_provider_id, provider_slug) =
+        let (provider_id, _provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         let cache = Arc::new(CountingCache::default());
@@ -3944,14 +4657,14 @@ mod tests {
             .build()
             .expect("ctx");
 
-        service
-            .create_model(&ctx, &make_create_model_req(&provider_slug, "gpt-4o"))
+        let created = service
+            .create_model(&ctx, &make_create_model_req(provider_id, "gpt-4o"))
             .await
             .expect("create");
         service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                created.id,
                 &crate::UpdateModelRequestV1 {
                     approval_status: Some(crate::ApprovalStatus::Approved),
                     ..Default::default()
@@ -3960,7 +4673,7 @@ mod tests {
             .await
             .expect("update");
         service
-            .delete_model(&ctx, "openai::gpt-4o")
+            .delete_model(&ctx, created.id)
             .await
             .expect("delete");
 
@@ -3981,7 +4694,7 @@ mod tests {
         let model_repo = ModelRepositoryImpl::default();
         let (_provider_id, provider_slug) =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        create_test_model(
+        let created = create_test_model(
             &model_repo,
             &conn,
             &scope,
@@ -4019,7 +4732,7 @@ mod tests {
         service
             .update_model(
                 &ctx,
-                "openai::gpt-4o",
+                created.id,
                 &crate::UpdateModelRequestV1 {
                     approval_status: Some(crate::ApprovalStatus::Approved),
                     ..Default::default()

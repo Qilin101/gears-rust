@@ -29,7 +29,7 @@ type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl>;
 // Provider handlers
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// `GET /model-registry/v1/providers/{id}`
+/// `GET /model-registry/v1/admin/providers/{id}`
 pub async fn get_provider(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -39,7 +39,7 @@ pub async fn get_provider(
     Ok(Json(ProviderDto::from(provider)))
 }
 
-/// `GET /model-registry/v1/providers`
+/// `GET /model-registry/v1/admin/providers`
 pub async fn list_providers(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -61,7 +61,7 @@ pub async fn list_providers(
     }))
 }
 
-/// `POST /model-registry/v1/providers`
+/// `POST /model-registry/v1/admin/providers`
 pub async fn create_provider(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -92,7 +92,7 @@ pub async fn create_provider(
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
-/// `PATCH /model-registry/v1/providers/{id}`
+/// `PATCH /model-registry/v1/admin/providers/{id}`
 pub async fn update_provider(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -119,7 +119,7 @@ pub async fn update_provider(
     Ok(Json(dto))
 }
 
-/// `DELETE /model-registry/v1/providers/{id}`
+/// `DELETE /model-registry/v1/admin/providers/{id}`
 pub async fn delete_provider(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -133,8 +133,8 @@ pub async fn delete_provider(
 // Model handlers
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// `GET /model-registry/v1/models/{canonical_id}`
-pub async fn get_model(
+/// `GET /model-registry/v1/models/{canonical_id}` — eval read.
+pub async fn get_tenant_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
     Path(canonical_id): Path<String>,
@@ -143,7 +143,17 @@ pub async fn get_model(
     Ok(Json(ModelDto::from(model)))
 }
 
-/// `GET /model-registry/v1/models`
+/// `GET /model-registry/v1/admin/models/{id}` — management read.
+pub async fn get_model(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<JsonBody<ModelDto>> {
+    let model = svc.get_model(&ctx, id).await?;
+    Ok(Json(ModelDto::from(model)))
+}
+
+/// `GET /model-registry/v1/models` — eval listing.
 pub async fn list_models(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -165,7 +175,7 @@ pub async fn list_models(
     }))
 }
 
-/// `POST /model-registry/v1/models`
+/// `POST /model-registry/v1/admin/models`
 pub async fn create_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
@@ -187,7 +197,7 @@ pub async fn create_model(
         })?;
 
     let req = crate::CreateModelRequestV1 {
-        provider_slug: dto.provider_slug,
+        provider_id: dto.provider_id,
         lifecycle_status,
         approval_status,
         info,
@@ -198,11 +208,11 @@ pub async fn create_model(
     Ok((StatusCode::CREATED, Json(dto)))
 }
 
-/// `PATCH /model-registry/v1/models/{canonical_id}`
+/// `PATCH /model-registry/v1/admin/models/{id}`
 pub async fn update_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
-    Path(canonical_id): Path<String>,
+    Path(id): Path<Uuid>,
     Json(dto): Json<UpdateModelRequestDto>,
 ) -> ApiResult<JsonBody<ModelDto>> {
     let approval_status = dto
@@ -302,18 +312,18 @@ pub async fn update_model(
         provider_settings: dto.provider_settings,
     };
 
-    let model = svc.update_model(&ctx, &canonical_id, &sdk_req).await?;
+    let model = svc.update_model(&ctx, id, &sdk_req).await?;
     let dto: ModelDto = model.into();
     Ok(Json(dto))
 }
 
-/// `DELETE /model-registry/v1/models/{canonical_id}`
+/// `DELETE /model-registry/v1/admin/models/{id}`
 pub async fn delete_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<ConcreteService>>,
-    Path(canonical_id): Path<String>,
+    Path(id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
-    svc.delete_model(&ctx, &canonical_id).await?;
+    svc.delete_model(&ctx, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -79,6 +79,14 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync> Mode
 
     // ── Models — CRUD ───────────────────────────────────────────────────
 
+    async fn get_model(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ModelV1, ModelRegistryError> {
+        self.service.get_model(ctx, id).await.map_err(Into::into)
+    }
+
     async fn create_model(
         &self,
         ctx: &SecurityContext,
@@ -93,11 +101,11 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync> Mode
     async fn update_model(
         &self,
         ctx: &SecurityContext,
-        canonical_id: &str,
+        id: Uuid,
         req: UpdateModelRequestV1,
     ) -> Result<ModelV1, ModelRegistryError> {
         self.service
-            .update_model(ctx, canonical_id, &req)
+            .update_model(ctx, id, &req)
             .await
             .map_err(Into::into)
     }
@@ -105,12 +113,9 @@ impl<R: ProviderRepository + Send + Sync, M: ModelRepository + Send + Sync> Mode
     async fn delete_model(
         &self,
         ctx: &SecurityContext,
-        canonical_id: &str,
+        id: Uuid,
     ) -> Result<(), ModelRegistryError> {
-        self.service
-            .delete_model(ctx, canonical_id)
-            .await
-            .map_err(Into::into)
+        self.service.delete_model(ctx, id).await.map_err(Into::into)
     }
 
     // ── Providers ────────────────────────────────────────────────────────
@@ -209,13 +214,13 @@ mod tests {
         ) -> Result<ProviderV1, DomainError> {
             Err(DomainError::provider_not_found(Uuid::nil()))
         }
-        async fn find_by_slug(
+        async fn find_all_by_slug(
             &self,
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: &str,
-        ) -> Result<ProviderV1, DomainError> {
-            Err(DomainError::provider_not_found(Uuid::nil()))
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            Ok(Vec::new())
         }
         async fn list(
             &self,
@@ -229,6 +234,14 @@ mod tests {
             &self,
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
+        ) -> Result<Vec<ProviderV1>, DomainError> {
+            Err(DomainError::internal("not implemented"))
+        }
+        async fn find_by_ids(
+            &self,
+            _: &impl toolkit_db::secure::DBRunner,
+            _: &toolkit_security::AccessScope,
+            _: &[Uuid],
         ) -> Result<Vec<ProviderV1>, DomainError> {
             Err(DomainError::internal("not implemented"))
         }
@@ -265,6 +278,14 @@ mod tests {
 
     #[async_trait]
     impl ModelRepository for MockModelRepo {
+        async fn find_by_id(
+            &self,
+            _: &impl toolkit_db::secure::DBRunner,
+            _: &toolkit_security::AccessScope,
+            id: Uuid,
+        ) -> Result<ModelV1, DomainError> {
+            Err(DomainError::model_not_found_by_id(id))
+        }
         async fn find_by_canonical(
             &self,
             _: &impl toolkit_db::secure::DBRunner,
@@ -287,6 +308,7 @@ mod tests {
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
             _: Uuid,
+            _: &ProviderV1,
             _: &CreateModelRequestV1,
         ) -> Result<ModelV1, DomainError> {
             Err(DomainError::internal("not implemented"))
@@ -295,7 +317,7 @@ mod tests {
             &self,
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
-            _: &str,
+            _: Uuid,
             _: &UpdateModelRequestV1,
         ) -> Result<ModelV1, DomainError> {
             Err(DomainError::internal("not implemented"))
@@ -304,7 +326,7 @@ mod tests {
             &self,
             _: &impl toolkit_db::secure::DBRunner,
             _: &toolkit_security::AccessScope,
-            _: &str,
+            _: Uuid,
         ) -> Result<(), DomainError> {
             Err(DomainError::internal("not implemented"))
         }
@@ -512,6 +534,17 @@ mod tests {
         assert!(
             matches!(err, ModelRegistryError::ModelNotFound { .. }),
             "expected ModelNotFound, got: {err:?}"
+        );
+
+        // get_model is id-keyed and reports the id-carrying not-found variant,
+        // distinct from the canonical_id one get_tenant_model returns.
+        let err = client
+            .get_model(&ctx, Uuid::nil())
+            .await
+            .expect_err("should return error");
+        assert!(
+            matches!(err, ModelRegistryError::ModelNotFoundById { .. }),
+            "expected ModelNotFoundById, got: {err:?}"
         );
 
         // get_provider should return ProviderNotFound

@@ -4,6 +4,8 @@
 //! These are NOT REST DTOs — they sit on the SDK trait (`ModelRegistryClientV1`)
 //! and are serialized into transport (REST/gRPC) by the module crate.
 
+use uuid::Uuid;
+
 use crate::models::{
     ApprovalStatus, ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities,
     LifecycleStatus, ModelCapabilities, ModelInfoV1, ModelPerformance, ProviderStatus,
@@ -162,18 +164,20 @@ pub struct UpdateProviderRequestV1 {
 /// Request for manually creating a model in the catalog (P1 manual model
 /// management; `cpt-cf-model-registry-fr-manual-model-management`).
 ///
-/// The `canonical_id` is derived from `provider_slug` + `info.provider_model_id`
-/// — both are immutable after creation. Provider must exist for the caller's
-/// tenant (or be inherited from an ancestor).
+/// The provider is addressed by its `Uuid` — the slug is never supplied by the
+/// caller. The model is owned by the resolved provider's tenant.
+///
+/// The server derives `canonical_id` as `{provider.slug}::{info.provider_model_id}`
+/// from the resolved provider; it is immutable after creation.
 ///
 /// The optional `approval_status` defaults to [`ApprovalStatus::Pending`];
 /// admins can pass [`ApprovalStatus::Approved`] to approve in the same call
 /// as a convenience.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateModelRequestV1 {
-    /// Provider slug (1-64 chars, lowercase alphanumeric + hyphen). Combined
-    /// with `info.provider_model_id` to form the `canonical_id`.
-    pub provider_slug: String,
+    /// Provider that will own this model; the created model takes its tenant.
+    /// The provider's slug forms the left half of the derived `canonical_id`.
+    pub provider_id: Uuid,
     /// Lifecycle status (Production / Preview / Experimental / …).
     pub lifecycle_status: LifecycleStatus,
     /// Optional initial approval status. `None` ⇒ defaults to
@@ -192,7 +196,7 @@ pub struct CreateModelRequestV1 {
 /// Request for updating an existing model. Only non-`None` fields are applied.
 ///
 /// **Immutable after creation** — these fields are NOT in this struct:
-/// `canonical_id`, `provider_slug`, `info.provider_model_id`, `info.gts_type`.
+/// `canonical_id`, `provider_id`, `info.provider_model_id`, `info.gts_type`.
 /// To switch a model's provider settings shape, soft-delete and recreate.
 ///
 /// **Approval status changes** also flow through this PATCH endpoint (see
