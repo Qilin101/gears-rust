@@ -71,7 +71,7 @@ pub struct ProviderDto {
     pub updated_at: String,
 }
 
-/// Request body for `POST /model-registry/v1/providers`.
+/// Request body for `POST /model-registry/v1/admin/providers`.
 #[api_dto(request)]
 #[derive(Debug, Clone)]
 pub struct CreateProviderRequestDto {
@@ -88,7 +88,7 @@ pub struct CreateProviderRequestDto {
     pub discovery_interval_seconds: Option<u32>,
 }
 
-/// Request body for `PATCH /model-registry/v1/providers/{id}`.
+/// Request body for `PATCH /model-registry/v1/admin/providers/{id}`.
 #[api_dto(request)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
@@ -115,7 +115,7 @@ pub struct UpdateProviderRequestDto {
     pub discovery_interval_seconds: Option<Option<u32>>,
 }
 
-/// Cursor-paginated list envelope for `GET /model-registry/v1/providers`.
+/// Cursor-paginated list envelope for `GET /model-registry/v1/admin/providers`.
 #[api_dto(request, response)]
 #[derive(Debug, Clone)]
 pub struct ProviderListDto {
@@ -189,18 +189,20 @@ where
     }
 }
 
-/// Request body for `POST /model-registry/v1/models`.
+/// Request body for `POST /model-registry/v1/admin/models`.
 #[api_dto(request)]
 #[derive(Debug, Clone)]
 pub struct CreateModelRequestDto {
-    pub provider_slug: String,
+    /// Provider that will own this model. Must belong to the caller's own
+    /// tenant; the server derives `canonical_id` from its slug.
+    pub provider_id: Uuid,
     pub lifecycle_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_status: Option<String>,
     pub info: JsonValue,
 }
 
-/// Request body for `PATCH /model-registry/v1/models/{canonical_id}`.
+/// Request body for `PATCH /model-registry/v1/admin/models/{id}`.
 #[api_dto(request)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
@@ -324,11 +326,10 @@ pub struct ModelListDto {
 /// Wire projection of [`ModelManagementV1`] — a model row annotated with
 /// provider-visibility flags for the admin endpoint.
 ///
-/// The three bools are response-only (§3.3); they are **not** `OData` filterable
+/// Both bools are response-only (§3.3); they are **not** `OData` filterable
 /// fields and must not be added to `ModelFilterField`.
 #[api_dto(response)]
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct ModelManagementDto {
     pub id: Uuid,
     pub provider_id: Uuid,
@@ -336,11 +337,9 @@ pub struct ModelManagementDto {
     pub lifecycle_status: String,
     pub approval_status: String,
     pub info: JsonValue,
-    /// The provider slug is shadowed by a closer tenant in the ancestor chain.
-    pub shadowed: bool,
     /// The provider is disabled.
     pub provider_disabled: bool,
-    /// The model would be visible in the eval (`list_tenant_models`) result.
+    /// The model passes every eval predicate except provider shadowing.
     pub available_for_eval: bool,
 }
 
@@ -355,7 +354,7 @@ pub struct ModelManagementListDto {
 // Forwarding conversion: SDK `ModelManagementV1` → REST `ModelManagementDto`.
 //
 // Like `From<ModelV1> for ModelDto`, this drops the SDK's `model` wrapper
-// and flattens the three management bools alongside the model's scalar fields.
+// and flattens the management bools alongside the model's scalar fields.
 impl<P> From<ModelManagementV1<P>> for ModelManagementDto
 where
     P: gts::GtsSchema + gts::GtsSerialize,
@@ -368,7 +367,6 @@ where
             lifecycle_status: source.model.lifecycle_status.as_str().to_owned(),
             approval_status: source.model.approval_status.as_str().to_owned(),
             info: model_info_to_json(&source.model.info),
-            shadowed: source.shadowed,
             provider_disabled: source.provider_disabled,
             available_for_eval: source.available_for_eval,
         }

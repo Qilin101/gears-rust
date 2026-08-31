@@ -23,18 +23,33 @@ use crate::models::{
 /// This trait is registered in `ClientHub` by the model-registry module:
 /// ```ignore
 /// let mr = hub.get::<dyn ModelRegistryClientV1>()?;
+///
+/// // eval read — keyed by canonical id, resolved through the tenant chain
 /// let model = mr.get_tenant_model(ctx, "openai::gpt-4o").await?;
+///
+/// // management read/write — keyed by uuid
+/// let same = mr.get_model(ctx, model.id).await?;
 /// ```
 ///
 /// All methods require `SecurityContext` for tenant scoping and authorization.
+///
+/// **Identifiers**: the eval read path (`get_tenant_model`) is keyed by
+/// `canonical_id` because that is the only handle an inference caller has.
+/// Everything else — the management read and all CRUD — is keyed by `Uuid`.
 #[async_trait]
 pub trait ModelRegistryClientV1: Send + Sync {
     // ==================== Models — read (P1) ====================
 
     /// Get a model by canonical ID within the caller's tenant context.
     ///
-    /// Returns the model with its approval status. Uses cache-first lookup
-    /// with DB fallback.
+    /// **Eval-facing and fail-closed**: a successful return means the model is
+    /// approved, live, and on an active provider that won its slug in the
+    /// caller's tenant chain. For the ungated management read see
+    /// [`Self::get_model`].
+    ///
+    /// `canonical_id` is parsed on its first `::` to recover the provider slug,
+    /// which is then resolved closest-first across the ancestor chain — this is
+    /// the one place in the API where a slug is interpreted.
     async fn get_tenant_model(
         &self,
         ctx: &SecurityContext,
@@ -72,13 +87,10 @@ pub trait ModelRegistryClientV1: Send + Sync {
 
     /// List models with management flags (admin endpoint).
     ///
-    /// Like [`Self::list_tenant_models`], but:
-    /// - Returns [`ModelManagementV1`] rows that include `shadowed`,
-    ///   `provider_disabled`, and `available_for_eval` flags.
-    /// - Merges ancestor rows **without** `canonical_id` dedupe — two chain
-    ///   tenants owning the same slug is the exact case this endpoint exists
-    ///   to display.
-    /// - Supports `include_deprecated` to include terminal-lifecycle models.
+    /// Returns every model in the caller's access scope, with no eval gates.
+    /// Rows are [`ModelManagementV1`], carrying `provider_disabled` and
+    /// `available_for_eval`. `include_deprecated` adds terminal-lifecycle
+    /// models.
     async fn list_tenant_models_management(
         &self,
         ctx: &SecurityContext,
@@ -93,15 +105,46 @@ pub trait ModelRegistryClientV1: Send + Sync {
     // (`approve` / `reject` / `revoke`) flow through `update_model` with
     // `UpdateModelRequestV1::approval_status` — no dedicated action endpoints.
     //
+    // Every method here addresses entities by `Uuid`, never by slug or
+    // `canonical_id`. A `canonical_id` is chain-relative — the same string
+    // resolves to different rows for a parent and a child once a provider slug
+    // is shadowed — so it cannot key a write, and the PDP evaluates resource
+    // constraints on `id` alone.
+    //
     // The same SDK methods continue to work in P2; only the implementation
     // shifts so approval status writes route through the Approval Service
     // (DESIGN §1.2 driver `fr-model-approval`).
 
+    /// Get a model by its `Uuid` with **management** semantics.
+    ///
+    /// The management counterpart of [`Self::get_tenant_model`], and the read
+    /// that pairs with the id-keyed CRUD methods below:
+    ///
+    /// - **No eval gates.** Lifecycle, provider status, and approval status are
+    ///   *not* checked. A returned model may be `pending`, `rejected`,
+    ///   `deprecated`, or sit on a disabled or shadowed provider — that is the
+    ///   point, since an admin has to read a row before acting on it. Callers
+    ///   needing eval availability must use [`Self::get_tenant_model`] or read
+    ///   `available_for_eval` from [`Self::list_tenant_models_management`].
+    /// - **Scope-bound.** Reads within the caller's access scope; the tenant
+    ///   ancestor chain is not consulted.
+    ///
+    /// Returns [`ModelRegistryError::ModelNotFoundById`] when no in-scope model
+    /// carries `id`.
+    async fn get_model(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ModelV1, ModelRegistryError>;
+
     /// Manually register a new model in the catalog.
     ///
-    /// Provider must already exist (registered via [`Self::create_provider`]
-    /// or inherited from an ancestor tenant). The `canonical_id` is derived
-    /// from `req.provider_slug` + `req.info.provider_model_id`.
+    /// `req.provider_id` is resolved within the caller's access scope; a
+    /// provider outside it is refused with
+    /// [`ModelRegistryError::ProviderNotFound`]. The created model takes the
+    /// resolved provider's tenant, since a model's `tenant_id` must equal its
+    /// provider's. The server derives `canonical_id` as
+    /// `{provider.slug}::{req.info.provider_model_id}` from that provider.
     ///
     /// The optional `req.approval_status` is written to `models.approval_status`;
     /// defaults to [`crate::models::ApprovalStatus::Pending`] when `None`.
@@ -111,42 +154,45 @@ pub trait ModelRegistryClientV1: Send + Sync {
         req: CreateModelRequestV1,
     ) -> Result<ModelV1, ModelRegistryError>;
 
-    /// Update an existing model's mutable fields (PATCH semantics).
+    /// Update an existing model's mutable fields by `Uuid` (PATCH semantics).
     ///
-    /// `canonical_id`, `provider_slug`, `info.provider_model_id`, and
+    /// `canonical_id`, `provider_id`, `info.provider_model_id`, and
     /// `info.gts_type` are immutable — to change them, soft-delete and
     /// recreate.
+    ///
+    /// Scoped to the caller's access scope, the same one [`Self::get_model`]
+    /// reads under.
     ///
     /// Setting `req.approval_status` updates `models.approval_status`.
     async fn update_model(
         &self,
         ctx: &SecurityContext,
-        canonical_id: &str,
+        id: Uuid,
         req: UpdateModelRequestV1,
     ) -> Result<ModelV1, ModelRegistryError>;
 
-    /// Soft-delete a model by canonical ID (sets `lifecycle_status` to
+    /// Soft-delete a model by `Uuid` (sets `lifecycle_status` to
     /// [`crate::models::LifecycleStatus::Deprecated`]).
     ///
     /// Record is retained but hidden from default `list_tenant_models`
     /// responses. Resurrection requires recreate via [`Self::create_model`]
     /// after the previous record is purged.
-    async fn delete_model(
-        &self,
-        ctx: &SecurityContext,
-        canonical_id: &str,
-    ) -> Result<(), ModelRegistryError>;
+    ///
+    /// Scoped to the caller's access scope, like [`Self::update_model`].
+    async fn delete_model(&self, ctx: &SecurityContext, id: Uuid)
+    -> Result<(), ModelRegistryError>;
 
     // ==================== Providers (P1) ====================
 
-    /// Get a provider by ID.
+    /// Get a provider by ID within the caller's access scope.
     async fn get_provider(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<ProviderV1, ModelRegistryError>;
 
-    /// List providers for the caller's tenant with `OData` filtering.
+    /// List the providers in the caller's access scope, with `OData`
+    /// filtering.
     ///
     /// `query.filter` and `query.order` accept exactly the fields enumerated
     /// by [`ProviderFilterField`](crate::odata::ProviderFilterField); build it

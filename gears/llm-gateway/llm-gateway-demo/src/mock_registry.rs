@@ -106,6 +106,16 @@ impl ModelRegistryClientV1 for MockModelRegistry {
         })
     }
 
+    async fn get_model(
+        &self,
+        _ctx: &SecurityContext,
+        _id: Uuid,
+    ) -> Result<ModelV1, ModelRegistryError> {
+        // The demo's fixtures are keyed by canonical_id and the gateway only
+        // ever calls `get_tenant_model`; the management read is unused here.
+        Err(unsupported())
+    }
+
     async fn create_model(
         &self,
         _ctx: &SecurityContext,
@@ -117,7 +127,7 @@ impl ModelRegistryClientV1 for MockModelRegistry {
     async fn update_model(
         &self,
         _ctx: &SecurityContext,
-        _canonical_id: &str,
+        _id: Uuid,
         _req: UpdateModelRequestV1,
     ) -> Result<ModelV1, ModelRegistryError> {
         Err(unsupported())
@@ -126,7 +136,7 @@ impl ModelRegistryClientV1 for MockModelRegistry {
     async fn delete_model(
         &self,
         _ctx: &SecurityContext,
-        _canonical_id: &str,
+        _id: Uuid,
     ) -> Result<(), ModelRegistryError> {
         Err(unsupported())
     }

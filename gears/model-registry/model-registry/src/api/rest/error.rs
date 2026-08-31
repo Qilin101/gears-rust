@@ -41,6 +41,11 @@ impl From<DomainError> for CanonicalError {
                     .with_resource(canonical_id)
                     .create()
             }
+            DomainError::ModelNotFoundById { id } => {
+                ModelRegistryResourceError::not_found("Model not found")
+                    .with_resource(id.to_string())
+                    .create()
+            }
             DomainError::ProviderNotFound { id } => {
                 ModelRegistryResourceError::not_found("Provider not found")
                     .with_resource(id.to_string())
@@ -58,13 +63,6 @@ impl From<DomainError> for CanonicalError {
             }
 
             // ── 403 Permission Denied ──────────────────────────────────
-            DomainError::ProviderNotOwned { slug } => {
-                ModelRegistryResourceError::permission_denied()
-                    .with_reason(format!(
-                        "provider with slug `{slug}` is not owned by caller's tenant"
-                    ))
-                    .create()
-            }
             DomainError::ModelNotApproved { canonical_id } => {
                 ModelRegistryResourceError::permission_denied()
                     .with_reason(format!("model not approved: {canonical_id}"))

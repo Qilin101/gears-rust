@@ -1,7 +1,7 @@
 //! `SeaORM`-backed implementation of [`ModelRepository`].
 //!
-//! Cross-entity read: [`Self::create`] queries `provider::Entity` to verify the
-//! referenced provider exists before inserting a model.
+//! Writes are keyed by `Uuid`. `find_by_canonical` is the one slug-derived
+//! lookup and serves the eval read path only.
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Set};
@@ -14,9 +14,9 @@ use uuid::Uuid;
 use crate::config::{ModelRegistryConfig, PageLimits};
 use crate::domain::error::DomainError;
 use crate::domain::repo::{ListVisibility, ModelRepository};
-use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, UpdateModelRequestV1};
+use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, ProviderV1, UpdateModelRequestV1};
 
-use super::entity::{self, model, provider};
+use super::entity::{self, model};
 use super::error_mapping::map_scope_error;
 use super::model_mapper;
 use super::model_odata_mapper::ModelODataMapper;
@@ -52,6 +52,25 @@ impl Default for ModelRepositoryImpl {
 
 #[async_trait]
 impl ModelRepository for ModelRepositoryImpl {
+    async fn find_by_id(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<ModelV1, DomainError> {
+        let entity = model::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .and_id(id)
+            .map_err(map_scope_error)?
+            .one(conn)
+            .await
+            .map_err(map_scope_error)?
+            .ok_or(DomainError::model_not_found_by_id(id))?;
+
+        model_mapper::model_entity_to_v1(entity)
+    }
+
     async fn find_by_canonical(
         &self,
         conn: &impl DBRunner,
@@ -142,15 +161,21 @@ impl ModelRepository for ModelRepositoryImpl {
         conn: &impl DBRunner,
         scope: &AccessScope,
         tenant_id: Uuid,
+        provider: &ProviderV1,
         req: &CreateModelRequestV1,
     ) -> Result<ModelV1, DomainError> {
-        let canonical_id = format!("{}::{}", req.provider_slug, req.info.provider_model_id);
+        let canonical_id = format!("{}::{}", provider.slug, req.info.provider_model_id);
 
-        // Check for duplicate canonical_id within the tenant scope.
+        // `canonical_id` uniqueness is per-tenant, so the pre-check is pinned
+        // to `tenant_id` rather than spanning the whole scope.
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(model::Column::CanonicalId.eq(&canonical_id)))
+            .filter(
+                Condition::all()
+                    .add(model::Column::TenantId.eq(tenant_id))
+                    .add(model::Column::CanonicalId.eq(&canonical_id)),
+            )
             .one(conn)
             .await
             .map_err(map_scope_error)?;
@@ -158,38 +183,13 @@ impl ModelRepository for ModelRepositoryImpl {
         if existing.is_some() {
             return Err(DomainError::validation(format!(
                 "model with canonical_id `{canonical_id}` already exists \
-                 (duplicate provider_slug + provider_model_id)"
+                 (duplicate provider + provider_model_id)"
             )));
         }
 
-        // Verify provider exists within scope.
-        let provider_entity = provider::Entity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(Condition::all().add(provider::Column::Slug.eq(&req.provider_slug)))
-            .one(conn)
-            .await
-            .map_err(map_scope_error)?
-            .ok_or(DomainError::validation(format!(
-                "provider with slug `{}` not found",
-                req.provider_slug,
-            )))?;
-        // ^^ NOTE: Validation (400) is used here but the service-layer
-        // pre-check (`create_model`) resolves the provider own-tenant-only
-        // first and returns ProviderNotFoundBySlug (404) / ProviderNotOwned
-        // (403). This repository path is TOCTOU-only — reachable only when
-        // the provider is deleted between the pre-check and this query.
-        // Keeping Validation rather than adding a new error variant avoids
-        // coupling the repository to a domain concept ("ownership check")
-        // it does not implement.
-
         let initial_approval = req.approval_status.unwrap_or(ApprovalStatus::Pending);
-        let am = model_mapper::model_create_active_model(
-            tenant_id,
-            provider_entity.id,
-            req,
-            initial_approval,
-        );
+        let am =
+            model_mapper::model_create_active_model(tenant_id, provider, req, initial_approval);
 
         let entity = toolkit_db::secure::secure_insert::<model::Entity>(am, scope, conn)
             .await
@@ -202,26 +202,25 @@ impl ModelRepository for ModelRepositoryImpl {
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
-        canonical_id: &str,
+        id: Uuid,
         req: &UpdateModelRequestV1,
     ) -> Result<ModelV1, DomainError> {
         // Fetch existing entity (scope-checked).
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(model::Column::CanonicalId.eq(canonical_id)))
+            .and_id(id)
+            .map_err(map_scope_error)?
             .one(conn)
             .await
             .map_err(map_scope_error)?
-            .ok_or(DomainError::model_not_found(canonical_id))?;
+            .ok_or(DomainError::model_not_found_by_id(id))?;
 
         // Build the patched ActiveModel via the mapper (PATCH semantics).
         let am = model_mapper::model_update_active_model(&existing, req)?;
 
-        let model_id = existing.id;
-
         // Execute update using secure_update_with_scope.
-        let updated = secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
+        let updated = secure_update_with_scope::<model::Entity>(am, scope, id, conn)
             .await
             .map_err(map_scope_error)?;
 
@@ -232,26 +231,26 @@ impl ModelRepository for ModelRepositoryImpl {
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
-        canonical_id: &str,
+        id: Uuid,
     ) -> Result<(), DomainError> {
         // Fetch existing entity (scope-checked).
         let existing = model::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(model::Column::CanonicalId.eq(canonical_id)))
+            .and_id(id)
+            .map_err(map_scope_error)?
             .one(conn)
             .await
             .map_err(map_scope_error)?
-            .ok_or(DomainError::model_not_found(canonical_id))?;
+            .ok_or(DomainError::model_not_found_by_id(id))?;
 
-        let model_id = existing.id;
         let mut am: entity::model::ActiveModel = existing.into();
         am.lifecycle_status = Set("deprecated".to_owned());
         let now = chrono::Utc::now();
         am.deprecated_at = Set(Some(now));
         am.updated_at = Set(now);
 
-        secure_update_with_scope::<model::Entity>(am, scope, model_id, conn)
+        secure_update_with_scope::<model::Entity>(am, scope, id, conn)
             .await
             .map_err(map_scope_error)?;
 
@@ -315,19 +314,18 @@ mod tests {
         scope: &AccessScope,
         tenant_id: Uuid,
         slug: &str,
-    ) -> (Uuid, String) {
+    ) -> ProviderV1 {
         let gts = gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~");
         let req = crate::CreateProviderRequestV1::builder(slug, slug, gts).build();
-        let p = ProviderRepository::create(repo, conn, scope, tenant_id, &req)
+        ProviderRepository::create(repo, conn, scope, tenant_id, &req)
             .await
-            .expect("create test provider");
-        (p.id, p.slug)
+            .expect("create test provider")
     }
 
     /// Helper: create a model for test purposes.
     /// Builds `ModelInfoV1` directly via struct literal — the SDK entity/info
     /// structs are not `#[non_exhaustive]`, so no JSON round-trip is needed.
-    fn make_create_model_req(provider_slug: &str, provider_model_id: &str) -> CreateModelRequestV1 {
+    fn make_create_model_req(provider_id: Uuid, provider_model_id: &str) -> CreateModelRequestV1 {
         let gts_leaf = "cf.genai._.openai.v1~";
         let gts_type = format!("gts.cf.genai.model.info.v1~{gts_leaf}");
 
@@ -406,7 +404,7 @@ mod tests {
         };
 
         CreateModelRequestV1 {
-            provider_slug: provider_slug.to_owned(),
+            provider_id,
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: None,
             info,
@@ -419,18 +417,18 @@ mod tests {
 
     #[tokio::test]
     async fn model_create_stores_model() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let model = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+        let req = make_create_model_req(provider.id, "gpt-4o");
+        let model = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
             .await
             .expect("create model");
 
@@ -441,19 +439,19 @@ mod tests {
 
     #[tokio::test]
     async fn model_create_with_initial_approval() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let mut req = make_create_model_req(provider.id, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        let model = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+        let model = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
             .await
             .expect("create model");
 
@@ -462,47 +460,28 @@ mod tests {
 
     #[tokio::test]
     async fn model_create_duplicate_canonical_id_rejected() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
-        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+        let req = make_create_model_req(provider.id, "gpt-4o");
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
             .await
             .expect("first create");
 
         // Second create with same canonical_id must fail.
-        let err = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+        let err = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
             .await
             .expect_err("duplicate canonical_id should be rejected");
         assert!(
             matches!(&err, DomainError::Validation { .. }),
             "expected Validation for duplicate, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn model_create_provider_not_found() {
-        let provider = setup_provider().await;
-        #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
-        let model_repo = ModelRepositoryImpl::default();
-        let tenant_id = test_tenant();
-        let scope = scope_for(tenant_id);
-
-        let req = make_create_model_req("nonexistent-provider", "gpt-4o");
-        let err = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
-            .await
-            .expect_err("nonexistent provider should be rejected");
-        assert!(
-            matches!(&err, DomainError::Validation { .. }),
-            "expected Validation for missing provider, got {err:?}"
         );
     }
 
@@ -512,20 +491,21 @@ mod tests {
 
     #[tokio::test]
     async fn model_find_by_canonical_returns_model() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let created = ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
-            .await
-            .expect("create model");
+        let req = make_create_model_req(provider.id, "gpt-4o");
+        let created =
+            ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
+                .await
+                .expect("create model");
 
         let found =
             ModelRepository::find_by_canonical(&model_repo, &conn, &scope, "openai::gpt-4o")
@@ -537,9 +517,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_find_by_canonical_not_found() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let model_repo = ModelRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
@@ -556,15 +536,15 @@ mod tests {
 
     #[tokio::test]
     async fn model_find_by_canonical_tenant_isolation() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let (_provider_id, provider_slug) = create_test_provider(
+        let provider = create_test_provider(
             &provider_repo,
             &conn,
             &scope_for(tenant_a),
@@ -572,11 +552,17 @@ mod tests {
             "openai",
         )
         .await;
-        let req = make_create_model_req(&provider_slug, "gpt-4o");
-        let _created =
-            ModelRepository::create(&model_repo, &conn, &scope_for(tenant_a), tenant_a, &req)
-                .await
-                .expect("create model");
+        let req = make_create_model_req(provider.id, "gpt-4o");
+        let _created = ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope_for(tenant_a),
+            tenant_a,
+            &provider,
+            &req,
+        )
+        .await
+        .expect("create model");
 
         // Other tenant should not see this model.
         let err = ModelRepository::find_by_canonical(
@@ -600,22 +586,23 @@ mod tests {
 
     #[tokio::test]
     async fn model_update_changes_fields() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let _created = ModelRepository::create(
+        let created = ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -624,7 +611,7 @@ mod tests {
             &model_repo,
             &conn,
             &scope,
-            "openai::gpt-4o",
+            created.id,
             &UpdateModelRequestV1 {
                 lifecycle_status: Some(crate::LifecycleStatus::Preview),
                 ..Default::default()
@@ -640,17 +627,18 @@ mod tests {
 
     #[tokio::test]
     async fn model_update_not_found() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let model_repo = ModelRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
+        let missing = Uuid::new_v4();
         let err = ModelRepository::update(
             &model_repo,
             &conn,
             &scope,
-            "nonexistent::model",
+            missing,
             &UpdateModelRequestV1 {
                 lifecycle_status: Some(crate::LifecycleStatus::Preview),
                 ..Default::default()
@@ -660,8 +648,8 @@ mod tests {
         .expect_err("should return not found");
 
         assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound, got {err:?}"
+            matches!(&err, DomainError::ModelNotFoundById { id } if *id == missing),
+            "expected ModelNotFoundById({missing}), got {err:?}"
         );
     }
 
@@ -671,27 +659,28 @@ mod tests {
 
     #[tokio::test]
     async fn model_soft_delete_sets_deprecated() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let _created = ModelRepository::create(
+        let created = ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, created.id)
             .await
             .expect("soft delete should succeed");
 
@@ -705,27 +694,28 @@ mod tests {
 
     #[tokio::test]
     async fn model_soft_delete_hides_from_list() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        ModelRepository::create(
+        let created = ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
 
-        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, created.id)
             .await
             .expect("soft delete");
 
@@ -749,19 +739,20 @@ mod tests {
 
     #[tokio::test]
     async fn model_soft_delete_not_found() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let model_repo = ModelRepositoryImpl::default();
         let scope = scope_for(test_tenant());
 
-        let err = ModelRepository::soft_delete(&model_repo, &conn, &scope, "nonexistent::model")
+        let missing = Uuid::new_v4();
+        let err = ModelRepository::soft_delete(&model_repo, &conn, &scope, missing)
             .await
             .expect_err("should return not found");
 
         assert!(
-            matches!(&err, DomainError::ModelNotFound { .. }),
-            "expected ModelNotFound, got {err:?}"
+            matches!(&err, DomainError::ModelNotFoundById { id } if *id == missing),
+            "expected ModelNotFoundById({missing}), got {err:?}"
         );
     }
 
@@ -771,15 +762,15 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_returns_all_non_deprecated() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         ModelRepository::create(
@@ -787,7 +778,8 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create gpt-4o");
@@ -796,7 +788,8 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o-mini"),
         )
         .await
         .expect("create gpt-4o-mini");
@@ -817,9 +810,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_clamps_to_configured_max_page_size() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let cfg = ModelRegistryConfig {
             max_page_size: 2,
             ..Default::default()
@@ -829,7 +822,7 @@ mod tests {
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         for i in 0..4 {
             ModelRepository::create(
@@ -837,7 +830,8 @@ mod tests {
                 &conn,
                 &scope,
                 tenant_id,
-                &make_create_model_req(&provider_slug, &format!("gpt-{i}")),
+                &provider,
+                &make_create_model_req(provider.id, &format!("gpt-{i}")),
             )
             .await
             .expect("create model");
@@ -879,15 +873,15 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_tenant_isolation() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_a = test_tenant();
         let tenant_b = other_tenant();
 
-        let (_provider_id, provider_slug) = create_test_provider(
+        let provider = create_test_provider(
             &provider_repo,
             &conn,
             &scope_for(tenant_a),
@@ -900,7 +894,8 @@ mod tests {
             &conn,
             &scope_for(tenant_a),
             tenant_a,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -921,15 +916,15 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_respects_limit() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         for i in 0..4 {
@@ -938,7 +933,8 @@ mod tests {
                 &conn,
                 &scope,
                 tenant_id,
-                &make_create_model_req(&provider_slug, &format!("model-{i}")),
+                &provider,
+                &make_create_model_req(provider.id, &format!("model-{i}")),
             )
             .await
             .expect("create model");
@@ -968,21 +964,21 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_filters_by_approval_status() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create model with approved status directly on create.
-        let mut req = make_create_model_req(&provider_slug, "gpt-4o");
+        let mut req = make_create_model_req(provider.id, "gpt-4o");
         req.approval_status = Some(crate::ApprovalStatus::Approved);
-        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
             .await
             .expect("create approved model");
 
@@ -992,7 +988,8 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o-mini"),
         )
         .await
         .expect("create model");
@@ -1024,22 +1021,23 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_filters_by_gts_type() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1068,22 +1066,23 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_filters_by_vision_capability() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1114,36 +1113,42 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_eval_with_non_empty_allow_list() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
         // Create two providers.
-        let (openai_id, openai_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let (_anthropic_id, anthropic_slug) =
+        let openai = create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        let anthropic =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "anthropic").await;
 
         // Create an approved model under each provider — the eval path also
         // gates on `approval_status = approved`, so a `pending` fixture would
         // make this test pass for the wrong reason.
-        let mut openai_req = make_create_model_req(&openai_slug, "gpt-4o");
+        let mut openai_req = make_create_model_req(openai.id, "gpt-4o");
         openai_req.approval_status = Some(crate::ApprovalStatus::Approved);
-        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &openai_req)
+        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &openai, &openai_req)
             .await
             .expect("create openai model");
-        let mut anthropic_req = make_create_model_req(&anthropic_slug, "claude-3");
+        let mut anthropic_req = make_create_model_req(anthropic.id, "claude-3");
         anthropic_req.approval_status = Some(crate::ApprovalStatus::Approved);
-        ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &anthropic_req)
-            .await
-            .expect("create anthropic model");
+        ModelRepository::create(
+            &model_repo,
+            &conn,
+            &scope,
+            tenant_id,
+            &anthropic,
+            &anthropic_req,
+        )
+        .await
+        .expect("create anthropic model");
 
         // Eval with allow-list containing only openai's provider_id.
-        let allow_list = vec![openai_id];
+        let allow_list = vec![openai.id];
         let page = ModelRepository::list(
             &model_repo,
             &conn,
@@ -1167,22 +1172,23 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_eval_with_empty_allow_list() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
         ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1213,24 +1219,25 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_eval_hides_deprecated_even_with_filter() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create a model and then soft-delete it.
-        ModelRepository::create(
+        let created = ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1241,13 +1248,14 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o-mini"),
         )
         .await
         .expect("create gpt-4o-mini");
 
         // Soft-delete the first one.
-        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, created.id)
             .await
             .expect("soft delete");
 
@@ -1259,7 +1267,7 @@ mod tests {
             filter: Some(Box::new(parsed.into_expr())),
             ..Default::default()
         };
-        let allow_list = vec![provider_id];
+        let allow_list = vec![provider.id];
         let page = ModelRepository::list(
             &model_repo,
             &conn,
@@ -1285,15 +1293,15 @@ mod tests {
     /// non-approved rows (DESIGN §3.3 "The narrowing invariant").
     #[tokio::test]
     async fn model_list_eval_hides_non_approved_even_with_filter() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // One row per non-approved status, plus one approved row.
@@ -1303,14 +1311,14 @@ mod tests {
             ("o3", crate::ApprovalStatus::Revoked),
             ("gpt-5", crate::ApprovalStatus::Approved),
         ] {
-            let mut req = make_create_model_req(&provider_slug, model_id);
+            let mut req = make_create_model_req(provider.id, model_id);
             req.approval_status = Some(status);
-            ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &req)
+            ModelRepository::create(&model_repo, &conn, &scope, tenant_id, &provider, &req)
                 .await
                 .expect("create model");
         }
 
-        let allow_list = vec![provider_id];
+        let allow_list = vec![provider.id];
 
         // Unfiltered: only the approved row survives.
         let page = ModelRepository::list(
@@ -1360,24 +1368,25 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_management_include_deprecated_returns_deprecated_rows() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
-        let (_provider_id, provider_slug) =
+        let provider =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
 
         // Create two models.
-        ModelRepository::create(
+        let created = ModelRepository::create(
             &model_repo,
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o"),
         )
         .await
         .expect("create model");
@@ -1386,13 +1395,14 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&provider_slug, "gpt-4o-mini"),
+            &provider,
+            &make_create_model_req(provider.id, "gpt-4o-mini"),
         )
         .await
         .expect("create gpt-4o-mini");
 
         // Soft-delete the first one.
-        ModelRepository::soft_delete(&model_repo, &conn, &scope, "openai::gpt-4o")
+        ModelRepository::soft_delete(&model_repo, &conn, &scope, created.id)
             .await
             .expect("soft delete");
 
@@ -1433,18 +1443,17 @@ mod tests {
 
     #[tokio::test]
     async fn model_list_management_returns_rows_outside_allow_list() {
-        let provider = setup_provider().await;
+        let db = setup_provider().await;
         #[allow(clippy::expect_used)]
-        let conn = provider.conn().expect("conn");
+        let conn = db.conn().expect("conn");
         let provider_repo = ProviderRepositoryImpl::default();
         let model_repo = ModelRepositoryImpl::default();
         let tenant_id = test_tenant();
         let scope = scope_for(tenant_id);
 
         // Create two providers.
-        let (_openai_id, openai_slug) =
-            create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
-        let (_anthropic_id, anthropic_slug) =
+        let openai = create_test_provider(&provider_repo, &conn, &scope, tenant_id, "openai").await;
+        let anthropic =
             create_test_provider(&provider_repo, &conn, &scope, tenant_id, "anthropic").await;
 
         // Create a model under each provider.
@@ -1453,7 +1462,8 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&openai_slug, "gpt-4o"),
+            &openai,
+            &make_create_model_req(openai.id, "gpt-4o"),
         )
         .await
         .expect("create openai model");
@@ -1462,7 +1472,8 @@ mod tests {
             &conn,
             &scope,
             tenant_id,
-            &make_create_model_req(&anthropic_slug, "claude-3"),
+            &anthropic,
+            &make_create_model_req(anthropic.id, "claude-3"),
         )
         .await
         .expect("create anthropic model");

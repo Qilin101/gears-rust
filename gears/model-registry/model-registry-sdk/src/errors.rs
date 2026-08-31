@@ -14,6 +14,9 @@ pub enum ModelRegistryError {
     #[error("model not found: {canonical_id}")]
     ModelNotFound { canonical_id: String },
 
+    #[error("model not found: {id}")]
+    ModelNotFoundById { id: Uuid },
+
     #[error("model not approved for tenant: {canonical_id}")]
     ModelNotApproved { canonical_id: String },
 
@@ -41,9 +44,6 @@ pub enum ModelRegistryError {
     #[error("forbidden: {detail}")]
     Forbidden { detail: String },
 
-    #[error("provider with slug `{slug}` not owned by caller's tenant")]
-    ProviderNotOwned { slug: String },
-
     #[error("provider slug already exists: {slug}")]
     ProviderConflict { slug: String },
 
@@ -67,6 +67,11 @@ impl ModelRegistryError {
         Self::ModelNotFound {
             canonical_id: canonical_id.into(),
         }
+    }
+
+    #[must_use]
+    pub fn model_not_found_by_id(id: Uuid) -> Self {
+        Self::ModelNotFoundById { id }
     }
 
     #[must_use]
@@ -124,11 +129,6 @@ impl ModelRegistryError {
         Self::Forbidden {
             detail: detail.into(),
         }
-    }
-
-    #[must_use]
-    pub fn provider_not_owned(slug: impl Into<String>) -> Self {
-        Self::ProviderNotOwned { slug: slug.into() }
     }
 
     #[must_use]

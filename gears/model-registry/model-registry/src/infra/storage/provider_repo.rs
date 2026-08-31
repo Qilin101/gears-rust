@@ -73,22 +73,24 @@ impl ProviderRepository for ProviderRepositoryImpl {
         provider_mapper::provider_entity_to_v1(entity)
     }
 
-    async fn find_by_slug(
+    async fn find_all_by_slug(
         &self,
         conn: &impl DBRunner,
         scope: &AccessScope,
         slug: &str,
-    ) -> Result<ProviderV1, DomainError> {
-        let entity = provider::Entity::find()
+    ) -> Result<Vec<ProviderV1>, DomainError> {
+        let entities = provider::Entity::find()
             .secure()
             .scope_with(scope)
             .filter(Condition::all().add(provider::Column::Slug.eq(slug)))
-            .one(conn)
+            .all(conn)
             .await
-            .map_err(map_scope_error)?
-            .ok_or(DomainError::provider_not_found_by_slug(slug))?;
+            .map_err(map_scope_error)?;
 
-        provider_mapper::provider_entity_to_v1(entity)
+        entities
+            .into_iter()
+            .map(provider_mapper::provider_entity_to_v1)
+            .collect()
     }
 
     async fn list(
@@ -129,6 +131,31 @@ impl ProviderRepository for ProviderRepositoryImpl {
         Ok(page)
     }
 
+    async fn find_by_ids(
+        &self,
+        conn: &impl DBRunner,
+        scope: &AccessScope,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProviderV1>, DomainError> {
+        // An empty `IN ()` is rejected by the scope layer.
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let entities = provider::Entity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(Condition::all().add(provider::Column::Id.is_in(ids.to_vec())))
+            .all(conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        entities
+            .into_iter()
+            .map(provider_mapper::provider_entity_to_v1)
+            .collect()
+    }
+
     async fn list_all_for_tenant(
         &self,
         conn: &impl DBRunner,
@@ -154,11 +181,16 @@ impl ProviderRepository for ProviderRepositoryImpl {
         tenant_id: Uuid,
         req: &CreateProviderRequestV1,
     ) -> Result<ProviderV1, DomainError> {
-        // Check for slug conflict within the tenant scope before inserting.
+        // Slug uniqueness is per-tenant, so the pre-check is pinned to
+        // `tenant_id` rather than spanning the whole scope.
         let existing = provider::Entity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(provider::Column::Slug.eq(req.slug())))
+            .filter(
+                Condition::all()
+                    .add(provider::Column::TenantId.eq(tenant_id))
+                    .add(provider::Column::Slug.eq(req.slug())),
+            )
             .one(conn)
             .await
             .map_err(map_scope_error)?;

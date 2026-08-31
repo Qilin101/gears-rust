@@ -6,8 +6,8 @@ use model_registry_sdk::models::{
     ApprovalStatus, ContextWindow, CreateModelRequestV1, DefaultInferenceParametersV1,
     DisabledCapabilities, DisabledMediaCapability, DisabledReasoningCapability,
     DisabledWebSearchCapability, LifecycleStatus, MediaCapability, ModelCapabilities, ModelInfoV1,
-    ModelPerformance, ModelV1, OpenAiSettingsV1, ReasoningCapability, SupportedApi,
-    UpdateModelRequestV1, WebSearchCapability,
+    ModelPerformance, ModelV1, OpenAiSettingsV1, ProviderStatus, ProviderV1, ReasoningCapability,
+    SupportedApi, UpdateModelRequestV1, WebSearchCapability,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -28,6 +28,25 @@ fn test_tenant_id() -> Uuid {
 
 fn test_provider_id() -> Uuid {
     Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()
+}
+
+/// The resolved provider the write path is given. Only `id` and `slug` are read
+/// by `model_create_active_model` — `slug` is the left half of `canonical_id`.
+fn test_provider() -> ProviderV1 {
+    ProviderV1 {
+        id: test_provider_id(),
+        tenant_id: test_tenant_id(),
+        slug: "openai".into(),
+        name: "OpenAI".into(),
+        gts_type: gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
+        status: ProviderStatus::Active,
+        managed: false,
+        metadata: None,
+        discovery_enabled: false,
+        discovery_interval_seconds: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
 }
 
 fn test_model_id() -> Uuid {
@@ -344,7 +363,7 @@ fn model_entity_to_v1_rejects_corrupt_approval_status() {
 fn model_create_projects_filterable_columns() {
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
         info,
@@ -352,7 +371,7 @@ fn model_create_projects_filterable_columns() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -381,7 +400,7 @@ fn model_create_projects_filterable_columns() {
 fn model_create_default_pending_approval() {
     let info = make_info("cf.genai._.openai.v1~", &openai_settings());
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Preview,
         approval_status: None,
         info,
@@ -389,7 +408,7 @@ fn model_create_default_pending_approval() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Pending,
     );
@@ -799,7 +818,7 @@ fn model_entity_to_v1_handles_null_jsonb_sub_objects() {
 fn make_create_request(gts_leaf: &str) -> CreateModelRequestV1 {
     let info = make_info(gts_leaf, &openai_settings());
     CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
         info,
@@ -834,7 +853,7 @@ fn model_create_active_model_sets_all_scalar_columns() {
     info.allow_parameter_override = false;
 
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
         info,
@@ -842,7 +861,7 @@ fn model_create_active_model_sets_all_scalar_columns() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -880,7 +899,7 @@ fn model_create_active_model_extracts_provider_settings() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -900,7 +919,7 @@ fn model_create_active_model_handles_null_provider_settings() {
     // When `provider_settings` is `null` in the input, the column is stored as None.
     let info = make_info("cf.genai._.openai.v1~", &serde_json::Value::Null);
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
@@ -908,7 +927,7 @@ fn model_create_active_model_handles_null_provider_settings() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Pending,
     );
@@ -923,7 +942,7 @@ fn model_create_active_model_stores_full_capabilities() {
     let req = make_create_request("cf.genai._.openai.v1~");
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -951,7 +970,7 @@ fn model_create_active_model_stores_disabled_capabilities_fully() {
     let req = make_create_request("cf.genai._.openai.v1~");
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -984,7 +1003,7 @@ fn model_create_active_model_additional_info_round_trip() {
     ]);
 
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
@@ -992,7 +1011,7 @@ fn model_create_active_model_additional_info_round_trip() {
 
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Pending,
     );
@@ -1020,14 +1039,14 @@ fn model_create_active_model_default_parameters_round_trip() {
     };
 
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
     };
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Pending,
     );
@@ -1048,7 +1067,7 @@ fn model_create_active_model_allow_extra_params_round_trip() {
     let req = make_create_request("cf.genai._.openai.v1~");
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
@@ -1066,12 +1085,12 @@ fn model_create_active_model_sets_canonical_id_format() {
     let req = make_create_request("cf.genai._.openai.v1~");
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
 
-    // canonical_id = {provider_slug}::{provider_model_id}
+    // canonical_id = {provider.slug}::{provider_model_id}
     assert_eq!(am.canonical_id.unwrap(), "openai::gpt-4o");
 }
 
@@ -1082,14 +1101,14 @@ fn model_create_active_model_sets_supported_api_csv() {
     let mut info = make_info("cf.genai._.openai.v1~", &openai_settings());
     info.supported_api = HashSet::from([SupportedApi::Completion, SupportedApi::Batch]);
     let req = CreateModelRequestV1 {
-        provider_slug: "openai".into(),
+        provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
     };
     let am = model_create_active_model(
         test_tenant_id(),
-        test_provider_id(),
+        &test_provider(),
         &req,
         ApprovalStatus::Approved,
     );
