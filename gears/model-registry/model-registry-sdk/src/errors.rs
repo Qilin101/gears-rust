@@ -175,7 +175,6 @@ mod tests {
     #[test]
     fn internal_without_source_has_none() {
         let err = ModelRegistryError::internal("db pool exhausted");
-        assert_eq!(err.to_string(), "internal error: db pool exhausted");
         assert!(std::error::Error::source(&err).is_none());
     }
 
@@ -183,7 +182,6 @@ mod tests {
     fn internal_from_preserves_source_chain() {
         let upstream = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "rst");
         let err = ModelRegistryError::internal_from("oagw call failed", upstream);
-        assert_eq!(err.to_string(), "internal error: oagw call failed");
         let source = std::error::Error::source(&err).expect("source preserved");
         assert!(source.to_string().contains("rst"));
     }

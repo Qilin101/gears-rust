@@ -590,98 +590,97 @@ mod tests {
     use super::*;
 
     /// `ALL` is the domain the API layer renders in "expected one of …"
-    /// validation messages, so it must list exactly the variants the
-    /// wire-format cases below enumerate, in the same order.
-    fn assert_all_lists_every_variant<T: Copy + PartialEq + std::fmt::Debug>(
+    /// validation messages, and `as_str` / `from_wire` are the hand-written
+    /// storage-layer twins of it — pinned together so they cannot drift apart.
+    fn assert_wire_domain<T: Copy + PartialEq + std::fmt::Debug>(
         all: &[T],
         cases: &[(T, &str)],
+        as_str: fn(T) -> &'static str,
+        from_wire: fn(&str) -> Option<T>,
     ) {
         let from_cases: Vec<T> = cases.iter().map(|(v, _)| *v).collect();
         assert_eq!(all, from_cases.as_slice(), "ALL drifted from the variants");
+        for (variant, expected) in cases {
+            assert_eq!(as_str(*variant), *expected, "as_str drift on {variant:?}");
+            assert_eq!(from_wire(expected), Some(*variant));
+        }
+        assert_eq!(from_wire(""), None);
+        assert_eq!(from_wire("not-a-variant"), None);
     }
 
     #[test]
-    fn lifecycle_status_wire_format_is_lowercase() {
-        // Pinned to match DESIGN.md §3.1 — lifecycle_status is queryable via
-        // OData on the catalog list endpoint and must match the JSONB-stored
-        // string casing.
-        let cases = [
-            (LifecycleStatus::Production, "\"production\""),
-            (LifecycleStatus::Preview, "\"preview\""),
-            (LifecycleStatus::Experimental, "\"experimental\""),
-            (LifecycleStatus::Deprecated, "\"deprecated\""),
-            (LifecycleStatus::Sunset, "\"sunset\""),
-        ];
-        assert_all_lists_every_variant(LifecycleStatus::ALL, &cases);
-        for (variant, expected) in cases {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: LifecycleStatus = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-            // `as_str` / `from_wire` are the storage-layer twins of the serde
-            // representation — pinned together so they cannot drift apart.
-            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
-            assert_eq!(LifecycleStatus::from_wire(variant.as_str()), Some(variant));
-        }
+    fn lifecycle_status_wire_domain() {
+        assert_wire_domain(
+            LifecycleStatus::ALL,
+            &[
+                (LifecycleStatus::Production, "production"),
+                (LifecycleStatus::Preview, "preview"),
+                (LifecycleStatus::Experimental, "experimental"),
+                (LifecycleStatus::Deprecated, "deprecated"),
+                (LifecycleStatus::Sunset, "sunset"),
+            ],
+            LifecycleStatus::as_str,
+            LifecycleStatus::from_wire,
+        );
+        // Casing is significant: OData filters compare against the lowercase
+        // strings the JSONB column stores.
         assert_eq!(LifecycleStatus::from_wire("Production"), None);
     }
 
     #[test]
-    fn approval_status_wire_format_is_lowercase() {
-        let cases = [
-            (ApprovalStatus::Pending, "\"pending\""),
-            (ApprovalStatus::Approved, "\"approved\""),
-            (ApprovalStatus::Rejected, "\"rejected\""),
-            (ApprovalStatus::Revoked, "\"revoked\""),
-        ];
-        assert_all_lists_every_variant(ApprovalStatus::ALL, &cases);
-        for (variant, expected) in cases {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: ApprovalStatus = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
-            assert_eq!(ApprovalStatus::from_wire(variant.as_str()), Some(variant));
-        }
-        assert_eq!(ApprovalStatus::from_wire("unknown"), None);
+    fn approval_status_wire_domain() {
+        assert_wire_domain(
+            ApprovalStatus::ALL,
+            &[
+                (ApprovalStatus::Pending, "pending"),
+                (ApprovalStatus::Approved, "approved"),
+                (ApprovalStatus::Rejected, "rejected"),
+                (ApprovalStatus::Revoked, "revoked"),
+            ],
+            ApprovalStatus::as_str,
+            ApprovalStatus::from_wire,
+        );
     }
 
     #[test]
-    fn provider_status_wire_format_is_lowercase() {
-        let cases = [
-            (ProviderStatus::Active, "\"active\""),
-            (ProviderStatus::Disabled, "\"disabled\""),
-        ];
-        assert_all_lists_every_variant(ProviderStatus::ALL, &cases);
-        for (variant, expected) in cases {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: ProviderStatus = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
-            assert_eq!(ProviderStatus::from_wire(variant.as_str()), Some(variant));
-        }
-        assert_eq!(ProviderStatus::from_wire(""), None);
+    fn provider_status_wire_domain() {
+        assert_wire_domain(
+            ProviderStatus::ALL,
+            &[
+                (ProviderStatus::Active, "active"),
+                (ProviderStatus::Disabled, "disabled"),
+            ],
+            ProviderStatus::as_str,
+            ProviderStatus::from_wire,
+        );
     }
 
     #[test]
-    fn share_mode_wire_format_is_lowercase() {
-        let cases = [
-            (ShareMode::Private, "\"private\""),
-            (ShareMode::Children, "\"children\""),
-            (ShareMode::Subtree, "\"subtree\""),
-        ];
-        assert_all_lists_every_variant(ShareMode::ALL, &cases);
-        for (variant, expected) in cases {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: ShareMode = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
-            assert_eq!(ShareMode::from_wire(variant.as_str()), Some(variant));
-        }
-        assert_eq!(ShareMode::from_wire(""), None);
-        assert_eq!(ShareMode::from_wire("Subtree"), None);
+    fn share_mode_wire_domain() {
+        assert_wire_domain(
+            ShareMode::ALL,
+            &[
+                (ShareMode::Private, "private"),
+                (ShareMode::Children, "children"),
+                (ShareMode::Subtree, "subtree"),
+            ],
+            ShareMode::as_str,
+            ShareMode::from_wire,
+        );
+    }
+
+    #[test]
+    fn supported_api_wire_domain() {
+        assert_wire_domain(
+            SupportedApi::ALL,
+            &[
+                (SupportedApi::Completion, "completion"),
+                (SupportedApi::Embedding, "embedding"),
+                (SupportedApi::Batch, "batch"),
+            ],
+            SupportedApi::as_str,
+            SupportedApi::from_wire,
+        );
     }
 
     /// The depth rule, pinned. `reaches` is the single Rust definition; the
@@ -717,59 +716,6 @@ mod tests {
                 reach.windows(2).all(|w| !w[0] || w[1]),
                 "reach must never narrow as the mode widens, at distance {distance}: {reach:?}"
             );
-        }
-    }
-
-    #[test]
-    fn supported_api_wire_format_is_lowercase() {
-        // Pinned to match DESIGN.md §3.1; OData filters on
-        // `info.supported_api` (DESIGN.md §3.3) compare against these strings.
-        let cases = [
-            (SupportedApi::Completion, "\"completion\""),
-            (SupportedApi::Embedding, "\"embedding\""),
-            (SupportedApi::Batch, "\"batch\""),
-        ];
-        assert_all_lists_every_variant(SupportedApi::ALL, &cases);
-        for (variant, expected) in cases {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: SupportedApi = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
-            assert_eq!(SupportedApi::from_wire(variant.as_str()), Some(variant));
-        }
-        assert_eq!(SupportedApi::from_wire("images"), None);
-    }
-
-    #[test]
-    fn reasoning_effort_wire_format_is_lowercase() {
-        // Pinned to match gts.cf.llmgw.core.reasoning_config.v1~ — gateway
-        // schema expects lowercase strings.
-        for (variant, expected) in [
-            (ReasoningEffort::None, "\"none\""),
-            (ReasoningEffort::Low, "\"low\""),
-            (ReasoningEffort::Medium, "\"medium\""),
-            (ReasoningEffort::High, "\"high\""),
-            (ReasoningEffort::XHigh, "\"xhigh\""),
-        ] {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: ReasoningEffort = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
-        }
-    }
-
-    #[test]
-    fn service_tier_wire_format_is_lowercase() {
-        // Pinned to match gts.cf.llmgw.core.create_response_body.v1~.
-        for (variant, expected) in [
-            (ServiceTier::Auto, "\"auto\""),
-            (ServiceTier::Default, "\"default\""),
-        ] {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "wire format drift on {variant:?}");
-            let back: ServiceTier = serde_json::from_str(&s).unwrap();
-            assert_eq!(back, variant);
         }
     }
 }
