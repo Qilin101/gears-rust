@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::error::DomainError;
+use super::inheritance::ShareVisibility;
 
 /// Controls which models are visible in a repository `list` query.
 ///
@@ -23,8 +24,9 @@ use super::error::DomainError;
 #[derive(Debug, Clone)]
 #[domain_model]
 pub enum ListVisibility<'a> {
-    /// Eval visibility: ANDs `provider_id IN (allow_list)` plus two unconditional
-    /// exclusions — terminal lifecycle and non-approved. Models whose
+    /// Eval visibility: ANDs `provider_id IN (allow_list)`, the model-stage
+    /// sharing predicate, plus two unconditional exclusions — terminal
+    /// lifecycle and non-approved. Models whose
     /// `lifecycle_status` is `deprecated` / `sunset`, or whose `approval_status`
     /// is anything other than `approved`, are never returned through this path,
     /// regardless of the ``OData $filter`` in the query (DESIGN §3.3).
@@ -32,6 +34,10 @@ pub enum ListVisibility<'a> {
         /// Provider IDs allowed for this tenant. Must be a non-empty slice to
         /// produce any results — an empty slice yields an empty page.
         allow_list: &'a [Uuid],
+        /// The requester's chain partitioned by sharing distance. ANDs the
+        /// model-stage sharing predicate onto the query, so an inherited row
+        /// is returned only when its own `share_mode` reaches the requester.
+        sharing: &'a ShareVisibility,
     },
     /// Management visibility: no mandatory predicates. `include_deprecated`
     /// controls whether terminal-lifecycle models (`deprecated` / `sunset`) are

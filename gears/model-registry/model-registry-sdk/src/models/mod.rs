@@ -42,7 +42,7 @@ pub use common::{
     ApprovalStatus, ContextWindow, DisabledCapabilities, DisabledMediaCapability,
     DisabledReasoningCapability, DisabledWebSearchCapability, LifecycleStatus, MediaCapability,
     ModelCapabilities, ModelPerformance, ProviderStatus, ReasoningCapability, ReasoningEffort,
-    ServiceTier, SupportedApi, WebSearchCapability,
+    ServiceTier, ShareMode, SupportedApi, WebSearchCapability,
 };
 
 pub use default_parameters::{

@@ -35,6 +35,7 @@ impl FieldToColumn<ModelFilterField> for ModelODataMapper {
             ModelFilterField::CanonicalId => model::Column::CanonicalId,
             ModelFilterField::LifecycleStatus => model::Column::LifecycleStatus,
             ModelFilterField::ApprovalStatus => model::Column::ApprovalStatus,
+            ModelFilterField::ShareMode => model::Column::ShareMode,
             ModelFilterField::GtsType => model::Column::GtsType,
             ModelFilterField::SupportedApi => model::Column::SupportedApi,
             ModelFilterField::ProviderModelId => model::Column::ProviderModelId,
@@ -66,6 +67,7 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
             ModelFilterField::ApprovalStatus => {
                 sea_orm::Value::String(Some(m.approval_status.clone()))
             }
+            ModelFilterField::ShareMode => sea_orm::Value::String(Some(m.share_mode.clone())),
             ModelFilterField::GtsType => sea_orm::Value::String(m.gts_type.clone()),
             ModelFilterField::SupportedApi => sea_orm::Value::String(m.supported_api.clone()),
             ModelFilterField::ProviderModelId => {
@@ -167,6 +169,7 @@ mod tests {
             provider_model_id: Some("gpt-4o".to_owned()),
             supported_api: Some("completion".to_owned()),
             approval_status: "approved".to_owned(),
+            share_mode: "subtree".to_owned(),
             cap_vision: true,
             cap_function_calling: true,
             cap_streaming: true,
@@ -243,6 +246,7 @@ mod tests {
             provider_model_id: None,
             supported_api: None,
             approval_status: "pending".to_owned(),
+            share_mode: "subtree".to_owned(),
             cap_vision: false,
             cap_function_calling: false,
             cap_streaming: false,

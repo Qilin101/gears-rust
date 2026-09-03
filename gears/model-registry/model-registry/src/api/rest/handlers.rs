@@ -87,6 +87,12 @@ pub async fn create_provider(
         req
     };
 
+    let req = if let Some(raw) = dto.share_mode.as_deref() {
+        req.share_mode(parse::share_mode(raw)?)
+    } else {
+        req
+    };
+
     let provider = svc.create_provider(&ctx, &req.build()).await?;
     let dto: ProviderDto = provider.into();
     Ok((StatusCode::CREATED, Json(dto)))
@@ -105,9 +111,16 @@ pub async fn update_provider(
         .map(parse::provider_status)
         .transpose()?;
 
+    let share_mode = dto
+        .share_mode
+        .as_deref()
+        .map(parse::share_mode)
+        .transpose()?;
+
     let sdk_req = crate::UpdateProviderRequestV1 {
         name: dto.name,
         status,
+        share_mode,
         managed: dto.managed,
         metadata: dto.metadata,
         discovery_enabled: dto.discovery_enabled,
@@ -187,6 +200,11 @@ pub async fn create_model(
         .as_deref()
         .map(parse::approval_status)
         .transpose()?;
+    let share_mode = dto
+        .share_mode
+        .as_deref()
+        .map(parse::share_mode)
+        .transpose()?;
 
     // Parse info JSON into ModelInfoV1
     let info: model_registry_sdk::models::ModelInfoV1<serde_json::Value> =
@@ -200,6 +218,7 @@ pub async fn create_model(
         provider_id: dto.provider_id,
         lifecycle_status,
         approval_status,
+        share_mode,
         info,
     };
 
@@ -226,10 +245,17 @@ pub async fn update_model(
         .map(parse::lifecycle_status)
         .transpose()?;
 
+    let share_mode = dto
+        .share_mode
+        .as_deref()
+        .map(parse::share_mode)
+        .transpose()?;
+
     // Build SDK request from DTO fields
     let sdk_req = crate::UpdateModelRequestV1 {
         approval_status,
         lifecycle_status,
+        share_mode,
         display_name: dto.display_name,
         description: dto.description,
         family: dto.family,

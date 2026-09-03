@@ -96,6 +96,7 @@ pub use models::{
     ReasoningEffort,
     ReasoningSummary,
     ServiceTier,
+    ShareMode,
     SupportedApi,
     TextFormat,
     TextFormatKind,

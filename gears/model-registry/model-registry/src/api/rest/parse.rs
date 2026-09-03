@@ -6,7 +6,7 @@
 //! document, and lists the accepted domain from `X::ALL` rather than from a
 //! restated string literal.
 
-use model_registry_sdk::models::{ApprovalStatus, LifecycleStatus, ProviderStatus};
+use model_registry_sdk::models::{ApprovalStatus, LifecycleStatus, ProviderStatus, ShareMode};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_odata::ODataQuery;
 
@@ -36,6 +36,22 @@ pub(super) fn provider_status(raw: &str) -> Result<ProviderStatus, CanonicalErro
             .collect::<Vec<_>>()
             .join(", ");
         invalid("status", "INVALID_PROVIDER_STATUS", raw, &expected)
+    })
+}
+
+/// Parse the `share_mode` field of a provider or model request.
+///
+/// # Errors
+/// `INVALID_SHARE_MODE` when `raw` is outside the documented domain.
+pub(super) fn share_mode(raw: &str) -> Result<ShareMode, CanonicalError> {
+    ShareMode::from_wire(raw).ok_or_else(|| {
+        let expected = ShareMode::ALL
+            .iter()
+            .copied()
+            .map(ShareMode::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        invalid("share_mode", "INVALID_SHARE_MODE", raw, &expected)
     })
 }
 

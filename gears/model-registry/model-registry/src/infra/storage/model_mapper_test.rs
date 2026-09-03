@@ -40,6 +40,7 @@ fn test_provider() -> ProviderV1 {
         name: "OpenAI".into(),
         gts_type: gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
         status: ProviderStatus::Active,
+        share_mode: model_registry_sdk::models::ShareMode::Subtree,
         managed: false,
         metadata: None,
         discovery_enabled: false,
@@ -218,6 +219,7 @@ fn make_model_entity(
         provider_model_id: Some("gpt-4o".to_owned()),
         supported_api: Some("completion".to_owned()),
         approval_status: "approved".to_owned(),
+        share_mode: "subtree".to_owned(),
         cap_vision: true,
         cap_function_calling: true,
         cap_streaming: true,
@@ -355,6 +357,23 @@ fn model_entity_to_v1_rejects_corrupt_approval_status() {
     );
 }
 
+#[test]
+fn model_entity_to_v1_rejects_corrupt_share_mode() {
+    let mut entity = make_model_entity(
+        test_model_id(),
+        test_provider_id(),
+        test_tenant_id(),
+        "openai::gpt-4o",
+    );
+    entity.share_mode = "everyone".to_owned();
+
+    let err = model_entity_to_v1(entity).expect_err("out-of-domain share_mode must be rejected");
+    assert!(
+        matches!(&err, DomainError::Internal { .. }),
+        "expected Internal, got {err:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // OData-filterable columns after create
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -366,6 +385,7 @@ fn model_create_projects_filterable_columns() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
+        share_mode: None,
         info,
     };
 
@@ -403,6 +423,7 @@ fn model_create_default_pending_approval() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Preview,
         approval_status: None,
+        share_mode: None,
         info,
     };
 
@@ -612,6 +633,7 @@ fn model_entity_to_v1_round_trips_all_promoted_columns() {
         provider_model_id: Some("gpt-4o".to_owned()),
         supported_api: Some("batch,completion".to_owned()),
         approval_status: "approved".to_owned(),
+        share_mode: "subtree".to_owned(),
         cap_vision: true,
         cap_function_calling: true,
         cap_streaming: true,
@@ -738,6 +760,7 @@ fn model_entity_to_v1_default_db_values_reconstruct_without_error() {
         provider_model_id: None, // nullable identity column
         supported_api: None,
         approval_status: "pending".to_owned(),
+        share_mode: "subtree".to_owned(),
         cap_vision: false,
         cap_function_calling: false,
         cap_streaming: false,
@@ -821,6 +844,7 @@ fn make_create_request(gts_leaf: &str) -> CreateModelRequestV1 {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
+        share_mode: None,
         info,
     }
 }
@@ -856,6 +880,7 @@ fn model_create_active_model_sets_all_scalar_columns() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: Some(ApprovalStatus::Approved),
+        share_mode: None,
         info,
     };
 
@@ -922,6 +947,7 @@ fn model_create_active_model_handles_null_provider_settings() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
+        share_mode: None,
         info,
     };
 
@@ -1006,6 +1032,7 @@ fn model_create_active_model_additional_info_round_trip() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
+        share_mode: None,
         info,
     };
 
@@ -1042,6 +1069,7 @@ fn model_create_active_model_default_parameters_round_trip() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
+        share_mode: None,
         info,
     };
     let am = model_create_active_model(
@@ -1104,6 +1132,7 @@ fn model_create_active_model_sets_supported_api_csv() {
         provider_id: test_provider_id(),
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
+        share_mode: None,
         info,
     };
     let am = model_create_active_model(

@@ -42,7 +42,8 @@ use std::collections::HashSet;
 
 use model_registry_sdk::models::{
     ApprovalStatus, ContextWindow, CreateModelRequestV1, LifecycleStatus, ModelCapabilities,
-    ModelInfoV1, ModelPerformance, ModelV1, ProviderV1, SupportedApi, UpdateModelRequestV1,
+    ModelInfoV1, ModelPerformance, ModelV1, ProviderV1, ShareMode, SupportedApi,
+    UpdateModelRequestV1,
 };
 use sea_orm::Set;
 use uuid::Uuid;
@@ -111,9 +112,11 @@ fn supported_api_to_csv(apis: &HashSet<SupportedApi>) -> Option<String> {
 /// Convert a `model::Model` entity to `ModelV1<serde_json::Value>`.
 ///
 /// # Errors
-/// [`DomainError::Internal`] when `lifecycle_status` / `approval_status` hold
-/// values outside their enum domain, or when the row fails to lift into
-/// [`ModelInfoV1`] (see [`model_entity_to_info_v1`]).
+/// [`DomainError::Internal`] when `lifecycle_status` / `approval_status` /
+/// `share_mode` hold values outside their enum domain, or when the row fails to
+/// lift into [`ModelInfoV1`] (see [`model_entity_to_info_v1`]). `share_mode`
+/// fails closed rather than defaulting: a mis-parsed value would silently
+/// change who can see the model.
 pub fn model_entity_to_v1(e: entity::model::Model) -> Result<ModelV1, DomainError> {
     let lifecycle_status = LifecycleStatus::from_wire(&e.lifecycle_status).ok_or_else(|| {
         DomainError::internal(format!(
@@ -127,6 +130,12 @@ pub fn model_entity_to_v1(e: entity::model::Model) -> Result<ModelV1, DomainErro
             e.approval_status, e.canonical_id
         ))
     })?;
+    let share_mode = ShareMode::from_wire(&e.share_mode).ok_or_else(|| {
+        DomainError::internal(format!(
+            "models.share_mode out-of-domain value `{}` on model {}",
+            e.share_mode, e.canonical_id
+        ))
+    })?;
 
     Ok(ModelV1 {
         id: e.id,
@@ -137,6 +146,7 @@ pub fn model_entity_to_v1(e: entity::model::Model) -> Result<ModelV1, DomainErro
         provider_id: e.provider_id,
         lifecycle_status,
         approval_status,
+        share_mode,
         info: model_entity_to_info_v1(e)?,
     })
 }
@@ -295,6 +305,11 @@ pub fn model_create_active_model(
         created_at: Set(now),
         updated_at: Set(now),
         approval_status: Set(initial_approval_status.as_str().to_owned()),
+        share_mode: Set(req
+            .share_mode
+            .unwrap_or(ShareMode::Subtree)
+            .as_str()
+            .to_owned()),
         ..Default::default()
     };
     project_info(&req.info, &mut active);
@@ -307,8 +322,8 @@ pub fn model_create_active_model(
 /// `Some(...)` patches from the request, and re-projects every promoted column
 /// through [`project_info`].
 ///
-/// `approval_status` is patched in place alongside the other fields when
-/// `req.approval_status` is `Some(...)`.
+/// `approval_status` and `share_mode` are patched in place alongside the other
+/// fields when their request field is `Some(...)`.
 ///
 /// Immutable fields (`canonical_id`, `provider_slug`, `info.provider_model_id`,
 /// `info.gts_type`) are silently ignored if present in the request.
@@ -332,6 +347,11 @@ pub fn model_update_active_model(
         active.approval_status = Set(approval.as_str().to_owned());
     }
 
+    // — Share mode —
+    if let Some(share_mode) = req.share_mode {
+        active.share_mode = Set(share_mode.as_str().to_owned());
+    }
+
     // Reconstruct ModelInfoV1 from the existing promoted columns, apply the
     // patches, and re-project every column through the same projection the
     // create path uses.
@@ -342,7 +362,10 @@ pub fn model_update_active_model(
     }
 
     // Only bump `updated_at` when at least one field was actually set.
-    let changed = req.lifecycle_status.is_some() || req.approval_status.is_some() || info_changed;
+    let changed = req.lifecycle_status.is_some()
+        || req.approval_status.is_some()
+        || req.share_mode.is_some()
+        || info_changed;
     if changed {
         active.updated_at = Set(chrono::Utc::now());
     }

@@ -27,7 +27,9 @@ use uuid::Uuid;
 
 use super::cache::ResolutionCache;
 use super::error::DomainError;
-use super::inheritance::{build_chain_providers, chain_read_scope, resolve_ancestors};
+use super::inheritance::{
+    ShareVisibility, build_chain_providers, chain_read_scope, resolve_ancestors,
+};
 use super::repo::{ListVisibility, ModelRepository, ProviderRepository};
 
 use crate::config::ModelRegistryConfig;
@@ -367,8 +369,9 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
     ///
     /// 1. `provider_id` mismatch → `ModelNotFound` (inconsistent data)
     /// 2. Terminal lifecycle → `ModelDeprecated`
-    /// 3. Disabled provider → `ProviderDisabled`
-    /// 4. Not `approved` → `ModelNotApproved`
+    /// 3. Owner does not share the model this far down → `ModelNotFound`
+    /// 4. Disabled provider → `ProviderDisabled`
+    /// 5. Not `approved` → `ModelNotApproved`
     ///
     /// The read is a **fail-closed access gate**: a successful return means
     /// approved, live, and on an active winning provider. Approval is checked
@@ -456,7 +459,21 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
             return Err(DomainError::model_not_found(canonical_id));
         }
 
-        //    Gate 2: terminal lifecycle → ModelDeprecated.
+        //    Gate 2: the model's owner must share it far enough to reach the
+        //    caller. Returns `ModelNotFound` — never a distinct error — so a
+        //    hidden model is indistinguishable from an absent one. Ordered
+        //    before the remaining gates for the same reason approval is
+        //    ordered last (DESIGN §3.5): `ModelDeprecated`, `ProviderDisabled`
+        //    and `ModelNotApproved` would each disclose that the row exists.
+        //    A model owned outside the chain fails closed here too.
+        let Some(distance) = inheritance.position(model.tenant_id) else {
+            return Err(DomainError::model_not_found(canonical_id));
+        };
+        if !model.share_mode.reaches(distance) {
+            return Err(DomainError::model_not_found(canonical_id));
+        }
+
+        //    Gate 3: terminal lifecycle → ModelDeprecated.
         if matches!(
             model.lifecycle_status,
             crate::LifecycleStatus::Deprecated | crate::LifecycleStatus::Sunset
@@ -464,14 +481,14 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
             return Err(DomainError::model_deprecated(canonical_id));
         }
 
-        //    Gate 3: disabled winning provider → ProviderDisabled. Ordered
+        //    Gate 4: disabled winning provider → ProviderDisabled. Ordered
         //    after the model lookup so `ProviderDisabled` cannot leak for a
         //    `canonical_id` that names no model of that provider.
         if !matches!(winner.status, crate::ProviderStatus::Active) {
             return Err(DomainError::provider_disabled(winner.id));
         }
 
-        //    Gate 4: not approved → ModelNotApproved.
+        //    Gate 5: not approved → ModelNotApproved.
         if !matches!(model.approval_status, ApprovalStatus::Approved) {
             return Err(DomainError::model_not_approved(canonical_id));
         }
@@ -543,8 +560,17 @@ impl<R: ProviderRepository, M: ModelRepository> Service<R, M> {
         // 5. One chain-wide model query: the database applies the caller's
         //    filter, ordering and cursor over own and inherited rows together.
         let scope = chain_read_scope(&own_scope, &inheritance);
+        let sharing = ShareVisibility::from_chain(&inheritance);
         self.model_repo
-            .list(&conn, &scope, query, ListVisibility::Eval { allow_list })
+            .list(
+                &conn,
+                &scope,
+                query,
+                ListVisibility::Eval {
+                    allow_list,
+                    sharing: &sharing,
+                },
+            )
             .await
     }
 
@@ -1137,6 +1163,7 @@ mod tests {
             discovery_interval_seconds: None,
             created_at: now,
             updated_at: now,
+            share_mode: model_registry_sdk::models::ShareMode::Subtree,
         }
     }
 
@@ -1341,6 +1368,7 @@ mod tests {
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: None,
             info,
+            share_mode: None,
         }
     }
 
@@ -3236,6 +3264,7 @@ mod tests {
                     metadata: None,
                     discovery_enabled: None,
                     discovery_interval_seconds: None,
+                    share_mode: None,
                 },
             )
             .await
@@ -4746,5 +4775,461 @@ mod tests {
             .await
             .expect("the approval is visible immediately");
         assert_eq!(model.approval_status, crate::ApprovalStatus::Approved);
+    }
+
+    use model_registry_sdk::models::ShareMode;
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // share_mode — owner-side sharing (DESIGN §3.5)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// Create a provider owned by `tenant_id` with an explicit `share_mode`.
+    async fn create_shared_provider(
+        conn: &impl toolkit_db::secure::DBRunner,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        slug: &str,
+        share_mode: ShareMode,
+    ) -> Uuid {
+        let repo = ProviderRepositoryImpl::default();
+        let req = crate::CreateProviderRequestV1::builder(
+            slug,
+            slug,
+            gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~"),
+        )
+        .share_mode(share_mode)
+        .build();
+        crate::domain::repo::ProviderRepository::create(&repo, conn, scope, tenant_id, &req)
+            .await
+            .expect("create shared provider")
+            .id
+    }
+
+    /// Create an approved model owned by `tenant_id` with an explicit
+    /// `share_mode`.
+    async fn create_shared_model(
+        conn: &impl toolkit_db::secure::DBRunner,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        provider_slug: &str,
+        provider_model_id: &str,
+        share_mode: ShareMode,
+    ) -> crate::ModelV1 {
+        let repo = ModelRepositoryImpl::default();
+        let provider = resolve_test_provider(conn, scope, provider_slug).await;
+        let mut req = make_create_model_req(provider.id, provider_model_id);
+        req.approval_status = Some(crate::ApprovalStatus::Approved);
+        req.share_mode = Some(share_mode);
+        crate::domain::repo::ModelRepository::create(&repo, conn, scope, tenant_id, &provider, &req)
+            .await
+            .expect("create shared model")
+    }
+
+    fn ctx_for(tenant_id: Uuid) -> SecurityContext {
+        SecurityContext::builder()
+            .subject_id(Uuid::new_v4())
+            .subject_tenant_id(tenant_id)
+            .build()
+            .expect("ctx")
+    }
+
+    /// The eval listing's SQL predicate re-encodes `ShareMode::reaches`, so the
+    /// two can silently diverge. Seed one model at every (distance, mode) pair
+    /// and assert the listing returns exactly what `reaches` predicts.
+    #[tokio::test]
+    async fn test_share_mode_sql_predicate_matches_the_reaches_rule() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        // distance 0 = child, 1 = parent, 2 = grandparent (TwoAncestorsResolver)
+        let tenants = [
+            (0_usize, child_tenant()),
+            (1, parent_id()),
+            (2, grandparent_id()),
+        ];
+
+        let mut expected: Vec<String> = Vec::new();
+        for (distance, tenant) in tenants {
+            let scope = scope_for(tenant);
+            for mode in ShareMode::ALL.iter().copied() {
+                // One provider per (distance, mode) so the provider stage never
+                // masks the model stage: each provider is `subtree`, isolating
+                // the model's own share_mode as the only variable.
+                let slug = format!("p{distance}{}", mode.as_str());
+                create_shared_provider(&conn, &scope, tenant, &slug, ShareMode::Subtree).await;
+                let model = create_shared_model(&conn, &scope, tenant, &slug, "m", mode).await;
+                if mode.reaches(distance) {
+                    expected.push(model.canonical_id);
+                }
+            }
+        }
+        expected.sort();
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        let mut got: Vec<String> = page.items.into_iter().map(|m| m.canonical_id).collect();
+        got.sort();
+
+        assert_eq!(
+            got, expected,
+            "the SQL sharing predicate drifted from ShareMode::reaches"
+        );
+    }
+
+    /// The provider stage runs the same rule over provider rows.
+    #[tokio::test]
+    async fn test_share_mode_gates_models_through_their_provider() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        // Every model is `subtree`; only the provider's mode varies, so this
+        // isolates the provider stage.
+        for (distance, tenant) in [
+            (0_usize, child_tenant()),
+            (1, parent_id()),
+            (2, grandparent_id()),
+        ] {
+            let scope = scope_for(tenant);
+            for mode in ShareMode::ALL.iter().copied() {
+                let slug = format!("q{distance}{}", mode.as_str());
+                create_shared_provider(&conn, &scope, tenant, &slug, mode).await;
+                create_shared_model(&conn, &scope, tenant, &slug, "m", ShareMode::Subtree).await;
+            }
+        }
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        let got: std::collections::HashSet<String> =
+            page.items.into_iter().map(|m| m.canonical_id).collect();
+
+        for (distance, ()) in [(0_usize, ()), (1, ()), (2, ())] {
+            for mode in ShareMode::ALL.iter().copied() {
+                let canonical = format!("q{distance}{}::m", mode.as_str());
+                assert_eq!(
+                    got.contains(&canonical),
+                    mode.reaches(distance),
+                    "provider stage wrong for {mode:?} at distance {distance}"
+                );
+            }
+        }
+    }
+
+    /// Effective reach is the narrower of provider and model. Because
+    /// visibility is monotone in `share_mode`, evaluating the two stages
+    /// independently and `ANDing` them is exactly `min(provider, model)` — this
+    /// pins that equivalence over the full 3x3 grid at distance 1.
+    #[tokio::test]
+    async fn test_share_mode_composes_narrowest_wins() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let scope = scope_for(parent_id());
+
+        for p_mode in ShareMode::ALL.iter().copied() {
+            for m_mode in ShareMode::ALL.iter().copied() {
+                let slug = format!("{}-{}", p_mode.as_str(), m_mode.as_str());
+                create_shared_provider(&conn, &scope, parent_id(), &slug, p_mode).await;
+                create_shared_model(&conn, &scope, parent_id(), &slug, "m", m_mode).await;
+            }
+        }
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        let got: std::collections::HashSet<String> =
+            page.items.into_iter().map(|m| m.canonical_id).collect();
+
+        for p_mode in ShareMode::ALL.iter().copied() {
+            for m_mode in ShareMode::ALL.iter().copied() {
+                let canonical = format!("{}-{}::m", p_mode.as_str(), m_mode.as_str());
+                // distance 1: the parent owns both rows.
+                let want = p_mode.reaches(1) && m_mode.reaches(1);
+                assert_eq!(
+                    got.contains(&canonical),
+                    want,
+                    "provider {p_mode:?} + model {m_mode:?} should be visible={want}"
+                );
+            }
+        }
+    }
+
+    /// A `private` ancestor provider is dropped **before** winner ranking, so
+    /// it does not take its slug out of the subtree — a farther ancestor owning
+    /// the same slug wins it instead.
+    #[tokio::test]
+    async fn test_private_provider_is_transparent_not_a_blocker() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+
+        // Grandparent shares `openai` with the whole subtree; the parent owns a
+        // `private` provider under the same slug.
+        create_shared_provider(
+            &conn,
+            &scope_for(grandparent_id()),
+            grandparent_id(),
+            "openai",
+            ShareMode::Subtree,
+        )
+        .await;
+        create_shared_model(
+            &conn,
+            &scope_for(grandparent_id()),
+            grandparent_id(),
+            "openai",
+            "gpt-4o",
+            ShareMode::Subtree,
+        )
+        .await;
+
+        create_shared_provider(
+            &conn,
+            &scope_for(parent_id()),
+            parent_id(),
+            "openai",
+            ShareMode::Private,
+        )
+        .await;
+        create_shared_model(
+            &conn,
+            &scope_for(parent_id()),
+            parent_id(),
+            "openai",
+            "parent-only",
+            ShareMode::Subtree,
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&child_ctx(), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            ["openai::gpt-4o"],
+            "a private provider must not shadow \u{2014} the grandparent's row wins the slug"
+        );
+    }
+
+    /// The owner still sees its own `private` rows on the eval path: distance 0
+    /// is reached by every mode, and the private provider still wins its slug
+    /// for its own tenant.
+    #[tokio::test]
+    async fn test_private_rows_stay_visible_to_their_owner() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let scope = scope_for(parent_id());
+        create_shared_provider(&conn, &scope, parent_id(), "openai", ShareMode::Private).await;
+        create_shared_model(
+            &conn,
+            &scope,
+            parent_id(),
+            "openai",
+            "gpt-4o",
+            ShareMode::Private,
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&ctx_for(parent_id()), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        let ids: Vec<&str> = page.items.iter().map(|m| m.canonical_id.as_str()).collect();
+        assert_eq!(ids, ["openai::gpt-4o"]);
+    }
+
+    /// A hidden model must be indistinguishable from an absent one. Gate order
+    /// matters: a non-shared model that is *also* deprecated, on a disabled
+    /// provider, or unapproved must still report `ModelNotFound` rather than
+    /// the more specific error, which would disclose that the row exists.
+    #[tokio::test]
+    async fn test_get_tenant_model_hides_unshared_rows_behind_model_not_found() {
+        for (label, lifecycle, approval, provider_status) in [
+            (
+                "plain",
+                crate::LifecycleStatus::Production,
+                crate::ApprovalStatus::Approved,
+                crate::ProviderStatus::Active,
+            ),
+            (
+                "deprecated",
+                crate::LifecycleStatus::Deprecated,
+                crate::ApprovalStatus::Approved,
+                crate::ProviderStatus::Active,
+            ),
+            (
+                "unapproved",
+                crate::LifecycleStatus::Production,
+                crate::ApprovalStatus::Pending,
+                crate::ProviderStatus::Active,
+            ),
+            (
+                "disabled-provider",
+                crate::LifecycleStatus::Production,
+                crate::ApprovalStatus::Approved,
+                crate::ProviderStatus::Disabled,
+            ),
+        ] {
+            let db = setup_db().await;
+            let conn = db.conn().expect("conn");
+            let scope = scope_for(parent_id());
+
+            // Provider reaches the child; the model itself does not.
+            let provider_id_val =
+                create_shared_provider(&conn, &scope, parent_id(), "openai", ShareMode::Subtree)
+                    .await;
+            let provider = resolve_test_provider(&conn, &scope, "openai").await;
+            let mut req = make_create_model_req(provider.id, "gpt-4o");
+            req.approval_status = Some(approval);
+            req.share_mode = Some(ShareMode::Private);
+            req.lifecycle_status = lifecycle;
+            crate::domain::repo::ModelRepository::create(
+                &ModelRepositoryImpl::default(),
+                &conn,
+                &scope,
+                parent_id(),
+                &provider,
+                &req,
+            )
+            .await
+            .expect("create model");
+
+            if provider_status == crate::ProviderStatus::Disabled {
+                crate::domain::repo::ProviderRepository::update(
+                    &ProviderRepositoryImpl::default(),
+                    &conn,
+                    &scope,
+                    provider_id_val,
+                    &crate::UpdateProviderRequestV1 {
+                        status: Some(crate::ProviderStatus::Disabled),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("disable provider");
+            }
+
+            let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+            let err = service
+                .get_tenant_model(&child_ctx(), "openai::gpt-4o")
+                .await
+                .expect_err("an unshared model must not resolve");
+
+            assert!(
+                matches!(err, DomainError::ModelNotFound { .. }),
+                "case `{label}`: an unshared model must report ModelNotFound, got {err:?}"
+            );
+        }
+    }
+
+    /// The management surface is PDP-scoped and performs no chain walk, so an
+    /// owner keeps seeing everything it owns regardless of `share_mode`.
+    #[tokio::test]
+    async fn test_management_listing_ignores_share_mode() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let scope = scope_for(test_tenant());
+        create_shared_provider(&conn, &scope, test_tenant(), "openai", ShareMode::Private).await;
+        create_shared_model(
+            &conn,
+            &scope,
+            test_tenant(),
+            "openai",
+            "gpt-4o",
+            ShareMode::Private,
+        )
+        .await;
+
+        let service = build_service(db, TwoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models_management(&ctx_for(test_tenant()), &ODataQuery::default(), false)
+            .await
+            .expect("management list should succeed");
+        let ids: Vec<&str> = page
+            .items
+            .iter()
+            .map(|m| m.model.canonical_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["openai::gpt-4o"],
+            "an owner must keep seeing its own private rows on the admin surface"
+        );
+    }
+
+    /// `share_mode` is a real column, so admins can narrow the management
+    /// listing on it — "what have I withheld?" is a first-class query.
+    #[tokio::test]
+    async fn test_share_mode_is_odata_filterable_on_the_management_listing() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let scope = scope_for(test_tenant());
+        for mode in ShareMode::ALL.iter().copied() {
+            let slug = format!("f{}", mode.as_str());
+            create_shared_provider(&conn, &scope, test_tenant(), &slug, ShareMode::Subtree).await;
+            create_shared_model(&conn, &scope, test_tenant(), &slug, "m", mode).await;
+        }
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+
+        for mode in ShareMode::ALL.iter().copied() {
+            let parsed =
+                toolkit_odata::parse_filter_string(&format!("share_mode eq '{}'", mode.as_str()))
+                    .expect("share_mode is an allowlisted filter field");
+            let query = ODataQuery {
+                filter: Some(Box::new(parsed.into_expr())),
+                ..Default::default()
+            };
+            let page = service
+                .list_tenant_models_management(&ctx_for(test_tenant()), &query, false)
+                .await
+                .expect("management list should succeed");
+            let ids: Vec<&str> = page
+                .items
+                .iter()
+                .map(|m| m.model.canonical_id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                [format!("f{}::m", mode.as_str()).as_str()],
+                "filtering on share_mode eq '{}' must return exactly its own row",
+                mode.as_str()
+            );
+        }
+    }
+
+    /// A root tenant inherits from nobody: both ancestor buckets are empty, the
+    /// predicate collapses to `tenant_id = own`, and no `IN ()` is rendered.
+    #[tokio::test]
+    async fn test_root_tenant_sees_its_own_rows_at_every_share_mode() {
+        let db = setup_db().await;
+        let conn = db.conn().expect("conn");
+        let scope = scope_for(test_tenant());
+        for mode in ShareMode::ALL.iter().copied() {
+            let slug = format!("r{}", mode.as_str());
+            create_shared_provider(&conn, &scope, test_tenant(), &slug, mode).await;
+            create_shared_model(&conn, &scope, test_tenant(), &slug, "m", mode).await;
+        }
+
+        let service = build_service(db, NoAncestorsResolver, ModelRegistryConfig::default());
+        let page = service
+            .list_tenant_models(&ctx_for(test_tenant()), &ODataQuery::default())
+            .await
+            .expect("list should succeed");
+        assert_eq!(
+            page.items.len(),
+            ShareMode::ALL.len(),
+            "a root tenant sees every row it owns, whatever its share_mode"
+        );
     }
 }

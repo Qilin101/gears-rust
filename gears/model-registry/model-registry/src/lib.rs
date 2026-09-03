@@ -5,7 +5,7 @@
 pub use model_registry_sdk::{
     ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus,
     ModelManagementV1, ModelRegistryClientV1, ModelRegistryError, ModelV1, ProviderStatus,
-    ProviderV1, UpdateModelRequestV1, UpdateProviderRequestV1,
+    ProviderV1, ShareMode, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 pub mod gear;

@@ -27,7 +27,7 @@ for the eval read, never an addressing key for a write.
 | `GET` | `/model-registry/v1/admin/models` | Management listing with provider-visibility flags |
 | `POST` | `/model-registry/v1/admin/models` | Register a new model (body carries `provider_id`; the model takes that provider's tenant) |
 | `GET` | `/model-registry/v1/admin/models/{id}` | Get model by ID — no eval gates |
-| `PATCH` | `/model-registry/v1/admin/models/{id}` | Partial update including approval status |
+| `PATCH` | `/model-registry/v1/admin/models/{id}` | Partial update including approval status and `share_mode` |
 | `DELETE` | `/model-registry/v1/admin/models/{id}` | Soft-delete (marks deprecated) |
 
 ### Admin — providers
@@ -36,8 +36,8 @@ for the eval read, never an addressing key for a write.
 |--------|------|-------------|
 | `GET` | `/model-registry/v1/admin/providers` | List providers in the caller's access scope, with OData filtering |
 | `GET` | `/model-registry/v1/admin/providers/{id}` | Get provider by ID |
-| `POST` | `/model-registry/v1/admin/providers` | Register a new provider (`slug` is the natural key being created) |
-| `PATCH` | `/model-registry/v1/admin/providers/{id}` | Partial update (slug immutable) |
+| `POST` | `/model-registry/v1/admin/providers` | Register a new provider (`slug` is the natural key being created; `share_mode` defaults to `subtree`) |
+| `PATCH` | `/model-registry/v1/admin/providers/{id}` | Partial update including `status` and `share_mode` (slug immutable) |
 | `DELETE` | `/model-registry/v1/admin/providers/{id}` | Delete provider |
 
 ### Management DTO Fields
@@ -60,7 +60,7 @@ Deprecated models are excluded from the default management listing; pass `includ
 ## Key Features
 
 - **Cache-first reads**: In-memory cache with a single TTL (`cache_ttl_seconds`, default 10min), tenant-prefixed keys. Only ancestor chains are cached; no model or provider row is
-- **Tenant inheritance**: Additive inheritance with child-shadowing by provider slug, applied on the eval reads only
+- **Tenant inheritance**: Additive inheritance narrowed by two restrict-only levers, both applied on the eval reads only — child-shadowing by provider slug (consumer-side) and `share_mode` (owner-side: `private` / `children` / `subtree`, default `subtree`, on both providers and models, narrowest-wins)
 - **Approval management**: Direct approval status writes via `PATCH /admin/models/{id}` (P1)
 - **Tenant isolation**: `AccessScope`-enforced queries at the repository layer, with the resource `id` supplied to the PDP on every point operation
 - **OData filtering**: `$filter` / `$orderby` on the allowlisted fields published by `model_registry_sdk::odata`, plus cursor-based pagination (`$top` + opaque cursor). `$select` and `$skip` are not supported

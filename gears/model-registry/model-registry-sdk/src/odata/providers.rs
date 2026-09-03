@@ -22,6 +22,8 @@ pub struct ProviderQuery {
     #[odata(filter(kind = "String"))]
     pub status: String,
     #[odata(filter(kind = "String"))]
+    pub share_mode: String,
+    #[odata(filter(kind = "String"))]
     pub gts_type: String,
     #[odata(filter(kind = "Bool"))]
     pub managed: bool,
@@ -56,6 +58,8 @@ pub const PROVIDER_NAME: FieldRef<ProviderSchema, String> =
     FieldRef::new(ProviderFilterField::Name);
 pub const PROVIDER_STATUS: FieldRef<ProviderSchema, String> =
     FieldRef::new(ProviderFilterField::Status);
+pub const PROVIDER_SHARE_MODE: FieldRef<ProviderSchema, String> =
+    FieldRef::new(ProviderFilterField::ShareMode);
 pub const PROVIDER_GTS_TYPE: FieldRef<ProviderSchema, String> =
     FieldRef::new(ProviderFilterField::GtsType);
 pub const PROVIDER_MANAGED: FieldRef<ProviderSchema, bool> =

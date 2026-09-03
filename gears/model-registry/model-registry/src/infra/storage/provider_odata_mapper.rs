@@ -33,6 +33,7 @@ impl FieldToColumn<ProviderFilterField> for ProviderODataMapper {
             ProviderFilterField::Slug => provider::Column::Slug,
             ProviderFilterField::Name => provider::Column::Name,
             ProviderFilterField::Status => provider::Column::Status,
+            ProviderFilterField::ShareMode => provider::Column::ShareMode,
             ProviderFilterField::GtsType => provider::Column::GtsType,
             ProviderFilterField::Managed => provider::Column::Managed,
             ProviderFilterField::DiscoveryEnabled => provider::Column::DiscoveryEnabled,
@@ -51,6 +52,7 @@ impl ODataFieldMapping<ProviderFilterField> for ProviderODataMapper {
             ProviderFilterField::Slug => sea_orm::Value::String(Some(m.slug.clone())),
             ProviderFilterField::Name => sea_orm::Value::String(Some(m.name.clone())),
             ProviderFilterField::Status => sea_orm::Value::String(Some(m.status.clone())),
+            ProviderFilterField::ShareMode => sea_orm::Value::String(Some(m.share_mode.clone())),
             ProviderFilterField::GtsType => sea_orm::Value::String(Some(m.gts_type.clone())),
             ProviderFilterField::Managed => sea_orm::Value::Bool(Some(m.managed)),
             ProviderFilterField::DiscoveryEnabled => {
@@ -100,6 +102,7 @@ mod tests {
             name: "OpenAI".to_owned(),
             gts_type: "gts.cf.genai._.openai.v1~".to_owned(),
             status: "active".to_owned(),
+            share_mode: "subtree".to_owned(),
             managed: true,
             metadata: None,
             discovery_enabled: false,

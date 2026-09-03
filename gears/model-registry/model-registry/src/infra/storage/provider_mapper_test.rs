@@ -36,6 +36,7 @@ fn make_provider_entity(
         name: format!("Provider {slug}"),
         gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".to_owned(),
         status: status.to_owned(),
+        share_mode: "subtree".to_owned(),
         managed: false,
         metadata: Some(json!({"region": "us-east"})),
         discovery_enabled: false,
@@ -96,6 +97,20 @@ fn provider_entity_to_v1_rejects_corrupt_status() {
     );
 }
 
+#[test]
+fn provider_entity_to_v1_rejects_corrupt_share_mode() {
+    // Sharing decides who can see the provider, so an unreadable value must
+    // fail the read rather than default to anything.
+    let mut entity = make_provider_entity(test_provider_id(), test_tenant_id(), "openai", "active");
+    entity.share_mode = "everyone".to_owned();
+
+    let err = provider_entity_to_v1(entity).expect_err("out-of-domain share_mode must be rejected");
+    assert!(
+        matches!(&err, DomainError::Internal { .. }),
+        "expected Internal, got {err:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Provider create ActiveModel
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -144,6 +159,7 @@ fn provider_update_only_some_fields() {
     let req = UpdateProviderRequestV1 {
         name: Some("Updated".into()),
         status: Some(ProviderStatus::Disabled),
+        share_mode: None,
         managed: None,
         metadata: None,
         discovery_enabled: None,

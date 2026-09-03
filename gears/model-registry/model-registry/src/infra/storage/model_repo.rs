@@ -13,10 +13,48 @@ use uuid::Uuid;
 
 use crate::config::{ModelRegistryConfig, PageLimits};
 use crate::domain::error::DomainError;
+use crate::domain::inheritance::ShareVisibility;
 use crate::domain::repo::{ListVisibility, ModelRepository};
-use crate::{ApprovalStatus, CreateModelRequestV1, ModelV1, ProviderV1, UpdateModelRequestV1};
+use crate::{
+    ApprovalStatus, CreateModelRequestV1, ModelV1, ProviderV1, ShareMode, UpdateModelRequestV1,
+};
 
 use super::entity::{self, model};
+
+/// The model stage of the sharing gate, as a SQL disjunction.
+///
+/// Mirrors [`ShareMode::reaches`], which this cannot call: own rows are visible
+/// at every mode, a parent's rows need `children` or wider, and anything
+/// further up needs `subtree`. A `share_mode_matches_reaches_rule` test pins
+/// the two together.
+///
+/// Empty buckets contribute **no** branch rather than an `IN ()`, which has no
+/// portable rendering. A root tenant therefore collapses to `tenant_id = own`,
+/// which is correct: it inherits from nobody.
+fn share_condition(sharing: &ShareVisibility) -> Condition {
+    let mut any = Condition::any().add(model::Column::TenantId.eq(sharing.own()));
+
+    if !sharing.parents().is_empty() {
+        any = any.add(
+            Condition::all()
+                .add(model::Column::TenantId.is_in(sharing.parents().to_vec()))
+                .add(
+                    model::Column::ShareMode
+                        .is_in([ShareMode::Children.as_str(), ShareMode::Subtree.as_str()]),
+                ),
+        );
+    }
+
+    if !sharing.beyond().is_empty() {
+        any = any.add(
+            Condition::all()
+                .add(model::Column::TenantId.is_in(sharing.beyond().to_vec()))
+                .add(model::Column::ShareMode.eq(ShareMode::Subtree.as_str())),
+        );
+    }
+
+    any
+}
 use super::error_mapping::map_scope_error;
 use super::model_mapper;
 use super::model_odata_mapper::ModelODataMapper;
@@ -99,15 +137,20 @@ impl ModelRepository for ModelRepositoryImpl {
         let mut base = model::Entity::find().secure().scope_with(scope);
 
         // ── Eval path ──────────────────────────────────────────────────────
-        // Mandatory predicates: allow-list membership + unconditional lifecycle
-        // and approval exclusions (DESIGN §3.3). The OData `$filter` is ANDed on
-        // top, so it can only narrow within this set — neither
-        // `$filter=lifecycle_status eq 'deprecated'` nor
+        // Mandatory predicates: allow-list membership + the model-stage sharing
+        // gate + unconditional lifecycle and approval exclusions (DESIGN §3.3).
+        // The OData `$filter` is ANDed on top, so it can only narrow within this
+        // set — neither `$filter=lifecycle_status eq 'deprecated'` nor
         // `$filter=approval_status eq 'pending'` can escape them.
-        if let ListVisibility::Eval { allow_list } = visibility {
+        if let ListVisibility::Eval {
+            allow_list,
+            sharing,
+        } = visibility
+        {
             base = base.filter(
                 Condition::all()
                     .add(model::Column::ProviderId.is_in(allow_list.to_vec()))
+                    .add(share_condition(sharing))
                     .add(model::Column::LifecycleStatus.ne("deprecated"))
                     .add(model::Column::LifecycleStatus.ne("sunset"))
                     .add(model::Column::ApprovalStatus.eq(ApprovalStatus::Approved.as_str())),
@@ -278,6 +321,15 @@ mod tests {
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
+    /// Every eval test in this module reads as a root tenant, which inherits
+    /// from nobody: the sharing predicate collapses to `tenant_id = own`.
+    fn own_only_sharing(tenant_id: Uuid) -> ShareVisibility {
+        ShareVisibility::from_chain(&crate::domain::inheritance::InheritanceContext::new(
+            tenant_id,
+            vec![],
+        ))
+    }
+
     async fn setup_provider() -> DBProvider<DbError> {
         let opts = ConnectOpts {
             max_conns: Some(1),
@@ -408,6 +460,7 @@ mod tests {
             lifecycle_status: crate::LifecycleStatus::Production,
             approval_status: None,
             info,
+            share_mode: None,
         }
     }
 
@@ -1156,6 +1209,7 @@ mod tests {
             &ODataQuery::default(),
             ListVisibility::Eval {
                 allow_list: &allow_list,
+                sharing: &own_only_sharing(test_tenant()),
             },
         )
         .await
@@ -1202,6 +1256,7 @@ mod tests {
             &ODataQuery::default(),
             ListVisibility::Eval {
                 allow_list: &allow_list,
+                sharing: &own_only_sharing(test_tenant()),
             },
         )
         .await
@@ -1275,6 +1330,7 @@ mod tests {
             &query,
             ListVisibility::Eval {
                 allow_list: &allow_list,
+                sharing: &own_only_sharing(test_tenant()),
             },
         )
         .await
@@ -1328,6 +1384,7 @@ mod tests {
             &ODataQuery::default(),
             ListVisibility::Eval {
                 allow_list: &allow_list,
+                sharing: &own_only_sharing(test_tenant()),
             },
         )
         .await
@@ -1355,6 +1412,7 @@ mod tests {
                 &query,
                 ListVisibility::Eval {
                     allow_list: &allow_list,
+                    sharing: &own_only_sharing(test_tenant()),
                 },
             )
             .await

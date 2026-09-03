@@ -152,6 +152,70 @@ impl ProviderStatus {
     }
 }
 
+/// How far down the tenant hierarchy an owner shares a provider or model.
+///
+/// The owner-side counterpart to consumer-side provider shadowing: shadowing
+/// lets a descendant hide what it inherited, `ShareMode` lets the owner decide
+/// what is offered in the first place. Applies to the eval reads only — an
+/// owner always sees its own rows on the admin surface regardless.
+///
+/// Wire format is lowercase to match `DESIGN.md §3.1`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ShareMode {
+    /// Visible to the owning tenant only.
+    Private,
+    /// Visible to the owning tenant and its direct children.
+    Children,
+    /// Visible to the owning tenant and its whole subtree. The default.
+    Subtree,
+}
+
+impl ShareMode {
+    /// Every variant, in declaration order — widening.
+    pub const ALL: &[Self] = &[Self::Private, Self::Children, Self::Subtree];
+
+    /// Lowercase wire/storage string — identical to the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Children => "children",
+            Self::Subtree => "subtree",
+        }
+    }
+
+    /// Parse from the lowercase wire/storage string. `None` for any value
+    /// outside the documented domain.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "private" => Some(Self::Private),
+            "children" => Some(Self::Children),
+            "subtree" => Some(Self::Subtree),
+            _ => None,
+        }
+    }
+
+    /// Whether a row carrying this mode reaches a requester `distance` hops
+    /// below its owner. `0` is the owner itself, `1` a direct child.
+    ///
+    /// The single definition of the depth rule. The eval listing encodes the
+    /// same table as a SQL predicate because it cannot call this; the two are
+    /// held together by a drift test rather than by shared code.
+    #[must_use]
+    pub const fn reaches(self, distance: usize) -> bool {
+        match self {
+            Self::Private => distance == 0,
+            Self::Children => distance <= 1,
+            Self::Subtree => true,
+        }
+    }
+}
+
 /// API kind that a model exposes.
 ///
 /// A model may expose multiple API surfaces (e.g. `[Completion, Batch]` for
@@ -598,6 +662,62 @@ mod tests {
             assert_eq!(ProviderStatus::from_wire(variant.as_str()), Some(variant));
         }
         assert_eq!(ProviderStatus::from_wire(""), None);
+    }
+
+    #[test]
+    fn share_mode_wire_format_is_lowercase() {
+        let cases = [
+            (ShareMode::Private, "\"private\""),
+            (ShareMode::Children, "\"children\""),
+            (ShareMode::Subtree, "\"subtree\""),
+        ];
+        assert_all_lists_every_variant(ShareMode::ALL, &cases);
+        for (variant, expected) in cases {
+            let s = serde_json::to_string(&variant).unwrap();
+            assert_eq!(s, expected, "wire format drift on {variant:?}");
+            let back: ShareMode = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, variant);
+            assert_eq!(format!("\"{}\"", variant.as_str()), expected);
+            assert_eq!(ShareMode::from_wire(variant.as_str()), Some(variant));
+        }
+        assert_eq!(ShareMode::from_wire(""), None);
+        assert_eq!(ShareMode::from_wire("Subtree"), None);
+    }
+
+    /// The depth rule, pinned. `reaches` is the single Rust definition; the
+    /// eval listing re-encodes it as SQL, and an integration drift test holds
+    /// the two together.
+    #[test]
+    fn share_mode_reaches_by_distance() {
+        // (mode, reachable distances out of 0..=3)
+        let cases = [
+            (ShareMode::Private, [true, false, false, false]),
+            (ShareMode::Children, [true, true, false, false]),
+            (ShareMode::Subtree, [true, true, true, true]),
+        ];
+        for (mode, expected) in cases {
+            for (distance, want) in expected.iter().enumerate() {
+                assert_eq!(
+                    mode.reaches(distance),
+                    *want,
+                    "{mode:?} at distance {distance}"
+                );
+            }
+        }
+    }
+
+    /// Sharing is monotone in the variant order, which is what lets the
+    /// provider and model stages be evaluated independently and `AND`-ed instead
+    /// of computing an explicit `min()` (DESIGN §3.5).
+    #[test]
+    fn share_mode_reach_widens_monotonically() {
+        for distance in 0..4 {
+            let reach: Vec<bool> = ShareMode::ALL.iter().map(|m| m.reaches(distance)).collect();
+            assert!(
+                reach.windows(2).all(|w| !w[0] || w[1]),
+                "reach must never narrow as the mode widens, at distance {distance}: {reach:?}"
+            );
+        }
     }
 
     #[test]

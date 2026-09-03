@@ -14,7 +14,7 @@
 use toolkit_odata::ast::Value;
 use toolkit_odata::schema::IntoODataValue;
 
-use crate::models::{ApprovalStatus, LifecycleStatus, ProviderStatus, SupportedApi};
+use crate::models::{ApprovalStatus, LifecycleStatus, ProviderStatus, ShareMode, SupportedApi};
 
 impl IntoODataValue for LifecycleStatus {
     fn into_odata_value(self) -> Value {
@@ -29,6 +29,12 @@ impl IntoODataValue for ApprovalStatus {
 }
 
 impl IntoODataValue for ProviderStatus {
+    fn into_odata_value(self) -> Value {
+        Value::String(self.as_str().to_owned())
+    }
+}
+
+impl IntoODataValue for ShareMode {
     fn into_odata_value(self) -> Value {
         Value::String(self.as_str().to_owned())
     }

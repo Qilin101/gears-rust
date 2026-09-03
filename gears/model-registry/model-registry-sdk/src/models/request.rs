@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::models::{
     ApprovalStatus, ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities,
-    LifecycleStatus, ModelCapabilities, ModelInfoV1, ModelPerformance, ProviderStatus,
+    LifecycleStatus, ModelCapabilities, ModelInfoV1, ModelPerformance, ProviderStatus, ShareMode,
 };
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,7 @@ pub struct CreateProviderRequestV1 {
     slug: String,
     name: String,
     gts_type: gts::GtsTypeId,
+    share_mode: ShareMode,
     managed: bool,
     metadata: Option<serde_json::Value>,
     discovery_enabled: bool,
@@ -40,6 +41,7 @@ impl CreateProviderRequestV1 {
             slug: slug.into(),
             name: name.into(),
             gts_type,
+            share_mode: ShareMode::Subtree,
             managed: false,
             metadata: None,
             discovery_enabled: false,
@@ -60,6 +62,13 @@ impl CreateProviderRequestV1 {
     #[must_use]
     pub fn gts_type(&self) -> &gts::GtsTypeId {
         &self.gts_type
+    }
+
+    /// How far below this tenant the provider is offered. Defaults to
+    /// [`ShareMode::Subtree`].
+    #[must_use]
+    pub fn share_mode(&self) -> ShareMode {
+        self.share_mode
     }
 
     #[must_use]
@@ -88,6 +97,7 @@ pub struct CreateProviderRequestV1Builder {
     slug: String,
     name: String,
     gts_type: gts::GtsTypeId,
+    share_mode: ShareMode,
     managed: bool,
     metadata: Option<serde_json::Value>,
     discovery_enabled: bool,
@@ -95,6 +105,12 @@ pub struct CreateProviderRequestV1Builder {
 }
 
 impl CreateProviderRequestV1Builder {
+    #[must_use]
+    pub fn share_mode(mut self, share_mode: ShareMode) -> Self {
+        self.share_mode = share_mode;
+        self
+    }
+
     #[must_use]
     pub fn managed(mut self, managed: bool) -> Self {
         self.managed = managed;
@@ -125,6 +141,7 @@ impl CreateProviderRequestV1Builder {
             slug: self.slug,
             name: self.name,
             gts_type: self.gts_type,
+            share_mode: self.share_mode,
             managed: self.managed,
             metadata: self.metadata,
             discovery_enabled: self.discovery_enabled,
@@ -149,6 +166,8 @@ impl CreateProviderRequestV1Builder {
 pub struct UpdateProviderRequestV1 {
     pub name: Option<String>,
     pub status: Option<ProviderStatus>,
+    /// How far below the owning tenant the provider is offered.
+    pub share_mode: Option<ShareMode>,
     pub managed: Option<bool>,
     /// Nullable — `Some(None)` clears stored metadata.
     pub metadata: Option<Option<serde_json::Value>>,
@@ -183,6 +202,10 @@ pub struct CreateModelRequestV1 {
     /// Optional initial approval status. `None` ⇒ defaults to
     /// [`ApprovalStatus::Pending`].
     pub approval_status: Option<ApprovalStatus>,
+    /// Optional initial share mode. `None` ⇒ defaults to
+    /// [`ShareMode::Subtree`]. Capped at read time by the owning provider's
+    /// own `share_mode`.
+    pub share_mode: Option<ShareMode>,
     /// Model info — display, capabilities, limits, default parameters, and
     /// the provider-specific settings payload (raw JSON typed by
     /// `info.gts_type`).
@@ -214,6 +237,9 @@ pub struct UpdateModelRequestV1 {
     // ── Status ────────────────────────────────────────────────────────
     /// Approval status (`approved` / `rejected` / `revoked` / `pending`).
     pub approval_status: Option<ApprovalStatus>,
+    /// How far below the owning tenant this model is offered on the eval
+    /// reads. Non-nullable — `None` leaves it unchanged.
+    pub share_mode: Option<ShareMode>,
     /// Lifecycle status (e.g. promote `Experimental` → `Production`, or mark
     /// `Sunset`). Setting to `Deprecated` here is equivalent to the soft-delete
     /// path; prefer [`crate::api::ModelRegistryClientV1::delete_model`].

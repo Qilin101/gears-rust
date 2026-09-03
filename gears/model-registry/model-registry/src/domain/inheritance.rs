@@ -105,6 +105,12 @@ impl ChainProviders {
 /// Ordering by [`InheritanceContext`] position rather than by arrival is what
 /// makes the single batch equivalent to the closest-first fan-out it replaces.
 ///
+/// A provider whose `share_mode` does not reach the requester's distance is
+/// dropped **before** ranking, so it neither appears nor wins its slug: to a
+/// descendant it does not exist, and a farther ancestor owning the same slug
+/// can win it instead. The owner itself is always at distance `0`, which every
+/// mode reaches, so a `private` provider still wins its slug for its own tenant.
+///
 /// The winner is the closest chain tenant owning a given slug — ownership
 /// only, status is not a factor. Failing closed is now the caller's `?` on the
 /// single query: there is no partial provider set to skip.
@@ -113,10 +119,14 @@ pub fn build_chain_providers(
     inheritance: &InheritanceContext,
     providers: Vec<ProviderV1>,
 ) -> ChainProviders {
-    // Rank every row by chain distance, dropping tenants outside the chain.
+    // Rank every row by chain distance, dropping tenants outside the chain and
+    // providers whose owner does not share them this far down.
     let mut ranked: Vec<(usize, ProviderV1)> = providers
         .into_iter()
-        .filter_map(|p| inheritance.position(p.tenant_id).map(|pos| (pos, p)))
+        .filter_map(|p| {
+            let pos = inheritance.position(p.tenant_id)?;
+            p.share_mode.reaches(pos).then_some((pos, p))
+        })
         .collect();
 
     // Stable sort, so the closest tenant's row for a slug comes first.
@@ -213,6 +223,68 @@ impl InheritanceContext {
     #[must_use]
     pub fn position(&self, tenant_id: Uuid) -> Option<usize> {
         self.pos_in_chain.get(&tenant_id).copied()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShareVisibility — the model-stage sharing partition
+// ---------------------------------------------------------------------------
+
+/// The requester's chain partitioned by the `ShareMode` each position needs.
+///
+/// The model stage of the sharing gate runs in SQL, which cannot call
+/// [`model_registry_sdk::models::ShareMode::reaches`], so the depth rule is projected into three tenant
+/// buckets the repository turns into a plain disjunction. Building it here
+/// keeps the rule's only Rust definition in this module.
+///
+/// The buckets mirror [`model_registry_sdk::models::ShareMode::reaches`] exactly:
+/// - `own` — distance 0, reached by every mode.
+/// - `parents` — distance 1, reached by `children` and `subtree`.
+/// - `beyond` — distance ≥ 2, reached by `subtree` alone.
+#[derive(Debug, Clone)]
+#[domain_model]
+pub struct ShareVisibility {
+    own: Uuid,
+    parents: Vec<Uuid>,
+    beyond: Vec<Uuid>,
+}
+
+impl ShareVisibility {
+    /// Partition `inheritance`'s chain by distance from the requester.
+    #[must_use]
+    pub fn from_chain(inheritance: &InheritanceContext) -> Self {
+        let mut parents = Vec::new();
+        let mut beyond = Vec::new();
+        for id in inheritance.chain_ids() {
+            match inheritance.position(*id) {
+                Some(0) | None => {}
+                Some(1) => parents.push(*id),
+                Some(_) => beyond.push(*id),
+            }
+        }
+        Self {
+            own: inheritance.tenant_id(),
+            parents,
+            beyond,
+        }
+    }
+
+    /// The requester's own tenant. Its rows are visible at every `share_mode`.
+    #[must_use]
+    pub fn own(&self) -> Uuid {
+        self.own
+    }
+
+    /// Chain tenants one hop up — reached by `children` and `subtree`.
+    #[must_use]
+    pub fn parents(&self) -> &[Uuid] {
+        &self.parents
+    }
+
+    /// Chain tenants two or more hops up — reached by `subtree` only.
+    #[must_use]
+    pub fn beyond(&self) -> &[Uuid] {
+        &self.beyond
     }
 }
 
@@ -816,6 +888,7 @@ mod tests {
             discovery_interval_seconds: None,
             created_at: now,
             updated_at: now,
+            share_mode: model_registry_sdk::models::ShareMode::Subtree,
         }
     }
 

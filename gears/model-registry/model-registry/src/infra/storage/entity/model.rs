@@ -128,6 +128,12 @@ pub struct Model {
     /// update flow.
     pub approval_status: String,
 
+    // -- Sharing --
+    /// How far below the owning tenant this model is offered on the eval
+    /// reads: `private`, `children`, or `subtree`. Unlike shadowing, this is a
+    /// property of the row itself, so it is storable and filterable.
+    pub share_mode: String,
+
     // -- Capability flags --
     /// Whether the model supports vision/image input.
     pub cap_vision: bool,
@@ -251,6 +257,7 @@ mod tests {
             provider_model_id: Some("gpt-4o".to_owned()),
             supported_api: Some("completion".to_owned()),
             approval_status: "approved".to_owned(),
+            share_mode: "subtree".to_owned(),
             cap_vision: true,
             cap_function_calling: true,
             cap_streaming: true,

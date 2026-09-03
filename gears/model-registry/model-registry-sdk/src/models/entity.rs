@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus};
+use crate::models::{ApprovalStatus, LifecycleStatus, ModelInfoV1, ProviderStatus, ShareMode};
 
 // ---------------------------------------------------------------------------
 // ModelV1<P>
@@ -34,6 +34,10 @@ pub struct ModelV1<P: gts::GtsSchema = serde_json::Value> {
     pub canonical_id: String,
     pub lifecycle_status: LifecycleStatus,
     pub approval_status: ApprovalStatus,
+    /// How far below the owning tenant this model is offered on the eval
+    /// reads. Capped by the owning provider's own `share_mode` — the effective
+    /// reach is the narrower of the two (DESIGN §3.5).
+    pub share_mode: ShareMode,
     /// All model information: display, capabilities, the promoted identity
     /// (`gts_type`, `supported_api`, `provider_model_id`), and the
     /// `provider_settings: P` payload.
@@ -74,6 +78,7 @@ impl ModelV1<serde_json::Value> {
             canonical_id: self.canonical_id,
             lifecycle_status: self.lifecycle_status,
             approval_status: self.approval_status,
+            share_mode: self.share_mode,
             info: self.info.try_into_typed::<Q>()?,
         })
     }
@@ -93,10 +98,11 @@ impl ModelV1<serde_json::Value> {
 /// - `available_for_eval` — the model is approved, on a non-terminal
 ///   lifecycle, and its provider is active.
 ///
-/// `available_for_eval` does not account for provider shadowing, which is
-/// relative to a requester's tenant chain. A model marked
-/// `available_for_eval` may still be hidden from a given tenant's eval
-/// listing by a closer provider owning the same slug.
+/// `available_for_eval` accounts for neither provider shadowing nor
+/// `share_mode`, both of which are relative to a requester's tenant chain. A
+/// model marked `available_for_eval` may still be hidden from a given tenant's
+/// eval listing by a closer provider owning the same slug, or because its own
+/// or its provider's `share_mode` does not reach that tenant.
 ///
 /// Generic over `P` with the same semantics as [`ModelV1<P>`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -128,6 +134,11 @@ pub struct ProviderV1 {
     /// GTS type identifier for the provider.
     pub gts_type: gts::GtsTypeId,
     pub status: ProviderStatus,
+    /// How far below the owning tenant this provider is offered on the eval
+    /// reads. A provider that does not reach a requester is dropped before
+    /// slug-winner ranking, so it neither appears nor shadows for that
+    /// requester (DESIGN §3.5).
+    pub share_mode: ShareMode,
     /// Whether the platform can manage this provider (e.g. install/unload
     /// models on ollama, `lm_studio`).
     pub managed: bool,
@@ -193,6 +204,7 @@ mod tests {
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: LifecycleStatus::Production,
             approval_status: ApprovalStatus::Approved,
+            share_mode: ShareMode::Subtree,
             info: ModelInfoV1 {
                 gts_type: gts::GtsTypeId::new(gts_type),
                 display_name: "Sample".into(),

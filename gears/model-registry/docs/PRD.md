@@ -43,6 +43,7 @@
   - [UC-006: Register Provider](#uc-006-register-provider)
   - [UC-007: Disable Provider](#uc-007-disable-provider)
   - [UC-008: Re-enable Provider](#uc-008-re-enable-provider)
+  - [UC-028: Set Share Mode](#uc-028-set-share-mode)
   - [UC-009: Get Model Provider Cost](#uc-009-get-model-provider-cost)
   - [UC-010: Configure Auto-Approval Rule](#uc-010-configure-auto-approval-rule)
   - [UC-011: Get Provider Discovery Health](#uc-011-get-provider-discovery-health)
@@ -161,7 +162,7 @@ LLM Gateway requires a centralized source of truth for model availability, capab
 
 **ID**: `cpt-cf-model-registry-actor-tenant-admin`
 
-**Role**: Approves or rejects models created under their own tenant's providers. Manages tenant-specific providers, including shadowing or disabling an inherited provider to restrict what its subtree sees. Can only restrict access compared to parent tenant, not expand — and cannot approve, reject, or otherwise override an individual model owned by an ancestor tenant; the only lever is shadowing the ancestor's provider.
+**Role**: Approves or rejects models created under their own tenant's providers. Manages tenant-specific providers, and holds two independent restriction levers: as a **consumer**, shadowing or disabling an inherited provider to restrict what its own subtree sees; as an **owner**, setting `share_mode` on its own providers and models to restrict how far down the hierarchy they are offered. Can only restrict access compared to parent tenant, not expand — and cannot approve, reject, or otherwise override an individual model owned by an ancestor tenant. `share_mode` governs visibility only, never approval authority.
 
 #### Platform Administrator
 
@@ -248,10 +249,11 @@ Represents a configured AI provider instance for a tenant.
 - Child tenant CAN shadow an inherited provider by creating a provider with the same slug (regardless of the shadow's `status`)
 - Shadowing completely replaces the parent's provider **and every model attached to it** for that tenant and its descendants — those inherited models become unavailable in the child's subtree; the shadowing provider starts with no models of its own until the child creates them (manually) or discovers them (auto-discovery)
 - Resolution order: tenant → parent → ... → root (first match wins)
+- Owner tenants restrict inheritance from their own side with `share_mode` (`private` / `children` / `subtree`, default `subtree`): a provider or model that does not reach a requester is invisible to it. A provider that does not reach a requester also does **not** shadow for it — a farther ancestor's same-slug provider wins instead (see `cpt-cf-model-registry-fr-share-mode`)
 
-**A model belongs to its provider's tenant**: A model always belongs to exactly one provider, and a model's `tenant_id` MUST equal its provider's `tenant_id`. Creation names its provider by `id`, resolves it within the caller's access scope, and writes the model into that provider's tenant — so a tenant admin holding an own-tenant-only grant cannot create a model against another tenant's provider, whether or not that provider is shadowed. The only way a child tenant changes what it sees from an ancestor's provider is by shadowing the provider itself (above); there is no per-model shadowing.
+**A model belongs to its provider's tenant**: A model always belongs to exactly one provider, and a model's `tenant_id` MUST equal its provider's `tenant_id`. Creation names its provider by `id`, resolves it within the caller's access scope, and writes the model into that provider's tenant — so a tenant admin holding an own-tenant-only grant cannot create a model against another tenant's provider, whether or not that provider is shadowed. The only way a child *tenant* changes what it sees from an ancestor's provider is by shadowing the provider itself (above); there is no per-model shadowing. The model's *owner*, separately, can withhold an individual model from its descendants with `share_mode` — that is an owner-side visibility control, not a shadow, and it never transfers approval authority.
 
-**Inheritance applies to the eval reads only**: additive visibility and provider shadowing govern `GET /v1/models` and `GET /v1/models/{canonical_id}`. The admin endpoints operate on the tenants the PDP grants and never walk the hierarchy (see §6 Authorization).
+**Inheritance applies to the eval reads only**: additive visibility, provider shadowing, and `share_mode` all govern `GET /v1/models` and `GET /v1/models/{canonical_id}`. The admin endpoints operate on the tenants the PDP grants and never walk the hierarchy (see §6 Authorization).
 
 **Disabling a provider**: Disabling a provider — whether it is the tenant's own provider or a shadow of an inherited one — makes **every model attached to it unavailable for eval** in that tenant's subtree, in addition to suspending auto-discovery and refusing creation of new models against it. Disabled providers and their models remain visible via management/admin listing (see `cpt-cf-model-registry-fr-list-tenant-models-management`) so admins can audit and re-enable them. Re-enabling restores eval availability for its models (each still subject to its own approval status).
 
@@ -535,7 +537,7 @@ The system must allow admins to manually create, update, and remove model catalo
 - **Soft-delete model** — admin marks model as `deprecated`; record retained, hidden from default `list_tenant_models`.
 
 **Approval status (P1)**:
-- Approval status is managed directly by the tenant admin of the model's own tenant (which always equals its provider's tenant) via the Model Registry API — no Approval Service in P1. A descendant tenant that merely inherits the model has no approval authority over it; its only lever is shadowing the model's provider (see Domain Model → Provider → Inheritance & Shadowing).
+- Approval status is managed directly by the tenant admin of the model's own tenant (which always equals its provider's tenant) via the Model Registry API — no Approval Service in P1. A descendant tenant that merely inherits the model has no approval authority over it; its only lever is shadowing the model's provider (see Domain Model → Provider → Inheritance & Shadowing). The model's **owner** may additionally restrict how far it is offered via `share_mode` (`cpt-cf-model-registry-fr-share-mode`), which controls visibility only and never approval authority.
 - Admin can set any of the four statuses, `pending` included. Default for newly created models is `pending` (admin must explicitly approve), unless created with `status=approved` in a single call (admin convenience).
 - Approval transitions are **not validated**: any of the four values may be set directly, in any
   order, by an admin authorized for the model's tenant. P1 has no workflow engine, and transition
@@ -569,11 +571,12 @@ Provider inheritance:
 - Providers inherit down tenant hierarchy (additive only)
 - Child tenant sees parent's providers + own providers
 - Child CAN shadow inherited provider by creating provider with same slug (overrides for that tenant and descendants), regardless of the shadow's `status` — shadowing hides every model attached to the inherited provider, not just the provider record itself
+- Owner CAN restrict how far a provider is inherited via `share_mode` (`private` / `children` / `subtree`, default `subtree`); see `cpt-cf-model-registry-fr-share-mode`. A provider that does not reach a requester is invisible to it and does not shadow for it
 - Model creation always requires the model's tenant to match its provider's tenant; the provider is resolved within the caller's access scope and the model is written into that provider's tenant
 - Disabling a provider (own, or a shadow of an inherited one) makes every model attached to it unavailable for eval, in addition to suspending auto-discovery and refusing new model creation against it
 
 Provider config:
-- ID, slug, name, gts_type, status (active/disabled)
+- ID, slug, name, gts_type, status (active/disabled), share_mode (private/children/subtree)
 - Discovery enabled/interval
 - Provider-type-specific connection settings (GTS-typed), only where the provider type requires them — there is no generic `base_url` field
 
@@ -583,6 +586,24 @@ Provider deletion:
 Credentials handled by OAGW — not stored in Model Registry.
 
 **Actors**: `cpt-cf-model-registry-actor-platform-admin` (root tenant providers), `cpt-cf-model-registry-actor-tenant-admin` (own tenant's providers, including shadowing an inherited provider)
+
+#### Owner-Declared Share Mode
+
+- [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-share-mode`
+
+The system must let a tenant that owns a provider or model declare how far down the tenant hierarchy it is offered.
+
+- Both `providers` and `models` carry a `share_mode`: `private`, `children`, or `subtree`
+- Default is `subtree`, which is unrestricted downward inheritance — the behaviour a row has when its owner never sets the field
+- `private` reaches the owning tenant only; `children` reaches the owning tenant and its direct children; `subtree` reaches the whole subtree
+- A model's effective reach is the **narrower** of its own `share_mode` and its provider's. A model can restrict further than its provider but never past it
+- Applies to the eval reads (`get_tenant_model`, `list_tenant_models`) only. The admin endpoints are PDP-scoped and perform no hierarchy walk, so an owner always sees everything it owns
+- A provider that does not reach a requester is invisible to that requester **and does not shadow for it** — a farther ancestor owning the same slug wins the slug instead. To block a slug for a whole subtree, disable a shadowing provider (see Provider Management)
+- A model hidden by `share_mode` is reported as `model_not_found`, never a distinct error, so a descendant cannot distinguish a withheld model from one that does not exist
+- `share_mode` governs visibility only. It confers no approval authority and cannot widen what any tenant sees
+- Settable on create and update for both resources, returned on the admin read endpoints, and OData-filterable on both admin listings
+
+**Actors**: `cpt-cf-model-registry-actor-platform-admin` (root tenant), `cpt-cf-model-registry-actor-tenant-admin` (own tenant's providers and models)
 
 #### Model Provider Cost
 
@@ -975,7 +996,7 @@ Error responses follow RFC 9457 Problem Details standard. Each status above is f
 | Unauthorized approval | Role-based authorization checks on all admin operations |
 | Cache poisoning | TTL-based expiry; cached entries are never keyed by user-controlled input |
 | Provider credential exposure | Credentials handled by OAGW, not stored in Model Registry |
-| Privilege escalation via hierarchy | Child tenants can only restrict, not expand parent permissions |
+| Privilege escalation via hierarchy | Child tenants can only restrict, not expand parent permissions. Both visibility levers — a consumer's provider shadow and an owner's `share_mode` — are restrict-only and are ANDed, so neither can widen what a tenant sees |
 | Stale approval served | Approval status is enforced fail-closed on every read, from the model row that read fetches. It is never cached, so a revocation takes effect on the next read on every replica — there is no TTL window and nothing to invalidate |
 
 ## 11. Consumers
@@ -1192,6 +1213,30 @@ Key interfaces:
 4. Every model attached to this provider becomes available for eval again (subject to its own approval status)
 
 **Postconditions**: Provider active; auto-discovery and provider-extending operations are permitted again; its models are eval-available again without re-approval.
+
+### UC-028: Set Share Mode
+
+- [ ] `p1` - **ID**: `cpt-cf-model-registry-usecase-set-share-mode`
+
+**Actor**: `cpt-cf-model-registry-actor-platform-admin` (root tenant), `cpt-cf-model-registry-actor-tenant-admin` (own tenant)
+
+**Preconditions**: The provider or model exists and is owned by a tenant the caller's access scope covers.
+
+**Flow**:
+1. Admin sets `share_mode` on one of its own providers or models to `private`, `children`, or `subtree`
+2. Registry validates the value against the documented domain, rejecting anything else with `INVALID_SHARE_MODE`
+3. Registry persists the new value
+4. The next eval read from any descendant reflects it — nothing derived from `share_mode` is cached
+
+**Postconditions**: Descendants beyond the declared reach no longer see the row on the eval reads. The owner's own view, on both the eval and admin paths, is unchanged.
+
+**Acceptance criteria**:
+- Setting a provider to `private` removes it and all of its models from every descendant's eval reads
+- Setting a single model to `private` removes only that model; the provider's other models stay visible
+- A model set wider than its provider is still capped by the provider — effective reach is the narrower of the two
+- A withheld model resolves as `model_not_found` for a descendant, even when it is also deprecated, unapproved, or on a disabled provider
+- The owner continues to see the row on `GET /v1/admin/models` and `GET /v1/admin/providers`
+- A `private` provider does not shadow the slug for descendants — an ancestor's provider of the same slug wins it
 
 ### UC-009: Get Model Provider Cost
 

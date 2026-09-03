@@ -27,6 +27,7 @@ fn provider_dto_serializes() {
         name: "OpenAI".into(),
         gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".into(),
         status: "active".into(),
+        share_mode: "subtree".into(),
         managed: true,
         metadata: Some(json!({"region": "us-east-1"})),
         discovery_enabled: true,
@@ -60,6 +61,7 @@ fn provider_dto_omits_absent_fields() {
         name: "Ollama".into(),
         gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.generic.v1~".into(),
         status: "active".into(),
+        share_mode: "subtree".into(),
         managed: false,
         metadata: None,
         discovery_enabled: false,
@@ -173,6 +175,7 @@ fn model_dto_serializes() {
         canonical_id: "openai::gpt-4o".into(),
         lifecycle_status: "production".into(),
         approval_status: "approved".into(),
+        share_mode: "subtree".into(),
         info: info.clone(),
     };
 
@@ -346,6 +349,7 @@ fn provider_list_dto_serializes() {
             name: "OpenAI".into(),
             gts_type: "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~".into(),
             status: "active".into(),
+            share_mode: "subtree".into(),
             managed: true,
             metadata: None,
             discovery_enabled: false,
@@ -377,6 +381,7 @@ fn model_list_dto_serializes() {
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: "production".into(),
             approval_status: "approved".into(),
+            share_mode: "subtree".into(),
             info: json!({"key": "val"}),
         }],
         page_info: PageInfoDto {
@@ -446,6 +451,7 @@ mod provider_from_v1 {
             name: "OpenAI".into(),
             gts_type: gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
             status,
+            share_mode: model_registry_sdk::models::ShareMode::Subtree,
             managed: true,
             metadata: Some(json!({"region": "us-east-1"})),
             discovery_enabled: true,
@@ -507,6 +513,7 @@ mod provider_from_v1 {
             name: v1.name.clone(),
             gts_type: v1.gts_type.to_string(),
             status: "active".into(),
+            share_mode: "subtree".into(),
             managed: v1.managed,
             metadata: v1.metadata.clone(),
             discovery_enabled: v1.discovery_enabled,
@@ -576,6 +583,7 @@ mod model_from_v1 {
             canonical_id: "openai::gpt-4o".into(),
             lifecycle_status: lifecycle,
             approval_status: approval,
+            share_mode: model_registry_sdk::models::ShareMode::Subtree,
             info: model_registry_sdk::models::ModelInfoV1 {
                 gts_type: gts::GtsTypeId::new(OpenAiSettingsV1::TYPE_ID),
                 display_name: "GPT-4o".into(),

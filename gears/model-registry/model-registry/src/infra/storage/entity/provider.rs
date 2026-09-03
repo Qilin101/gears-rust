@@ -22,6 +22,9 @@ pub struct Model {
     pub gts_type: String,
     /// Operational status: `active` or `disabled`.
     pub status: String,
+    /// How far below the owning tenant this provider is offered on the eval
+    /// reads: `private`, `children`, or `subtree`.
+    pub share_mode: String,
     /// Whether the platform can manage this provider (e.g. install/unload models).
     pub managed: bool,
     /// Provider-specific metadata, JSONB (JSON on `SQLite`).

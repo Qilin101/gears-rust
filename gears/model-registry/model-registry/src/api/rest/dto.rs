@@ -61,6 +61,9 @@ pub struct ProviderDto {
     pub name: String,
     pub gts_type: String,
     pub status: String,
+    /// How far below this tenant the provider is offered on the eval reads:
+    /// `private`, `children`, or `subtree`.
+    pub share_mode: String,
     pub managed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<JsonValue>,
@@ -78,6 +81,9 @@ pub struct CreateProviderRequestDto {
     pub slug: String,
     pub name: String,
     pub gts_type: String,
+    /// Defaults to `subtree` (inherit-everything) when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_mode: Option<String>,
     #[serde(default)]
     pub managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +103,8 @@ pub struct UpdateProviderRequestDto {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed: Option<bool>,
     #[serde(
@@ -131,6 +139,7 @@ impl From<ProviderV1> for ProviderDto {
             name: source.name,
             gts_type: source.gts_type.to_string(),
             status: source.status.as_str().to_owned(),
+            share_mode: source.share_mode.as_str().to_owned(),
             managed: source.managed,
             metadata: source.metadata,
             discovery_enabled: source.discovery_enabled,
@@ -154,6 +163,8 @@ pub struct ModelDto {
     pub canonical_id: String,
     pub lifecycle_status: String,
     pub approval_status: String,
+    /// How far below the owning tenant the model is offered on the eval reads.
+    pub share_mode: String,
     pub info: JsonValue,
 }
 
@@ -184,6 +195,7 @@ where
             canonical_id: source.canonical_id,
             lifecycle_status: source.lifecycle_status.as_str().to_owned(),
             approval_status: source.approval_status.as_str().to_owned(),
+            share_mode: source.share_mode.as_str().to_owned(),
             info: model_info_to_json(&source.info),
         }
     }
@@ -199,6 +211,9 @@ pub struct CreateModelRequestDto {
     pub lifecycle_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_status: Option<String>,
+    /// Defaults to `subtree` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_mode: Option<String>,
     pub info: JsonValue,
 }
 
@@ -209,6 +224,8 @@ pub struct CreateModelRequestDto {
 pub struct UpdateModelRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

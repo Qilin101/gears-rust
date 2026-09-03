@@ -27,6 +27,8 @@ pub struct ModelQuery {
     #[odata(filter(kind = "String"))]
     pub approval_status: String,
     #[odata(filter(kind = "String"))]
+    pub share_mode: String,
+    #[odata(filter(kind = "String"))]
     pub gts_type: String,
     #[odata(filter(kind = "String"))]
     pub supported_api: String,
@@ -85,6 +87,8 @@ pub const MODEL_LIFECYCLE_STATUS: FieldRef<ModelSchema, String> =
     FieldRef::new(ModelFilterField::LifecycleStatus);
 pub const MODEL_APPROVAL_STATUS: FieldRef<ModelSchema, String> =
     FieldRef::new(ModelFilterField::ApprovalStatus);
+pub const MODEL_SHARE_MODE: FieldRef<ModelSchema, String> =
+    FieldRef::new(ModelFilterField::ShareMode);
 pub const MODEL_GTS_TYPE: FieldRef<ModelSchema, String> = FieldRef::new(ModelFilterField::GtsType);
 pub const MODEL_SUPPORTED_API: FieldRef<ModelSchema, String> =
     FieldRef::new(ModelFilterField::SupportedApi);

@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS providers (
     name                        VARCHAR(255) NOT NULL,
     gts_type                    VARCHAR(255) NOT NULL,
     status                      VARCHAR(50) NOT NULL DEFAULT 'active',
+    share_mode                  VARCHAR(50) NOT NULL DEFAULT 'subtree',
     managed                     {bool_} NOT NULL DEFAULT false,
     metadata                    {jsonb_nullable},
     discovery_enabled           {bool_} NOT NULL DEFAULT false,
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS models (
     provider_model_id           VARCHAR(255),
     supported_api               VARCHAR(50),
     approval_status             VARCHAR(50) NOT NULL DEFAULT 'pending',
+    share_mode                  VARCHAR(50) NOT NULL DEFAULT 'subtree',
     cap_vision                  {bool_} NOT NULL DEFAULT false,
     cap_function_calling        {bool_} NOT NULL DEFAULT false,
     cap_streaming               {bool_} NOT NULL DEFAULT false,
@@ -133,6 +135,7 @@ CREATE TABLE IF NOT EXISTS models (
 
 CREATE INDEX IF NOT EXISTS idx_providers_name              ON providers (name);
 CREATE INDEX IF NOT EXISTS idx_providers_status            ON providers (status);
+CREATE INDEX IF NOT EXISTS idx_providers_share_mode        ON providers (share_mode);
 CREATE INDEX IF NOT EXISTS idx_providers_gts_type          ON providers (gts_type);
 CREATE INDEX IF NOT EXISTS idx_providers_managed           ON providers (managed);
 CREATE INDEX IF NOT EXISTS idx_providers_discovery_enabled ON providers (discovery_enabled);
@@ -152,6 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_models_cap_streaming    ON models (cap_streaming)
 CREATE INDEX IF NOT EXISTS idx_models_cap_reasoning    ON models (cap_reasoning_effort);
 CREATE INDEX IF NOT EXISTS idx_models_managed          ON models (managed);
 CREATE INDEX IF NOT EXISTS idx_models_tenant_provider ON models (tenant_id, provider_id);
+CREATE INDEX IF NOT EXISTS idx_models_tenant_share_mode ON models (tenant_id, share_mode);
 ",
         );
 
@@ -412,6 +416,43 @@ mod tests {
                 || (cols.first().is_some_and(|c| c == "tenant_id")
                     && cols.get(1).is_some_and(|c| c == column))
         })
+    }
+
+    /// `share_mode` exists on both tables as NOT NULL with a `subtree` default,
+    /// so an existing row and an omitting insert both keep today's
+    /// inherit-everything behaviour.
+    #[tokio::test]
+    async fn share_mode_columns_default_to_subtree() {
+        let conn = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite connection");
+        let manager = SchemaManager::new(&conn);
+        Migration::up(&Migration, &manager).await.unwrap();
+
+        for table in ["providers", "models"] {
+            let rows = conn
+                .query_all_raw(sea_orm::Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("PRAGMA table_info({table});"),
+                ))
+                .await
+                .expect("pragma table_info");
+
+            let col = rows
+                .iter()
+                .find(|r| r.try_get_by::<String, _>("name").unwrap_or_default() == "share_mode")
+                .unwrap_or_else(|| panic!("{table}.share_mode must exist"));
+
+            let notnull: i32 = col.try_get_by::<i32, _>("notnull").unwrap_or_default();
+            assert_eq!(notnull, 1, "{table}.share_mode must be NOT NULL");
+
+            let dflt: Option<String> = col.try_get_by::<String, _>("dflt_value").ok();
+            assert_eq!(
+                dflt.as_deref(),
+                Some("'subtree'"),
+                "{table}.share_mode must default to 'subtree'"
+            );
+        }
     }
 
     /// Every `OData`-filterable column carries a B-tree index. The expectation is

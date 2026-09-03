@@ -521,6 +521,7 @@ fn make_create_model_req(provider_id: Uuid, provider_model_id: &str) -> CreateMo
         lifecycle_status: LifecycleStatus::Production,
         approval_status: None,
         info,
+        share_mode: None,
     }
 }
 
