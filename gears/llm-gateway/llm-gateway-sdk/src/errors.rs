@@ -162,6 +162,21 @@ pub enum LlmGatewayError {
     #[error("quota check unavailable")]
     QuotaCheckUnavailable,
 
+    /// `permission_denied` — the caller is not allowed to perform the
+    /// operation: the per-operation PEP check through `PolicyEnforcer`
+    /// denied it, or Quota Enforcement refused the quota attribution. Not
+    /// retryable. A design addition; the PRD defines no authorization code
+    /// (DESIGN § 4.1).
+    #[error("permission denied")]
+    PermissionDenied,
+
+    /// `gateway_unavailable` — the Gateway instance cannot take or finish the
+    /// request: the per-instance in-flight limit is reached, or a request was
+    /// cut at the shutdown drain deadline. Retryable. A design addition; the
+    /// PRD defines no capacity or shutdown code (DESIGN § 4.1).
+    #[error("gateway unavailable")]
+    GatewayUnavailable,
+
     /// `timeout` — a Gateway-enforced timeout expired.
     #[error("timeout: {kind:?}")]
     Timeout { kind: TimeoutKind },
@@ -205,6 +220,8 @@ impl LlmGatewayError {
             Self::UnapprovedDestination => "unapproved_destination",
             Self::QuotaExceeded => "quota_exceeded",
             Self::QuotaCheckUnavailable => "quota_check_unavailable",
+            Self::PermissionDenied => "permission_denied",
+            Self::GatewayUnavailable => "gateway_unavailable",
             Self::Timeout { .. } => "timeout",
             Self::Provider { category, .. } => category.code(),
             Self::Internal { .. } => "internal",
@@ -416,6 +433,22 @@ mod tests {
         assert_eq!(output.code(), "output_validation_error");
         assert_eq!(request.code(), "validation_error");
         assert_eq!(output.to_response_error().code, "output_validation_error");
+    }
+
+    #[test]
+    fn design_codes_for_authorization_and_capacity() {
+        assert_eq!(
+            LlmGatewayError::PermissionDenied.code(),
+            "permission_denied"
+        );
+        assert_eq!(
+            LlmGatewayError::GatewayUnavailable.code(),
+            "gateway_unavailable"
+        );
+        assert_eq!(
+            LlmGatewayError::GatewayUnavailable.to_response_error().code,
+            "gateway_unavailable"
+        );
     }
 
     #[test]
