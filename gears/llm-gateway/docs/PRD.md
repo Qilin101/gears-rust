@@ -446,7 +446,7 @@ Providers accept different subsets of JSON Schema (e.g. Google requires `$ref` t
 
 The system **MUST** accept generic generation parameters (max output tokens, temperature, top_p, seed, penalties, etc.) and generic cache-control parameters, and map them to the provider's equivalents. The system **MUST** support forwarding provider-specific parameters that have no generic equivalent; which parameters may be forwarded is governed by the model configuration in Model Registry.
 
-The provider plugin **MUST** report which generic parameters the resolved model supports (support can differ between models of the same provider, e.g. reasoning models that reject `temperature`). When a request contains a generic generation parameter the model does not support, the system **MUST**, before calling the provider:
+The system **MUST** determine which generic parameters the resolved model supports (support can differ between models of the same provider, e.g. reasoning models that reject `temperature`). This knowledge is kept by the Gateway per provider and model; provider plugins do not report it. When a request contains a generic generation parameter the model does not support, the system **MUST**, before calling the provider:
 
 - by default, reject the request with an `unsupported_parameter` error that names the parameter;
 - if the request sets `drop_unsupported_params`, drop the parameter and proceed.
