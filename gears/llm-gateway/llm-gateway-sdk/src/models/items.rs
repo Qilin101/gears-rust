@@ -69,7 +69,7 @@ pub enum OutputItem {
     Data(DataOutput),
     /// A web search the provider ran for the Gateway web search tool,
     /// normalized across providers (`cpt-cf-llm-gateway-fr-web-search-v1`).
-    #[serde(rename = "cf:web_search_call")]
+    #[serde(rename = "cf_gears:web_search_call")]
     WebSearchCall(WebSearchCallOutput),
     /// An item `type` the core does not own, preserved verbatim.
     #[serde(untagged)]
@@ -207,7 +207,7 @@ pub struct DataOutput {
     pub url: Option<String>,
 }
 
-/// Normalized web search call output item (`cf:web_search_call`).
+/// Normalized web search call output item (`cf_gears:web_search_call`).
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn web_search_call_output_roundtrips() {
         let wire = serde_json::json!({
-            "type": "cf:web_search_call",
+            "type": "cf_gears:web_search_call",
             "id": "ws_1",
             "status": "completed",
             "queries": ["rust serde"],

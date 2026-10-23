@@ -30,8 +30,10 @@ pub enum Tool {
     InlineGts(ToolInlineGts),
     /// The provider-agnostic Gateway web search tool. The provider plugin maps
     /// it to the provider's native web search; the Gateway never runs searches
-    /// itself (`cpt-cf-llm-gateway-fr-web-search-v1`).
-    #[serde(rename = "cf:web_search")]
+    /// itself (`cpt-cf-llm-gateway-fr-web-search-v1`). Named under the
+    /// Gateway-owned `cf_gears:` prefix (ADR 0001); the PRD's `cf:web_search`
+    /// is a recorded deviation (DESIGN § 4.9).
+    #[serde(rename = "cf_gears:web_search")]
     WebSearch(WebSearchTool),
     /// The built-in image-generation tool (Gears extension).
     #[serde(rename = "cf_gears:image_generation")]
@@ -44,8 +46,8 @@ pub enum Tool {
     Other(Extension),
 }
 
-/// Gateway web search tool (`cf:web_search`). It has no options; results and
-/// citations come back as `cf:web_search_call` output items and
+/// Gateway web search tool (`cf_gears:web_search`). It has no options; results and
+/// citations come back as `cf_gears:web_search_call` output items and
 /// `url_citation` annotations.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -197,7 +199,7 @@ mod tests {
 
     #[test]
     fn web_search_tool_roundtrips() {
-        let wire = serde_json::json!({ "type": "cf:web_search" });
+        let wire = serde_json::json!({ "type": "cf_gears:web_search" });
         let tool: Tool = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(tool, Tool::WebSearch(WebSearchTool));
         assert_eq!(serde_json::to_value(&tool).unwrap(), wire);

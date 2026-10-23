@@ -96,7 +96,7 @@ pub struct ProviderPluginCapabilities {
     /// How the plugin expects media input to be delivered.
     pub media_input: MediaInputMode,
 
-    /// Whether the plugin maps the Gateway web search tool (`cf:web_search`)
+    /// Whether the plugin maps the Gateway web search tool (`cf_gears:web_search`)
     /// to a native provider web search tool (`cpt-cf-llm-gateway-fr-web-search-v1`).
     pub web_search: bool,
 }
