@@ -25,6 +25,15 @@ use crate::models::{items, tools};
 /// (`previous_response_id`, `store`): the Gateway is stateless and consumers
 /// send the full context with every request
 /// (`cpt-cf-llm-gateway-fr-chat-completion-v1`).
+///
+/// There is no `stream` field: SDK callers pick the mode with the trait
+/// method ([`create_response`] or [`create_response_stream`]). The REST
+/// `POST /responses` request carries a `stream` flag in its own DTO and calls
+/// the matching method; a `stream` key sent to the SDK model is ignored like
+/// any other unknown field.
+///
+/// [`create_response`]: crate::api::LlmGatewayClientV1::create_response
+/// [`create_response_stream`]: crate::api::LlmGatewayClientV1::create_response_stream
 #[derive(
     Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
@@ -82,10 +91,6 @@ pub struct CreateResponseBody {
     /// Context-truncation strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<TruncationStrategy>,
-    /// Stream the response as server-sent events (`cpt-cf-llm-gateway-fr-streaming-v1`).
-    /// The terminal event always carries usage.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
     /// Gateway extension: drop generic parameters the resolved model does not
     /// support instead of rejecting the request with `unsupported_parameter`.
     /// Every dropped parameter is listed in the response `ignored_parameters`
@@ -812,14 +817,24 @@ mod tests {
             "input": "Hello",
             "seed": 7,
             "reasoning": { "effort": "high", "budget_tokens": 2048 },
-            "stream": true,
             "drop_unsupported_params": true
         });
         let body: CreateResponseBody = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(body.stream, Some(true));
         assert_eq!(body.drop_unsupported_params, Some(true));
         assert_eq!(body.reasoning.as_ref().unwrap().budget_tokens, Some(2048));
         assert_eq!(serde_json::to_value(&body).unwrap(), wire);
+    }
+
+    // The mode is chosen by the trait method; a `stream` key in the body is
+    // not part of the SDK model and is dropped.
+    #[test]
+    fn create_response_body_ignores_stream_key() {
+        let body: CreateResponseBody =
+            serde_json::from_value(serde_json::json!({ "model": "gpt", "stream": true })).unwrap();
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "model": "gpt" })
+        );
     }
 
     #[test]
