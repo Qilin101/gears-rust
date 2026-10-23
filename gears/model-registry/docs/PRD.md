@@ -90,7 +90,7 @@ The Customer tenant defines its own `Shared` provider with the slug `openai`, wh
 | GTS | Global Type System: the platform's registry of globally unique type identifiers and their schemas. |
 | Provider GTS type | A globally unique type identifier naming the LLM Gateway plugin family that evaluates the provider's models. |
 | Provider-specific settings | Settings whose shape is defined by the provider type, including cost. |
-| General settings | The `base_url` and an optional reference to a secret in the credential store. |
+| General settings | An optional `base_url` and an optional reference to a secret in the credential store. When `base_url` is absent, the LLM Gateway provider plugin uses its built-in default URL. |
 | Default parameters | Provider-independent inference defaults, such as temperature or maximum output tokens. The model record also states whether callers may override them and which extra parameters callers may pass. |
 | Capabilities | What a model can do: streaming, tool calling, vision, structured output, reasoning controls, embeddings. |
 | User-facing information | Presentation fields: display name, description, icon, hosted by, context window size, and similar. |
@@ -242,7 +242,7 @@ The system **MUST** let a Tenant Administrator create, read, update, and delete 
 
 - The provider GTS type that evaluates it, taken from its provider.
 - Provider-specific settings, including cost.
-- General settings: `base_url` and an optional credential-store secret reference.
+- General settings: optional `base_url` and optional credential-store secret reference. When `base_url` is absent, the LLM Gateway provider plugin uses its built-in default URL.
 - Default parameters, and which parameters callers may override or add per request.
 - Capabilities.
 - User-facing information: display name, description, icon, hosted by, context window size, and similar.
@@ -285,7 +285,7 @@ The system **MUST** give models the same sharing modes as providers. A model **M
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-effective-catalog`
 
-The system **MUST** build a tenant's effective catalog from the providers and models it owns plus the shared providers and models of its ancestors. Shadowing is applied per provider slug, and the nearest tenant whose provider is visible to the caller wins. Inherited entries **MUST** be read-only for the inheriting tenant. An inheriting tenant sees the full record of an inherited provider and model, including provider-specific settings and cost, general settings with `base_url` and the secret reference, default parameters, capabilities, and user-facing information.
+The system **MUST** build a tenant's effective catalog from the providers and models it owns plus the shared providers and models of its ancestors. Shadowing is applied per provider slug, and the nearest tenant whose provider is visible to the caller wins. Inherited entries **MUST** be read-only for the inheriting tenant. An inheriting tenant sees the full record of an inherited provider and model, including provider-specific settings and cost, general settings (`base_url` and the secret reference, when set), default parameters, capabilities, and user-facing information.
 
 - **Rationale**: A single, predictable rule decides what each tenant sees, so all consumers get the same answer.
 - **Actors**: `cpt-cf-model-registry-actor-llm-gateway`, `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-tenant-resolver`
@@ -365,7 +365,7 @@ The system **MUST** resolve a canonical id for a tenant within 10 ms at the 99th
 - **Threshold**: p99 at or below 10 ms per resolution, measured inside the gear and excluding time spent waiting on the PDP and Tenant Resolver; sustained load of 1,000 resolutions per second with peaks of 5,000 per second platform-wide; catalog of 10,000 models platform-wide across all tenants; tenant hierarchies up to 10 levels deep.
 - **Rationale**: Resolution runs on every LLM request, and LLM Gateway budgets 50 ms of total overhead.
 - **Verification Method**: Automated benchmark at the stated load, catalog size, and hierarchy depth.
-- **Architecture Allocation**: Pending DESIGN (not yet created)
+- **Architecture Allocation**: See [DESIGN](./DESIGN.md) §1.2 NFR Allocation.
 
 #### Availability
 
@@ -376,7 +376,7 @@ The system **MUST** keep the resolution operations available 99.9% of the time p
 - **Threshold**: 99.9% monthly availability of resolution; recovery within 15 minutes after a gear failure.
 - **Rationale**: LLM Gateway targets 99.9% availability and depends on resolution on every request.
 - **Verification Method**: Monitoring of monthly resolution availability and of recovery time after gear failures.
-- **Architecture Allocation**: Pending DESIGN (not yet created)
+- **Architecture Allocation**: See [DESIGN](./DESIGN.md) §1.2 NFR Allocation.
 
 #### Durability
 
@@ -387,7 +387,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 - **Threshold**: Zero loss of acknowledged writes.
 - **Rationale**: The catalog is the source of truth for model access, and losing it would stop all LLM calls that depend on it.
 - **Verification Method**: Restart and backup-restore tests confirming that acknowledged writes survive.
-- **Architecture Allocation**: Pending DESIGN (not yet created)
+- **Architecture Allocation**: See [DESIGN](./DESIGN.md) §1.2 NFR Allocation.
 
 ### 6.2 NFR Exclusions
 
@@ -435,8 +435,8 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-contract-tenant-hierarchy`
 
 - **Direction**: required from client (Tenant Resolver)
-- **Protocol/Format**: Ancestor chain of a tenant, root first
-- **Compatibility**: Hierarchy changes take effect on the next resolution.
+- **Protocol/Format**: Ancestor chain of a tenant, parent first, root last
+- **Compatibility**: Hierarchy changes take effect within a bounded, configurable delay (see [DESIGN](./DESIGN.md)).
 
 ## 8. Use Cases
 
@@ -587,7 +587,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 
 ## 14. Traceability
 
-- **Design**: not yet created.
+- **Design**: [DESIGN.md](./DESIGN.md)
 - **ADRs**: not yet created.
 - **Features**: not yet created.
 - **SDK crate**: `cf-gears-model-registry-sdk` (`gears/model-registry/model-registry-sdk`) exists and predates this PRD.
