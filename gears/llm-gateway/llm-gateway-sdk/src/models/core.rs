@@ -887,16 +887,98 @@ mod tests {
     }
 
     #[test]
-    fn response_resource_provider_details_roundtrip() {
-        let details = ProviderDetails {
-            stop_reason: Some("end_turn".into()),
-            provider_request_id: Some("req_1".into()),
-        };
-        let value = serde_json::to_value(&details).unwrap();
+    fn response_resource_gateway_extensions_roundtrip() {
+        let wire = serde_json::json!({
+            "id": "resp_3",
+            "object": "response",
+            "created_at": 1_700_000_000_i64,
+            "completed_at": 1_700_000_005_i64,
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "model": "claude",
+            "instructions": null,
+            "output": [],
+            "error": null,
+            "tools": [],
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": true,
+            "text": { "format": { "type": "text" } },
+            "top_p": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "top_logprobs": 0,
+            "temperature": 1.0,
+            "reasoning": {},
+            "usage": null,
+            "max_output_tokens": 64,
+            "max_tool_calls": null,
+            "service_tier": "auto",
+            "metadata": null,
+            "safety_identifier": null,
+            "prompt_cache_key": null,
+            "ignored_parameters": ["temperature", "prompt_cache_key"],
+            "provider_details": {
+                "stop_reason": "max_tokens",
+                "provider_request_id": "req_1"
+            }
+        });
+        let resource: ResponseResource = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(
-            value,
-            serde_json::json!({ "stop_reason": "end_turn", "provider_request_id": "req_1" })
+            resource.ignored_parameters,
+            vec!["temperature".to_owned(), "prompt_cache_key".to_owned()]
         );
+        assert_eq!(
+            resource.provider_details,
+            Some(ProviderDetails {
+                stop_reason: Some("max_tokens".into()),
+                provider_request_id: Some("req_1".into()),
+            })
+        );
+        assert_eq!(serde_json::to_value(&resource).unwrap(), wire);
+    }
+
+    // Empty extensions stay off the wire, so plain Open Responses payloads
+    // round-trip unchanged.
+    #[test]
+    fn response_resource_omits_empty_gateway_extensions() {
+        let resource: ResponseResource = serde_json::from_value(serde_json::json!({
+            "id": "resp_4",
+            "object": "response",
+            "created_at": 1_700_000_000_i64,
+            "completed_at": null,
+            "status": "completed",
+            "incomplete_details": null,
+            "model": "gpt",
+            "instructions": null,
+            "output": [],
+            "error": null,
+            "tools": [],
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": true,
+            "text": { "format": { "type": "text" } },
+            "top_p": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "top_logprobs": 0,
+            "temperature": 1.0,
+            "reasoning": {},
+            "usage": null,
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "service_tier": "auto",
+            "metadata": null,
+            "safety_identifier": null,
+            "prompt_cache_key": null
+        }))
+        .unwrap();
+        assert!(resource.ignored_parameters.is_empty());
+        assert!(resource.provider_details.is_none());
+
+        let value = serde_json::to_value(&resource).unwrap();
+        assert!(value.get("ignored_parameters").is_none());
+        assert!(value.get("provider_details").is_none());
     }
 
     #[test]
