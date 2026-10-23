@@ -83,13 +83,23 @@ pub enum TimeoutKind {
 pub enum LlmGatewayError {
     /// `validation_error` — the request is invalid (empty input, `tool_choice`
     /// naming an undefined function, provider tool prefix that does not match
-    /// the model's provider), or structured output does not match the
-    /// requested schema. `param` names the offending field when known.
+    /// the model's provider). Not retryable without changing the request.
+    /// `param` names the offending field when known.
     #[error("validation error: {message}")]
     Validation {
         message: String,
         param: Option<String>,
     },
+
+    /// `output_validation_error` — the model's structured output does not
+    /// match the requested JSON schema; `message` carries the validation
+    /// details (paths and failed keywords, no content values). Unlike
+    /// `validation_error`, the request was valid and the provider was called,
+    /// so retrying the same request may succeed. The PRD names this
+    /// `validation_error`; the distinct code is a recorded deviation
+    /// (DESIGN § 4.9).
+    #[error("output validation error: {message}")]
+    OutputValidation { message: String },
 
     /// `model_not_found` — the model is unknown or not available for the
     /// tenant (the two cases are not distinguished).
@@ -182,6 +192,7 @@ impl LlmGatewayError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Validation { .. } => "validation_error",
+            Self::OutputValidation { .. } => "output_validation_error",
             Self::ModelNotFound { .. } => "model_not_found",
             Self::ModelResolutionUnavailable => "model_resolution_unavailable",
             Self::ProviderNotSupported { .. } => "provider_not_supported",
@@ -250,6 +261,13 @@ impl LlmGatewayError {
         Self::Validation {
             message: message.into(),
             param: Some(param.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn output_validation(message: impl Into<String>) -> Self {
+        Self::OutputValidation {
+            message: message.into(),
         }
     }
 
@@ -389,6 +407,15 @@ mod tests {
         let wire = LlmGatewayError::internal("db password rejected").to_response_error();
         assert_eq!(wire.code, "internal");
         assert_eq!(wire.message, "internal error");
+    }
+
+    #[test]
+    fn output_validation_is_distinct_from_request_validation() {
+        let output = LlmGatewayError::output_validation("/name: required");
+        let request = LlmGatewayError::validation("input is empty");
+        assert_eq!(output.code(), "output_validation_error");
+        assert_eq!(request.code(), "validation_error");
+        assert_eq!(output.to_response_error().code, "output_validation_error");
     }
 
     #[test]
