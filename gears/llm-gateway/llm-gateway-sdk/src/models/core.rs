@@ -203,9 +203,17 @@ pub struct ResponseResource {
     pub safety_identifier: Option<String>,
     /// Prompt cache key.
     pub prompt_cache_key: Option<String>,
-    /// Gateway extension: request parameters that were not applied — dropped
-    /// under `drop_unsupported_params`, or unsupported cache-control hints.
-    /// Dropping is never silent (`cpt-cf-llm-gateway-fr-generation-parameters-v1`).
+    /// Gateway extension: request parameters that were not applied. There are
+    /// three sources:
+    /// - generic parameters the model does not support, dropped under
+    ///   `drop_unsupported_params`;
+    /// - cache-control hints the provider has no equivalent for, always
+    ///   dropped;
+    /// - request values replaced by the model's default because the model's
+    ///   `allow_parameter_override` is false.
+    ///
+    /// Not applying a parameter is never silent
+    /// (`cpt-cf-llm-gateway-fr-generation-parameters-v1`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_parameters: Vec<String>,
     /// Gateway extension: provider originals behind the normalized fields.
