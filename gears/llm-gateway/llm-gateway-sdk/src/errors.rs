@@ -131,9 +131,14 @@ pub enum LlmGatewayError {
     SchemaNotFound { schema_id: String },
 
     /// `media_not_found` — an image or document input cannot be retrieved or
-    /// decoded.
-    #[error("media not found: {message}")]
-    MediaNotFound { message: String },
+    /// decoded. The message is fixed text and never says why: a blocked
+    /// fetch (address, redirect, size, type, or time rule), a failed fetch,
+    /// and a decode failure look the same, so the error cannot be used to
+    /// probe internal networks. `param` points at the failing input part
+    /// (e.g. `input[0].content[1]`) when known; log the cause on the server
+    /// side.
+    #[error("media not found")]
+    MediaNotFound { param: Option<String> },
 
     /// `credentials_unavailable` — the provider API key referenced by the
     /// model cannot be fetched from `CredStore`.
@@ -231,7 +236,9 @@ impl LlmGatewayError {
             ..ResponseError::default()
         };
         match self {
-            Self::Validation { param, .. } => error.param.clone_from(param),
+            Self::Validation { param, .. } | Self::MediaNotFound { param } => {
+                error.param.clone_from(param);
+            }
             Self::UnsupportedParameter { param } => error.param = Some(param.clone()),
             Self::Provider { details, .. } => {
                 error.provider_code.clone_from(&details.provider_code);
@@ -437,6 +444,17 @@ mod tests {
             LlmGatewayError::GatewayUnavailable.to_response_error().code,
             "gateway_unavailable"
         );
+    }
+
+    #[test]
+    fn media_not_found_message_is_fixed() {
+        let wire = LlmGatewayError::MediaNotFound {
+            param: Some("input[0].content[1]".into()),
+        }
+        .to_response_error();
+        assert_eq!(wire.code, "media_not_found");
+        assert_eq!(wire.message, "media not found");
+        assert_eq!(wire.param.as_deref(), Some("input[0].content[1]"));
     }
 
     #[test]
