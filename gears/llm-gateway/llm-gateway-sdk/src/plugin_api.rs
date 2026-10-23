@@ -21,7 +21,6 @@
 //! version.
 
 use async_trait::async_trait;
-use model_registry_sdk::ModelInfoV1;
 use toolkit_security::SecurityContext;
 
 use crate::api::ResponseEventStream;
@@ -29,7 +28,7 @@ use crate::errors::LlmGatewayError;
 use crate::models::core::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, ResponseResource,
 };
-use crate::models::plugin::{ModelSupport, ProviderCallCtx, ProviderPluginCapabilities};
+use crate::models::plugin::{ProviderCallCtx, ProviderPluginCapabilities};
 
 /// Provider-plugin API trait (Version 1).
 ///
@@ -51,14 +50,6 @@ pub trait LlmGatewayProviderPluginClientV1: Send + Sync {
     /// Report integration-level capabilities for this provider integration.
     /// Provider-wide and local — no external call.
     fn capabilities(&self) -> ProviderPluginCapabilities;
-
-    /// Report which generic parameters, `tool_choice` values, reasoning
-    /// options, and embedding sizes the given model supports. Local — no
-    /// external call. Support can differ between models of the same provider
-    /// (e.g. reasoning models that reject `temperature`).
-    ///
-    /// See `cpt-cf-llm-gateway-fr-generation-parameters-v1`.
-    fn model_support(&self, model_info: &ModelInfoV1) -> ModelSupport;
 
     /// Create a response (sync). Translates the request to the provider's
     /// native format, calls the provider via OAGW, and normalizes the result

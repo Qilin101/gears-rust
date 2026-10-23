@@ -40,10 +40,7 @@ pub use models::items::{
     ItemStatus, MessageItem, MessageOutput, OutputItem, ReasoningContentPart, ReasoningItem,
     ReasoningOutput, ReasoningSummaryPart, WebSearchCallOutput, WebSearchResult,
 };
-pub use models::plugin::{
-    EmbeddingDimensions, GenericParameter, MediaInputMode, ModelSupport, ProviderCallCtx,
-    ProviderPluginCapabilities,
-};
+pub use models::plugin::{MediaInputMode, ProviderCallCtx, ProviderPluginCapabilities};
 pub use models::role::Role;
 pub use models::streaming::{
     ContentDeltaEvent, ContentPartEvent, DataEvent, ErrorEvent, FunctionCallArgumentsEvent,

@@ -2,14 +2,12 @@
 //!
 //! A provider plugin (see [`crate::plugin_api::LlmGatewayProviderPluginClientV1`])
 //! isolates one LLM provider behind a common trait. These types carry the
-//! per-call context the core Gateway hands to a plugin, the integration-level
-//! capabilities a plugin reports, and the per-model parameter support a plugin
-//! reports. Per-model feature capabilities (vision, function calling,
-//! streaming, …) are owned by Model Registry (`ModelCapabilities`) and
-//! validated by the core before dispatch — they are deliberately not
-//! duplicated here.
-
-use std::collections::BTreeSet;
+//! per-call context the core Gateway hands to a plugin and the
+//! integration-level capabilities a plugin reports. Per-model feature
+//! capabilities (vision, function calling, streaming, …) are owned by Model
+//! Registry (`ModelCapabilities`), and per-model parameter support is decided
+//! by the Gateway service; both are validated by the core before dispatch and
+//! are deliberately not part of the plugin contract.
 
 use model_registry_sdk::ModelInfoV1;
 use secrecy::SecretString;
@@ -101,151 +99,4 @@ pub struct ProviderPluginCapabilities {
     /// Whether the plugin maps the Gateway web search tool (`cf:web_search`)
     /// to a native provider web search tool (`cpt-cf-llm-gateway-fr-web-search-v1`).
     pub web_search: bool,
-}
-
-/// A generic request parameter whose support can differ between models of the
-/// same provider (`cpt-cf-llm-gateway-fr-generation-parameters-v1`).
-///
-/// `tool_choice` values and reasoning options are listed separately, because
-/// support is per value (`cpt-cf-llm-gateway-fr-tool-calling-v1`,
-/// `cpt-cf-llm-gateway-fr-reasoning-v1`).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum GenericParameter {
-    Temperature,
-    TopP,
-    MaxOutputTokens,
-    MaxToolCalls,
-    Seed,
-    PresencePenalty,
-    FrequencyPenalty,
-    TopLogprobs,
-    Truncation,
-    ServiceTier,
-    TextVerbosity,
-    SafetyIdentifier,
-    /// Cache-control hint; dropped without error when unsupported.
-    PromptCacheKey,
-    ParallelToolCalls,
-    /// `tool_choice = none`.
-    ToolChoiceNone,
-    /// `tool_choice = auto`.
-    ToolChoiceAuto,
-    /// `tool_choice = required`.
-    ToolChoiceRequired,
-    /// `tool_choice` naming a specific function.
-    ToolChoiceFunction,
-    /// `reasoning.effort`.
-    ReasoningEffort,
-    /// `reasoning.summary`.
-    ReasoningSummary,
-    /// `reasoning.budget_tokens`.
-    ReasoningBudgetTokens,
-    /// Embeddings `input_type`.
-    EmbeddingInputType,
-}
-
-/// Output sizes an embedding model can produce for `dimensions`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EmbeddingDimensions {
-    /// The model has one fixed size; `dimensions` must equal it.
-    Fixed { size: u32 },
-    /// Any size in `min..=max`.
-    Range { min: u32, max: u32 },
-    /// One of the listed sizes.
-    OneOf { sizes: Vec<u32> },
-}
-
-impl EmbeddingDimensions {
-    /// Whether the model can produce vectors of exactly `size`.
-    #[must_use]
-    pub fn allows(&self, size: u32) -> bool {
-        match self {
-            Self::Fixed { size: fixed } => *fixed == size,
-            Self::Range { min, max } => (*min..=*max).contains(&size),
-            Self::OneOf { sizes } => sizes.contains(&size),
-        }
-    }
-}
-
-/// What the plugin supports for one resolved model. Reported by
-/// [`crate::plugin_api::LlmGatewayProviderPluginClientV1::model_support`] and
-/// used by the core before dispatch to reject (`unsupported_parameter`,
-/// `capability_not_supported`) or drop parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ModelSupport {
-    /// Generic parameters the model accepts.
-    pub parameters: BTreeSet<GenericParameter>,
-    /// Sizes the model can produce for embeddings `dimensions`; `None` when
-    /// the model is not an embedding model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_dimensions: Option<EmbeddingDimensions>,
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fixed_dimensions_accept_only_the_fixed_size() {
-        let dims = EmbeddingDimensions::Fixed { size: 1536 };
-        assert!(dims.allows(1536));
-        assert!(!dims.allows(256));
-    }
-
-    #[test]
-    fn range_and_list_dimensions() {
-        assert!(EmbeddingDimensions::Range { min: 64, max: 3072 }.allows(256));
-        assert!(!EmbeddingDimensions::Range { min: 64, max: 3072 }.allows(4096));
-        assert!(
-            EmbeddingDimensions::OneOf {
-                sizes: vec![256, 512]
-            }
-            .allows(512)
-        );
-        assert!(
-            !EmbeddingDimensions::OneOf {
-                sizes: vec![256, 512]
-            }
-            .allows(1024)
-        );
-    }
-
-    #[test]
-    fn model_support_roundtrip() {
-        let support = ModelSupport {
-            parameters: [
-                GenericParameter::Temperature,
-                GenericParameter::ToolChoiceAuto,
-            ]
-            .into_iter()
-            .collect(),
-            embedding_dimensions: None,
-        };
-        let value = serde_json::to_value(&support).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({ "parameters": ["temperature", "tool_choice_auto"] })
-        );
-        let back: ModelSupport = serde_json::from_value(value).unwrap();
-        assert_eq!(back, support);
-    }
 }
