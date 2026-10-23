@@ -12,6 +12,7 @@
 use model_registry_sdk::ModelInfoV1;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 /// Per-call context the core Gateway passes to every provider-plugin method.
 ///
@@ -45,6 +46,19 @@ pub struct ProviderCallCtx {
     /// key is redacted in `Debug`, zeroed on drop, and must never be logged or
     /// persisted.
     pub api_key: Option<SecretString>,
+
+    /// Per-request cancellation token. The core cancels it on consumer
+    /// disconnect, on a provider call or stream timeout, and at the shutdown
+    /// drain deadline (`cpt-cf-llm-gateway-seq-stream-cancellation-v1`). The
+    /// plugin checks it between provider reads, for sync and streaming calls
+    /// alike, and on cancellation stops reading and drops the provider
+    /// connection so OAGW closes it.
+    ///
+    /// Clones share the same cancellation state: calling `.cancel()` on any
+    /// clone cancels the whole request. Derive child tokens with
+    /// [`CancellationToken::child_token`] for sub-tasks that need independent
+    /// cancellation.
+    pub cancel: CancellationToken,
 }
 
 impl ProviderCallCtx {

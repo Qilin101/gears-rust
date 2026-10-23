@@ -26,6 +26,7 @@ futures-core = { workspace = true }
 toolkit-security = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-with-str"] }
 secrecy = { workspace = true }
+tokio-util = { workspace = true }
 
 # GTS types for provider-plugin discovery
 gts = { workspace = true }
