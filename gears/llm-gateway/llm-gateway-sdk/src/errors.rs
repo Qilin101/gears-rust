@@ -60,7 +60,8 @@ impl ProviderErrorCategory {
 pub struct ProviderFailure {
     /// The provider's original error code, when available.
     pub provider_code: Option<String>,
-    /// The provider's original error message, when available.
+    /// The provider's original error message, when available. Kept in full
+    /// here; truncated to [`MAX_PROVIDER_TEXT_CHARS`] on the wire.
     pub provider_message: Option<String>,
     /// Request identifier assigned by the provider, when available.
     pub provider_request_id: Option<String>,
@@ -195,6 +196,20 @@ pub enum LlmGatewayError {
     },
 }
 
+/// Maximum length, in characters, of provider-supplied text sent to the
+/// client: `provider_message` and the message of a provider error. Longer
+/// text is cut and ends with `…` (DESIGN § 4.1).
+pub const MAX_PROVIDER_TEXT_CHARS: usize = 1024;
+
+/// Cut `text` to [`MAX_PROVIDER_TEXT_CHARS`] characters, on a character
+/// boundary, marking the cut with `…`.
+fn truncate_provider_text(text: &str) -> String {
+    match text.char_indices().nth(MAX_PROVIDER_TEXT_CHARS) {
+        Some((cut, _)) => format!("{}\u{2026}", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
 impl LlmGatewayError {
     /// Stable wire code of the error.
     #[must_use]
@@ -223,11 +238,16 @@ impl LlmGatewayError {
 
     /// Build the `error` object of a terminal `response.failed` event, with
     /// the same code as the error and the provider originals when present.
-    /// `Internal` errors expose only a generic message.
+    /// `Internal` errors expose only a generic message. For provider errors,
+    /// the message and `provider_message` are truncated to
+    /// [`MAX_PROVIDER_TEXT_CHARS`], because they carry provider text. REST
+    /// Problems must be built from the same object, so the rule holds on both
+    /// paths.
     #[must_use]
     pub fn to_response_error(&self) -> ResponseError {
         let message = match self {
             Self::Internal { .. } => "internal error".to_owned(),
+            Self::Provider { .. } => truncate_provider_text(&self.to_string()),
             other => other.to_string(),
         };
         let mut error = ResponseError {
@@ -242,7 +262,10 @@ impl LlmGatewayError {
             Self::UnsupportedParameter { param } => error.param = Some(param.clone()),
             Self::Provider { details, .. } => {
                 error.provider_code.clone_from(&details.provider_code);
-                error.provider_message.clone_from(&details.provider_message);
+                error.provider_message = details
+                    .provider_message
+                    .as_deref()
+                    .map(truncate_provider_text);
                 error
                     .provider_request_id
                     .clone_from(&details.provider_request_id);
@@ -455,6 +478,37 @@ mod tests {
         assert_eq!(wire.code, "media_not_found");
         assert_eq!(wire.message, "media not found");
         assert_eq!(wire.param.as_deref(), Some("input[0].content[1]"));
+    }
+
+    #[test]
+    fn provider_text_is_truncated_on_the_wire() {
+        let long = "x".repeat(MAX_PROVIDER_TEXT_CHARS + 500);
+        let err = LlmGatewayError::provider(
+            ProviderErrorCategory::InvalidRequest,
+            long.clone(),
+            ProviderFailure {
+                provider_message: Some(long),
+                ..ProviderFailure::default()
+            },
+        );
+        let wire = err.to_response_error();
+        let provider_message = wire.provider_message.unwrap();
+        assert_eq!(
+            provider_message.chars().count(),
+            MAX_PROVIDER_TEXT_CHARS + 1
+        );
+        assert!(provider_message.ends_with('\u{2026}'));
+        assert_eq!(wire.message.chars().count(), MAX_PROVIDER_TEXT_CHARS + 1);
+        assert!(wire.message.starts_with("invalid_request: "));
+    }
+
+    #[test]
+    fn truncation_keeps_short_text_and_char_boundaries() {
+        assert_eq!(truncate_provider_text("short"), "short");
+        let cyrillic = "\u{436}".repeat(MAX_PROVIDER_TEXT_CHARS + 1);
+        let cut = truncate_provider_text(&cyrillic);
+        assert_eq!(cut.chars().count(), MAX_PROVIDER_TEXT_CHARS + 1);
+        assert!(cut.ends_with('\u{2026}'));
     }
 
     #[test]
