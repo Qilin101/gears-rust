@@ -19,7 +19,7 @@ pub mod models;
 pub mod plugin_api;
 
 pub use api::{LlmGatewayClientV1, ResponseEventStream};
-pub use errors::{LlmGatewayError, ProviderErrorCategory, ProviderFailure, TimeoutKind};
+pub use errors::{LlmGatewayError, ProviderErrorCategory, ProviderFailure};
 pub use gts::LlmGatewayProviderPluginSpecV1;
 pub use models::content::{
     Annotation, AudioFormat, ImageDetail, InputAudio, InputContentPart, InputFile, InputImage,

@@ -31,7 +31,9 @@ pub enum ProviderErrorCategory {
     /// Provider rejected the API key.
     AuthenticationFailed,
     /// Provider outage, overload, server error, or network failure; the
-    /// request may succeed on retry.
+    /// request may succeed on retry. Also reported when the provider call or
+    /// stream times out (sync call timeout, stream idle timeout, maximum
+    /// stream duration; DESIGN § 4.5).
     ProviderUnavailable,
     /// Provider error that matches no other category.
     ProviderError,
@@ -64,15 +66,6 @@ pub struct ProviderFailure {
     pub provider_request_id: Option<String>,
     /// Seconds to wait before retrying, when the provider supplied it.
     pub retry_after: Option<u64>,
-}
-
-/// Which timeout expired (`cpt-cf-llm-gateway-fr-timeout-v1`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeoutKind {
-    /// No first response chunk within the time-to-first-token limit.
-    TimeToFirstToken,
-    /// Response not complete within the total generation limit.
-    Total,
 }
 
 /// Errors returned by LLM Gateway SDK operations.
@@ -177,10 +170,6 @@ pub enum LlmGatewayError {
     #[error("gateway unavailable")]
     GatewayUnavailable,
 
-    /// `timeout` — a Gateway-enforced timeout expired.
-    #[error("timeout: {kind:?}")]
-    Timeout { kind: TimeoutKind },
-
     /// A provider error, normalized to a [`ProviderErrorCategory`]; the wire
     /// `code` is the category's code.
     #[error("{}: {message}", category.code())]
@@ -222,7 +211,6 @@ impl LlmGatewayError {
             Self::QuotaCheckUnavailable => "quota_check_unavailable",
             Self::PermissionDenied => "permission_denied",
             Self::GatewayUnavailable => "gateway_unavailable",
-            Self::Timeout { .. } => "timeout",
             Self::Provider { category, .. } => category.code(),
             Self::Internal { .. } => "internal",
         }
