@@ -56,8 +56,10 @@ pub trait LlmGatewayProviderPluginClientV1: Send + Sync {
     /// back into a [`ResponseResource`]: status from the stop reason, usage
     /// with cost in AI credits.
     ///
-    /// A structured output schema the provider cannot express is rejected with
-    /// `unsupported_schema` before the provider is called.
+    /// The plugin adapts a structured output schema to the provider's JSON
+    /// Schema subset. Whether the schema can be expressed at all is checked by
+    /// the Gateway service before quota admission and key retrieval
+    /// (`unsupported_schema`), not through this trait.
     ///
     /// See `cpt-cf-llm-gateway-seq-create-response-sync-v1`.
     async fn create_response(
