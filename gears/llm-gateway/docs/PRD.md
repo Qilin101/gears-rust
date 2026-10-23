@@ -274,7 +274,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - Image and file input as base64 data or external URLs
 - Reasoning configuration and reasoning output, including multi-turn reasoning continuity without server-side state
 - Tool/function calling pass-through (consumer executes tools), including tools defined by GTS reference or inline GTS schema
-- Gateway web search tool (`cf:web_search`), forwarded to providers that support it natively
+- Gateway web search tool (`cf_gears:web_search`), forwarded to providers that support it natively
 - Provider-specific tools, namespaced by provider (e.g. `openai:shell`)
 - Structured output with schema validation
 - Generic generation parameters (max tokens, temperature, top_p, seed, …), generic cache-control parameters, and forwarding of provider-specific parameters
@@ -295,7 +295,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 
 - Conversation state storage — consumers provide full context per request
 - Provider-side conversation state: `previous_response_id`, `store=true`
-- Tool execution — Gateway returns tool calls for consumer to execute. This includes web search: Gateway does not run searches itself; `cf:web_search` is executed by providers that support it
+- Tool execution — Gateway returns tool calls for consumer to execute. This includes web search: Gateway does not run searches itself; `cf_gears:web_search` is executed by providers that support it
 - Gateway-side content caching or response deduplication (provider-side prompt caching controls are in scope)
 
 ## 5. Functional Requirements
@@ -418,7 +418,7 @@ A `tool_choice` that names a function not defined in the request **MUST** be rej
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-web-search-v1`
 
-The system **MUST** support a provider-agnostic web search tool (`cf:web_search`). The provider plugin **MUST** map it to the provider's native web search tool when the provider supports one; otherwise the request is rejected by the capability check. The Gateway does not run searches itself. Web search results and citations **MUST** be returned in a normalized format.
+The system **MUST** support a provider-agnostic web search tool (`cf_gears:web_search`). The provider plugin **MUST** map it to the provider's native web search tool when the provider supports one; otherwise the request is rejected by the capability check. The Gateway does not run searches itself. Web search results and citations **MUST** be returned in a normalized format.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`
 
@@ -434,7 +434,7 @@ The system **MUST** accept provider-specific tools namespaced with the provider 
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-structured-output-v1`
 
-The system **MUST** accept a JSON schema with the request and validate the provider response against it, returning either the validated response or a validation error with details.
+The system **MUST** accept a JSON schema with the request and validate the provider response against it, returning either the validated response or an `output_validation_error` with details. This code is distinct from request validation errors (`validation_error`): the request was valid and the provider was called, so retrying the same request may succeed.
 
 Providers accept different subsets of JSON Schema (e.g. Google requires `$ref` to be inlined and does not accept `additionalProperties`). The provider plugin **MUST** adapt the schema to the provider's subset when this can be done without loosening the final result — for example, inlining `$ref` or removing keywords the provider does not accept. Removed constraints remain enforced, because the system validates the response against the original schema, not the adapted one. If the schema cannot be expressed in the provider's subset (e.g. recursive `$ref` for a provider that requires inlining), the system **MUST** reject the request with an `unsupported_schema` error naming the construct, before calling the provider.
 
@@ -960,7 +960,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 
 **Acceptance criteria**:
 - Tool definitions supported: reference, inline GTS, unified format (OpenAI-like)
-- Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-020)
+- Gateway web search (`cf_gears:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-020)
 - Tool calls returned in unified format
 - `tool_choice` (`none`, `auto`, `required`, specific function) and `parallel_tool_calls` mapped to provider equivalents
 - Response in normalized format
@@ -979,12 +979,12 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 3. Plugin adapts the schema to the JSON Schema subset the provider accepts, maps it to the provider's native structured output, and calls the provider via OAGW
 4. Plugin converts the provider response to the normalized format and computes cost in AI credits
 5. Gateway validates the response against the original schema
-6. Gateway reports usage and returns the validated response with usage (or validation_error if invalid)
+6. Gateway reports usage and returns the validated response with usage (or output_validation_error if invalid)
 
 **Postconditions**: Valid JSON returned, usage reported.
 
 **Alternative Flows**:
-- **Schema validation failure**: Gateway returns validation_error with details if response does not match schema.
+- **Schema validation failure**: Gateway returns output_validation_error with details if response does not match schema; usage is still reported.
 - **Unsupported schema**: Gateway returns unsupported_schema error naming the construct if the schema cannot be expressed in the provider's JSON Schema subset; the provider is not called.
 - **Model not capable**: Gateway returns capability_not_supported error if the model does not support schema-constrained output.
 - **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
@@ -992,7 +992,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Response validated against the original schema, including constraints removed during schema adaptation
 - Schemas adapted to the provider's JSON Schema subset where possible; otherwise rejected with unsupported_schema before calling the provider
-- Returns validation_error with details if schema validation fails
+- Returns output_validation_error with details if schema validation fails, distinct from request validation_error
 - Response in normalized format
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
@@ -1161,9 +1161,9 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Preconditions**: Model available for tenant; the provider supports the requested tool.
 
 **Flow**:
-1. Consumer sends create_response with `cf:web_search` and/or a provider-specific tool (e.g. `openai:shell`)
+1. Consumer sends create_response with `cf_gears:web_search` and/or a provider-specific tool (e.g. `openai:shell`)
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin maps `cf:web_search` to the provider's native web search tool, forwards provider-specific tools as-is, and calls the provider via OAGW
+3. Plugin maps `cf_gears:web_search` to the provider's native web search tool, forwards provider-specific tools as-is, and calls the provider via OAGW
 4. Provider executes the tools and returns the answer
 5. Plugin converts the answer, citations, web search results, and provider tool call outputs to the normalized format and computes cost in AI credits
 6. Gateway reports usage and returns the answer with normalized citations, web search results, and provider tool call outputs

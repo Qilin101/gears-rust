@@ -1385,8 +1385,6 @@ The Gateway is a data processor: consumers own request and response data. Reques
 | Sync `POST /responses` can exceed the ~30 s handler duration guideline | LLM generations routinely run longer; streaming is the recommended path, and the sync route needs a longer route timeout at api-gateway | Platform Architecture (api-gateway owners) |
 | Instance-local in-memory usage buffer | Required for non-blocking at-least-once delivery without persisting usage records; it holds no request-affinity state, so any-instance routing still holds | LLM Gateway team |
 | Open Responses error object appears only inside SSE terminal events; HTTP errors use RFC 9457 Problems with the Open Responses `code` as an extension | Keeps the platform error envelope for HTTP while staying Open Responses compatible in streams | Platform Architecture |
-| The Gateway web search tool is `cf_gears:web_search`; the PRD names it `cf:web_search` (`cpt-cf-llm-gateway-fr-web-search-v1`, UC-020) | One prefix for all Gateway-owned types: the SDK already uses `cf_gears:` for Gateway types, and the tool behavior is unchanged | LLM Gateway team (PRD owner) |
-| Structured output that fails schema validation returns `output_validation_error`; the PRD names it `validation_error` (UC-011) | Output validation has different status and retry semantics from request validation (409 and retryable versus 400 and not retryable), so clients need a distinct code; the SDK already defines `output_validation_error` | LLM Gateway team (PRD owner) |
 
 ### 4.10 Open Questions and Assumptions
 
