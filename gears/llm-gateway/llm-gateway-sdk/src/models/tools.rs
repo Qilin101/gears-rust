@@ -46,13 +46,24 @@ pub enum Tool {
     Other(Extension),
 }
 
-/// Gateway web search tool (`cf_gears:web_search`). It has no options; results and
-/// citations come back as `cf_gears:web_search_call` output items and
-/// `url_citation` annotations.
+/// Gateway web search tool (`cf_gears:web_search`). Results and citations come
+/// back as `cf_gears:web_search_call` output items and `url_citation`
+/// annotations.
+///
+/// The tool defines no generic options. Any other fields (e.g.
+/// `search_context_size`) are kept in [`WebSearchTool::options`] and handed to
+/// the plugin, which maps those its provider supports. Accepting them here
+/// keeps the tool a `WebSearch` value: if they made decoding fail, the tool
+/// would fall through to [`Tool::Other`] and skip the web search capability
+/// check.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
-pub struct WebSearchTool;
+pub struct WebSearchTool {
+    /// Tool options other than `type`, preserved verbatim.
+    #[serde(flatten)]
+    pub options: serde_json::Map<String, serde_json::Value>,
+}
 
 /// Function tool.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -201,7 +212,26 @@ mod tests {
     fn web_search_tool_roundtrips() {
         let wire = serde_json::json!({ "type": "cf_gears:web_search" });
         let tool: Tool = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(tool, Tool::WebSearch(WebSearchTool));
+        assert_eq!(tool, Tool::WebSearch(WebSearchTool::default()));
+        assert_eq!(serde_json::to_value(&tool).unwrap(), wire);
+    }
+
+    // Extra fields must not push the Gateway tool into `Other`, where it would
+    // bypass the web search capability check.
+    #[test]
+    fn web_search_tool_with_options_stays_web_search() {
+        let wire = serde_json::json!({
+            "type": "cf_gears:web_search",
+            "search_context_size": "high"
+        });
+        let tool: Tool = serde_json::from_value(wire.clone()).unwrap();
+        let Tool::WebSearch(web_search) = &tool else {
+            panic!("expected WebSearch, got {tool:?}");
+        };
+        assert_eq!(
+            web_search.options.get("search_context_size"),
+            Some(&serde_json::json!("high"))
+        );
         assert_eq!(serde_json::to_value(&tool).unwrap(), wire);
     }
 
