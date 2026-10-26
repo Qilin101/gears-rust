@@ -232,6 +232,7 @@ pub struct ResponseResource {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct ProviderDetails {
     /// The provider's original stop reason (e.g. `end_turn`, `length`,
     /// `MAX_TOKENS`), from which `status` and `incomplete_details.reason`
@@ -241,6 +242,22 @@ pub struct ProviderDetails {
     /// Request identifier assigned by the provider, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+}
+
+impl ProviderDetails {
+    /// Set the provider's original stop reason.
+    #[must_use]
+    pub fn with_stop_reason(mut self, stop_reason: impl Into<String>) -> Self {
+        self.stop_reason = Some(stop_reason.into());
+        self
+    }
+
+    /// Set the request identifier assigned by the provider.
+    #[must_use]
+    pub fn with_provider_request_id(mut self, provider_request_id: impl Into<String>) -> Self {
+        self.provider_request_id = Some(provider_request_id.into());
+        self
+    }
 }
 
 /// Response lifecycle status.
@@ -280,6 +297,7 @@ impl IncompleteDetails {
 
 /// Embedding request (`cpt-cf-llm-gateway-fr-embeddings-v1`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
 pub struct EmbeddingRequest {
     /// Model identifier from the Model Registry.
     pub model: String,
@@ -307,6 +325,59 @@ pub struct EmbeddingRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     pub extra_fields: Option<HashMap<String, serde_json::Value>>,
+}
+
+impl EmbeddingRequest {
+    /// Request embeddings of `input` from `model`, with every optional
+    /// parameter unset.
+    #[must_use]
+    pub fn new(model: impl Into<String>, input: EmbeddingInput) -> Self {
+        Self {
+            model: model.into(),
+            input,
+            dimensions: None,
+            input_type: None,
+            encoding_format: None,
+            drop_unsupported_params: None,
+            extra_fields: None,
+        }
+    }
+
+    /// Set the output vector size.
+    #[must_use]
+    pub fn with_dimensions(mut self, dimensions: u32) -> Self {
+        self.dimensions = Some(dimensions);
+        self
+    }
+
+    /// Set the kind of text being embedded.
+    #[must_use]
+    pub fn with_input_type(mut self, input_type: EmbeddingInputType) -> Self {
+        self.input_type = Some(input_type);
+        self
+    }
+
+    /// Set the output encoding format.
+    #[must_use]
+    pub fn with_encoding_format(mut self, encoding_format: EncodingFormat) -> Self {
+        self.encoding_format = Some(encoding_format);
+        self
+    }
+
+    /// Drop unsupported generic parameters (except `dimensions`) instead of
+    /// rejecting the request.
+    #[must_use]
+    pub fn with_drop_unsupported_params(mut self, drop: bool) -> Self {
+        self.drop_unsupported_params = Some(drop);
+        self
+    }
+
+    /// Set the provider-specific parameters.
+    #[must_use]
+    pub fn with_extra_fields(mut self, extra_fields: HashMap<String, serde_json::Value>) -> Self {
+        self.extra_fields = Some(extra_fields);
+        self
+    }
 }
 
 /// Kind of text being embedded.
@@ -343,6 +414,7 @@ pub enum EncodingFormat {
 
 /// Embedding response.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
 pub struct EmbeddingResponse {
     /// Gateway request identifier, also the idempotency key of the usage
     /// record (`cpt-cf-llm-gateway-fr-request-traceability-v1`).
@@ -359,6 +431,34 @@ pub struct EmbeddingResponse {
     /// Provider originals (`provider_request_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_details: Option<ProviderDetails>,
+}
+
+impl EmbeddingResponse {
+    /// Embedding results for request `id`, with no ignored parameters and no
+    /// provider details.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        model: impl Into<String>,
+        data: Vec<EmbeddingData>,
+        usage: Usage,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            model: model.into(),
+            data,
+            usage,
+            ignored_parameters: Vec::new(),
+            provider_details: None,
+        }
+    }
+
+    /// Set the provider originals.
+    #[must_use]
+    pub fn with_provider_details(mut self, provider_details: ProviderDetails) -> Self {
+        self.provider_details = Some(provider_details);
+        self
+    }
 }
 
 /// A single embedding result.
@@ -389,6 +489,7 @@ pub enum EmbeddingVector {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct Usage {
     /// Input tokens consumed.
     pub input_tokens: u64,
@@ -421,13 +522,79 @@ pub struct Usage {
     pub estimated: bool,
 }
 
+impl Usage {
+    /// Final usage reported by the provider (`complete = true`,
+    /// `estimated = false`).
+    #[must_use]
+    pub fn reported(input_tokens: u64, output_tokens: u64, cost: Decimal) -> Self {
+        Self::build(input_tokens, output_tokens, cost, true, false)
+    }
+
+    /// Estimate made when the provider gave no final usage (`complete =
+    /// false`, `estimated = true`).
+    #[must_use]
+    pub fn estimated(input_tokens: u64, output_tokens: u64, cost: Decimal) -> Self {
+        Self::build(input_tokens, output_tokens, cost, false, true)
+    }
+
+    /// No final provider usage and no estimate: zero amounts, `complete =
+    /// false`, `estimated = false`.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::build(0, 0, Decimal::ZERO, false, false)
+    }
+
+    /// Set the input and output token breakdowns.
+    #[must_use]
+    pub fn with_details(mut self, input: InputTokensDetails, output: OutputTokensDetails) -> Self {
+        self.input_tokens_details = input;
+        self.output_tokens_details = output;
+        self
+    }
+
+    /// Set the provider's raw usage structure.
+    #[must_use]
+    pub fn with_provider_raw(mut self, raw: serde_json::Value) -> Self {
+        self.provider_raw = Some(raw);
+        self
+    }
+
+    fn build(
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: Decimal,
+        complete: bool,
+        estimated: bool,
+    ) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            input_tokens_details: InputTokensDetails::default(),
+            output_tokens_details: OutputTokensDetails::default(),
+            cost,
+            provider_raw: None,
+            complete,
+            estimated,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
 
 /// Input token usage breakdown.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct InputTokensDetails {
     /// Tokens served from cache.
@@ -436,7 +603,15 @@ pub struct InputTokensDetails {
 
 /// Output token usage breakdown.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 pub struct OutputTokensDetails {
     /// Tokens used for reasoning.
@@ -457,6 +632,7 @@ pub struct OutputTokensDetails {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct ResponseError {
     /// Machine-readable error code.
     pub code: String,
@@ -477,6 +653,22 @@ pub struct ResponseError {
     /// Gateway extension: seconds to wait before retrying (`rate_limited`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<u64>,
+}
+
+impl ResponseError {
+    /// Error object with `code` and `message` and no Gateway extensions.
+    /// Prefer [`LlmGatewayError::to_response_error`], which fills the
+    /// extensions and truncates provider text.
+    ///
+    /// [`LlmGatewayError::to_response_error`]: crate::errors::LlmGatewayError::to_response_error
+    #[must_use]
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            ..Self::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

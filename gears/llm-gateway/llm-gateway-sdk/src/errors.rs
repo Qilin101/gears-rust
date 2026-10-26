@@ -61,6 +61,7 @@ impl ProviderErrorCategory {
 
 /// A normalized provider error with the provider's originals.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ProviderFailure {
     /// The provider's original error code, when available.
     pub provider_code: Option<String>,
@@ -71,6 +72,36 @@ pub struct ProviderFailure {
     pub provider_request_id: Option<String>,
     /// Seconds to wait before retrying, when the provider supplied it.
     pub retry_after: Option<u64>,
+}
+
+impl ProviderFailure {
+    /// Set the provider's original error code.
+    #[must_use]
+    pub fn with_provider_code(mut self, code: impl Into<String>) -> Self {
+        self.provider_code = Some(code.into());
+        self
+    }
+
+    /// Set the provider's original error message.
+    #[must_use]
+    pub fn with_provider_message(mut self, message: impl Into<String>) -> Self {
+        self.provider_message = Some(message.into());
+        self
+    }
+
+    /// Set the request identifier assigned by the provider.
+    #[must_use]
+    pub fn with_provider_request_id(mut self, provider_request_id: impl Into<String>) -> Self {
+        self.provider_request_id = Some(provider_request_id.into());
+        self
+    }
+
+    /// Set the seconds to wait before retrying.
+    #[must_use]
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
+    }
 }
 
 /// Errors returned by LLM Gateway SDK operations.
@@ -84,6 +115,7 @@ pub enum LlmGatewayError {
     /// the model's provider). Not retryable without changing the request.
     /// `param` names the offending field when known.
     #[error("validation error: {message}")]
+    #[non_exhaustive]
     Validation {
         message: String,
         param: Option<String>,
@@ -97,11 +129,13 @@ pub enum LlmGatewayError {
     /// `validation_error`; the distinct code is a recorded deviation
     /// (DESIGN § 4.9).
     #[error("output validation error: {message}")]
+    #[non_exhaustive]
     OutputValidation { message: String },
 
     /// `model_not_found` — the model is unknown or not available for the
     /// tenant (the two cases are not distinguished).
     #[error("model not found: {model}")]
+    #[non_exhaustive]
     ModelNotFound { model: String },
 
     /// `model_resolution_unavailable` — Model Registry is unavailable.
@@ -111,6 +145,7 @@ pub enum LlmGatewayError {
     /// `provider_not_supported` — no provider plugin is registered for the
     /// model's provider type.
     #[error("provider not supported: {provider_type}")]
+    #[non_exhaustive]
     ProviderNotSupported { provider_type: String },
 
     /// `capability_not_supported` — the model or the provider integration
@@ -118,21 +153,25 @@ pub enum LlmGatewayError {
     /// tool calling, web search, a reasoning option, structured output,
     /// embeddings).
     #[error("capability not supported: {capability}")]
+    #[non_exhaustive]
     CapabilityNotSupported { capability: String },
 
     /// `unsupported_parameter` — a generic parameter the model does not
     /// support, and `drop_unsupported_params` is not set (or the parameter is
     /// `dimensions`, which is never dropped).
     #[error("unsupported parameter: {param}")]
+    #[non_exhaustive]
     UnsupportedParameter { param: String },
 
     /// `unsupported_schema` — the structured output schema cannot be expressed
     /// in the provider's JSON Schema subset; `construct` names the construct.
     #[error("unsupported schema construct: {construct}")]
+    #[non_exhaustive]
     UnsupportedSchema { construct: String },
 
     /// `schema_not_found` — a GTS tool schema reference cannot be resolved.
     #[error("schema not found: {schema_id}")]
+    #[non_exhaustive]
     SchemaNotFound { schema_id: String },
 
     /// `media_not_found` — an image or document input cannot be retrieved or
@@ -143,6 +182,7 @@ pub enum LlmGatewayError {
     /// (e.g. `input[0].content[1]`) when known; log the cause on the server
     /// side.
     #[error("media not found")]
+    #[non_exhaustive]
     MediaNotFound { param: Option<String> },
 
     /// `credentials_unavailable` — the provider API key referenced by the
@@ -183,6 +223,7 @@ pub enum LlmGatewayError {
     /// A provider error, normalized to a [`ProviderErrorCategory`]; the wire
     /// `code` is the category's code.
     #[error("{}: {message}", category.code())]
+    #[non_exhaustive]
     Provider {
         category: ProviderErrorCategory,
         message: String,
@@ -193,6 +234,7 @@ pub enum LlmGatewayError {
     /// summary; `source` carries the underlying error when available,
     /// accessible via `std::error::Error::source`.
     #[error("internal error: {detail}")]
+    #[non_exhaustive]
     Internal {
         detail: String,
         #[source]
@@ -307,6 +349,35 @@ impl LlmGatewayError {
     pub fn output_validation(message: impl Into<String>) -> Self {
         Self::OutputValidation {
             message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn provider_not_supported(provider_type: impl Into<String>) -> Self {
+        Self::ProviderNotSupported {
+            provider_type: provider_type.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn schema_not_found(schema_id: impl Into<String>) -> Self {
+        Self::SchemaNotFound {
+            schema_id: schema_id.into(),
+        }
+    }
+
+    /// `media_not_found` without pointing at an input part.
+    #[must_use]
+    pub fn media_not_found() -> Self {
+        Self::MediaNotFound { param: None }
+    }
+
+    /// `media_not_found` for the input part at `param`
+    /// (e.g. `input[0].content[1]`).
+    #[must_use]
+    pub fn media_not_found_param(param: impl Into<String>) -> Self {
+        Self::MediaNotFound {
+            param: Some(param.into()),
         }
     }
 

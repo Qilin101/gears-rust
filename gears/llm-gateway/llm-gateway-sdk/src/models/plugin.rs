@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 /// in-process value and is deliberately not serializable, so the key cannot
 /// leak through serialization.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProviderCallCtx {
     /// The resolved model info the core fetched from Model Registry, carried
     /// unchanged as the GTS-typed [`ModelInfoV1`] envelope (default
@@ -62,6 +63,29 @@ pub struct ProviderCallCtx {
 }
 
 impl ProviderCallCtx {
+    /// Call context for request `request_id` on `model_info`, with no
+    /// provider API key.
+    #[must_use]
+    pub fn new(
+        model_info: ModelInfoV1,
+        request_id: impl Into<String>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            model_info,
+            request_id: request_id.into(),
+            api_key: None,
+            cancel,
+        }
+    }
+
+    /// Set the provider API key fetched from `CredStore`.
+    #[must_use]
+    pub fn with_api_key(mut self, api_key: SecretString) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
     /// Narrow [`Self::model_info`] to a concrete provider view `Q`, validating
     /// its `gts_type` against `Q`'s GTS type id. Delegates to Model Registry's
     /// `ModelInfoV1::try_into_typed`.
@@ -102,6 +126,7 @@ pub enum MediaInputMode {
 /// `ModelInfoV1.capabilities` / `supported_api` and are validated by the core
 /// together with these (`cpt-cf-llm-gateway-fr-model-capability-check-v1`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
 pub struct ProviderPluginCapabilities {
     /// Whether the provider integration can stream responses at all
     /// (independent of any individual model's `streaming` flag).
@@ -113,4 +138,31 @@ pub struct ProviderPluginCapabilities {
     /// Whether the plugin maps the Gateway web search tool (`cf_gears:web_search`)
     /// to a native provider web search tool (`cpt-cf-llm-gateway-fr-web-search-v1`).
     pub web_search: bool,
+}
+
+impl ProviderPluginCapabilities {
+    /// Capabilities with the given media input mode, no streaming transport,
+    /// and no web search.
+    #[must_use]
+    pub fn new(media_input: MediaInputMode) -> Self {
+        Self {
+            streaming_transport: false,
+            media_input,
+            web_search: false,
+        }
+    }
+
+    /// The provider integration can stream responses.
+    #[must_use]
+    pub fn with_streaming_transport(mut self) -> Self {
+        self.streaming_transport = true;
+        self
+    }
+
+    /// The plugin maps `cf_gears:web_search` to a native provider tool.
+    #[must_use]
+    pub fn with_web_search(mut self) -> Self {
+        self.web_search = true;
+        self
+    }
 }

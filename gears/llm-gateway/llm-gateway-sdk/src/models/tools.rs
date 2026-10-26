@@ -59,6 +59,7 @@ pub enum Tool {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct WebSearchTool {
     /// Domains the search is restricted to (e.g. `example.com`, which also
     /// covers its subdomains). `None` means no restriction.
@@ -73,6 +74,22 @@ pub struct WebSearchTool {
     /// verbatim.
     #[serde(flatten)]
     pub options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl WebSearchTool {
+    /// Restrict the search to these domains.
+    #[must_use]
+    pub fn with_allowed_domains(mut self, domains: Vec<String>) -> Self {
+        self.allowed_domains = Some(domains);
+        self
+    }
+
+    /// Add a provider-specific option, forwarded to the plugin verbatim.
+    #[must_use]
+    pub fn with_option(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.options.insert(key.into(), value);
+        self
+    }
 }
 
 /// Function tool.

@@ -211,6 +211,7 @@ pub struct DataOutput {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct WebSearchCallOutput {
     /// Unique item identifier.
     pub id: String,
@@ -224,16 +225,62 @@ pub struct WebSearchCallOutput {
     pub results: Vec<WebSearchResult>,
 }
 
+impl WebSearchCallOutput {
+    /// Web search call item with no reported queries or results.
+    #[must_use]
+    pub fn new(id: impl Into<String>, status: ItemStatus) -> Self {
+        Self {
+            id: id.into(),
+            status,
+            queries: Vec::new(),
+            results: Vec::new(),
+        }
+    }
+
+    /// Set the queries the provider ran.
+    #[must_use]
+    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
+        self.queries = queries;
+        self
+    }
+
+    /// Set the sources the provider found.
+    #[must_use]
+    pub fn with_results(mut self, results: Vec<WebSearchResult>) -> Self {
+        self.results = results;
+        self
+    }
+}
+
 /// One web search result.
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[non_exhaustive]
 pub struct WebSearchResult {
     /// Result URL.
     pub url: String,
     /// Result title, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+impl WebSearchResult {
+    /// Result for `url`, without a title.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            title: None,
+        }
+    }
+
+    /// Set the result title.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
