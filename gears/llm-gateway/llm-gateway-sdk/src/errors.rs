@@ -14,11 +14,15 @@ use crate::models::core::ResponseError;
 /// (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 ///
 /// Provider plugins map every provider error to one of these categories, so
-/// consumers can branch on the category regardless of provider.
+/// consumers can branch on the category regardless of provider. The set can
+/// grow as providers add error kinds, so matches outside this crate need a
+/// wildcard arm; [`ProviderErrorCategory::ProviderError`] stays the bucket for
+/// errors that match no category.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ProviderErrorCategory {
     /// Input exceeds the model context window; trim history and retry.
     ContextLengthExceeded,
