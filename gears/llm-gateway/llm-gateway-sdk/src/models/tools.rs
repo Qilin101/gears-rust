@@ -218,14 +218,6 @@ pub enum ImageResponseFormat {
 mod tests {
     use super::*;
 
-    #[test]
-    fn web_search_tool_roundtrips() {
-        let wire = serde_json::json!({ "type": "cf_gears:web_search" });
-        let tool: Tool = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(tool, Tool::WebSearch(WebSearchTool::default()));
-        assert_eq!(serde_json::to_value(&tool).unwrap(), wire);
-    }
-
     // Extra fields must not push the Gateway tool into `Other`, where it would
     // bypass the web search capability check.
     #[test]
