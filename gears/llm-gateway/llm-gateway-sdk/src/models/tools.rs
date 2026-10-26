@@ -50,17 +50,27 @@ pub enum Tool {
 /// back as `cf_gears:web_search_call` output items and `url_citation`
 /// annotations.
 ///
-/// The tool defines no generic options. Any other fields (e.g.
-/// `search_context_size`) are kept in [`WebSearchTool::options`] and handed to
-/// the plugin, which maps those its provider supports. Accepting them here
-/// keeps the tool a `WebSearch` value: if they made decoding fail, the tool
-/// would fall through to [`Tool::Other`] and skip the web search capability
-/// check.
+/// The generic option is [`WebSearchTool::allowed_domains`]. Any other fields
+/// (e.g. `search_context_size`) are kept in [`WebSearchTool::options`] and
+/// handed to the plugin, which maps those its provider supports. Accepting them
+/// here keeps the tool a `WebSearch` value: if they made decoding fail, the
+/// tool would fall through to [`Tool::Other`] and skip the web search
+/// capability check.
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 pub struct WebSearchTool {
-    /// Tool options other than `type`, preserved verbatim.
+    /// Domains the search is restricted to (e.g. `example.com`, which also
+    /// covers its subdomains). `None` means no restriction.
+    ///
+    /// This narrows what the model can read, so it is never dropped: when the
+    /// provider cannot restrict search by domain, the request is rejected with
+    /// `unsupported_parameter`, even when `drop_unsupported_params` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
+
+    /// Tool options other than `type` and `allowed_domains`, preserved
+    /// verbatim.
     #[serde(flatten)]
     pub options: serde_json::Map<String, serde_json::Value>,
 }
@@ -231,6 +241,29 @@ mod tests {
         assert_eq!(
             web_search.options.get("search_context_size"),
             Some(&serde_json::json!("high"))
+        );
+        assert_eq!(serde_json::to_value(&tool).unwrap(), wire);
+    }
+
+    #[test]
+    fn web_search_tool_allowed_domains_is_typed() {
+        let wire = serde_json::json!({
+            "type": "cf_gears:web_search",
+            "allowed_domains": ["docs.rs", "serde.rs"],
+            "search_context_size": "low"
+        });
+        let tool: Tool = serde_json::from_value(wire.clone()).unwrap();
+        let Tool::WebSearch(web_search) = &tool else {
+            panic!("expected WebSearch, got {tool:?}");
+        };
+        assert_eq!(
+            web_search.allowed_domains.as_deref(),
+            Some(&["docs.rs".to_owned(), "serde.rs".to_owned()][..])
+        );
+        assert!(!web_search.options.contains_key("allowed_domains"));
+        assert_eq!(
+            web_search.options.get("search_context_size"),
+            Some(&serde_json::json!("low"))
         );
         assert_eq!(serde_json::to_value(&tool).unwrap(), wire);
     }
