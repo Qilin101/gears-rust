@@ -41,9 +41,10 @@ pub struct ProviderCallCtx {
 
     /// Provider API key the core fetched from `CredStore` by the model's secret
     /// reference (`cpt-cf-llm-gateway-fr-provider-credentials-v1`). The plugin
-    /// sets it on the outbound provider request, which goes only through OAGW
-    /// to the model's approved HTTPS destination. `None` for models without a
-    /// secret reference (authentication handled by OAGW, local provider). The
+    /// sets it on the outbound provider request, which goes only through OAGW,
+    /// over HTTPS, to the model's upstream alias (`provider_settings.oagw_alias`).
+    /// `None` for models without a secret reference (authentication handled by
+    /// OAGW, local provider). The
     /// key is redacted in `Debug`, zeroed on drop, and must never be logged or
     /// persisted.
     pub api_key: Option<SecretString>,
