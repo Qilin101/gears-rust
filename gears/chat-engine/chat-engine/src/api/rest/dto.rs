@@ -3,7 +3,7 @@
 //! These are the only types that derive `utoipa::ToSchema` — domain models
 //! in `domain/` and SDK models in `chat_engine_sdk::models` stay
 //! transport-agnostic. Each DTO carries the exact field names / optionality
-//! locked by `modules/chat-engine/api/http-protocol.json` and the SDK wire
+//! locked by the generated `gears/chat-engine/docs/openapi.json` and the SDK wire
 //! formats sealed in Phase 5.
 //!
 //! The streaming event DTOs ([`StreamingStartDto`], [`StreamingChunkDto`],
@@ -19,6 +19,8 @@
 use serde_json::Value as JsonValue;
 use toolkit_macros::api_dto;
 use uuid::Uuid;
+
+use crate::domain::error::{ChatEngineError, Result};
 
 use chat_engine_sdk::models::{
     CapabilityValue, LifecycleState, Message as SdkMessage, MessagePart as SdkMessagePart,
@@ -202,10 +204,17 @@ pub struct MessagePartInputDto {
     pub content: JsonValue,
 }
 
-impl From<MessagePartInputDto> for SdkMessagePartInput {
-    fn from(d: MessagePartInputDto) -> Self {
-        let part_type = part_type_from_wire(&d.part_type);
-        Self {
+impl TryFrom<MessagePartInputDto> for SdkMessagePartInput {
+    type Error = ChatEngineError;
+
+    fn try_from(d: MessagePartInputDto) -> Result<Self> {
+        let part_type = part_type_from_wire(&d.part_type).ok_or_else(|| {
+            ChatEngineError::bad_request(format!(
+                "unknown message part type: {}",
+                d.part_type.escape_debug()
+            ))
+        })?;
+        Ok(Self {
             content: normalize_part_content(part_type, d.content),
             part_type,
             // Citations/references are plugin-produced (assistant side); the
@@ -213,7 +222,7 @@ impl From<MessagePartInputDto> for SdkMessagePartInput {
             file_citations: Vec::new(),
             link_citations: Vec::new(),
             references: Vec::new(),
-        }
+        })
     }
 }
 
@@ -244,26 +253,36 @@ fn part_type_to_wire(t: MessagePartType) -> &'static str {
         MessagePartType::Videos => "videos",
         MessagePartType::Links => "links",
         MessagePartType::Statuses => "statuses",
+        MessagePartType::ToolCall => "tool_call",
+        MessagePartType::ToolResult => "tool_result",
     }
 }
 
-/// Parse a wire part-type string, defaulting unknown values to `text` so a
-/// malformed body never panics. Strict validation lives in the service layer.
-fn part_type_from_wire(s: &str) -> MessagePartType {
-    match s {
+/// Parse a wire part-type string. `None` for a value outside the closed
+/// [`MessagePartType`] set — callers reject the request rather than coerce an
+/// unrecognized part into `text`, which would persist a body the client never
+/// sent. Per-type `content` shape validation stays in the service layer.
+fn part_type_from_wire(s: &str) -> Option<MessagePartType> {
+    Some(match s {
+        "text" => MessagePartType::Text,
         "code" => MessagePartType::Code,
         "images" => MessagePartType::Images,
         "videos" => MessagePartType::Videos,
         "links" => MessagePartType::Links,
         "statuses" => MessagePartType::Statuses,
-        _ => MessagePartType::Text,
-    }
+        "tool_call" => MessagePartType::ToolCall,
+        "tool_result" => MessagePartType::ToolResult,
+        _ => return None,
+    })
 }
 
-/// Convenience: convert wire parts to the SDK input shape.
-#[must_use]
-pub fn parts_into_sdk(parts: Vec<MessagePartInputDto>) -> Vec<SdkMessagePartInput> {
-    parts.into_iter().map(SdkMessagePartInput::from).collect()
+/// Convert wire parts to the SDK input shape. Rejects the whole body with a
+/// 400 if any part carries a `type` outside the known set.
+pub fn parts_into_sdk(parts: Vec<MessagePartInputDto>) -> Result<Vec<SdkMessagePartInput>> {
+    parts
+        .into_iter()
+        .map(SdkMessagePartInput::try_from)
+        .collect()
 }
 
 /// Wire-shape projection of [`SdkMessage`].
@@ -350,6 +369,13 @@ pub struct SendMessageRequestDto {
     pub parent_message_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<CapabilityValueDto>>,
+    /// Opaque per-turn client context (device, locale, active error state, …)
+    /// persisted on the user message row and echoed back on reads as the
+    /// message's `metadata`. Engine-reserved keys (`model_used`, `finish_reason`,
+    /// `temperature_used`, `usage`, `summarized_message_ids`) and payloads larger
+    /// than 8 KiB serialized are rejected with `400`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
 }
 
 /// Body for `POST /chat-engine/v1/messages/{id}/recreate`.
@@ -603,7 +629,7 @@ pub struct StreamingErrorDto {
 
 /// Tagged-union of all streaming events. NDJSON serialization writes one
 /// `StreamingEventDto` per line. The discriminator field is `type` per
-/// the OpenAPI spec (`api/http-protocol.json`) — see
+/// the OpenAPI spec (`docs/openapi.json`) — see
 /// `StreamingStartEvent.type`, `StreamingChunkEvent.type`, …
 #[api_dto(request, response)]
 #[serde(tag = "type")]

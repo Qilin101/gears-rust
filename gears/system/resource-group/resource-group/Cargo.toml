@@ -1,7 +1,7 @@
 # Created: 2026-04-16 by Constructor Tech
 [package]
 name = "cf-gears-resource-group"
-version = "0.3.2"
+version = "0.4.5"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -31,10 +31,11 @@ integration = []
 
 [dependencies]
 # SDK - public API, models, and errors
-resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.2.8", path = "../resource-group-sdk", features = ["odata"] }
+resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.3.5", path = "../resource-group-sdk", features = ["odata"] }
 
 # Core dependencies
 anyhow = { workspace = true }
+opentelemetry = { workspace = true, features = ["metrics"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
@@ -63,11 +64,10 @@ sea-orm-migration = { workspace = true }
 thiserror = { workspace = true }
 
 # AuthZ
-authz-resolver-sdk = { workspace = true }
+authz-resolver-sdk = { workspace = true, features = ["rest-client"] }
 
 # GTS type system — types registry for schema resolution
 types-registry-sdk = { workspace = true }
-authz-resolver = { workspace = true }
 types-registry = { workspace = true }
 gts = { workspace = true }
 
@@ -83,6 +83,8 @@ toolkit-macros = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["metrics", "testing"] }
 # "test-support" enables `connect_db_with_metric_callback` and
 # `secure::in_transaction_for_testing`, which the DB-behaviour audit's
 # `QueryRecorder` needs. Test-only: the production dependency above pulls in
@@ -95,6 +97,8 @@ toolkit-db = { workspace = true, features = ["sqlite", "pg", "test-support"] }
 # Cargo.toml), used here as test-only dev-dependencies.
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
+# Database images are pinned centrally; `Postgres::default()` would take its
+# tag from testcontainers-modules (see docs/TESTING.md 4.4).
 test-containers = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }

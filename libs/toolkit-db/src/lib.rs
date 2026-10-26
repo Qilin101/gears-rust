@@ -70,6 +70,13 @@
 )]
 
 // Re-export key types for public API
+// The `Scopable` derive emits `::toolkit_db::…` paths, which do not resolve
+// inside this crate. Aliasing it into the extern prelude for test builds lets
+// the derive's own output be tested next to the code that relies on it, rather
+// than only in downstream crates that happen to use it.
+#[cfg(test)]
+extern crate self as toolkit_db;
+
 pub use advisory_locks::{DbLockError, DbLockGuard, LockConfig};
 
 // Re-export sea_orm_migration for gears that implement DatabaseCapability
@@ -90,6 +97,7 @@ pub mod secure;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+/// Internal provider that hands out database handles.
 mod db_provider;
 
 // Internal gears
@@ -215,7 +223,10 @@ pub enum DbError {
     #[error("SQLite pragma error: {0}")]
     SqlitePragma(String),
 
-    #[error("Environment variable '{name}': {source}")]
+    /// `{name:?}` rather than `'{name}'`: the name comes from configuration
+    /// and is printed in a log line, and `Debug` escapes a newline or a
+    /// control character in it, so the line cannot be split.
+    #[error("Environment variable {name:?}: {source}")]
     EnvVar {
         name: String,
         source: std::env::VarError,
@@ -568,6 +579,19 @@ impl DbHandle {
     pub async fn lock(&self, gear: &str, key: &str) -> Result<DbLockGuard> {
         let guard = self.locks.lock(gear, key).await?;
         Ok(guard)
+    }
+
+    /// Remove a lock marker left by a process that died holding `key`, so the
+    /// key can be acquired again. Only meaningful for the file backend behind
+    /// `SQLite`; a no-op elsewhere. Returns whether a marker was removed.
+    ///
+    /// Start-up only: nothing checks whether the holder is still alive, so a
+    /// call from a request path would break a lock a live process holds.
+    ///
+    /// # Errors
+    /// Returns an error if a marker exists but cannot be removed.
+    pub async fn remove_lock_marker_at_startup(&self, gear: &str, key: &str) -> Result<bool> {
+        Ok(self.locks.remove_marker_at_startup(gear, key).await?)
     }
 
     /// Try to acquire an advisory lock with configurable retry/backoff policy.

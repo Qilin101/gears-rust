@@ -42,7 +42,7 @@
 //! (container lifetime via an owned `Drop`, why skipping is right locally
 //! but wrong in CI).
 //!
-//! Requires the `integration` feature. Run via `make test-rg-pg` or:
+//! Requires the `integration` feature. Run via `make test-integration LANE=rg-pg` or:
 //!
 //! ```sh
 //! cargo nextest run -p cf-gears-resource-group --features integration --test pg_smoke_test
@@ -188,7 +188,7 @@ async fn create_self_referencing_type(
         Uuid::now_v7().as_simple()
     );
     type_svc
-        .create_type(CreateTypeRequest {
+        .create_type_unscoped(CreateTypeRequest {
             code: code.clone(),
             can_be_root: true,
             allowed_parent_types: vec![],
@@ -198,7 +198,7 @@ async fn create_self_referencing_type(
         .await
         .expect("create self-referencing type (initial)");
     type_svc
-        .update_type(
+        .update_type_unscoped(
             &code,
             UpdateTypeRequest {
                 can_be_root: true,
@@ -248,7 +248,7 @@ async fn build_chain(
 async fn pg_move_under_deep_parent_rebuilds_every_depth() {
     let fixture = pg_fixture_or_skip!();
     let db = fixture.db.clone();
-    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let type_svc = common::make_type_service(db.clone());
     let group_svc = common::make_group_service(db.clone());
     let tenant_id = Uuid::now_v7();
     let ctx = common::make_ctx(tenant_id);
@@ -305,7 +305,7 @@ async fn pg_move_under_deep_parent_rebuilds_every_depth() {
 async fn pg_force_delete_leaves_no_orphans() {
     let fixture = pg_fixture_or_skip!();
     let db = fixture.db.clone();
-    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let type_svc = common::make_type_service(db.clone());
     let group_svc = common::make_group_service(db.clone());
     let tenant_id = Uuid::now_v7();
     let ctx = common::make_ctx(tenant_id);
@@ -412,6 +412,15 @@ async fn pg_force_delete_leaves_no_orphans() {
         mem_count, 0,
         "memberships for the deleted group should be gone"
     );
+
+    // With every membership of the subtree gone, nothing on real PostgreSQL
+    // FK-restricts deleting `root_type` any more: `ON DELETE RESTRICT` on
+    // `resource_group_membership.gts_type_id` is what would otherwise answer
+    // with "group(s) or membership(s) of this type exist".
+    type_svc
+        .delete_type_unscoped(&root_type.code)
+        .await
+        .expect("delete_type should succeed once the subtree's memberships are gone");
 }
 
 /// RG-06 on real PostgreSQL: a 4-deep create chain, then the full closure
@@ -421,7 +430,7 @@ async fn pg_force_delete_leaves_no_orphans() {
 async fn pg_create_chain_closure_invariant() {
     let fixture = pg_fixture_or_skip!();
     let db = fixture.db.clone();
-    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let type_svc = common::make_type_service(db.clone());
     let group_svc = common::make_group_service(db.clone());
     let tenant_id = Uuid::now_v7();
     let ctx = common::make_ctx(tenant_id);
@@ -431,4 +440,58 @@ async fn pg_create_chain_closure_invariant() {
 
     let conn = db.conn().expect("conn");
     common::assert_closure_matches_parent_links(&conn).await;
+}
+
+/// PostgreSQL rejects a GTS string bound to SMALLINT; verify resolution and quoted UUIDs.
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_membership_filters_resolve_gts_and_accept_quoted_uuid() {
+    let fixture = pg_fixture_or_skip!();
+    let db = fixture.db.clone();
+    let types = common::make_type_service(db.clone());
+    let groups = common::make_group_service(db.clone());
+    let memberships = common::make_membership_service(db);
+    let tenant = Uuid::now_v7();
+    let ctx = common::make_ctx(tenant);
+    let member_type = common::create_root_type(&types, "pgfiltermember").await;
+    let other_type = common::create_root_type(&types, "pgfilterother").await;
+    let group_type = common::create_root_type(&types, "pgfiltergroup").await;
+    types
+        .update_type_unscoped(
+            &group_type.code,
+            UpdateTypeRequest {
+                can_be_root: true,
+                allowed_parent_types: vec![],
+                allowed_membership_types: vec![member_type.code.clone(), other_type.code.clone()],
+                metadata_schema: None,
+            },
+        )
+        .await
+        .unwrap();
+    let group =
+        common::create_root_group(&groups, &ctx, &group_type.code, "matching", tenant).await;
+    let other_group =
+        common::create_root_group(&groups, &ctx, &group_type.code, "other", tenant).await;
+    for (id, code, resource) in [
+        (group.id, &member_type.code, "expected"),
+        (group.id, &other_type.code, "wrong-type"),
+        (other_group.id, &member_type.code, "wrong-group"),
+    ] {
+        memberships
+            .add_membership(&ctx, id, code, resource)
+            .await
+            .unwrap();
+    }
+    for group_literal in [group.id.to_string(), format!("'{}'", group.id)] {
+        let filter = toolkit_odata::parse_filter_string(&format!(
+            "group_id eq {group_literal} and resource_type eq '{}'",
+            member_type.code
+        ))
+        .unwrap();
+        let query = toolkit_odata::ODataQuery::new().with_filter(filter.into_expr());
+        let page = memberships.list_memberships(&ctx, &query).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].group_id, group.id);
+        assert_eq!(page.items[0].resource_type, member_type.code);
+        assert_eq!(page.items[0].resource_id, "expected");
+    }
 }

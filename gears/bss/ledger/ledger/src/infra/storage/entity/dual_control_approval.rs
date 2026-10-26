@@ -5,9 +5,9 @@
 //! `PENDING → APPROVED | REJECTED | NEEDS_REWORK | CANCELLED | EXPIRED`; `intent`
 //! is the deterministic replay payload executed on `approve`.
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde_json::Value as JsonValue;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -20,6 +20,8 @@ use uuid::Uuid;
     no_type
 )]
 pub struct Model {
+    pub currency: Option<String>,
+    pub currency_scale: Option<i16>,
     #[sea_orm(primary_key, auto_increment = false)]
     pub approval_id: Uuid,
     pub tenant_id: Uuid,
@@ -28,15 +30,15 @@ pub struct Model {
     pub revision: i32,
     pub business_key: String,
     pub intent: JsonValue,
-    pub amount_usd_eq_minor: Option<i64>,
+    pub amount: Option<String>,
     pub threshold_snapshot: JsonValue,
     pub reason_code: String,
     pub prepared_by: Uuid,
-    pub prepared_at: DateTime<Utc>,
+    pub prepared_at: OffsetDateTime,
     pub approved_by: Option<Uuid>,
-    pub decided_at: Option<DateTime<Utc>>,
+    pub decided_at: Option<OffsetDateTime>,
     pub correlation_id: Uuid,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: OffsetDateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

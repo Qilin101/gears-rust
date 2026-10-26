@@ -3,11 +3,12 @@
 //! reuse with a differing payload surfaces as a conflict, not a silent replay.
 
 use bss_ledger_sdk::{AccountClass, MappingStatus, Side, SourceDocType};
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
+use time::OffsetDateTime;
 
 fn entry() -> NewEntry {
     NewEntry {
@@ -20,7 +21,7 @@ fn entry() -> NewEntry {
         source_business_id: "biz-1".to_owned(),
         reverses_entry_id: None,
         reverses_period_id: None,
-        posted_at_utc: Utc::now(),
+        posted_at_utc: OffsetDateTime::now_utc(),
         effective_at: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: Uuid::from_u128(4),
@@ -40,15 +41,12 @@ fn line() -> NewLine {
         account_class: AccountClass::Ar,
         gl_code: None,
         side: Side::Debit,
-        amount_minor: 0,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: money("0", "USD", 2),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: Some(100),
-        functional_currency: Some("USD".to_owned()),
+        functional_money: Some(money("1", "USD", 2)),
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -72,7 +70,7 @@ fn payload_hash_distinguishes_functional_amount() {
     let e = entry();
     let base = line();
     let mut other = base.clone();
-    other.functional_amount_minor = Some(200);
+    other.functional_money = Some(money("2", "USD", 2));
     assert_ne!(
         IdempotencyGate::payload_hash(&e, std::slice::from_ref(&base)),
         IdempotencyGate::payload_hash(&e, std::slice::from_ref(&other)),
@@ -85,7 +83,7 @@ fn payload_hash_distinguishes_functional_amount() {
 fn payload_hash_distinguishes_revenue_stream() {
     let e = entry();
     let mut a = line();
-    a.amount_minor = 100;
+    a.money = money("1", "USD", 2);
     let mut b = a.clone();
     a.revenue_stream = Some("stream-a".to_owned());
     b.revenue_stream = Some("stream-b".to_owned());
@@ -126,5 +124,49 @@ fn payload_hash_distinguishes_ar_status() {
         IdempotencyGate::payload_hash(&e, std::slice::from_ref(&a)),
         IdempotencyGate::payload_hash(&e, std::slice::from_ref(&b)),
         "differing ar_status must change the payload hash"
+    );
+}
+
+fn money(text: &str, code: &str, scale: u8) -> bss_ledger_sdk::PostedMoney {
+    bss_ledger_sdk::PostedMoney::try_new(
+        bss_ledger_sdk::parse_decimal(text).unwrap(),
+        bss_ledger_sdk::CurrencySpec::try_new(code.to_owned(), scale).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn canonical_decimal_metadata_and_null_framing() {
+    let e = entry();
+    let mut a = line();
+    a.money = money("10.000", "USD", 3);
+    let mut b = a.clone();
+    b.money = money("10", "USD", 3);
+    assert_eq!(
+        IdempotencyGate::payload_hash(&e, &[a.clone()]),
+        IdempotencyGate::payload_hash(&e, &[b.clone()])
+    );
+    b.money = money("10", "USD", 2);
+    assert_ne!(
+        IdempotencyGate::payload_hash(&e, &[a.clone()]),
+        IdempotencyGate::payload_hash(&e, &[b.clone()])
+    );
+    b = a.clone();
+    b.money = money("10", "EUR", 3);
+    assert_ne!(
+        IdempotencyGate::payload_hash(&e, &[a.clone()]),
+        IdempotencyGate::payload_hash(&e, &[b.clone()])
+    );
+    b = a.clone();
+    b.functional_money = Some(money("1", "USD", 3));
+    assert_ne!(
+        IdempotencyGate::payload_hash(&e, &[a.clone()]),
+        IdempotencyGate::payload_hash(&e, &[b.clone()])
+    );
+    b = a.clone();
+    b.invoice_id = Some(String::new());
+    assert_ne!(
+        IdempotencyGate::payload_hash(&e, &[a]),
+        IdempotencyGate::payload_hash(&e, &[b])
     );
 }

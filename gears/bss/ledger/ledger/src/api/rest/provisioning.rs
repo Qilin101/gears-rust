@@ -1,8 +1,8 @@
 //! Axum handlers + router for the gear's tenant-scoped REST surface:
 //! `POST /bss-ledger/v1/provisioning` (seed the ledger; target tenant in the
-//! body) and `GET /bss-ledger/v1/accounts?tenant_id=…` (list the chart of
-//! accounts; target tenant from the query, the caller's own by default).
-//! Tenant is carried in body/query (not the path) per the vhp-core REST
+//! body) and `GET /bss-ledger/v1/accounts` (list the chart of accounts; seller
+//! from `$filter=tenant_id eq …`, the caller's own by default).
+//! Tenant is carried in body/query (not the path) per the platform REST
 //! convention (RBAC/RMS) — see the gear's invoice-posting impl design.
 //!
 //! The gear's first REST surface. Translates the provisioning request into the
@@ -17,6 +17,7 @@
 //! so the `OpenAPI` document at `/openapi.json` lists the operation with its
 //! declared request / response schemas.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Query};
@@ -27,13 +28,13 @@ use toolkit::api::operation_builder::OperationBuilderODataExt;
 use toolkit::api::{OpenApiRegistry, operation_builder::OperationBuilder};
 use toolkit_odata::Page;
 use toolkit_security::SecurityContext;
-use uuid::Uuid;
 
 use crate::api::rest::auth_context::require_authenticated;
 use crate::api::rest::canonical_json::CanonicalJson;
 use crate::api::rest::dto::{AccountInfoDto, ProvisioningRequestDto, ProvisioningResultDto};
 use crate::api::rest::error::authz_error_to_canonical;
-use crate::odata::AccountInfoFilterField;
+use crate::api::rest::odata_list::{list_seller_tenant, reject_non_odata_list_params};
+use crate::odata::{AccountInfoFilterField, AccountInfoOrderField};
 
 /// `OpenAPI` tag applied to the provisioning operation.
 const TAG: &str = "BSS Ledger Provisioning";
@@ -57,10 +58,12 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .operation_id("bss_ledger.provision")
         .summary("Provision a seller legal-entity (idempotent, additive)")
         .description(
-            "Seeds the chart of accounts, non-ISO currency scales, the \
-             fiscal-calendar config, and the initial OPEN fiscal period for the \
-             seller legal-entity named by the body's `tenant_id`. Re-calls are \
-             additive: existing rows are a no-op.",
+            "Seeds the chart of accounts, the currency scales of codes with no \
+             ISO 4217 minor-unit scale, the fiscal-calendar config, and the initial OPEN fiscal \
+             period for the seller legal-entity named by the body's `tenant_id`. An \
+             ISO 4217 code always has its ISO scale: a row for it may only repeat \
+             that scale, and another scale refuses the whole request with 400 and \
+             writes nothing. Re-calls are additive: existing rows are a no-op.",
         )
         .tag(TAG)
         .authenticated()
@@ -78,7 +81,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         // Malformed body / bad enum literals / out-of-range scale all surface
         // as canonical `InvalidArgument` = HTTP 400 (the canonical taxonomy has
         // no 422; this projects the architecture's RFC-9457 codes onto the
-        // platform error layer, like every other vhp-core gear).
+        // platform error layer, like every other gear).
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -92,8 +95,8 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
             "Cursor-paginated list of the target tenant's chart-of-accounts \
              entries — each account's persistent id + coordinate — so a caller \
              can resolve the ids it posts to / reads balances for. The target is \
-             the `tenant_id` query param (the caller's own tenant by default). \
-             Supports OData `$filter` over `account_class`, `currency`, \
+             `$filter=tenant_id eq <uuid>` (the caller's own tenant when omitted). \
+             Supports OData `$filter` over `tenant_id`, `account_class`, `currency`, \
              `revenue_stream`, and `lifecycle_state`. Tenant-scoped: the \
              `$filter` ANDs the caller's authorized subtree, so a tenant outside \
              it yields an empty page (no leak, not a 403).",
@@ -101,11 +104,6 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "Target tenant whose accounts to list (defaults to the caller's own tenant)",
-        )
         .query_param_typed(
             "limit",
             false,
@@ -115,6 +113,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_accounts)
         .with_odata_filter::<AccountInfoFilterField>()
+        .with_odata_orderby::<AccountInfoOrderField>()
         .json_response_with_schema::<Page<AccountInfoDto>>(
             openapi,
             StatusCode::OK,
@@ -164,27 +163,22 @@ async fn provision(
     Ok(Json(outcome.into()))
 }
 
-/// `GET …/accounts` non-OData query: the target tenant (the caller's own when
-/// omitted). The `OData` `$filter` / `$orderby` / `limit` / `cursor` are parsed
-/// separately by the `OData` extractor from the same query string; `tenant_id`
-/// stays a plain param alongside them (per the RBAC list convention).
-#[derive(Debug, serde::Deserialize)]
-struct AccountsQuery {
-    tenant_id: Option<Uuid>,
-}
-
+/// `GET …/accounts`: seller from `$filter=tenant_id eq`, else the caller.
+/// Named `?tenant_id=` is 400 (AM list contract).
+#[allow(clippy::implicit_hasher)]
 async fn list_accounts(
     Extension(state): Extension<Arc<ApiState>>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<AccountsQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<AccountInfoDto>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    // Target tenant from the query, the caller's own tenant by default. The
+    reject_non_odata_list_params(&extras)?;
+    // Target tenant from `$filter`, the caller's own tenant by default. The
     // in-process client's PDP scope is the SQL-level BOLA filter (a tenant
     // outside the caller's subtree yields an empty page), so there is no
     // separate target-anchored gate here. The `$filter` ANDs that scope.
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     let page = state.client.list_accounts(&ctx, tenant_id, &odata).await?;
     Ok(Json(Page {
         items: page.items.into_iter().map(AccountInfoDto::from).collect(),

@@ -19,6 +19,7 @@ test-support = ["dep:opentelemetry_sdk"]
 
 [dependencies]
 bss-ledger-sdk = { workspace = true }
+bss-money = { workspace = true, features = ["exact"] }
 # Shared BSS coordination primitive: the single-active recognition-run lease
 # (`coord_leases` table + `LeaseManager`/`LeaseGuard`); its migration is added to
 # this gear's `Migrator` below.
@@ -26,7 +27,14 @@ coord = { workspace = true }
 
 async-trait = { workspace = true }
 anyhow = { workspace = true }
+bigdecimal.workspace = true
+rust_decimal.workspace = true
+tokio-retry = { workspace = true } # full-jitter delay between transaction retries
 chrono = { workspace = true, features = ["serde"] }
+# Instants are `time::OffsetDateTime` end-to-end (entity, domain, REST), matching
+# AM and pricing. `serde-well-known` is the RFC 3339 wire form. `chrono` stays
+# for calendar `NaiveDate` (due dates, posting `effective_at`).
+time = { workspace = true, features = ["serde-well-known"] }
 # `FutureExt::catch_unwind`: flip a recognition-run row FAILED on a panic (not only
 # on `Err`), so a panicked pass leaves no stuck `RUNNING` row a retry would replay.
 futures = { workspace = true }
@@ -88,6 +96,13 @@ authz-resolver = { workspace = true }
 # (only a tenant whose type owns a billing ledger may be provisioned, §4.12).
 account-management-sdk = { workspace = true }
 account-management = { workspace = true }
+# Platform tenant registry (`get_tenants`, batched + status-filtered) — the
+# lifecycle gate on the reconciliation tick's ledger-derived tenant enumeration
+# (`infra::tenant_lifecycle`). Ledger data never shrinks, so without the
+# registry the tick reconciles every tenant that ever posted an entry, forever.
+# The batch read is the one the registry offers; AM's own client is per-tenant.
+tenant-resolver-sdk = { workspace = true }
+tenant-resolver = { workspace = true }
 # `AuthzPermissionV1` + `gts_instance!` for the permission catalog.
 toolkit-gts = { workspace = true }
 # `gts_instance!`'s expansion references the `gts` crate directly (same as rbac).
@@ -98,7 +113,7 @@ toolkit-canonical-errors = { workspace = true }
 
 # REST surface (the gear's first): axum router/extractors + utoipa schemas.
 axum = { workspace = true }
-utoipa = { workspace = true }
+utoipa = { workspace = true, features = ["time"] }
 # Holds the per-process REST `ApiState` populated in `init()`.
 arc-swap = { workspace = true }
 

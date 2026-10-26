@@ -17,14 +17,17 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use toolkit_db::secure::AccessScope;
+use crate::infra::posting::retry::AttemptError;
+use crate::infra::storage::repo::fx_repo::FxRateRow;
+use rust_decimal::Decimal;
+use toolkit_db::secure::{AccessScope, DBRunner};
 use uuid::Uuid;
 
 use crate::config::FxConfig;
 use crate::domain::error::DomainError;
 use crate::domain::ports::metrics::LedgerMetricsPort;
 use crate::infra::storage::repo::FxRepo;
+use time::OffsetDateTime;
 
 /// G10 currencies — the major, deeply-liquid pairs held to the tighter
 /// `stale_g10_hours` freshness window (design F3). A pair is "G10" if EITHER side
@@ -42,9 +45,9 @@ const G10: &[&str] = &[
 /// `triangulated_via` is always `None` in v1 (direct pairs only).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedRate {
-    pub rate_micro: i64,
+    pub rate: Decimal,
     pub provider: String,
-    pub as_of: DateTime<Utc>,
+    pub as_of: OffsetDateTime,
     pub stale: bool,
     pub fallback_order: i32,
     pub triangulated_via: Option<String>,
@@ -68,11 +71,11 @@ fn order_index(provider: &str, provider_order: &[String]) -> usize {
 /// i.e. clock skew) is never stale (`age <= window` holds). Pure — unit-tested
 /// without a DB.
 #[must_use]
-fn is_stale(base: &str, quote: &str, age: chrono::Duration, cfg: &FxConfig) -> bool {
+fn is_stale(base: &str, quote: &str, age: time::Duration, cfg: &FxConfig) -> bool {
     let window = if is_g10_pair(base, quote) {
-        chrono::Duration::hours(i64::try_from(cfg.stale_g10_hours).unwrap_or(i64::MAX))
+        time::Duration::hours(i64::try_from(cfg.stale_g10_hours).unwrap_or(i64::MAX))
     } else {
-        chrono::Duration::days(i64::try_from(cfg.stale_default_max_days).unwrap_or(i64::MAX))
+        time::Duration::days(i64::try_from(cfg.stale_default_max_days).unwrap_or(i64::MAX))
     };
     age > window
 }
@@ -145,15 +148,45 @@ impl RateSource {
         tenant: Uuid,
         base: &str,
         quote: &str,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<ResolvedRate, DomainError> {
         // Direct pairs only — see the §4.6 triangulation deferral above.
-        let mut candidates = self
+        let candidates = self
             .repo
             .latest_rates(tenant, base, quote)
             .await
-            .map_err(|e| DomainError::Internal(format!("fx latest_rates: {e}")))?;
+            .map_err(crate::infra::posting::error_transport::repo_to_domain)?;
 
+        self.select(candidates, tenant, base, quote, now)
+    }
+
+    /// Resolve using the caller's transaction, preserving typed retryable conflicts.
+    /// No standalone connection or nested retry is opened here.
+    pub(crate) async fn resolve_in<R: DBRunner>(
+        &self,
+        runner: &R,
+        scope: &AccessScope,
+        tenant: Uuid,
+        base: &str,
+        quote: &str,
+        now: OffsetDateTime,
+    ) -> Result<ResolvedRate, AttemptError> {
+        let candidates = self
+            .repo
+            .latest_rates_in(runner, scope, tenant, base, quote)
+            .await?;
+        Ok(self.select(candidates, tenant, base, quote, now)?)
+    }
+
+    /// Apply the established priority, tie and freshness policy to decoded quotes.
+    fn select(
+        &self,
+        mut candidates: Vec<FxRateRow>,
+        tenant: Uuid,
+        base: &str,
+        quote: &str,
+        now: OffsetDateTime,
+    ) -> Result<ResolvedRate, DomainError> {
         if candidates.is_empty() {
             return Err(DomainError::FxRateUnavailable(format!(
                 "no FX rate in the local store for {base}->{quote} (tenant {tenant})"
@@ -174,14 +207,6 @@ impl RateSource {
         // First non-stale candidate wins; its precedence rank is the result's
         // `fallback_order` (0 = primary).
         for row in &candidates {
-            // Defence in depth: a rate `<= 0` is never a valid quote. The REST
-            // ingest DTO rejects it, but the provider-sync upsert and the raw
-            // store have no such gate, so a corrupt/zero feed row could otherwise
-            // be picked here and flip the sign of (or zero out) every downstream
-            // translation. Skip it like a stale row so a valid fallback can win.
-            if row.rate_micro <= 0 {
-                continue;
-            }
             let age = now - row.as_of;
             if !is_stale(base, quote, age, &self.cfg) {
                 let rank = order_index(&row.provider, &self.cfg.provider_order);
@@ -195,7 +220,7 @@ impl RateSource {
                     metrics.fx_provider_fallback(&row.provider);
                 }
                 return Ok(ResolvedRate {
-                    rate_micro: row.rate_micro,
+                    rate: row.rate,
                     provider: row.provider.clone(),
                     as_of: row.as_of,
                     stale: false,
@@ -206,7 +231,7 @@ impl RateSource {
         }
 
         // Candidates exist but all are stale. v1 forbids the stale fallback.
-        // TODO(VHP-1853): per-tenant stale-allowed policy → on the configured
+        // TODO: per-tenant stale-allowed policy → on the configured
         // tenants, return the freshest stale candidate as
         // ResolvedRate { stale: true, .. } instead of erroring here.
         Err(DomainError::FxRateStaleNotAllowed(format!(

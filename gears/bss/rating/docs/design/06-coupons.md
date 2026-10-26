@@ -1,3 +1,6 @@
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 <!-- CONFLUENCE_TITLE: [BSS]: Rating — Coupons (Design) -->
 <!-- Related: ../PRD.md, ../DESIGN.md, ../SEAMS.md | Upstream: Promotions (frozen coupon snapshots), Finance (fxTableVersion for the billing-currency pass) | Downstream: Rating, Billing/Tax (discount lineage) | Owners: BSS Rating team -->
 
@@ -78,7 +81,7 @@ is the S1 coupon segment of `pricingSnapshotRef` (§4.5).
 
 | ADR ID | Decision Summary |
 |--------|------------------|
-| `cpt-cf-bss-rating-adr-scope-key-adoption` | Not load-bearing at step 7 itself — coupons discount the already-resolved line; listed because the rows being discounted resolve on the adopted 8-axis key upstream (slice 02) and the coupon segment joins that same composed ref. |
+| `cpt-cf-bss-rating-adr-scope-key-adoption` | Not load-bearing at step 7 itself — coupons discount the already-resolved line; listed because the rows being discounted resolve on the adopted ten-axis key upstream (slice 02) and the coupon segment joins that same composed ref. |
 
 No slice-local ADR: coupon semantics are PRD-normative ([`../PRD.md`](../PRD.md) §6.8, §17.2);
 the segment ownership follows **T-D-03** and replay follows **T-D-04**
@@ -246,7 +249,7 @@ the §15 clawback open belongs to.
 
 ### 3.7 Database Schemas and Tables
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-rating-storage-none-cpn`
+- [ ] `p2` - **ID**: `cpt-cf-bss-rating-datastore-none-cpn`
 
 **None owned.** Coupon entities, campaigns, and redemption state live in Promotions; the applied
 result persists only inside the rated outcome (segment + lineage) owned by Rating; there is no

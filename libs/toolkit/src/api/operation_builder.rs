@@ -135,8 +135,21 @@ impl<S> HandlerSlot<S> for Present {
 
 pub use state::{AuthNotSet, AuthSet, LicenseNotSet, LicenseSet, Missing, Present};
 
-/// Parameter specification for API operations
+/// Parameter specification built with location constructors and fluent setters.
+/// `#[non_exhaustive]` allows new schema keywords without changing call sites.
+///
+/// ```
+/// # use toolkit::api::operation_builder::{ParamLocation, ParamSpec};
+/// let version = ParamSpec::query("expected_resource_version")
+///     .required(true)
+///     .param_type("integer")
+///     .format("int64")
+///     .minimum(1.0);
+/// assert_eq!(version.location, ParamLocation::Query);
+/// assert_eq!(version.format.as_deref(), Some("int64"));
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ParamSpec {
     pub name: String,
     pub location: ParamLocation,
@@ -148,25 +161,114 @@ pub struct ParamSpec {
     /// `style: form, explode: true` — i.e. `?tag=a&tag=b`, which is how the
     /// generated REST client encodes a `Vec<T>` query field.
     pub array: bool,
+    /// Optional JSON Schema format token, kept independent of `utoipa` types.
+    pub format: Option<String>,
+    /// Optional JSON Schema `minimum`.
+    pub minimum: Option<f64>,
+    /// The only values this parameter accepts, rendered as the schema's
+    /// `enum`. Empty means any value of `param_type` will do.
+    pub enum_values: Vec<String>,
 }
 
 impl ParamSpec {
-    /// A single-valued parameter of `param_type`.
-    fn scalar(
-        name: String,
-        location: ParamLocation,
-        required: bool,
-        description: Option<String>,
-        param_type: String,
-    ) -> Self {
+    /// A required path parameter — `string` unless [`Self::param_type`] says
+    /// otherwise.
+    #[must_use]
+    pub fn path(name: impl Into<String>) -> Self {
+        Self::new(name, ParamLocation::Path, true)
+    }
+
+    /// An optional query parameter.
+    #[must_use]
+    pub fn query(name: impl Into<String>) -> Self {
+        Self::new(name, ParamLocation::Query, false)
+    }
+
+    /// An optional header parameter.
+    #[must_use]
+    pub fn header(name: impl Into<String>) -> Self {
+        Self::new(name, ParamLocation::Header, false)
+    }
+
+    /// An optional cookie parameter.
+    #[must_use]
+    pub fn cookie(name: impl Into<String>) -> Self {
+        Self::new(name, ParamLocation::Cookie, false)
+    }
+
+    fn new(name: impl Into<String>, location: ParamLocation, required: bool) -> Self {
         Self {
-            name,
+            name: name.into(),
             location,
             required,
-            description,
-            param_type,
+            description: None,
+            param_type: "string".to_owned(),
             array: false,
+            format: None,
+            minimum: None,
+            enum_values: Vec::new(),
         }
+    }
+
+    /// Whether the caller must send this parameter; path parameters are always required.
+    #[must_use]
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// The closed set of values this parameter accepts.
+    ///
+    /// They reach the document as the schema's `enum`, so a client generated
+    /// from the spec gets the set rather than a bare string, and a caller
+    /// reading the document can see what the endpoint takes without trying a
+    /// value to find out.
+    #[must_use]
+    pub fn enum_values<V, I>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<str>,
+    {
+        self.enum_values = values
+            .into_iter()
+            .map(|value| value.as_ref().to_owned())
+            .collect();
+        self
+    }
+
+    /// The description a generated client's documentation carries.
+    #[must_use]
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// JSON Schema type, or item type for arrays.
+    #[must_use]
+    pub fn param_type(mut self, param_type: impl Into<String>) -> Self {
+        self.param_type = param_type.into();
+        self
+    }
+
+    /// Whether the parameter repeats — see [`Self::array`](#structfield.array).
+    #[must_use]
+    pub fn array(mut self, array: bool) -> Self {
+        self.array = array;
+        self
+    }
+
+    /// The JSON Schema `format` token, e.g. `int64`.
+    #[must_use]
+    pub fn format(mut self, format: impl Into<String>) -> Self {
+        self.format = Some(format.into());
+        self
+    }
+
+    /// The JSON Schema `minimum`.
+    #[must_use]
+    pub fn minimum(mut self, minimum: f64) -> Self {
+        self.minimum = Some(minimum);
+        self
     }
 }
 
@@ -237,6 +339,7 @@ impl ResponseSchema {
 }
 
 /// Response specification for API operations
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct ResponseSpec {
     pub status: u16,
@@ -244,9 +347,52 @@ pub struct ResponseSpec {
     pub description: String,
     /// Schema of the response body (if any).
     pub schema: Option<ResponseSchema>,
+    /// Headers that may be returned with this response.
+    pub headers: Vec<ResponseHeaderSpec>,
 }
 
 impl ResponseSpec {
+    /// Create a response specification without declared headers.
+    #[must_use]
+    pub fn new(
+        status: u16,
+        content_type: &'static str,
+        description: impl Into<String>,
+        schema: Option<ResponseSchema>,
+    ) -> Self {
+        Self {
+            status,
+            content_type,
+            description: description.into(),
+            schema,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Add headers to this response specification.
+    ///
+    /// # Panics
+    /// Panics when the response already has, or the supplied headers contain,
+    /// a header with the same case-insensitive name.
+    #[must_use]
+    pub fn with_headers(mut self, headers: impl IntoIterator<Item = ResponseHeaderSpec>) -> Self {
+        let headers: Vec<_> = headers.into_iter().collect();
+        for (index, header) in headers.iter().enumerate() {
+            assert!(
+                !self
+                    .headers
+                    .iter()
+                    .chain(headers[..index].iter())
+                    .any(|existing| existing.name.eq_ignore_ascii_case(&header.name)),
+                "response {} already declares header '{}'",
+                self.status,
+                header.name
+            );
+        }
+        self.headers.extend(headers);
+        self
+    }
+
     /// Name of the component schema this response references, if any.
     ///
     /// For an array response this is the **item** component, not the array.
@@ -256,11 +402,61 @@ impl ResponseSpec {
     }
 }
 
+/// JSON Schema scalar type of a response header.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseHeaderType {
+    String,
+    Integer,
+    Boolean,
+}
+
+/// Header declared on one API response.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResponseHeaderSpec {
+    pub name: String,
+    pub description: Option<String>,
+    pub header_type: ResponseHeaderType,
+}
+
+impl ResponseHeaderSpec {
+    /// Create a response header with a description.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        header_type: ResponseHeaderType,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: Some(description.into()),
+            header_type,
+        }
+    }
+
+    /// Create a response header without a description.
+    #[must_use]
+    pub fn without_description(name: impl Into<String>, header_type: ResponseHeaderType) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            header_type,
+        }
+    }
+}
+
 /// License requirement specification for an operation
 #[derive(Clone, Debug)]
 pub struct LicenseReqSpec {
     pub license_names: Vec<String>,
 }
+
+/// Name of the platform `OpenAPI` apiKey scheme.
+pub use super::openapi_registry::INTERNAL_TOKEN_SECURITY_SCHEME;
+
+/// Per-route credential requirement, shared with listeners and the gateway.
+pub use toolkit_security::RouteAuth;
 
 /// Simplified operation specification for the type-safe builder
 #[derive(Clone, Debug)]
@@ -276,20 +472,20 @@ pub struct OperationSpec {
     pub responses: Vec<ResponseSpec>,
     /// Internal handler id; can be used by registry/generator to map a handler identity
     pub handler_id: String,
-    /// Auth axis: whether this operation requires a validated tenant JWT.
-    /// `true` = authenticated (bearer required); `false` = anonymous (a missing
-    /// bearer is allowed — a present bearer is still always re-validated).
-    /// Independent of [`exposed`](Self::exposed); maps 1:1 to the
-    /// `AnonymousRoute` marker in the `OoP` per-gear middleware (`!authenticated`).
-    pub authenticated: bool,
+    /// Auth axis: which credential this operation requires. Set by the builder's
+    /// `.authenticated()`, `.anonymous()` or `.platform_authenticated()`. Independent of
+    /// [`exposed`](Self::exposed).
+    pub auth: RouteAuth,
     /// Visibility axis: whether this route is registered in the gateway for
     /// external access (`true`) or is internal-only, reachable only via
     /// inter-gear communication (`false`). Defaults to `false` (internal).
-    /// Independent of [`authenticated`](Self::authenticated) — an exposed route
-    /// may still require a JWT.
+    /// Independent of [`auth`](Self::auth) — an exposed route may still require a JWT.
     pub exposed: bool,
-    /// Optional rate & concurrency limits for this operation
-    pub rate_limit: Option<RateLimitSpec>,
+    /// Optional zone-based throttling configuration for this operation.
+    /// Binds the operation to gateway throttling zones and carries the
+    /// `require_security_context` / `dry_run` flags. Zone keying is decided by
+    /// the zone config, not here.
+    pub throttling: Option<ThrottlingSpec>,
     /// Optional whitelist of allowed request Content-Type values (without parameters).
     /// Example: Some(vec!["application/json", "multipart/form-data", "application/pdf"])
     /// When set, gateway middleware will enforce these types and return HTTP 415 for
@@ -299,6 +495,28 @@ pub struct OperationSpec {
     /// `OpenAPI` vendor extensions (x-*)
     pub vendor_extensions: VendorExtensions,
     pub license_requirement: Option<LicenseReqSpec>,
+}
+
+impl OperationSpec {
+    /// Replace a response with the same status and content type while retaining
+    /// headers that were already declared for that response. The declared
+    /// response becomes the most recent response so subsequent headers attach
+    /// to it.
+    ///
+    /// Different content types for the same status are kept as separate specs;
+    /// the `OpenAPI` registry combines them into one response object.
+    fn upsert_response(&mut self, mut response: ResponseSpec) {
+        let Some(index) = self.responses.iter().position(|existing| {
+            existing.status == response.status && existing.content_type == response.content_type
+        }) else {
+            self.responses.push(response);
+            return;
+        };
+
+        let mut existing = self.responses.remove(index);
+        response.headers.append(&mut existing.headers);
+        self.responses.push(response);
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -315,15 +533,39 @@ pub struct ODataPagination<T> {
     pub allowed_fields: T,
 }
 
-/// Per-operation rate & concurrency limit specification
+/// Per-operation throttling specification.
+///
+/// References throttling zones (defined in the API gateway configuration) by
+/// name. Limits themselves live in config (zones are the primary source of
+/// truth); this struct only binds an operation to zones and provides the
+/// code-side behavior that config cannot express.
 #[derive(Clone, Debug, Default)]
-pub struct RateLimitSpec {
-    /// Target steady-state requests per second
-    pub rps: u32,
-    /// Maximum burst size (token bucket capacity)
-    pub burst: u32,
-    /// Maximum number of in-flight requests for this route
-    pub in_flight: u32,
+pub struct ThrottlingSpec {
+    /// Name of the rate-limit zone this operation participates in, or `None`
+    /// when the operation is not rate-limited.
+    pub rate_limit_zone: Option<String>,
+    /// Name of the in-flight-limit zone this operation participates in, or
+    /// `None` when the operation has no in-flight limit.
+    pub in_flight_limit_zone: Option<String>,
+    /// Whether this operation's throttling must run after authentication
+    /// (so the identity validated by the operation's auth plane is available).
+    ///
+    /// - `false` (default): the operation is throttled *before* auth, using
+    ///   IP-keyed zones only.
+    /// - `true`: the operation is throttled *after* auth, allowing
+    ///   identity-keyed zones: keyed by the tenant subject id on an
+    ///   `.authenticated()` operation, or by the calling workload on a
+    ///   `.platform_authenticated()` one.
+    pub require_security_context: bool,
+    /// Observe-but-don't-enforce mode.
+    ///
+    /// - `false` (default): limits are enforced normally (over-limit requests
+    ///   are rejected).
+    /// - `true`: requests are never rejected by this operation's rate-limit or
+    ///   in-flight limits. Instead, whenever a limit *would* have triggered, the
+    ///   gateway emits a `warn` log (with the offending key) and serves the
+    ///   request. Useful for tuning zones before enabling enforcement.
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -363,7 +605,7 @@ where
         T: toolkit_odata::filter::FilterField,
     {
         use std::fmt::Write as _;
-        use toolkit_odata::filter::FieldKind;
+        use toolkit_odata::filter::FilterOp;
 
         let mut filter = self
             .spec
@@ -376,45 +618,40 @@ where
             let name = field.name().to_owned();
             let kind = field.kind();
 
-            let ops: Vec<String> = match kind {
-                FieldKind::String => vec!["eq", "ne", "contains", "startswith", "endswith", "in"],
-                FieldKind::Uuid => vec!["eq", "ne", "in"],
-                FieldKind::Bool => vec!["eq", "ne"],
-                FieldKind::I64
-                | FieldKind::F64
-                | FieldKind::Decimal
-                | FieldKind::DateTimeUtc
-                | FieldKind::Date
-                | FieldKind::Time => {
-                    vec!["eq", "ne", "gt", "ge", "lt", "le", "in"]
-                }
-            }
+            // Published straight from the parser's own table, so the contract
+            // cannot promise an operator the parser refuses, or hide one it
+            // accepts.
+            let ops: Vec<String> = [
+                FilterOp::Eq,
+                FilterOp::Ne,
+                FilterOp::Gt,
+                FilterOp::Ge,
+                FilterOp::Lt,
+                FilterOp::Le,
+                FilterOp::Contains,
+                FilterOp::StartsWith,
+                FilterOp::EndsWith,
+                FilterOp::In,
+            ]
             .into_iter()
-            .map(String::from)
+            .filter(|op| kind.allows(*op))
+            .map(|op| op.to_string())
             .collect();
 
             _ = write!(description, "\n- {}: {}", name, ops.join("|"));
             filter.allowed_fields.insert(name.clone(), ops);
         }
-        self.spec.params.push(ParamSpec::scalar(
-            "$filter".to_owned(),
-            ParamLocation::Query,
-            false,
-            Some(description),
-            "string".to_owned(),
-        ));
+        self.spec
+            .params
+            .push(ParamSpec::query("$filter").description(description));
         self.spec.vendor_extensions.x_odata_filter = Some(filter);
         self
     }
 
     fn with_odata_select(mut self) -> Self {
-        self.spec.params.push(ParamSpec::scalar(
-            "$select".to_owned(),
-            ParamLocation::Query,
-            false,
-            Some("OData v4 select expression".to_owned()),
-            "string".to_owned(),
-        ));
+        self.spec
+            .params
+            .push(ParamSpec::query("$select").description("OData v4 select expression"));
         self
     }
 
@@ -444,13 +681,9 @@ where
                 order_by.allowed_fields.push(desc);
             }
         }
-        self.spec.params.push(ParamSpec::scalar(
-            "$orderby".to_owned(),
-            ParamLocation::Query,
-            false,
-            Some(description),
-            "string".to_owned(),
-        ));
+        self.spec
+            .params
+            .push(ParamSpec::query("$orderby").description(description));
         self.spec.vendor_extensions.x_odata_orderby = Some(order_by);
         self
     }
@@ -509,9 +742,9 @@ impl<S> OperationBuilder<Missing, Missing, S, AuthNotSet> {
                 request_body: None,
                 responses: Vec::new(),
                 handler_id,
-                authenticated: false,
+                auth: RouteAuth::Anonymous,
                 exposed: false,
-                rate_limit: None,
+                throttling: None,
                 allowed_request_content_types: None,
                 vendor_extensions: VendorExtensions::default(),
                 license_requirement: None,
@@ -576,14 +809,12 @@ where
         self
     }
 
-    /// Require per-route rate and concurrency limits.
-    /// Stores metadata for the gateway to enforce.
-    pub fn require_rate_limit(&mut self, rps: u32, burst: u32, in_flight: u32) -> &mut Self {
-        self.spec.rate_limit = Some(RateLimitSpec {
-            rps,
-            burst,
-            in_flight,
-        });
+    /// Attach zone-based throttling configuration to this operation.
+    ///
+    /// Binds the operation to gateway throttling zones (by name). The limits
+    /// themselves are defined in the gateway configuration.
+    pub fn with_throttling(mut self, spec: ThrottlingSpec) -> Self {
+        self.spec.throttling = Some(spec);
         self
     }
 
@@ -613,13 +844,9 @@ where
 
     /// Add a path parameter with type inference (defaults to string)
     pub fn path_param(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
-        self.spec.params.push(ParamSpec::scalar(
-            name.into(),
-            ParamLocation::Path,
-            true,
-            Some(description.into()),
-            "string".to_owned(),
-        ));
+        self.spec
+            .params
+            .push(ParamSpec::path(name).description(description));
         self
     }
 
@@ -630,13 +857,11 @@ where
         required: bool,
         description: impl Into<String>,
     ) -> Self {
-        self.spec.params.push(ParamSpec::scalar(
-            name.into(),
-            ParamLocation::Query,
-            required,
-            Some(description.into()),
-            "string".to_owned(),
-        ));
+        self.spec.params.push(
+            ParamSpec::query(name)
+                .required(required)
+                .description(description),
+        );
         self
     }
 
@@ -648,13 +873,41 @@ where
         description: impl Into<String>,
         param_type: impl Into<String>,
     ) -> Self {
-        self.spec.params.push(ParamSpec::scalar(
-            name.into(),
-            ParamLocation::Query,
-            required,
-            Some(description.into()),
-            param_type.into(),
-        ));
+        self.spec.params.push(
+            ParamSpec::query(name)
+                .required(required)
+                .description(description)
+                .param_type(param_type),
+        );
+        self
+    }
+
+    /// Add a string query parameter that only accepts `values`.
+    ///
+    /// The values reach the document as the parameter's `enum`, so a client
+    /// generated from the spec gets a closed set rather than a bare string,
+    /// and a caller reading the document can see what the endpoint takes
+    /// without trying one.
+    ///
+    /// The parameter stays a string; [`ParamSpec::enum_values`] is what
+    /// narrows it.
+    pub fn query_param_enum<V, I>(
+        mut self,
+        name: impl Into<String>,
+        required: bool,
+        description: impl Into<String>,
+        values: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: AsRef<str>,
+    {
+        self.spec.params.push(
+            ParamSpec::query(name)
+                .required(required)
+                .description(description)
+                .enum_values(values),
+        );
         self
     }
 
@@ -666,14 +919,12 @@ where
     /// `style: form, explode: true` arrays.
     pub fn query_params_from<T: toolkit_contract::query::QueryParams>(mut self) -> Self {
         for p in T::openapi_params() {
-            self.spec.params.push(ParamSpec {
-                name: p.name.to_owned(),
-                location: ParamLocation::Query,
-                required: p.required,
-                description: None,
-                param_type: p.openapi_type.to_owned(),
-                array: p.array,
-            });
+            self.spec.params.push(
+                ParamSpec::query(p.name)
+                    .required(p.required)
+                    .param_type(p.openapi_type)
+                    .array(p.array),
+            );
         }
         self
     }
@@ -691,14 +942,13 @@ where
         description: impl Into<String>,
         item_type: impl Into<String>,
     ) -> Self {
-        self.spec.params.push(ParamSpec {
-            name: name.into(),
-            location: ParamLocation::Query,
-            required,
-            description: Some(description.into()),
-            param_type: item_type.into(),
-            array: true,
-        });
+        self.spec.params.push(
+            ParamSpec::query(name)
+                .required(required)
+                .description(description)
+                .param_type(item_type)
+                .array(true),
+        );
         self
     }
 
@@ -924,13 +1174,8 @@ where
         self
     }
 
-    /// Mark this route as **publicly visible** — registered in the gateway for
-    /// external access (the *visibility* axis).
-    ///
-    /// This is independent of authentication (`.authenticated()` /
-    /// `.anonymous()`): an exposed route may still require a JWT. Routes are
-    /// **internal by default** (not registered in the gateway). Available at any
-    /// stage of the builder.
+    /// Expose the route through the gateway, independently of authentication. Internal by
+    /// default; callable at any stage. Platform auth suppresses exposure with a warning.
     pub fn exposed(mut self) -> Self {
         self.spec.exposed = true;
         self
@@ -1060,7 +1305,24 @@ where
     /// # }
     /// ```
     pub fn authenticated(mut self) -> OperationBuilder<H, R, S, AuthSet, L> {
-        self.spec.authenticated = true;
+        self.spec.auth = RouteAuth::Authenticated;
+        OperationBuilder {
+            spec: self.spec,
+            method_router: self.method_router,
+            _has_handler: self._has_handler,
+            _has_response: self._has_response,
+            _state: self._state,
+            _auth_state: PhantomData,
+            _license_state: self._license_state,
+        }
+    }
+
+    /// Require a validated `X-ToolKit-Internal-Token`; a bearer alone is never validated and
+    /// yields 401, as do missing internal auth and a bearer beside the token. `OpenAPI` uses
+    /// [`INTERNAL_TOKEN_SECURITY_SCHEME`]; discovery excludes the route. Handlers read
+    /// `Extension<PlatformSecurityContext>`; a license decision is still required.
+    pub fn platform_authenticated(mut self) -> OperationBuilder<H, R, S, AuthSet, L> {
+        self.spec.auth = RouteAuth::Platform;
         OperationBuilder {
             spec: self.spec,
             method_router: self.method_router,
@@ -1101,7 +1363,7 @@ where
     /// # let _ = router;
     /// ```
     pub fn anonymous(mut self) -> OperationBuilder<H, R, S, AuthSet, LicenseSet> {
-        self.spec.authenticated = false;
+        self.spec.auth = RouteAuth::Anonymous;
         OperationBuilder {
             spec: self.spec,
             method_router: self.method_router,
@@ -1218,6 +1480,7 @@ where
             content_type: "application/json",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1247,6 +1510,7 @@ where
             content_type: "",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1275,6 +1539,7 @@ where
             content_type: "application/json",
             description: description.into(),
             schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1313,6 +1578,7 @@ where
             content_type: "application/json",
             description: description.into(),
             schema: Some(ResponseSchema::Array { items_schema_name }),
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1348,6 +1614,7 @@ where
             content_type,
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1371,6 +1638,7 @@ where
             content_type: "text/html",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1399,6 +1667,7 @@ where
             schema: Some(ResponseSchema::Ref {
                 schema_name: problem_name,
             }),
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1426,6 +1695,42 @@ where
             content_type: "text/event-stream",
             description: description.into(),
             schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
+        });
+        OperationBuilder {
+            spec: self.spec,
+            method_router: self.method_router,
+            _has_handler: self._has_handler,
+            _has_response: PhantomData::<Present>,
+            _state: self._state,
+            _auth_state: self._auth_state,
+            _license_state: self._license_state,
+        }
+    }
+
+    /// First response: `multipart/mixed` stream of JSON items, one item per
+    /// body part — the server-to-server counterpart to [`Self::sse_json`].
+    ///
+    /// `T` is the *item* type, exactly as for SSE: the media-type key in the
+    /// spec is the bare `multipart/mixed`, with no `boundary=` parameter,
+    /// because the boundary is generated per response at runtime by
+    /// [`crate::http::multipart::MultipartJsonStream`] and is not a property of
+    /// the operation.
+    pub fn multipart_json<T>(
+        mut self,
+        openapi: &dyn OpenApiRegistry,
+        description: impl Into<String>,
+    ) -> OperationBuilder<H, Present, S, A, L>
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + api_dto::ResponseApiDto + 'static,
+    {
+        let name = ensure_schema::<T>(openapi);
+        self.spec.responses.push(ResponseSpec {
+            status: http::StatusCode::OK.as_u16(),
+            content_type: "multipart/mixed",
+            description: description.into(),
+            schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
         });
         OperationBuilder {
             spec: self.spec,
@@ -1448,17 +1753,49 @@ where
     A: AuthState,
     L: LicenseState,
 {
+    /// Declare a header on the most recently declared response.
+    ///
+    /// Call this immediately after the response declaration it describes.
+    /// Consecutive calls attach multiple headers to that same response.
+    ///
+    /// # Panics
+    /// Panics when the response status already has a header with the same
+    /// case-insensitive name.
+    pub fn response_header(mut self, header: ResponseHeaderSpec) -> Self {
+        let Some(response) = self.spec.responses.last() else {
+            unreachable!("Present response state guarantees a response");
+        };
+        let status = response.status;
+        assert!(
+            !self.spec.responses.iter().any(|response| {
+                response.status == status
+                    && response
+                        .headers
+                        .iter()
+                        .any(|existing| existing.name.eq_ignore_ascii_case(&header.name))
+            }),
+            "response {status} already declares header '{}'",
+            header.name
+        );
+        let Some(response) = self.spec.responses.last_mut() else {
+            unreachable!("Present response state guarantees a response");
+        };
+        response.headers.push(header);
+        self
+    }
+
     /// Add a JSON response (additional).
     pub fn json_response(
         mut self,
         status: http::StatusCode,
         description: impl Into<String>,
     ) -> Self {
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: "application/json",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -1469,11 +1806,12 @@ where
         status: http::StatusCode,
         description: impl Into<String>,
     ) -> Self {
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: "",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -1489,11 +1827,12 @@ where
         T: utoipa::ToSchema + utoipa::PartialSchema + api_dto::ResponseApiDto + 'static,
     {
         let name = ensure_schema::<T>(registry);
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: "application/json",
             description: description.into(),
             schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
         });
         self
     }
@@ -1513,11 +1852,12 @@ where
         T: utoipa::ToSchema + utoipa::PartialSchema + api_dto::ResponseApiDto + 'static,
     {
         let items_schema_name = ensure_schema::<T>(registry);
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: "application/json",
             description: description.into(),
             schema: Some(ResponseSchema::Array { items_schema_name }),
+            headers: Vec::new(),
         });
         self
     }
@@ -1540,11 +1880,12 @@ where
         description: impl Into<String>,
         content_type: &'static str,
     ) -> Self {
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type,
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -1555,11 +1896,12 @@ where
         status: http::StatusCode,
         description: impl Into<String>,
     ) -> Self {
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: "text/html",
             description: description.into(),
             schema: None,
+            headers: Vec::new(),
         });
         self
     }
@@ -1573,13 +1915,14 @@ where
     ) -> Self {
         // Canonical Problem schema (RFC 9457 + GTS-typed). Component name "Problem".
         let problem_name = ensure_schema::<toolkit_canonical_errors::Problem>(registry);
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: status.as_u16(),
             content_type: problem::APPLICATION_PROBLEM_JSON,
             description: description.into(),
             schema: Some(ResponseSchema::Ref {
                 schema_name: problem_name,
             }),
+            headers: Vec::new(),
         });
         self
     }
@@ -1594,11 +1937,34 @@ where
         T: utoipa::ToSchema + utoipa::PartialSchema + api_dto::ResponseApiDto + 'static,
     {
         let name = ensure_schema::<T>(openapi);
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: http::StatusCode::OK.as_u16(),
             content_type: "text/event-stream",
             description: description.into(),
             schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
+        });
+        self
+    }
+
+    /// Additional `multipart/mixed` response (if the operation already has
+    /// one). See [`OperationBuilder::multipart_json`] on the first-response
+    /// builder for what `T` and the media-type key mean.
+    pub fn multipart_json<T>(
+        mut self,
+        openapi: &dyn OpenApiRegistry,
+        description: impl Into<String>,
+    ) -> Self
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + api_dto::ResponseApiDto + 'static,
+    {
+        let name = ensure_schema::<T>(openapi);
+        self.spec.upsert_response(ResponseSpec {
+            status: http::StatusCode::OK.as_u16(),
+            content_type: "multipart/mixed",
+            description: description.into(),
+            schema: Some(ResponseSchema::Ref { schema_name: name }),
+            headers: Vec::new(),
         });
         self
     }
@@ -1663,13 +2029,14 @@ where
         ];
 
         for (status, description) in standard_errors {
-            self.spec.responses.push(ResponseSpec {
+            self.spec.upsert_response(ResponseSpec {
                 status: status.as_u16(),
                 content_type: problem::APPLICATION_PROBLEM_JSON,
                 description: description.to_owned(),
                 schema: Some(ResponseSchema::Ref {
                     schema_name: problem_name.clone(),
                 }),
+                headers: Vec::new(),
             });
         }
 
@@ -1715,13 +2082,14 @@ where
     pub fn with_400_validation_error(mut self, registry: &dyn OpenApiRegistry) -> Self {
         let problem_name = ensure_schema::<toolkit_canonical_errors::Problem>(registry);
 
-        self.spec.responses.push(ResponseSpec {
+        self.spec.upsert_response(ResponseSpec {
             status: http::StatusCode::BAD_REQUEST.as_u16(),
             content_type: problem::APPLICATION_PROBLEM_JSON,
             description: "Validation Error".to_owned(),
             schema: Some(ResponseSchema::Ref {
                 schema_name: problem_name,
             }),
+            headers: Vec::new(),
         });
 
         self

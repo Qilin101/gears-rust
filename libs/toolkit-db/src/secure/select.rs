@@ -60,7 +60,9 @@ pub struct Scoped {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct SecureSelect<E: EntityTrait, S> {
+    /// The wrapped `SeaORM` select statement.
     pub(crate) inner: sea_orm::Select<E>,
+    /// Typestate marker tracking whether the scope has been applied.
     pub(crate) state: S,
 }
 
@@ -92,7 +94,9 @@ pub struct SecureSelect<E: EntityTrait, S> {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct SecureSelectTwo<E: EntityTrait, F: EntityTrait, S> {
+    /// The wrapped `SeaORM` select-two statement.
     pub(crate) inner: sea_orm::SelectTwo<E, F>,
+    /// Typestate marker tracking whether the scope has been applied.
     pub(crate) state: S,
 }
 
@@ -124,7 +128,9 @@ pub struct SecureSelectTwo<E: EntityTrait, F: EntityTrait, S> {
 #[must_use]
 #[derive(Clone, Debug)]
 pub struct SecureSelectTwoMany<E: EntityTrait, F: EntityTrait, S> {
+    /// The wrapped `SeaORM` select-two-many statement.
     pub(crate) inner: sea_orm::SelectTwoMany<E, F>,
+    /// Typestate marker tracking whether the scope has been applied.
     pub(crate) state: S,
 }
 
@@ -192,6 +198,18 @@ impl<E> SecureSelect<E, Scoped>
 where
     E: EntityTrait,
 {
+    /// Lock matching scoped rows for concurrent readers inside a transaction.
+    pub fn lock_shared(mut self) -> Self {
+        self.inner = self.inner.lock_shared();
+        self
+    }
+
+    /// Lock matching scoped rows exclusively inside a transaction.
+    pub fn lock_exclusive(mut self) -> Self {
+        self.inner = self.inner.lock_exclusive();
+        self
+    }
+
     /// Execute the query and return all matching results.
     ///
     /// # Errors

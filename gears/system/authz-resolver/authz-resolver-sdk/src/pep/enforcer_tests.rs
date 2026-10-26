@@ -2,10 +2,10 @@
 use async_trait::async_trait;
 
 use super::*;
-use crate::constraints::{Constraint, InPredicate, Predicate};
+use crate::constraints::{Constraint, InGroupPredicate, InPredicate, Predicate};
 use crate::models::{EvaluationResponse, EvaluationResponseContext};
 use toolkit_gts::gts_id;
-use toolkit_security::pep_properties;
+use toolkit_security::{PlatformSecurityContext, pep_properties};
 
 fn uuid(s: &str) -> Uuid {
     Uuid::parse_str(s).expect("valid test UUID")
@@ -23,11 +23,12 @@ const RESOURCE: &str = "33333333-3333-3333-3333-333333333333";
 struct AllowAllMock;
 
 #[async_trait]
-impl AuthZResolverClient for AllowAllMock {
+impl AuthZResolverApi for AllowAllMock {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         // Resolve tenant: explicit context first, then subject fallback.
         let tenant_id = req
             .context
@@ -92,11 +93,12 @@ impl DenyMock {
 }
 
 #[async_trait]
-impl AuthZResolverClient for DenyMock {
+impl AuthZResolverApi for DenyMock {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext {
@@ -111,12 +113,109 @@ impl AuthZResolverClient for DenyMock {
 struct FailMock;
 
 #[async_trait]
-impl AuthZResolverClient for FailMock {
+impl AuthZResolverApi for FailMock {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
-        Err(AuthZResolverError::Internal("boom".to_owned()))
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        Err(CanonicalError::internal("boom").create())
+    }
+}
+
+/// Mock that never responds in time — models a hung/slow PDP.
+struct SlowMock;
+
+#[async_trait]
+impl AuthZResolverApi for SlowMock {
+    async fn evaluate(
+        &self,
+        _ctx: PlatformSecurityContext,
+        _req: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        std::future::pending::<()>().await;
+        unreachable!("SlowMock should never complete before the PEP deadline");
+    }
+}
+
+/// Shared slot holding the last `(ctx, request)` the PEP passed to `evaluate`.
+type CapturedCall = Arc<std::sync::Mutex<Option<(PlatformSecurityContext, EvaluationRequest)>>>;
+
+/// Mock that captures the arguments the PEP passes to `evaluate`, so tests can
+/// assert the caller identity actually reaches the resolver. Returns an
+/// allow-all decision constrained to the request's resolved tenant.
+#[derive(Clone)]
+struct CapturingMock {
+    captured: CapturedCall,
+}
+
+impl CapturingMock {
+    fn new() -> Self {
+        Self {
+            captured: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthZResolverApi for CapturingMock {
+    async fn evaluate(
+        &self,
+        ctx: PlatformSecurityContext,
+        req: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        let tenant = req
+            .subject
+            .properties
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_default();
+        *self.captured.lock().unwrap() = Some((ctx, req));
+        Ok(EvaluationResponse {
+            decision: true,
+            context: EvaluationResponseContext {
+                constraints: vec![Constraint {
+                    predicates: vec![Predicate::In(InPredicate::new(
+                        pep_properties::OWNER_TENANT_ID,
+                        [tenant],
+                    ))],
+                }],
+                ..Default::default()
+            },
+        })
+    }
+}
+
+/// Mock PDP response used to verify that the resource descriptor's canonical
+/// GTS type reaches the compiled `AccessScope`.
+struct GroupScopeMock;
+
+#[async_trait]
+impl AuthZResolverApi for GroupScopeMock {
+    async fn evaluate(
+        &self,
+        _ctx: PlatformSecurityContext,
+        _req: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        Ok(EvaluationResponse {
+            decision: true,
+            context: EvaluationResponseContext {
+                constraints: vec![Constraint {
+                    predicates: vec![
+                        Predicate::In(InPredicate::new(
+                            pep_properties::OWNER_TENANT_ID,
+                            [uuid(TENANT)],
+                        )),
+                        Predicate::InGroup(InGroupPredicate::new(
+                            pep_properties::RESOURCE_ID,
+                            [uuid(RESOURCE)],
+                        )),
+                    ],
+                }],
+                ..Default::default()
+            },
+        })
     }
 }
 
@@ -128,13 +227,69 @@ fn test_ctx() -> SecurityContext {
         .unwrap()
 }
 
-const TEST_RESOURCE: ResourceType = ResourceType::from_static(
-    gts_id!("cf.core.users.user.v1~"),
-    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-);
+const TEST_RESOURCE_TYPE: &str = gts_id!("cf.core.users.user.v1~");
+const TEST_PROPERTIES: &[&str] = &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID];
+const TEST_RESOURCE: ResourceType = ResourceType::from_static(TEST_RESOURCE_TYPE, TEST_PROPERTIES);
+const GROUP_ENABLED_TEST_RESOURCE: ResourceType = TEST_RESOURCE.with_native_group_predicates();
+const NON_GTS_TEST_RESOURCE: ResourceType =
+    ResourceType::from_static("users.user", TEST_PROPERTIES).with_native_group_predicates();
 
-fn enforcer(mock: impl AuthZResolverClient + 'static) -> PolicyEnforcer {
+fn enforcer(mock: impl AuthZResolverApi + 'static) -> PolicyEnforcer {
     PolicyEnforcer::new(Arc::new(mock))
+}
+
+// ── from_hub (lazy resolution) ───────────────────────────────────
+
+#[tokio::test]
+async fn from_hub_resolves_registered_client() {
+    let hub = Arc::new(ClientHub::new());
+    hub.register::<dyn AuthZResolverApi>(Arc::new(AllowAllMock));
+    let e = PolicyEnforcer::from_hub(hub);
+    let ctx = test_ctx();
+
+    let scope = e
+        .access_scope(&ctx, &TEST_RESOURCE, "get", Some(uuid(RESOURCE)))
+        .await
+        .expect("lazy resolution should succeed once the client is registered");
+
+    assert_eq!(
+        scope.all_uuid_values_for(pep_properties::OWNER_TENANT_ID),
+        &[uuid(TENANT)]
+    );
+}
+
+#[tokio::test]
+async fn from_hub_errors_when_client_unregistered() {
+    let hub = Arc::new(ClientHub::new());
+    let e = PolicyEnforcer::from_hub(hub);
+    let ctx = test_ctx();
+
+    let err = e
+        .access_scope(&ctx, &TEST_RESOURCE, "get", Some(uuid(RESOURCE)))
+        .await
+        .expect_err("an unregistered client should surface a transport error");
+
+    assert!(matches!(err, EnforcerError::EvaluationFailed(_)));
+}
+
+// ── evaluate deadline (fail-fast on a slow PDP) ──────────────────
+
+#[tokio::test]
+async fn evaluate_times_out_when_pdp_is_slow() {
+    let e = enforcer(SlowMock).with_deadline(std::time::Duration::from_millis(20));
+    let ctx = test_ctx();
+
+    let start = std::time::Instant::now();
+    let err = e
+        .access_scope(&ctx, &TEST_RESOURCE, "get", Some(uuid(RESOURCE)))
+        .await
+        .expect_err("a PDP slower than the deadline must fail fast");
+
+    assert!(matches!(err, EnforcerError::EvaluationFailed(_)));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "the deadline must bound the call to well under the PDP's response time"
+    );
 }
 
 // ── build_request ────────────────────────────────────────────────
@@ -154,6 +309,127 @@ fn build_request_populates_fields() {
     assert!(req.context.require_constraints);
     // No explicit context_tenant_id → tenant_context is None (PDP decides)
     assert!(req.context.tenant_context.is_none());
+}
+
+#[test]
+fn build_request_suppresses_group_capabilities_without_resource_opt_in() {
+    let e = enforcer(AllowAllMock).with_capabilities(vec![
+        Capability::TenantHierarchy,
+        Capability::GroupMembership,
+        Capability::GroupHierarchy,
+    ]);
+
+    let req = e.build_request(&test_ctx(), &TEST_RESOURCE, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
+}
+
+#[test]
+fn build_request_suppresses_group_capabilities_for_non_gts_resource() {
+    let e = enforcer(AllowAllMock).with_capabilities(vec![
+        Capability::TenantHierarchy,
+        Capability::GroupMembership,
+        Capability::GroupHierarchy,
+    ]);
+
+    let req = e.build_request(&test_ctx(), &NON_GTS_TEST_RESOURCE, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
+}
+
+#[test]
+fn build_request_preserves_group_capabilities_for_opted_in_canonical_gts_resource() {
+    let capabilities = vec![Capability::GroupMembership, Capability::GroupHierarchy];
+    let e = enforcer(AllowAllMock).with_capabilities(capabilities.clone());
+
+    let req = e.build_request(
+        &test_ctx(),
+        &GROUP_ENABLED_TEST_RESOURCE,
+        "list",
+        None,
+        true,
+    );
+
+    assert_eq!(req.context.capabilities, capabilities);
+}
+
+#[test]
+fn build_request_rejects_non_canonical_and_instance_gts_names() {
+    let e = enforcer(AllowAllMock).with_capabilities(vec![Capability::GroupMembership]);
+    let resources = [
+        ResourceType::from_static(" gts.cf.core.users.user.v1~", TEST_PROPERTIES)
+            .with_native_group_predicates(),
+        ResourceType::from_static("gts.cf.core.users.user.v1~ ", TEST_PROPERTIES)
+            .with_native_group_predicates(),
+        ResourceType::from_static("not-a-gts~", TEST_PROPERTIES).with_native_group_predicates(),
+        ResourceType::from_static(
+            "gts.cf.core.users.user.v1~cf.core.users.instance.v1",
+            TEST_PROPERTIES,
+        )
+        .with_native_group_predicates(),
+    ];
+
+    for resource in resources {
+        let req = e.build_request(&test_ctx(), &resource, "list", None, true);
+        assert!(
+            req.context.capabilities.is_empty(),
+            "{} must not enable native group predicates",
+            resource.name()
+        );
+    }
+}
+
+#[test]
+fn build_request_supports_runtime_canonical_gts_resource() {
+    let resource = ResourceType::new(TEST_RESOURCE_TYPE.to_owned(), TEST_PROPERTIES)
+        .with_native_group_predicates();
+    let e = enforcer(AllowAllMock).with_capabilities(vec![Capability::GroupMembership]);
+
+    let req = e.build_request(&test_ctx(), &resource, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::GroupMembership]);
+}
+
+#[test]
+fn build_request_suppresses_group_hierarchy_without_group_membership() {
+    // `InGroupSubtree` compilation requires BOTH group capabilities, so a
+    // lone `GroupHierarchy` advertisement is a dead capability the PDP could
+    // only act on with predicates destined to fail — it must be suppressed.
+    let e = enforcer(AllowAllMock).with_capabilities(vec![
+        Capability::TenantHierarchy,
+        Capability::GroupHierarchy,
+    ]);
+
+    let req = e.build_request(
+        &test_ctx(),
+        &GROUP_ENABLED_TEST_RESOURCE,
+        "list",
+        None,
+        true,
+    );
+
+    assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
+}
+
+#[test]
+fn build_request_suppresses_group_capabilities_without_resource_id_property() {
+    // Native group predicates are hard-restricted to the `id` property; even a
+    // canonical GTS resource without `id` support cannot execute one.
+    const NO_ID_GTS_RESOURCE: ResourceType = ResourceType::from_static(
+        gts_id!("cf.core.users.user.v1~"),
+        &[pep_properties::OWNER_TENANT_ID],
+    )
+    .with_native_group_predicates();
+
+    let e = enforcer(AllowAllMock).with_capabilities(vec![
+        Capability::TenantHierarchy,
+        Capability::GroupMembership,
+        Capability::GroupHierarchy,
+    ]);
+
+    let req = e.build_request(&test_ctx(), &NO_ID_GTS_RESOURCE, "list", None, true);
+
+    assert_eq!(req.context.capabilities, vec![Capability::TenantHierarchy]);
 }
 
 #[test]
@@ -181,6 +457,129 @@ fn build_request_with_overrides_tenant() {
 }
 
 // ── access_scope ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn access_scope_threads_caller_identity_into_subject() {
+    // The core behaviour: the caller's SecurityContext must reach the resolver.
+    // Post two-plane-auth it travels in `req.subject` (+ context), while the
+    // `PlatformSecurityContext` argument is a credential-free plane marker.
+    let mock = CapturingMock::new();
+    let captured = Arc::clone(&mock.captured);
+    let e = enforcer(mock);
+    let ctx = SecurityContext::builder()
+        .subject_id(uuid(SUBJECT))
+        .subject_tenant_id(uuid(TENANT))
+        .token_scopes(vec!["users:read".to_owned()])
+        .bearer_token("caller-jwt".to_owned())
+        .build()
+        .unwrap();
+
+    e.access_scope(&ctx, &TEST_RESOURCE, "get", Some(uuid(RESOURCE)))
+        .await
+        .expect("allow-all mock should succeed");
+
+    let (plane_ctx, req) = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("evaluate must have been called");
+
+    // Caller identity is threaded via the request, not the ctx argument.
+    assert_eq!(req.subject.id, uuid(SUBJECT));
+    assert_eq!(
+        req.subject
+            .properties
+            .get("tenant_id")
+            .and_then(|v| v.as_str()),
+        Some(TENANT),
+    );
+    assert_eq!(req.context.token_scopes, vec!["users:read".to_owned()]);
+    assert!(
+        req.context.bearer_token.is_some(),
+        "caller bearer token must reach the PDP"
+    );
+
+    // The ctx argument is a credential-free plane marker carrying no identity,
+    // and it says so in its own variant rather than sharing `Unknown` with a
+    // peer identity this build does not recognise.
+    assert!(plane_ctx.is_outbound_marker());
+}
+
+#[tokio::test]
+async fn access_scope_uses_canonical_resource_type_for_group_membership() {
+    let scope = enforcer(GroupScopeMock)
+        .with_capabilities(vec![Capability::GroupMembership])
+        .access_scope(&test_ctx(), &GROUP_ENABLED_TEST_RESOURCE, "list", None)
+        .await
+        .expect(
+            "opted-in canonical GTS resource must compile the negotiated native group predicate",
+        );
+
+    let filter = &scope.constraints()[0].filters()[1];
+    let toolkit_security::ScopeFilter::InGroup(filter) = filter else {
+        panic!("expected InGroup filter, got {filter:?}");
+    };
+    assert_eq!(filter.membership_resource_type(), TEST_RESOURCE_TYPE);
+}
+
+#[tokio::test]
+async fn access_scope_rejects_unadvertised_native_group_predicate() {
+    let error = enforcer(GroupScopeMock)
+        .access_scope(&test_ctx(), &GROUP_ENABLED_TEST_RESOURCE, "list", None)
+        .await
+        .expect_err("a native group predicate must have been advertised");
+
+    let EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
+        predicate,
+        missing,
+    }) = error
+    else {
+        panic!("expected typed unadvertised-capability error, got: {error:?}");
+    };
+    assert_eq!(predicate, "InGroup");
+    assert_eq!(missing, vec!["group_membership"]);
+}
+
+#[tokio::test]
+async fn access_scope_rejects_group_predicate_without_resource_opt_in() {
+    let error = enforcer(GroupScopeMock)
+        .with_capabilities(vec![Capability::GroupMembership])
+        .access_scope(&test_ctx(), &TEST_RESOURCE, "list", None)
+        .await
+        .expect_err("a resource that did not opt in must reject native group predicates");
+
+    let EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
+        predicate,
+        missing,
+    }) = error
+    else {
+        panic!("expected resource opt-in to suppress the capability, got: {error:?}");
+    };
+    assert_eq!(predicate, "InGroup");
+    assert_eq!(missing, vec!["group_membership"]);
+}
+
+#[tokio::test]
+async fn access_scope_rejects_group_predicate_after_suppressing_non_gts_capability() {
+    let error = enforcer(GroupScopeMock)
+        .with_capabilities(vec![Capability::GroupMembership])
+        .access_scope(&test_ctx(), &NON_GTS_TEST_RESOURCE, "list", None)
+        .await
+        .expect_err("a non-GTS resource must not accept an unsolicited group predicate");
+
+    let EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
+        predicate,
+        missing,
+    }) = error
+    else {
+        panic!(
+            "the non-GTS resource name must suppress the configured capability before evaluation, \
+             got: {error:?}"
+        );
+    };
+    assert_eq!(predicate, "InGroup");
+    assert_eq!(missing, vec!["group_membership"]);
+}
 
 #[tokio::test]
 async fn access_scope_pdp_resolves_tenant_from_subject() {

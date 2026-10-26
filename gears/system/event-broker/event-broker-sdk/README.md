@@ -1,6 +1,6 @@
 # cf-gears-event-broker-sdk
 
-High-level Rust SDK for the Cyberfabric Event Broker.
+High-level Rust SDK for the `event-broker` gear.
 
 Wire concerns (JSON serialisation, partition selection, producer-chain bookkeeping,
 subscription lifecycle recovery, canonical error handling) are handled inside the
@@ -48,8 +48,7 @@ use event_broker_sdk::{
 struct OrderCreated { order_id: Uuid, total_cents: i64 }
 
 impl TypedEvent for OrderCreated {
-    const TYPE_ID: &'static str = "gts.cf.core.events.event.v1~orders.created.v1";
-    const TOPIC:   &'static str = "gts.cf.core.events.topic.v1~orders.v1";
+    const TYPE_ID: &'static str = "gts.cf.core.events.event.v1~orders.created.v1~";
     const SUBJECT_TYPE: &'static str = "gts.cf.core.events.subject.v1~order.v1";
     const SOURCE:  &'static str = "order-service";
     fn subject(&self) -> Cow<'_, str> { Cow::Owned(self.order_id.to_string()) }
@@ -116,10 +115,13 @@ let outbox_handle = event_outbox
     .await?;
 let producer_outbox = event_outbox.bind(&outbox_handle);
 
-let mut txn = db.begin().await?;
-write_business_state(&txn).await?;
-producer_outbox.enqueue(&txn, OrderCreated { ... }).await?;
-txn.commit().await?;
+// in_transaction flushes the producer-outbox handle only if the transaction
+// commits, so nothing is published for a rolled-back write.
+toolkit_db::outbox::in_transaction(&db, |txn| Box::pin(async move {
+    write_business_state(txn).await?;
+    let flush = producer_outbox.enqueue(txn, OrderCreated { ... }).await?;
+    Ok(((), flush))
+})).await?;
 ```
 
 `DbProducer` validates typed events before writing producer outbox rows. In lazy
@@ -249,7 +251,7 @@ let handle = ConsumerBuilder::new(broker.clone())
     .default_handler(DefaultProjector)
     .route()
     .topic(TopicRef::gts("gts.cf.core.events.topic.v1~orders.v1"))
-    .event_type(EventTypeRef::gts("gts.cf.core.events.event.v1~orders.created.v1"))
+    .event_type(EventTypeRef::gts("gts.cf.core.events.event.v1~orders.created.v1~"))
     .handler(OrderCreatedProjector)
     .start()
     .await?;
@@ -281,13 +283,14 @@ impl TxSingleEventHandler<LocalDbOffsetManager> for MyHandler {
                 .attempts(attempts)
                 .build();
 
-            self.db.transaction_ref(|tx| {
-                Box::pin(async move {
-                    self.dlq.enqueue(tx, record).await?;
-                    commit.commit_offset_in_tx(tx, event.offset).await?;
-                    Ok(())
-                })
-            }).await?;
+            // in_transaction flushes the DLQ handle only after the commit lands.
+            // Enqueue last, so an error on the offset write never leaves a handle
+            // to drop.
+            toolkit_db::outbox::in_transaction(&self.db, |tx| Box::pin(async move {
+                commit.commit_offset_in_tx(tx, event.offset).await?;
+                let flush = self.dlq.enqueue(tx, record).await?;
+                Ok(((), flush))
+            })).await?;
 
             return Ok(HandlerOutcome::Success);
         }

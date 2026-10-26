@@ -42,6 +42,18 @@ pub trait FilterField: Copy + Eq + std::hash::Hash + fmt::Debug + 'static {
 
     fn kind(&self) -> FieldKind;
 
+    /// Whether the field can be absent, so that `null` compares with it: `field eq null` asks for
+    /// the rows where it is absent and `field ne null` for the rows where it is present.
+    ///
+    /// Opt-in, `false` by default: `null` is then a value outside the field's kind and is refused
+    /// like any other mistyped value (`FilterError::TypeMismatch`), with every operator and inside
+    /// `in`. A consumer that evaluates the filter itself (an `IdP` plugin matching users, say)
+    /// therefore never sees a `null` it has no answer for unless its field says it can be absent.
+    /// On a nullable field an ordering with `null` is refused, and so is `null` inside `in`.
+    fn nullable(&self) -> bool {
+        false
+    }
+
     fn from_name(name: &str) -> Option<Self> {
         // Try exact match first (handles both simple names and slash-delimited property paths
         // like "hierarchy/depth" if the enum defines them).
@@ -93,6 +105,44 @@ pub enum FilterOp {
     EndsWith,
     And,
     Or,
+}
+
+impl FieldKind {
+    /// Whether a field of this kind accepts `op`.
+    ///
+    /// This is the table `OperationBuilder::with_odata_filter` publishes as
+    /// each endpoint's `x-odata-filter.allowedFields`, so what a caller reads
+    /// in the contract is what the parser enforces: ordering operators are
+    /// meaningless on a `Bool` or a `Uuid`, and the string functions only
+    /// apply to `String`.
+    #[must_use]
+    pub const fn allows(self, op: FilterOp) -> bool {
+        match self {
+            Self::String => matches!(
+                op,
+                FilterOp::Eq
+                    | FilterOp::Ne
+                    | FilterOp::In
+                    | FilterOp::Contains
+                    | FilterOp::StartsWith
+                    | FilterOp::EndsWith
+            ),
+            Self::Uuid => matches!(op, FilterOp::Eq | FilterOp::Ne | FilterOp::In),
+            Self::Bool => matches!(op, FilterOp::Eq | FilterOp::Ne),
+            Self::I64 | Self::F64 | Self::Decimal | Self::DateTimeUtc | Self::Date | Self::Time => {
+                matches!(
+                    op,
+                    FilterOp::Eq
+                        | FilterOp::Ne
+                        | FilterOp::Gt
+                        | FilterOp::Ge
+                        | FilterOp::Lt
+                        | FilterOp::Le
+                        | FilterOp::In
+                )
+            }
+        }
+    }
 }
 
 impl fmt::Display for FilterOp {
@@ -246,8 +296,6 @@ pub fn convert_expr_to_filter_node<F: FilterField>(
             let field = F::from_name(field_name)
                 .ok_or_else(|| FilterError::UnknownField(field_name.to_owned()))?;
 
-            validate_value_type(field, &value)?;
-
             let filter_op = match op {
                 odata_ast::CompareOperator::Eq => FilterOp::Eq,
                 odata_ast::CompareOperator::Ne => FilterOp::Ne,
@@ -256,6 +304,23 @@ pub fn convert_expr_to_filter_node<F: FilterField>(
                 odata_ast::CompareOperator::Lt => FilterOp::Lt,
                 odata_ast::CompareOperator::Le => FilterOp::Le,
             };
+
+            // On a field that can be absent, absence is not a value of the field's kind, so the
+            // value check does not apply: `eq null` asks for the rows where the field is absent
+            // and `ne null` for the rows where it is present. An ordering has no answer for it.
+            // On any other field `null` falls through to the value check, which refuses it.
+            if matches!(value, odata_ast::Value::Null) && field.nullable() {
+                if !matches!(filter_op, FilterOp::Eq | FilterOp::Ne) {
+                    return Err(FilterError::UnsupportedOperation(format!(
+                        "`{filter_op}` with null on field `{field_name}`; only `eq null` and \
+                         `ne null` compare with null"
+                    )));
+                }
+                return Ok(FilterNode::binary(field, filter_op, value));
+            }
+
+            validate_value_type(field, &value)?;
+            reject_unsupported_op(field, field_name, filter_op)?;
 
             Ok(FilterNode::binary(field, filter_op, value))
         }
@@ -357,6 +422,14 @@ pub fn convert_expr_to_filter_node<F: FilterField>(
             let mut values = Vec::with_capacity(list.len());
             for item in list {
                 match item {
+                    // An `in` list is a set of values; absence is asked with `eq null`. On a field
+                    // that cannot be absent, the value check below refuses `null` as a mismatch.
+                    E::Value(odata_ast::Value::Null) if field.nullable() => {
+                        return Err(FilterError::InvalidExpression(format!(
+                            "null is not a member of an `in` list on field `{field_name}`; \
+                             compare with `eq null`"
+                        )));
+                    }
                     E::Value(val) => {
                         validate_value_type(field, val)?;
                         values.push(val.clone());
@@ -375,11 +448,26 @@ pub fn convert_expr_to_filter_node<F: FilterField>(
                 ));
             }
 
+            reject_unsupported_op(field, field_name, FilterOp::In)?;
+
             Ok(FilterNode::InList { field, values })
         }
 
         E::Identifier(name) => Err(FilterError::BareIdentifier(name.clone())),
         E::Value(_) => Err(FilterError::BareLiteral),
+    }
+}
+
+/// Refuse an operator the field's kind does not accept, so the parser holds
+/// to the same table the contract publishes.
+fn reject_unsupported_op<F: FilterField>(field: F, name: &str, op: FilterOp) -> FilterResult<()> {
+    if field.kind().allows(op) {
+        Ok(())
+    } else {
+        Err(FilterError::UnsupportedOperation(format!(
+            "`{op}` on field `{name}` of type {}",
+            field.kind()
+        )))
     }
 }
 

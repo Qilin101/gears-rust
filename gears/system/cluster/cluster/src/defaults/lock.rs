@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::defaults::lease::{Acquisition, CacheLeaseStore};
 use crate::defaults::{LOCK_KEY_PREFIX, ShutdownRevoke, guard, identity};
-use cluster_sdk::cache::types::{PutRequest, Ttl};
-use cluster_sdk::cache::{CacheWatchEvent, ClusterCacheBackend};
+use cluster_sdk::cache::{CacheWatch, CacheWatchEvent, ClusterCacheBackend};
 use cluster_sdk::error::{ClusterError, ProviderErrorKind};
+use cluster_sdk::lease::LeaseToken;
 use cluster_sdk::lock::{
     DistributedLockBackend, LockCommandReceiver, LockFeatures, LockGuard, LockRequest,
 };
@@ -60,21 +61,135 @@ const MAX_CONSECUTIVE_WATCH_RESETS: u32 = 8;
 /// still prevents CPU spin, but the unusable-watch cap may eventually fire).
 const WATCH_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(50);
 
+/// The *initial* (and floor) poll cadence a blocking acquisition falls back to
+/// when the cache backend serves no exact watch (`features().watch == false`,
+/// e.g. redis `watch_mode: disabled`): with no event to wake on, it re-attempts
+/// the claim starting around this interval (jittered by
+/// [`watchless_poll_interval`]) and then backs off geometrically up to
+/// [`WATCHLESS_POLL_INTERVAL_CAP`] via [`grow_watchless`]. Capped by the caller's
+/// remaining budget at the call site, so a tight `timeout` still fires on time
+/// (plan D3).
+const WATCHLESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The ceiling the watchless poll *base* backs off to. The jittered interval is
+/// `[base, 2 * base)`, so the effective cadence tops out at `[500ms, 1s)` — a
+/// held lock is re-attempted roughly once a second at steady state rather than
+/// ~15×/s, which is what keeps a lock held to its full TTL from turning a handful
+/// of waiters into thousands of CAS writes on one key (the `redis
+/// watch_mode: disabled` deployment this path targets). Kept below one second so
+/// the effective interval never exceeds it.
+const WATCHLESS_POLL_INTERVAL_CAP: Duration = Duration::from_millis(500);
+
+/// A jittered watchless poll interval drawn uniformly from `[base, 2 * base)` — a
+/// floor of one full `base` (so a poll never degenerates into a spin) plus up to
+/// one `base` of jitter, so multiple waiters contending the same lock over a
+/// watchless cache desynchronize their claim attempts rather than retrying in
+/// lockstep and hammering the backend with synchronized CAS bursts. Mirrors the
+/// leader backend's `reclaim_jitter`; `ThreadRng` is entropy-seeded, so concurrent
+/// participants diverge with no explicit seeding. The caller grows `base` between
+/// polls via [`grow_watchless`] and clamps the result to its remaining `wait`
+/// budget.
+fn watchless_poll_interval(base: Duration) -> Duration {
+    use rand::RngExt as _;
+    let base_nanos = u64::try_from(base.as_nanos()).unwrap_or(u64::MAX);
+    // `base + U(0, base)` == `U(base, 2*base)`. `.max(1)` keeps the range
+    // non-empty for a hypothetical zero base.
+    let jitter = rand::rng().random_range(0..base_nanos.max(1));
+    Duration::from_nanos(base_nanos.saturating_add(jitter))
+}
+
+/// Doubles the watchless poll `base`, saturating at
+/// [`WATCHLESS_POLL_INTERVAL_CAP`]. Applied after each watchless poll so a wait
+/// that keeps contending backs off geometrically (50 → 100 → 200 → 400 → 500ms)
+/// instead of re-attempting the claim at a flat cadence for the whole wait.
+fn grow_watchless(base: Duration) -> Duration {
+    base.saturating_mul(2).min(WATCHLESS_POLL_INTERVAL_CAP)
+}
+
+/// The outcome of one wait step in [`wait_for_lease`](CasBasedDistributedLockBackend::wait_for_lease):
+/// either the watch resolved, or — with no watch — a bounded poll timer did.
+enum WaitStep {
+    /// The `wait` budget elapsed with no actionable event (a watch timeout, or a
+    /// watchless poll that consumed the whole budget).
+    Elapsed,
+    /// A terminal watch close carrying the backend error.
+    Closed(ClusterError),
+    /// A watch event, or a watchless poll tick → re-attempt the claim.
+    Retry,
+    /// The watch stream ended without a terminal close → re-subscribe.
+    StreamEnded,
+}
+
+/// One wait step: with a `watch`, wait up to `wait` for its next event; without
+/// one (the backend serves no exact watch), sleep a jittered poll interval drawn
+/// from `poll_base` — clamped to `wait` so a tight `timeout` still fires on time —
+/// and report a tick as [`WaitStep::Retry`] or a budget-consuming poll as
+/// [`WaitStep::Elapsed`].
+///
+/// Split out of the `select!` arm in
+/// [`wait_for_lease`](CasBasedDistributedLockBackend::wait_for_lease) so the two
+/// paths are one-liners at the call site and independently testable: it borrows no
+/// `self`, so the watchless path can be exercised directly (`watch == None`). It
+/// is cancel-safe to drop mid-await — both `recv` and `sleep` are — which is what
+/// lets the caller race it against graceful shutdown in `select!`.
+async fn next_wait_step(
+    watch: Option<&mut CacheWatch>,
+    poll_base: Duration,
+    wait: Duration,
+) -> WaitStep {
+    if let Some(w) = watch {
+        match tokio::time::timeout(wait, w.recv()).await {
+            Err(_elapsed) => WaitStep::Elapsed,
+            Ok(Some(CacheWatchEvent::Closed(err))) => WaitStep::Closed(err),
+            Ok(Some(_)) => WaitStep::Retry,
+            Ok(None) => WaitStep::StreamEnded,
+        }
+    } else {
+        // Watchless: sleep a jittered, bounded poll interval so contending
+        // waiters on the same lock desynchronize their claims. Clamped to `wait`;
+        // if that clamp consumed the whole `wait` budget it is an elapse (a real
+        // timeout or the incumbent's deadline), otherwise it is just a poll tick →
+        // retry the claim.
+        let poll = watchless_poll_interval(poll_base).min(wait);
+        tokio::time::sleep(poll).await;
+        if poll == wait {
+            WaitStep::Elapsed
+        } else {
+            WaitStep::Retry
+        }
+    }
+}
+
 /// A distributed-lock backend that derives TTL-bounded mutual exclusion from
 /// cache compare-and-swap operations (DESIGN §3.11, ADR-001).
 ///
-/// Acquisition is a `put_if_absent(lock_key, holder_id, ttl)`. A blocking
-/// [`lock`](DistributedLockBackend::lock) subscribes to a `watch` on the key and
-/// retries on each release/expiry event until it acquires or the timeout
-/// elapses. Release is **conditional**: the held entry is deleted only if this
-/// holder still owns it, so a foreign holder (which re-acquired after this
-/// holder's TTL lapsed) is not released while this holder's own lease is
-/// unexpired (the conditional delete has a documented non-atomic window — see
-/// [`LockGuard::release`]). A crashed holder is reaped by the
-/// cache TTL — there is no auto-renewal and there are **no fencing tokens**
-/// (the no-remote-in-critical-section rule eliminates the stale-writer scenario,
-/// ADR-002); a long critical section refreshes its lease via
-/// [`LockGuard::renew`].
+/// # A lock is a store-owned lease (§5.8.1)
+///
+/// Acquisition writes a [`LeaseRecord`](cluster_sdk::lease::LeaseRecord) —
+/// `{ owner, deadline, fence }` — under `lock/{name}` and returns the
+/// [`LeaseToken`] that is the whole authority over it. `renew` and `release` are
+/// conditional writes predicated on that token and on nothing this process
+/// remembers, which lets a lease be renewed through a *different* backend
+/// handle than the one that acquired it, and therefore through a different cluster
+/// replica (invariant I7).
+///
+/// Both halves of the trait are served from one lease. The token half
+/// ([`acquire`](DistributedLockBackend::acquire) and friends) is the primitive;
+/// [`try_lock`](DistributedLockBackend::try_lock) and
+/// [`lock`](DistributedLockBackend::lock) acquire the same lease and hand back a
+/// [`LockGuard`] whose task holds the token, because the guard's fields are private
+/// and cannot carry one (§6.5).
+///
+/// A blocking [`lock`](DistributedLockBackend::lock) subscribes to a `watch` on the
+/// key and retries on each event until it acquires or the timeout elapses. It also
+/// wakes itself at the incumbent's `deadline`: a lease lapsing writes nothing, so
+/// unlike physical TTL expiry it produces no watch event (see
+/// [`lease`](crate::defaults::lease)).
+///
+/// A crashed holder's lock lapses at its `deadline` and is then *stolen* by the
+/// next acquirer at `fence + 1` — there is no auto-renewal, and the fence stays
+/// internal rather than becoming a consumer-facing fencing token (§5.8.1, ADR-002).
+/// A long critical section refreshes its lease via [`LockGuard::renew`].
 ///
 /// # Consistency safety (ADR-009)
 ///
@@ -84,7 +199,7 @@ const WATCH_RESUBSCRIBE_BACKOFF: Duration = Duration::from_millis(50);
 /// the split-brain risk. [`features`](DistributedLockBackend::features) derives
 /// `linearizable` from the underlying cache's consistency.
 pub struct CasBasedDistributedLockBackend {
-    cache: Arc<dyn ClusterCacheBackend>,
+    leases: Arc<CacheLeaseStore>,
     /// Cancelled by [`ShutdownRevoke::revoke`] to signal an in-flight blocking
     /// [`lock`](Self::lock) waiter to return [`ClusterError::Shutdown`] promptly
     /// on graceful shutdown (DESIGN §3.13). The waiter runs in the caller's
@@ -124,11 +239,50 @@ impl CasBasedDistributedLockBackend {
     }
 
     fn with_cache(cache: Arc<dyn ClusterCacheBackend>) -> Self {
+        // Tell the operator once, at construction, if this cache cannot serve
+        // exact watch: a blocking `lock()` then waits by bounded polling rather
+        // than reactively (see `wait_for_lease`). Not fatal.
+        guard::warn_without_watch(cache.features(), Self::NAME);
         Self {
-            cache,
+            leases: Arc::new(CacheLeaseStore::new(cache)),
             shutdown: CancellationToken::new(),
             provider: "unknown",
             metrics: Arc::new(NoopMetrics),
+        }
+    }
+
+    /// The cache the lease records live in, for the watch a blocking acquisition
+    /// waits on.
+    fn cache(&self) -> &Arc<dyn ClusterCacheBackend> {
+        self.leases.cache()
+    }
+
+    /// Subscribes the blocking-acquisition watch, degrading to poll-only
+    /// (`None`) when the backend serves no exact watch.
+    ///
+    /// `Unsupported { feature: "watch" }` is a *permanent* capability answer, not
+    /// a retryable close, so it is not surfaced as an error: the caller falls back
+    /// to bounded polling. Any *other* `Unsupported` (a different feature) is a
+    /// genuine error about a different operation and propagates rather than being
+    /// silently reclassified as "no exact watch"; every other error propagates too.
+    ///
+    /// # Errors
+    /// Returns any [`ClusterError`] other than `Unsupported { feature: "watch" }`
+    /// if the subscribe fails.
+    async fn resubscribe(&self, key: &str) -> Result<Option<CacheWatch>, ClusterError> {
+        match self.cache().watch(key).await {
+            Ok(watch) => Ok(Some(watch)),
+            Err(ClusterError::Unsupported { feature: "watch" }) => {
+                // A cache that *declared* watch support yet refuses `watch()` is the
+                // dishonest case the construction-time `warn_without_watch` cannot
+                // catch; surface it (gated on the honest bit inside the helper). It
+                // is unreachable for an honestly watchless backend — the first
+                // subscribe yields `None` and the wait then polls without ever
+                // re-subscribing — so it emits at most once per blocking acquisition.
+                guard::warn_runtime_watchless(self.cache().features(), Self::NAME);
+                Ok(None)
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -148,6 +302,51 @@ impl CasBasedDistributedLockBackend {
         self
     }
 
+    /// Sets how long a lease record outlives the lease it fenced (§5.8.1).
+    ///
+    /// Additive rather than a third constructor: ADR-009's constructor *pair* is
+    /// the consistency guard, and adding retention arguments to both halves would
+    /// double a surface whose whole point is that there are exactly two ways in.
+    /// The wiring calls this with the cluster gear's `fence_retention`; without
+    /// it the backend keeps
+    /// [`FENCE_RETENTION_DEFAULT`](cluster_sdk::lease::FENCE_RETENTION_DEFAULT).
+    ///
+    /// Safe to call after construction because neither constructor spawns
+    /// anything: the guard tasks start per acquisition, so no task can be holding
+    /// the store this replaces.
+    #[must_use]
+    pub fn with_fence_retention(mut self, retention: Duration) -> Self {
+        self.leases = Arc::new(CacheLeaseStore::with_retention(
+            Arc::clone(self.leases.cache()),
+            retention,
+        ));
+        self
+    }
+
+    /// **Test-only.** Rebuilds the lease store on a virtual clock that tracks
+    /// [`tokio::time::pause`]/`advance`, so a test (including the gear's
+    /// `TimeControl::Virtual` conformance run) can lapse a lock's TTL under virtual
+    /// time (§5.8.1).
+    ///
+    /// Production must never call this: [`new`](Self::new) and
+    /// [`new_allow_weak_consistency`](Self::new_allow_weak_consistency) build the
+    /// pure wall clock, which cannot diverge across a wall step. Named and
+    /// documented as test-support, in the same spirit as
+    /// [`reserved_lease_cache`](cluster_sdk::reserved_lease_cache) — a `pub` seam
+    /// the conformance harness reaches from outside the crate's unit-test cfg.
+    /// Call before any acquisition (the guard tasks start per acquisition, so no
+    /// task can be holding the store this replaces).
+    #[must_use]
+    pub fn with_virtual_clock(mut self) -> Self {
+        use rand::RngExt as _;
+        self.leases = Arc::new(CacheLeaseStore::with_virtual_clock(
+            Arc::clone(self.leases.cache()),
+            self.leases.retention(),
+            rand::rng().random::<u64>(),
+        ));
+        self
+    }
+
     /// The cache key a named lock claims. Prefixed so a lock does not collide
     /// with a same-named election when both defaults share one cache.
     fn lock_key(name: &str) -> String {
@@ -164,47 +363,40 @@ impl CasBasedDistributedLockBackend {
     /// still inside its critical section; instead the held lease is the safety net
     /// and lapses via TTL (`cpt-cf-clst-fr-shutdown-ttl-cleanup`). The task is
     /// bounded — at most one per held guard.
-    fn spawn_guard(&self, name: &str, key: String, holder: String) -> LockGuard {
-        let (receiver, guard) = LockGuard::channel(name.to_owned(), COMMAND_BUFFER);
+    fn spawn_guard(&self, key: String, token: LeaseToken) -> LockGuard {
+        let (receiver, guard) = LockGuard::channel(token.name.clone(), COMMAND_BUFFER);
         let task = GuardTask {
-            cache: Arc::clone(&self.cache),
-            name: name.to_owned(),
+            leases: Arc::clone(&self.leases),
             key,
-            holder,
+            token,
             provider: self.provider,
             metrics: Arc::clone(&self.metrics),
         };
         tokio::spawn(task.run(receiver));
         guard
     }
-}
 
-#[async_trait]
-impl DistributedLockBackend for CasBasedDistributedLockBackend {
-    fn features(&self) -> LockFeatures {
-        LockFeatures::new(
-            self.cache.consistency() == cluster_sdk::cache::CacheConsistency::Linearizable,
-        )
-    }
-
-    async fn try_lock(&self, name: &str, ttl: Duration) -> Result<LockGuard, ClusterError> {
+    /// The acquisition both [`try_lock`](DistributedLockBackend::try_lock) and
+    /// [`acquire`](DistributedLockBackend::acquire) run: one insert-or-steal
+    /// attempt, contention reported as [`ClusterError::LockContended`].
+    ///
+    /// Instrumented here rather than at each caller so the guard-returning and
+    /// token-returning halves share one span and one metric series — they are the
+    /// same operation, and `op` is a bounded label (invariant I15).
+    async fn acquire_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+    ) -> Result<LeaseToken, ClusterError> {
         let span =
             tracing::info_span!(spans::LOCK_TRY_LOCK, provider = %self.provider, lock = %name);
         let op_started = std::time::Instant::now();
         let out = async {
             let key = Self::lock_key(name);
-            let holder = identity::fresh_id();
-            match self
-                .cache
-                .put_if_absent(PutRequest {
-                    key: &key,
-                    value: holder.as_bytes(),
-                    ttl: Ttl::Of(ttl),
-                })
-                .await?
-            {
-                Some(_) => Ok(self.spawn_guard(name, key, holder)),
-                None => Err(ClusterError::LockContended {
+            match self.leases.try_acquire(&key, name, owner, ttl).await? {
+                Acquisition::Acquired(token) => Ok(token),
+                Acquisition::Contended { .. } => Err(ClusterError::LockContended {
                     name: name.to_owned(),
                 }),
             }
@@ -222,128 +414,257 @@ impl DistributedLockBackend for CasBasedDistributedLockBackend {
         out
     }
 
+    /// The acquisition both [`lock`](DistributedLockBackend::lock) and
+    /// [`acquire_waiting`](DistributedLockBackend::acquire_waiting) run: retry the
+    /// steal until it lands or `timeout` elapses.
+    ///
+    /// Each wait ends on whichever comes first — a watch event, the incumbent
+    /// lease's `deadline`, the caller's `timeout`, or graceful shutdown. The
+    /// deadline arm is what a physical-TTL lock did not need: a lapsing lease writes
+    /// nothing, so no watch event announces it.
+    async fn acquire_lease_waiting(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+        timeout: Duration,
+    ) -> Result<LeaseToken, ClusterError> {
+        let span = tracing::info_span!(spans::LOCK_LOCK, provider = %self.provider, lock = %name);
+        let op_started = std::time::Instant::now();
+        let out = self
+            .wait_for_lease(name, owner, ttl, timeout)
+            .instrument(span)
+            .await;
+        record_lock(
+            &*self.metrics,
+            self.provider,
+            "lock",
+            name,
+            op_started,
+            &out,
+        );
+        out
+    }
+
+    /// The uninstrumented wait loop [`acquire_lease_waiting`](Self::acquire_lease_waiting)
+    /// spans and measures.
+    async fn wait_for_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+        timeout: Duration,
+    ) -> Result<LeaseToken, ClusterError> {
+        let key = Self::lock_key(name);
+        let started = tokio::time::Instant::now();
+        // Subscribe before the first attempt so a release between a failed claim
+        // and the wait cannot be missed. A backend with no exact-watch support
+        // (`features().watch == false`) yields `None`, and the wait falls back to
+        // bounded polling — so a blocking `lock()` still completes over e.g. redis
+        // `watch_mode: disabled` instead of failing at the first wait (plan D3).
+        let mut watch = self.resubscribe(&key).await?;
+        // Distinguish a busy-spin from a legitimate stream rotation. A watch that
+        // ends (`recv` → `None`) *immediately* on every re-subscribe would spin
+        // this loop hot (claim → watch ends → re-subscribe → claim …); a watch
+        // that lived for a meaningful interval before ending is a normal
+        // end-of-stream and the acquisition should keep waiting, bounded only by
+        // `timeout`. Only consecutive *immediate* re-ends count toward the cap.
+        let mut consecutive_immediate_resets: u32 = 0;
+        // The watchless poll base, grown geometrically between polls (see
+        // `grow_watchless`) so a long contended wait over a watchless cache backs
+        // off instead of re-attempting the claim at a flat cadence. Unused on a
+        // watch-based wait.
+        let mut poll_base = WATCHLESS_POLL_INTERVAL;
+        // Cloned to a local so the `cancelled()` future in the wait `select!`
+        // below does not borrow `self`.
+        let shutdown = self.shutdown.clone();
+        loop {
+            // Graceful cluster shutdown observed before the next claim attempt:
+            // abandon the wait promptly with a terminal `Shutdown` rather than
+            // racing another claim against a backend that is tearing down.
+            if shutdown.is_cancelled() {
+                return Err(ClusterError::Shutdown);
+            }
+            let lapse_in = match self.leases.try_acquire(&key, name, owner, ttl).await? {
+                Acquisition::Acquired(token) => return Ok(token),
+                Acquisition::Contended { lapse_in } => lapse_in,
+            };
+            // Treat an exhausted *or zero* budget as a timeout: a zero remaining
+            // would otherwise let an always-ready (e.g. closed) watch spin the
+            // loop at no time cost until the cap, reporting an unusable-watch
+            // error where the caller's deadline is the real binding constraint.
+            let Some(remaining) = timeout
+                .checked_sub(started.elapsed())
+                .filter(|r| !r.is_zero())
+            else {
+                return Err(ClusterError::LockTimeout {
+                    name: name.to_owned(),
+                    waited: started.elapsed(),
+                });
+            };
+            // Never wait past the point where the lease becomes stealable. Capped
+            // by `remaining` so a lease outliving the caller's patience still
+            // times out on time.
+            let wait = lapse_in.map_or(remaining, |lapse| remaining.min(lapse));
+            let recv_started = tokio::time::Instant::now();
+            // One wait step — a watch event or, watchless, a bounded poll — raced
+            // against graceful shutdown. The policy itself lives in
+            // `next_wait_step` (borrows no `self`, so the two paths are testable
+            // on their own).
+            let step = tokio::select! {
+                // Graceful cluster shutdown: abandon the wait promptly with a
+                // terminal `Shutdown` (`cpt-cf-clst-fr-shutdown-revoke`). Held
+                // locks lapse via their deadline; this only resolves an in-flight
+                // wait.
+                () = shutdown.cancelled() => return Err(ClusterError::Shutdown),
+                step = next_wait_step(watch.as_mut(), poll_base, wait) => step,
+            };
+            // Back the watchless poll off for the next attempt (a watch-based wait
+            // leaves `poll_base` at its initial value, unused).
+            if watch.is_none() {
+                poll_base = grow_watchless(poll_base);
+            }
+            match step {
+                // The wait budget ran out. If that was the caller's `timeout` it is
+                // a real timeout; if it was the incumbent's deadline, loop and steal.
+                WaitStep::Elapsed => {
+                    if wait == remaining {
+                        return Err(ClusterError::LockTimeout {
+                            name: name.to_owned(),
+                            waited: started.elapsed(),
+                        });
+                    }
+                    consecutive_immediate_resets = 0;
+                }
+                WaitStep::Closed(err) => return Err(err),
+                // Any event (release / expiry / lag / reset) or a poll tick →
+                // retry the claim.
+                WaitStep::Retry => consecutive_immediate_resets = 0,
+                // End-of-stream (sender dropped without a terminal `Closed`).
+                // Re-subscribe to keep waiting within the remaining timeout.
+                WaitStep::StreamEnded if recv_started.elapsed() >= WATCH_RESUBSCRIBE_BACKOFF => {
+                    // The watch lived a meaningful interval: a legitimate
+                    // rotation, not a busy-spin. Keep waiting.
+                    consecutive_immediate_resets = 0;
+                    watch = self.resubscribe(&key).await?;
+                }
+                WaitStep::StreamEnded => {
+                    // Ended immediately: a busy-spin symptom. Cap consecutive
+                    // immediate re-ends so a structurally unusable watch surfaces
+                    // instead of spinning, and back off so it cannot burn CPU
+                    // before the cap (or the timeout) fires.
+                    consecutive_immediate_resets += 1;
+                    if consecutive_immediate_resets >= MAX_CONSECUTIVE_WATCH_RESETS {
+                        tracing::warn!(
+                            lock = name,
+                            immediate_resubscribes = MAX_CONSECUTIVE_WATCH_RESETS,
+                            "distributed-lock backend watch ended immediately on every \
+                             re-subscribe; treating it as structurally unusable for blocking \
+                             acquisition and aborting the wait"
+                        );
+                        return Err(ClusterError::Provider {
+                            kind: ProviderErrorKind::Other,
+                            message: format!(
+                                "distributed-lock backend watch for `{name}` ended immediately \
+                                 {MAX_CONSECUTIVE_WATCH_RESETS} times in a row; the watch is \
+                                 unusable for blocking acquisition"
+                            ),
+                        });
+                    }
+                    // Clamp to the remaining wait so a tight `timeout` is not
+                    // overshot by a full backoff interval.
+                    tokio::time::sleep(WATCH_RESUBSCRIBE_BACKOFF.min(remaining)).await;
+                    watch = self.resubscribe(&key).await?;
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl DistributedLockBackend for CasBasedDistributedLockBackend {
+    fn features(&self) -> LockFeatures {
+        LockFeatures::new(
+            self.cache().consistency() == cluster_sdk::cache::CacheConsistency::Linearizable,
+        )
+    }
+
+    async fn try_lock(&self, name: &str, ttl: Duration) -> Result<LockGuard, ClusterError> {
+        // A fresh owner id per acquisition rather than one per process: two guards
+        // held concurrently in this process are then distinct owners, so neither
+        // can renew or release the other's lease. Remotely the owner is the
+        // caller's `ClientId` (§5.4), supplied by the serving gear.
+        let owner = identity::fresh_id();
+        let token = self.acquire_lease(name, &owner, ttl).await?;
+        Ok(self.spawn_guard(Self::lock_key(name), token))
+    }
+
     async fn lock(
         &self,
         name: &str,
         ttl: Duration,
         timeout: Duration,
     ) -> Result<LockGuard, ClusterError> {
-        let span = tracing::info_span!(spans::LOCK_LOCK, provider = %self.provider, lock = %name);
+        let owner = identity::fresh_id();
+        let token = self
+            .acquire_lease_waiting(name, &owner, ttl, timeout)
+            .await?;
+        Ok(self.spawn_guard(Self::lock_key(name), token))
+    }
+
+    async fn acquire(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+    ) -> Result<LeaseToken, ClusterError> {
+        self.acquire_lease(name, owner, ttl).await
+    }
+
+    async fn acquire_waiting(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+        timeout: Duration,
+    ) -> Result<LeaseToken, ClusterError> {
+        self.acquire_lease_waiting(name, owner, ttl, timeout).await
+    }
+
+    async fn renew(&self, token: &LeaseToken, ttl: Duration) -> Result<(), ClusterError> {
+        let key = Self::lock_key(&token.name);
+        let span = tracing::info_span!(
+            spans::LOCK_RENEW,
+            provider = %self.provider,
+            lock = %token.name
+        );
         let op_started = std::time::Instant::now();
-        let out = async {
-            let key = Self::lock_key(name);
-            let holder = identity::fresh_id();
-            let started = tokio::time::Instant::now();
-            // Subscribe before the first attempt so a release between a failed claim
-            // and the wait cannot be missed.
-            let mut watch = self.cache.watch(&key).await?;
-            // Distinguish a busy-spin from a legitimate stream rotation. A watch that
-            // ends (`recv` → `None`) *immediately* on every re-subscribe would spin
-            // this loop hot (claim → watch ends → re-subscribe → claim …); a watch
-            // that lived for a meaningful interval before ending is a normal
-            // end-of-stream and the acquisition should keep waiting, bounded only by
-            // `timeout`. Only consecutive *immediate* re-ends count toward the cap.
-            let mut consecutive_immediate_resets: u32 = 0;
-            // Cloned to a local so the `cancelled()` future in the wait `select!`
-            // below does not borrow `self`.
-            let shutdown = self.shutdown.clone();
-            loop {
-                // Graceful cluster shutdown observed before the next claim attempt:
-                // abandon the wait promptly with a terminal `Shutdown` rather than
-                // racing another claim against a backend that is tearing down.
-                if shutdown.is_cancelled() {
-                    return Err(ClusterError::Shutdown);
-                }
-                match self
-                    .cache
-                    .put_if_absent(PutRequest {
-                        key: &key,
-                        value: holder.as_bytes(),
-                        ttl: Ttl::Of(ttl),
-                    })
-                    .await
-                {
-                    Ok(Some(_)) => return Ok(self.spawn_guard(name, key, holder)),
-                    Ok(None) => {}
-                    Err(err) => return Err(err),
-                }
-                // Treat an exhausted *or zero* budget as a timeout: a zero remaining
-                // would otherwise let an always-ready (e.g. closed) watch spin the
-                // loop at no time cost until the cap, reporting an unusable-watch
-                // error where the caller's deadline is the real binding constraint.
-                let Some(remaining) = timeout
-                    .checked_sub(started.elapsed())
-                    .filter(|r| !r.is_zero())
-                else {
-                    return Err(ClusterError::LockTimeout {
-                        name: name.to_owned(),
-                        waited: started.elapsed(),
-                    });
-                };
-                let recv_started = tokio::time::Instant::now();
-                let waited = tokio::select! {
-                    // Graceful cluster shutdown: abandon the wait promptly with a
-                    // terminal `Shutdown` (`cpt-cf-clst-fr-shutdown-revoke`). Held
-                    // locks lapse via TTL; this only resolves an in-flight wait.
-                    () = shutdown.cancelled() => return Err(ClusterError::Shutdown),
-                    waited = tokio::time::timeout(remaining, watch.recv()) => waited,
-                };
-                match waited {
-                    Err(_elapsed) => {
-                        return Err(ClusterError::LockTimeout {
-                            name: name.to_owned(),
-                            waited: started.elapsed(),
-                        });
-                    }
-                    Ok(Some(CacheWatchEvent::Closed(err))) => return Err(err),
-                    // Any event (release / expiry / lag / reset) → retry the claim.
-                    Ok(Some(_)) => consecutive_immediate_resets = 0,
-                    // End-of-stream (sender dropped without a terminal `Closed`).
-                    // Re-subscribe to keep waiting within the remaining timeout.
-                    Ok(None) if recv_started.elapsed() >= WATCH_RESUBSCRIBE_BACKOFF => {
-                        // The watch lived a meaningful interval: a legitimate
-                        // rotation, not a busy-spin. Keep waiting.
-                        consecutive_immediate_resets = 0;
-                        watch = self.cache.watch(&key).await?;
-                    }
-                    Ok(None) => {
-                        // Ended immediately: a busy-spin symptom. Cap consecutive
-                        // immediate re-ends so a structurally unusable watch surfaces
-                        // instead of spinning, and back off so it cannot burn CPU
-                        // before the cap (or the timeout) fires.
-                        consecutive_immediate_resets += 1;
-                        if consecutive_immediate_resets >= MAX_CONSECUTIVE_WATCH_RESETS {
-                            tracing::warn!(
-                                lock = name,
-                                immediate_resubscribes = MAX_CONSECUTIVE_WATCH_RESETS,
-                                "distributed-lock backend watch ended immediately on every \
-                             re-subscribe; treating it as structurally unusable for blocking \
-                             acquisition and aborting the wait"
-                            );
-                            return Err(ClusterError::Provider {
-                                kind: ProviderErrorKind::Other,
-                                message: format!(
-                                    "distributed-lock backend watch for `{name}` ended immediately \
-                                 {MAX_CONSECUTIVE_WATCH_RESETS} times in a row; the watch is \
-                                 unusable for blocking acquisition"
-                                ),
-                            });
-                        }
-                        // Clamp to the remaining wait so a tight `timeout` is not
-                        // overshot by a full backoff interval.
-                        tokio::time::sleep(WATCH_RESUBSCRIBE_BACKOFF.min(remaining)).await;
-                        watch = self.cache.watch(&key).await?;
-                    }
-                }
-            }
-        }
-        .instrument(span)
-        .await;
+        let out = self.leases.renew(&key, token, ttl).instrument(span).await;
         record_lock(
             &*self.metrics,
             self.provider,
-            "lock",
-            name,
+            "renew",
+            &token.name,
+            op_started,
+            &out,
+        );
+        out
+    }
+
+    async fn release(&self, token: &LeaseToken) -> Result<(), ClusterError> {
+        let key = Self::lock_key(&token.name);
+        let span = tracing::info_span!(
+            spans::LOCK_RELEASE,
+            provider = %self.provider,
+            lock = %token.name
+        );
+        let op_started = std::time::Instant::now();
+        let out = self.leases.release(&key, token).instrument(span).await;
+        record_lock(
+            &*self.metrics,
+            self.provider,
+            "release",
+            &token.name,
             op_started,
             &out,
         );
@@ -357,8 +678,9 @@ impl ShutdownRevoke for CasBasedDistributedLockBackend {
     /// (`cpt-cf-clst-fr-shutdown-revoke`): cancels the shared token so every
     /// waiting [`lock`](Self::lock) call returns [`ClusterError::Shutdown`]
     /// promptly. No task set is awaited — a waiter runs in the caller's own
-    /// future, not a spawned task — and no remote release is performed; held
-    /// locks lapse via TTL (`cpt-cf-clst-fr-shutdown-ttl-cleanup`).
+    /// future, not a spawned task — and no release is issued: a held lock is a
+    /// record that outlives this process and lapses at its own deadline
+    /// (`cpt-cf-clst-fr-shutdown-ttl-cleanup`, §5.8.2).
     async fn revoke(&self) {
         self.shutdown.cancel();
     }
@@ -366,11 +688,18 @@ impl ShutdownRevoke for CasBasedDistributedLockBackend {
 
 /// The background task that completes a held lock's `renew`/`release` commands
 /// and self-terminates on channel closure (the consumer dropping its guard).
+///
+/// It exists because [`LockGuard`] cannot carry the [`LeaseToken`] — private
+/// fields, one constructor — so the token lives here, in the task's own state
+/// (§6.5). Everything it does is a lease operation on the shared store, which is
+/// what makes the in-process guard path and the remote token path the same code.
 struct GuardTask {
-    cache: Arc<dyn ClusterCacheBackend>,
-    name: String,
+    leases: Arc<CacheLeaseStore>,
+    /// The prefixed cache key. Derivable from `token.name`, kept resolved so the
+    /// hot path does not re-`format!` it per command.
     key: String,
-    holder: String,
+    /// The whole authority over this lock's lease.
+    token: LeaseToken,
     provider: &'static str,
     metrics: Arc<dyn ClusterMetrics>,
 }
@@ -383,15 +712,19 @@ impl GuardTask {
                     let span = tracing::info_span!(
                         spans::LOCK_RENEW,
                         provider = %self.provider,
-                        lock = %self.name
+                        lock = %self.token.name
                     );
                     let op_started = std::time::Instant::now();
-                    let out = self.renew(new_ttl).instrument(span).await;
+                    let out = self
+                        .leases
+                        .renew(&self.key, &self.token, new_ttl)
+                        .instrument(span)
+                        .await;
                     record_lock(
                         &*self.metrics,
                         self.provider,
                         "renew",
-                        &self.name,
+                        &self.token.name,
                         op_started,
                         &out,
                     );
@@ -401,15 +734,19 @@ impl GuardTask {
                     let span = tracing::info_span!(
                         spans::LOCK_RELEASE,
                         provider = %self.provider,
-                        lock = %self.name
+                        lock = %self.token.name
                     );
                     let op_started = std::time::Instant::now();
-                    let out = self.release().instrument(span).await;
+                    let out = self
+                        .leases
+                        .release(&self.key, &self.token)
+                        .instrument(span)
+                        .await;
                     record_lock(
                         &*self.metrics,
                         self.provider,
                         "release",
-                        &self.name,
+                        &self.token.name,
                         op_started,
                         &out,
                     );
@@ -419,76 +756,8 @@ impl GuardTask {
                 }
             }
         }
-        // The consumer dropped the guard without releasing: no I/O, the entry
-        // lapses via TTL (the safety net).
-    }
-
-    /// Renews the lease only while this holder still owns it. The lease is
-    /// **reset** to `new_ttl` from now — it is *not* added to the time already
-    /// left (the cache exposes no remaining-TTL read, so this CAS-based default
-    /// resets rather than strictly adds; that is why the consumer method is
-    /// `renew`, not `extend`). The caller must therefore pass the full desired
-    /// remaining duration; a `new_ttl` smaller than the time currently left would
-    /// shorten the lease.
-    ///
-    /// Non-atomic window (accepted tradeoff, ADR-002): this is a `get`-then-CAS,
-    /// and the CAS matches on *version* only. If the lease lapses between the
-    /// `get` and the CAS and a new holder re-acquires via `put_if_absent` (a
-    /// fresh entry at version `1`), a holder whose last-seen version was also `1`
-    /// can have its CAS match and overwrite the foreign entry — a lock steal,
-    /// strictly worse than the release window's delete. Bounded by the same
-    /// critical-section-shorter-than-TTL rule as [`release`](Self::release); see
-    /// [`LockGuard::renew`](crate::lock::LockGuard::renew) for the consumer note.
-    async fn renew(&self, new_ttl: Duration) -> Result<(), ClusterError> {
-        match self.cache.get(&self.key).await {
-            Ok(Some(entry)) if entry.value.as_slice() == self.holder.as_bytes() => self
-                .cache
-                .compare_and_swap(
-                    &self.key,
-                    entry.version,
-                    self.holder.as_bytes(),
-                    Ttl::Of(new_ttl),
-                )
-                .await
-                .map(|_entry| ())
-                .map_err(|err| match err {
-                    // A concurrent change won the race — we no longer hold it.
-                    ClusterError::CasConflict { .. } => ClusterError::LockExpired {
-                        name: self.name.clone(),
-                    },
-                    other => other,
-                }),
-            // Not ours (TTL lapsed, possibly re-acquired) or already gone.
-            Ok(_) => Err(ClusterError::LockExpired {
-                name: self.name.clone(),
-            }),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Deletes the entry only if this holder still owns it, so a foreign holder
-    /// is never released (`cpt-cf-clst-algo-sdk-default-backends-cas-lock`).
-    ///
-    /// **Non-atomic window (accepted tradeoff, ADR-002):** the cache has no
-    /// conditional / CAS delete, so this is a `get`-then-`delete`. The window is
-    /// safe **only while this holder's own TTL is still unexpired**: if the lease
-    /// lapsed between the `get` (which saw our value) and the `delete`, a new
-    /// holder could have re-acquired in that gap and the unconditional `delete`
-    /// would remove the *foreign* holder's entry, breaking mutual exclusion. The
-    /// consumer contract that keeps this safe is the critical-section rule — the
-    /// critical section (and thus the time to reach this release) must be shorter
-    /// than the lock TTL (DESIGN §2.2/§3.3). Use [`LockGuard::renew`] to refresh
-    /// the lease before it lapses for a long critical section.
-    async fn release(&self) -> Result<(), ClusterError> {
-        match self.cache.get(&self.key).await {
-            Ok(Some(entry)) if entry.value.as_slice() == self.holder.as_bytes() => {
-                self.cache.delete(&self.key).await.map(|_existed| ())
-            }
-            // A foreign holder's entry is left intact; from this holder's view
-            // the lease is already gone, so release is a success.
-            Ok(_) => Ok(()),
-            Err(err) => Err(err),
-        }
+        // The consumer dropped the guard without releasing: no I/O, the lease
+        // lapses at its stored deadline (the safety net).
     }
 }
 

@@ -4,6 +4,7 @@ mod dispatcher;
 mod offset_manager;
 mod progress;
 mod runtime;
+mod type_cache;
 mod types;
 
 #[cfg(test)]
@@ -13,15 +14,14 @@ mod builder_tests;
 #[cfg(test)]
 mod commit_tests;
 #[cfg(test)]
-#[cfg(feature = "test-util")]
-mod dispatcher_test_util;
-#[cfg(test)]
 mod dispatcher_tests;
 #[cfg(test)]
 #[cfg(feature = "db")]
 mod offset_manager_tests;
 #[cfg(test)]
 mod progress_tests;
+#[cfg(test)]
+mod type_cache_tests;
 #[cfg(test)]
 mod types_tests;
 
@@ -46,18 +46,18 @@ pub use offset_manager::{
 pub use runtime::{Consumer, ConsumerHandle};
 
 pub use crate::api::{
-    BarrierMode, ControlCode, FrameStream, PartitionPosition, PartitionSlot, ResolvedPosition,
-    SeekPosition, SubscriptionAssignment, TenantTraversalDepth, WireEvent, WireFrame,
+    BarrierMode, ControlCode, FrameStream, PartitionPosition, Position, SeekPosition,
+    SubscriptionAssignment, TenantTraversalDepth, WireEvent, WireFrame,
 };
 pub use crate::error::OffsetManagerError;
 pub use types::{
     BatchHandlerOutcome, ConnectionDropReason, ConsumerBatching, ConsumerBuffering,
     ConsumerCommitMode, ConsumerGroupRef, ConsumerHandler, ConsumerListenerSettings,
     ConsumerProfile, ConsumerRetry, ConsumerRuntimeEvent, ConsumerRuntimeListener,
-    ConsumerSettings, ConsumerSettingsOverrides, ConsumerSlowDetection, EventBatch, EventTypeRef,
-    FilterEngineRef, HandlerOutcome, PartitionBufferState, PartitionBufferStateSnapshot,
-    PartitionProgress, RawEvent, SingleEventHandler, SingleEventHandlerAdapter,
-    SlowConsumerTrigger, SubscriptionFilterRef, SubscriptionInterest, TopicRef,
+    ConsumerSettings, ConsumerSettingsOverrides, ConsumerSlowDetection, EventBatch, HandlerOutcome,
+    PartitionBufferState, PartitionBufferStateSnapshot, PartitionProgress, RawEvent,
+    SingleEventHandler, SingleEventHandlerAdapter, SlowConsumerTrigger, SubscriptionFilterRef,
+    SubscriptionInterest,
 };
 #[cfg(feature = "db")]
 pub use types::{TxConsumerHandler, TxSingleEventHandler, TxSingleEventHandlerAdapter};

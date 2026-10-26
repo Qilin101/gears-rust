@@ -105,7 +105,7 @@ E2E_BASE_URL=http://localhost:8087 pytest testing/e2e/suites/resource_group/ -v
 
 The intended AuthZ → RG chain is:
 
-1. **Gear init** (`gear.rs`): resolves `dyn AuthZResolverClient` from ClientHub, creates `PolicyEnforcer`
+1. **Gear init** (`gear.rs`): resolves `dyn AuthZResolverApi` from ClientHub, creates `PolicyEnforcer`
 2. **GroupService** (`group_service.rs`): receives `PolicyEnforcer`; all CRUD methods (`list_groups`, `get_group`, `update_group`, `delete_group`, `get_group_descendants`, `get_group_ancestors`) call `enforcer.access_scope(&ctx, &RG_GROUP_RESOURCE, action, resource_id)`
 3. **GroupRepository** (`group_repo.rs`): `list_groups`, `find_by_id`, `get_descendants`, `get_ancestors` accept `&AccessScope` and pass it to `SecureORM` via `.secure().scope_with(scope)`
 4. **Handlers** (`handlers/groups.rs`): pass `&ctx` to service methods (no longer `_ctx`)
@@ -197,7 +197,7 @@ WHERE owner_tenant_id IN ('T1')
 **`cond.rs`** (3 planned unit tests): InGroup subquery condition, InGroupSubtree nested subquery, tenant + InGroup AND condition
 
 **`tenant_filtering_db_test.rs`** (2 planned DB tests):
-- `group_based_in_group_predicate_produces_combined_scope` — mock AuthZ with InGroup + tenant → correct AccessScope with 2 filters
+- `group_based_in_group_predicate_against_groups_fails_closed` — mock AuthZ with InGroup + tenant against `RG_GROUP_RESOURCE` → typed unadvertised-capability compile error (the enforcer has table-level group capability, but the group resource does not opt in to membership predicates, so the capability is suppressed and an unsolicited native predicate is rejected fail-closed)
 - `group_based_membership_data_correctly_stored` — full S14 data: ProjectA/B, task memberships, verify isolation
 
 ### What remains for production use

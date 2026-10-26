@@ -24,7 +24,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{Duration, Utc};
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_security::SecurityContext;
@@ -37,6 +36,8 @@ use crate::domain::ports::metrics::LedgerMetricsPort;
 use crate::infra::events::publisher::LedgerEventPublisher;
 use crate::infra::fx::revaluation_run::UnrealizedRevaluationRun;
 use crate::infra::storage::repo::{FxRevaluationModeRepo, FxRevaluationRunRepo, ReferenceRepo};
+use time::Duration;
+use time::OffsetDateTime;
 
 /// Outcome of one revaluation tick (returned for testability; the serve loop only
 /// logs a tick error).
@@ -59,7 +60,7 @@ pub struct RevaluationRunJob {
     publisher: Arc<LedgerEventPublisher>,
     metrics: Arc<dyn LedgerMetricsPort>,
     fx: FxConfig,
-    /// Per-tenant FX revaluation mode (VHP-1986): resolves Mode A/B for each
+    /// Per-tenant FX revaluation mode: resolves Mode A/B for each
     /// provisioned tenant each tick (an explicit row wins; else the fleet default
     /// from `fx.revaluation_enabled`).
     mode_repo: FxRevaluationModeRepo,
@@ -94,7 +95,7 @@ impl RevaluationRunJob {
     /// provisioned tenants (the pass cannot start). A per-tenant forward/reversal
     /// fault is isolated within the pass.
     pub async fn run(&self) -> anyhow::Result<RevaluationRunReport> {
-        // VHP-1986: no global early-return — the Mode A/B decision is per-tenant
+        // No global early-return — the Mode A/B decision is per-tenant
         // (resolved in the loop below). The global `fx.revaluation_enabled` is only
         // the fleet default for tenants without an explicit per-tenant mode row.
         let started = Instant::now();
@@ -110,13 +111,13 @@ impl RevaluationRunJob {
         // Period-end detection: a tick is a period-end tick when tomorrow falls in
         // a different period (the last UTC day of the current period). Plain UTC
         // month arithmetic (decision 1).
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let today = period_id_for(now);
         let is_period_end = period_id_for(now + Duration::days(1)) != today;
         let prev = previous_period_id(&today);
 
         let mut report = RevaluationRunReport {
-            // The fleet default (VHP-1986): `fx.revaluation_enabled` is the default
+            // The fleet default: `fx.revaluation_enabled` is the default
             // for tenants WITHOUT an explicit mode row, NOT a hard global gate.
             enabled: self.fx.revaluation_enabled,
             forward_attempted: is_period_end,
@@ -125,7 +126,7 @@ impl RevaluationRunJob {
         };
         for tenant in tenants {
             let scope = AccessScope::for_tenant(tenant);
-            // VHP-1986 per-tenant Mode A/B: an explicit row wins; else the global
+            // Per-tenant Mode A/B: an explicit row wins; else the global
             // `fx.revaluation_enabled` is the fleet default (on→ModeB, off→ModeA).
             let mode = match self
                 .mode_repo
@@ -192,7 +193,7 @@ impl RevaluationRunJob {
         is_period_end: bool,
         revalue: bool,
     ) -> anyhow::Result<()> {
-        // Forward revaluation runs only for a current Mode-B tenant (VHP-1986).
+        // Forward revaluation runs only for a current Mode-B tenant.
         if is_period_end && revalue {
             runner
                 .run_period(ctx, scope, tenant, today, true)

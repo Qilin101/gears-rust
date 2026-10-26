@@ -12,8 +12,8 @@
 //! `run_id` in the same transaction as the `DR CL / CR Revenue` post; the
 //! `status=DONE`/`run_id` + the period UNIQUE prevent a second credit.
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -26,6 +26,8 @@ use uuid::Uuid;
     no_type
 )]
 pub struct Model {
+    pub currency: String,
+    pub currency_scale: i16,
     #[sea_orm(primary_key, auto_increment = false)]
     pub tenant_id: Uuid,
     #[sea_orm(primary_key, auto_increment = false)]
@@ -33,9 +35,11 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub segment_no: i32,
     pub period_id: String,
-    pub amount_minor: i64,
+    pub amount: String,
+    /// CAS token for changes to pending money and segment state.
+    pub version: i64,
     pub status: String,
-    pub recognized_at: Option<DateTime<Utc>>,
+    pub recognized_at: Option<OffsetDateTime>,
     pub run_id: Option<Uuid>,
 }
 

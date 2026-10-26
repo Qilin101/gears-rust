@@ -10,7 +10,8 @@ use crate::domain::test_support::{
 use crate::infra::kc_http::ReqwestKcTransport;
 use account_management_sdk::idp_user::{
     IdpDeprovisionUserRequest, IdpListUsersRequest, IdpNewUser, IdpProvisionUserRequest,
-    IdpTenantContext, IdpUserFilterField, IdpUserPagination,
+    IdpTenantContext, IdpUpdateUserRequest, IdpUserAttribute, IdpUserFilterField,
+    IdpUserPagination, IdpUserPatch,
 };
 use credstore_sdk::CredStoreClientV1;
 use gts::GtsTypeId;
@@ -1150,7 +1151,7 @@ async fn list_users_happy_path_returns_page() {
         let u3 = Uuid::new_v4();
         // `top = 2`, 3-member fixture (fits one page) → has_more=true after
         // the drain → next_cursor must be set.
-        // Items are sorted by (createdTimestamp ASC, id ASC) client-side.
+        // Items are sorted by the default (username ASC, id ASC) client-side.
         Mock::given(method("GET"))
             .and(path(format!(
                 "/admin/realms/platform/groups/{group_uuid}/members"
@@ -1205,8 +1206,8 @@ async fn list_users_happy_path_returns_page() {
 #[tokio::test]
 async fn list_users_with_cursor_continues_from_tiebreaker() {
     // DESIGN "Interactions & Sequences": both page requests hit KC with first=0; cursor carries
-    // (last_created_at, last_user_id) and client-side filtering skips the
-    // already-returned users.
+    // the last emitted user's (username, id) key tuple and client-side
+    // filtering skips the already-returned users.
     //
     // Both fetches are identical (first=0&max=3), so we mount a single
     // permissive mock that returns all 3 users on every call, and rely on
@@ -1223,9 +1224,11 @@ async fn list_users_with_cursor_continues_from_tiebreaker() {
         let u3 = Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000003").unwrap();
 
         // Single mock for both pages: KC always returns all 3 users.
-        // sorted order: u1(ts=1000) < u2(ts=2000) < u3(ts=3000).
+        // Creation order is the REVERSE of username order, so the walk
+        // proves the sort key is `username`, not `createdTimestamp`.
+        // sorted order: u1("a") < u2("b") < u3("c").
         // Page 1: limit=2, no cursor → emit u1,u2; cursor encodes u2.
-        // Page 2: limit=2, cursor=(ts=2000,u2) → skip u1,u2 → emit u3 only.
+        // Page 2: limit=2, cursor=("b",u2) → skip u1,u2 → emit u3 only.
         Mock::given(method("GET"))
             .and(path(format!(
                 "/admin/realms/platform/groups/{group_uuid}/members"
@@ -1237,9 +1240,9 @@ async fn list_users_with_cursor_continues_from_tiebreaker() {
             // `first=0` call still serves the request.
             .and(query_param("max", "200"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"id": u1.to_string(), "username": "a", "createdTimestamp": 1000_i64},
+                {"id": u3.to_string(), "username": "c", "createdTimestamp": 1000_i64},
                 {"id": u2.to_string(), "username": "b", "createdTimestamp": 2000_i64},
-                {"id": u3.to_string(), "username": "c", "createdTimestamp": 3000_i64},
+                {"id": u1.to_string(), "username": "a", "createdTimestamp": 3000_i64},
             ])))
             .expect(2) // page 1 + page 2 each call the same endpoint
             .mount(&server)
@@ -1274,10 +1277,9 @@ async fn list_users_with_cursor_continues_from_tiebreaker() {
             .clone()
             .expect("page 1 produced cursor");
 
-        // Verify cursor encodes u2's tiebreaker.
-        let decoded = UserFacade::decode_cursor(&cursor).expect("cursor decodes");
-        assert_eq!(decoded.last_created_at, 2000_i64);
-        assert_eq!(decoded.last_user_id, u2);
+        // Verify cursor encodes u2's key tuple under the default order.
+        let decoded = UserFacade::decode_cursor(&cursor, &default_order()).expect("cursor decodes");
+        assert_eq!(decoded.last_key, vec!["b".to_owned(), u2.to_string()]);
 
         // Page 2 — re-issue with cursor; client-side skip removes u1,u2.
         let req2 = list_users_req(
@@ -1312,16 +1314,19 @@ async fn list_users_cursor_filter_mismatch_returns_rejected() {
     let filter_a = Uuid::new_v4();
     let filter_b = Uuid::new_v4();
     let group_uuid = Uuid::new_v4();
-    let stale_cursor = UserFacade::encode_cursor(&ListUsersCursor {
-        filter_hash: UserFacade::filter_hash(
-            tenant_uuid,
-            "platform",
-            Some(filter_a),
-            &StringMatcher::Always,
-        ),
-        last_created_at: 1_716_400_001_000_i64,
-        last_user_id: filter_a,
-    });
+    let stale_cursor = UserFacade::encode_cursor(
+        &ListUsersCursor {
+            filter_hash: UserFacade::filter_hash(
+                tenant_uuid,
+                "platform",
+                Some(filter_a),
+                &StringMatcher::Always,
+            ),
+            last_key: vec!["alice".into(), filter_a.to_string()],
+            truncated: Vec::new(),
+        },
+        &default_order(),
+    );
 
     let facade = build_facade(&server);
     let ctx = build_system_ctx(Uuid::nil());
@@ -1392,30 +1397,29 @@ async fn list_users_5xx_returns_unavailable() {
 // Tasks 8+9 — cursor codec round-trips and list_users tiebreaker
 // -----------------------------------------------------------------
 
-// `cursor_round_trip_first_page_has_null_tiebreaker` (pre-CursorV1)
-// was retired with the CursorV1 migration: the new envelope always
-// carries a concrete `(last_created_at, last_user_id)` pair (the
-// plugin only emits a cursor when `has_more=true`, which means at
-// least one row was emitted and its tiebreaker is known). The
-// "first page" case is now "no cursor at all" — covered implicitly
-// by every test that calls `list_users_inner` without a cursor.
+// The plugin only emits a cursor when `has_more=true`, which means at
+// least one row was emitted and its key tuple is known. The "first
+// page" case is "no cursor at all" — covered implicitly by every test
+// that calls `list_users_inner` without a cursor.
+
+/// Effective order for a request that carries no `order`.
+fn default_order() -> ListUsersOrder {
+    ListUsersOrder::resolve(None).expect("default order is supported")
+}
 
 #[test]
 fn cursor_round_trip_with_tiebreaker() {
-    use uuid::uuid;
     let c = ListUsersCursor {
         filter_hash: "abc123".into(),
-        last_created_at: 1_716_400_000_000_i64,
-        last_user_id: uuid!("9c4a6b2e-0000-0000-0000-000000000001"),
+        last_key: vec![
+            "alice".into(),
+            "9c4a6b2e-0000-0000-0000-000000000001".into(),
+        ],
+        truncated: Vec::new(),
     };
-    let encoded = UserFacade::encode_cursor(&c);
-    let decoded = UserFacade::decode_cursor(&encoded).expect("decodes");
-    assert_eq!(decoded.last_created_at, 1_716_400_000_000_i64);
-    assert_eq!(
-        decoded.last_user_id,
-        uuid!("9c4a6b2e-0000-0000-0000-000000000001"),
-    );
-    assert_eq!(decoded.filter_hash, "abc123");
+    let encoded = UserFacade::encode_cursor(&c, &default_order());
+    let decoded = UserFacade::decode_cursor(&encoded, &default_order()).expect("decodes");
+    assert_eq!(decoded, c);
 }
 
 /// `CursorV1` envelope is wire-compatible with `toolkit_odata::CursorV1`:
@@ -1423,25 +1427,73 @@ fn cursor_round_trip_with_tiebreaker() {
 /// parse our cursor through the same `CursorV1::decode` path it uses
 /// for tenant `list_children`. Verify the plugin's emitted cursor
 /// decodes cleanly as `CursorV1` and carries the documented
-/// `(o, s, d)` triple plus our `(k[0], k[1])` tiebreaker.
+/// `(o, s, d)` triple plus the `(username, id)` key tuple.
 #[test]
 fn cursor_wire_shape_is_cursor_v1_compatible() {
     use toolkit_odata::{CursorV1, SortDir};
-    use uuid::uuid;
     let c = ListUsersCursor {
         filter_hash: "abc123".into(),
-        last_created_at: 1_716_400_000_000_i64,
-        last_user_id: uuid!("9c4a6b2e-0000-0000-0000-000000000001"),
+        last_key: vec![
+            "alice".into(),
+            "9c4a6b2e-0000-0000-0000-000000000001".into(),
+        ],
+        truncated: Vec::new(),
     };
-    let encoded = UserFacade::encode_cursor(&c);
+    let encoded = UserFacade::encode_cursor(&c, &default_order());
     let parsed = CursorV1::decode(&encoded).expect("encoded cursor MUST be a valid CursorV1");
     assert_eq!(parsed.o, SortDir::Asc);
-    assert_eq!(parsed.s, "+created_at,+id");
+    assert_eq!(parsed.s, "+username,+id");
     assert_eq!(parsed.d, "fwd");
     assert_eq!(parsed.f.as_deref(), Some("abc123"));
-    assert_eq!(parsed.k.len(), 2);
-    assert_eq!(parsed.k[0], "1716400000000");
-    assert_eq!(parsed.k[1], "9c4a6b2e-0000-0000-0000-000000000001");
+    assert_eq!(parsed.k, c.last_key);
+}
+
+/// The order a cursor pins is caller input to AM: on a continuation
+/// request the users handler recovers it from `s` and refuses any field
+/// outside `IdpUserFilterField` with a 400. Every order the plugin can
+/// emit must therefore name allow-listed fields only — `created_at`
+/// pinned here broke paging past page 1.
+#[test]
+fn cursor_order_pin_names_only_allow_listed_fields() {
+    use toolkit_odata::{CursorV1, ODataOrderBy, OrderKey, SortDir};
+    let allowed: Vec<&str> = IdpUserFilterField::FIELDS
+        .iter()
+        .map(FilterField::name)
+        .collect();
+    let mut orders = vec![None];
+    for field in IdpUserFilterField::FIELDS {
+        for dir in [SortDir::Asc, SortDir::Desc] {
+            orders.push(Some(ODataOrderBy(vec![OrderKey {
+                field: field.name().to_owned(),
+                dir,
+            }])));
+        }
+    }
+    for requested in orders {
+        let order = ListUsersOrder::resolve(requested.as_ref()).expect("allow-listed order");
+        let encoded = UserFacade::encode_cursor(
+            &ListUsersCursor {
+                filter_hash: "abc123".into(),
+                last_key: vec![String::new(); order.keys.len()],
+                truncated: Vec::new(),
+            },
+            &order,
+        );
+        let parsed = CursorV1::decode(&encoded).expect("valid CursorV1");
+        let recovered = ODataOrderBy::from_signed_tokens(&parsed.s).expect("signed tokens parse");
+        for key in &recovered.0 {
+            assert!(
+                allowed.contains(&key.field.as_str()),
+                "cursor for {requested:?} pins `{}`, which AM rejects (allowed: {allowed:?})",
+                key.field,
+            );
+        }
+        assert_eq!(
+            recovered.0.last().map(|k| k.field.as_str()),
+            Some("id"),
+            "the pinned order must end in the `id` tiebreaker",
+        );
+    }
 }
 
 /// Cursors emitted under one `(o, s)` order-pin MUST be rejected
@@ -1452,15 +1504,37 @@ fn cursor_wire_shape_is_cursor_v1_compatible() {
 fn cursor_decode_rejects_mismatched_order_pin() {
     use toolkit_odata::{CursorV1, SortDir};
     let forged = CursorV1 {
-        k: vec!["1716400000000".into(), Uuid::nil().to_string()],
-        o: SortDir::Desc,      // mismatched
-        s: "+username".into(), // mismatched
+        k: vec!["alice".into(), Uuid::nil().to_string()],
+        o: SortDir::Desc,          // mismatched
+        s: "-username,+id".into(), // mismatched
         f: Some("abc123".into()),
         d: "fwd".into(),
     }
     .encode()
     .expect("forged cursor encodes");
-    let err = UserFacade::decode_cursor(&forged).expect_err("mismatched order rejected");
+    let err = UserFacade::decode_cursor(&forged, &default_order())
+        .expect_err("mismatched order rejected");
+    assert!(matches!(err, PluginError::UserOpRejected { .. }));
+}
+
+/// A cursor minted by a build that pinned the fixed
+/// `(createdTimestamp ASC, id ASC)` order carries a creation-time
+/// position, which is meaningless in a `username` walk. Reject it as
+/// `invalid cursor` so the caller restarts instead of skipping rows.
+#[test]
+fn cursor_decode_rejects_created_at_order_pin() {
+    use toolkit_odata::{CursorV1, SortDir};
+    let stale = CursorV1 {
+        k: vec!["1716400000000".into(), Uuid::nil().to_string()],
+        o: SortDir::Asc,
+        s: "+created_at,+id".into(),
+        f: Some("abc123".into()),
+        d: "fwd".into(),
+    }
+    .encode()
+    .expect("stale cursor encodes");
+    let err = UserFacade::decode_cursor(&stale, &default_order())
+        .expect_err("created_at order pin rejected");
     assert!(matches!(err, PluginError::UserOpRejected { .. }));
 }
 
@@ -1473,15 +1547,15 @@ fn cursor_decode_rejects_mismatched_order_pin() {
 fn cursor_decode_rejects_missing_filter_hash() {
     use toolkit_odata::{CursorV1, SortDir};
     let forged = CursorV1 {
-        k: vec!["1716400000000".into(), Uuid::nil().to_string()],
+        k: vec!["alice".into(), Uuid::nil().to_string()],
         o: SortDir::Asc,
-        s: "+created_at,+id".into(),
+        s: "+username,+id".into(),
         f: None, // missing
         d: "fwd".into(),
     }
     .encode()
     .expect("forged cursor encodes");
-    let err = UserFacade::decode_cursor(&forged).expect_err("missing f rejected");
+    let err = UserFacade::decode_cursor(&forged, &default_order()).expect_err("missing f rejected");
     assert!(matches!(err, PluginError::UserOpRejected { .. }));
 }
 
@@ -1532,13 +1606,17 @@ async fn list_users_emits_cursor_when_more_results_exist() {
             page.page_info.next_cursor.is_some(),
             "next_cursor must be set when more results exist",
         );
-        let next =
-            UserFacade::decode_cursor(page.page_info.next_cursor.as_ref().unwrap())
-                .expect("decodes");
-        assert_eq!(next.last_created_at, 1_716_400_001_000_i64);
+        let next = UserFacade::decode_cursor(
+            page.page_info.next_cursor.as_ref().unwrap(),
+            &default_order(),
+        )
+        .expect("decodes");
         assert_eq!(
-            next.last_user_id,
-            uuid!("9c4a6b2e-0000-0000-0000-000000000002"),
+            next.last_key,
+            vec![
+                "u2".to_owned(),
+                uuid!("9c4a6b2e-0000-0000-0000-000000000002").to_string(),
+            ],
         );
     })
     .await;
@@ -1759,6 +1837,502 @@ async fn list_users_filter_finds_member_past_first_page() {
             vec![target],
             "username filter must find a member living past the first KC window",
         );
+    })
+    .await;
+}
+
+/// Order AM forwards on a users continuation request: recovered from the
+/// cursor's `s` (the `OData` extractor rejects `cursor + $orderby`),
+/// checked against the `IdpUserFilterField` allow-list exactly as the
+/// users handler's `ensure_known_order_fields` does (a miss there is the
+/// 400 `invalid cursor order: unknown field`), then given the `id`
+/// tiebreaker the AM service appends before SPI dispatch.
+fn am_continuation_order(cursor: &str) -> ODataOrderBy {
+    let parsed = CursorV1::decode(cursor).expect("AM's extractor decodes the cursor");
+    let order =
+        ODataOrderBy::from_signed_tokens(&parsed.s).expect("AM recovers the order from `s`");
+    let allowed: Vec<&str> = IdpUserFilterField::FIELDS
+        .iter()
+        .map(FilterField::name)
+        .collect();
+    for key in &order.0 {
+        assert!(
+            allowed.contains(&key.field.as_str()),
+            "AM's users handler rejects this cursor with 400: unknown field `{}` (allowed: {allowed:?})",
+            key.field,
+        );
+    }
+    order.ensure_tiebreaker("id", SortDir::Asc)
+}
+
+/// Walk every page the way AM drives the plugin: page 1 with the order
+/// AM injects, each later page with the order AM recovers from the
+/// previous `next_cursor`. Returns the ids in visit order plus every
+/// cursor's `s` pin.
+async fn walk_like_am(
+    facade: &UserFacade,
+    tenant_id: Uuid,
+    metadata: Option<serde_json::Value>,
+    top: u32,
+    first_order: ODataOrderBy,
+) -> (Vec<Uuid>, Vec<String>) {
+    let ctx = build_system_ctx(Uuid::nil());
+    let mut visited = Vec::new();
+    let mut pins = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let order = match cursor.as_deref() {
+            Some(c) => am_continuation_order(c),
+            None => first_order.clone(),
+        };
+        let req = list_users_req(
+            tenant_id,
+            metadata.clone(),
+            IdpUserPagination::new(top, cursor.clone()).expect("valid pagination"),
+            None,
+        )
+        .with_order(order);
+        let page = facade
+            .list_users_inner(&ctx, &req)
+            .await
+            .expect("every page of the walk must succeed");
+        visited.extend(page.items.iter().map(|u| u.id));
+        match page.page_info.next_cursor {
+            Some(next) => {
+                pins.push(CursorV1::decode(&next).expect("valid CursorV1").s);
+                cursor = Some(next);
+            }
+            None => return (visited, pins),
+        }
+        assert!(visited.len() <= 100, "walk does not terminate");
+    }
+}
+
+#[tokio::test]
+async fn list_users_walk_through_am_continuation_visits_every_user() {
+    // regression: the plugin pinned `+created_at,+id` in every cursor,
+    // which AM's users handler rejects on the continuation request
+    // (`created_at` is not an `IdpUserFilterField`), so no caller could
+    // list past page 1. The walk below drives page 2+ with the order AM
+    // recovers from the cursor and must reach every member exactly once,
+    // in `username` order (creation order deliberately disagrees).
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+
+        let group_uuid = Uuid::new_v4();
+        let ids: Vec<Uuid> = (1..=5)
+            .map(|n| Uuid::parse_str(&format!("dddddddd-0000-0000-0000-00000000000{n}")).unwrap())
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/admin/realms/platform/groups/{group_uuid}/members"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": ids[3].to_string(), "username": "dave", "createdTimestamp": 1000_i64},
+                {"id": ids[0].to_string(), "username": "alice", "createdTimestamp": 5000_i64},
+                {"id": ids[4].to_string(), "username": "erin", "createdTimestamp": 2000_i64},
+                {"id": ids[2].to_string(), "username": "carol", "createdTimestamp": 4000_i64},
+                {"id": ids[1].to_string(), "username": "bob", "createdTimestamp": 3000_i64},
+            ])))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let metadata = Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            group_uuid,
+            None,
+        ));
+        // AM injects `username ASC` + the `id ASC` tiebreaker on page 1.
+        let injected = ODataOrderBy(vec![OrderKey {
+            field: "username".into(),
+            dir: SortDir::Asc,
+        }])
+        .ensure_tiebreaker("id", SortDir::Asc);
+
+        let (visited, pins) = walk_like_am(&facade, Uuid::new_v4(), metadata, 2, injected).await;
+        assert_eq!(visited, ids, "every member once, in username order");
+        assert_eq!(pins, vec!["+username,+id", "+username,+id"]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn list_users_honors_requested_order_across_pages() {
+    // DESIGN "Interactions & Sequences": ordering is honored, not fixed.
+    // `last_name DESC` with a tie (broken by `id ASC`) and an absent
+    // value (projects as "", so it sorts last under DESC).
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+
+        let group_uuid = Uuid::new_v4();
+        let smith_a = Uuid::parse_str("eeeeeeee-0000-0000-0000-000000000001").unwrap();
+        let smith_b = Uuid::parse_str("eeeeeeee-0000-0000-0000-000000000002").unwrap();
+        let jones = Uuid::parse_str("eeeeeeee-0000-0000-0000-000000000003").unwrap();
+        let nameless = Uuid::parse_str("eeeeeeee-0000-0000-0000-000000000004").unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/admin/realms/platform/groups/{group_uuid}/members"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": nameless.to_string(), "username": "a", "lastName": ""},
+                {"id": jones.to_string(), "username": "b", "lastName": "Jones"},
+                {"id": smith_b.to_string(), "username": "c", "lastName": "Smith"},
+                {"id": smith_a.to_string(), "username": "d", "lastName": "Smith"},
+            ])))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let metadata = Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            group_uuid,
+            None,
+        ));
+        let requested = ODataOrderBy(vec![OrderKey {
+            field: "last_name".into(),
+            dir: SortDir::Desc,
+        }])
+        .ensure_tiebreaker("id", SortDir::Asc);
+
+        let (visited, pins) = walk_like_am(&facade, Uuid::new_v4(), metadata, 1, requested).await;
+        assert_eq!(visited, vec![smith_a, smith_b, jones, nameless]);
+        assert_eq!(pins, vec!["-last_name,+id"; 3]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn list_users_rejects_order_field_outside_allow_list() {
+    // DESIGN "Interactions & Sequences": a key outside
+    // `IdpUserFilterField` arriving over the SPI is
+    // `UnsupportedOperation` before any provider call. No KC mocks
+    // are mounted — reaching KC would surface as `UserOpUnavailable`.
+    let server = MockServer::start().await;
+    let facade = build_facade(&server);
+    let ctx = build_system_ctx(Uuid::nil());
+    let req = list_users_req(
+        Uuid::new_v4(),
+        Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            Uuid::new_v4(),
+            None,
+        )),
+        IdpUserPagination::new(2, None).expect("valid pagination"),
+        None,
+    )
+    .with_order(ODataOrderBy(vec![OrderKey {
+        field: "created_at".into(),
+        dir: SortDir::Asc,
+    }]));
+
+    let err = facade
+        .list_users_inner(&ctx, &req)
+        .await
+        .expect_err("created_at is not an order key");
+    assert!(
+        matches!(err, PluginError::UserOpUnsupported { ref detail } if detail.contains("created_at")),
+        "expected UserOpUnsupported naming created_at, got {err:?}",
+    );
+}
+
+#[tokio::test]
+async fn list_users_rejects_cursor_issued_under_other_order() {
+    // Changing the order mid-walk invalidates the cursor: its key tuple
+    // is a position in the old order, not the new one.
+    let server = MockServer::start().await;
+    let tenant_uuid = Uuid::new_v4();
+    let cursor = UserFacade::encode_cursor(
+        &ListUsersCursor {
+            filter_hash: UserFacade::filter_hash(
+                tenant_uuid,
+                "platform",
+                None,
+                &StringMatcher::Always,
+            ),
+            last_key: vec!["alice".into(), Uuid::nil().to_string()],
+            truncated: Vec::new(),
+        },
+        &default_order(),
+    );
+
+    let facade = build_facade(&server);
+    let ctx = build_system_ctx(Uuid::nil());
+    let req = list_users_req(
+        tenant_uuid,
+        Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            Uuid::new_v4(),
+            None,
+        )),
+        IdpUserPagination::new(2, Some(cursor)).expect("valid pagination"),
+        None,
+    )
+    .with_order(
+        ODataOrderBy(vec![OrderKey {
+            field: "email".into(),
+            dir: SortDir::Asc,
+        }])
+        .ensure_tiebreaker("id", SortDir::Asc),
+    );
+
+    let err = facade
+        .list_users_inner(&ctx, &req)
+        .await
+        .expect_err("order drift must reject the cursor");
+    assert!(
+        matches!(err, PluginError::UserOpRejected { ref detail } if detail == "invalid cursor"),
+        "expected UserOpRejected{{ detail == 'invalid cursor' }}, got {err:?}",
+    );
+}
+
+/// `ORDER BY display_name, first_name, last_name, id` — every profile
+/// key that can carry a long value, so the full tuple overflows.
+fn long_profile_order() -> ODataOrderBy {
+    ODataOrderBy(
+        ["display_name", "first_name", "last_name"]
+            .into_iter()
+            .map(|field| OrderKey {
+                field: field.into(),
+                dir: SortDir::Asc,
+            })
+            .collect(),
+    )
+    .ensure_tiebreaker("id", SortDir::Asc)
+}
+
+#[test]
+fn bounded_cursor_fits_continuation_limit_for_worst_case_keys() {
+    // Every allow-listed key at once, each profile value 255 four-byte
+    // chars (emoji) or 255 quotes (each JSON-escaped to two bytes): the full
+    // tuple is far past `MAX_CURSOR_LEN`, so values must be cut.
+    let mut keys: Vec<OrderKey> = [
+        "display_name",
+        "first_name",
+        "last_name",
+        "username",
+        "email",
+    ]
+    .into_iter()
+    .map(|field| OrderKey {
+        field: field.into(),
+        dir: SortDir::Desc,
+    })
+    .collect();
+    keys.push(OrderKey {
+        field: "id".into(),
+        dir: SortDir::Asc,
+    });
+    let order = ListUsersOrder::resolve(Some(&ODataOrderBy(keys))).expect("allow-listed order");
+    let id = Uuid::new_v4().to_string();
+    for long in ["\u{1f600}".repeat(255), "\"".repeat(255)] {
+        let last_key = vec![
+            format!("{long} {long}"),
+            long.clone(),
+            long.clone(),
+            long.clone(),
+            long.clone(),
+            id.clone(),
+        ];
+        let encoded = UserFacade::bounded_cursor("abc123", &last_key, &order);
+        IdpUserPagination::new(1, Some(encoded.clone()))
+            .expect("AM must accept the cursor the plugin emits");
+
+        let decoded = UserFacade::decode_cursor(&encoded, &order).expect("decodes");
+        assert_eq!(decoded.filter_hash, "abc123");
+        assert!(!decoded.truncated.is_empty(), "the full tuple does not fit");
+        assert!(!decoded.truncated.contains(&5), "the id value is never cut");
+        assert_eq!(decoded.last_key[5], id);
+        for (stored, full) in decoded.last_key.iter().zip(&last_key) {
+            assert!(full.starts_with(stored.as_str()));
+        }
+    }
+}
+
+#[test]
+fn bounded_cursor_keeps_full_key_when_it_fits() {
+    let last_key = vec!["alice".to_owned(), Uuid::nil().to_string()];
+    let encoded = UserFacade::bounded_cursor("abc123", &last_key, &default_order());
+    assert_eq!(
+        CursorV1::decode(&encoded).expect("valid CursorV1").k,
+        last_key,
+        "no truncation mask on a cursor that fits",
+    );
+}
+
+#[test]
+fn cursor_decode_rejects_malformed_truncation_mask() {
+    // Default order is `(username, id)`: a mask must have one flag per
+    // key, flag only `username`, and flag at least one key.
+    for mask in ["01", "00", "1", "100", "x0"] {
+        let forged = CursorV1 {
+            k: vec!["ali".into(), Uuid::nil().to_string(), mask.into()],
+            o: SortDir::Asc,
+            s: "+username,+id".into(),
+            f: Some("abc123".into()),
+            d: "fwd".into(),
+        }
+        .encode()
+        .expect("forged cursor encodes");
+        let err = UserFacade::decode_cursor(&forged, &default_order())
+            .expect_err("malformed mask rejected");
+        assert!(
+            matches!(err, PluginError::UserOpRejected { .. }),
+            "mask {mask:?}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_users_walks_long_unicode_keys_within_cursor_limit() {
+    // regression: the cursor carried every sort value in full, so long
+    // CJK names across `display_name, first_name, last_name` produced a
+    // ~4.3 KB `next_cursor` that AM's `IdpUserPagination::new` rejects
+    // (`CursorTooLong`, max 4096) — following it returned 400. The rows
+    // differ only in their last character, past the point where the
+    // bounded cursor cuts `display_name`, so page 2+ must resume from
+    // the cursor's row by id rather than by the truncated values.
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+
+        let group_uuid = Uuid::new_v4();
+        let first_name = "\u{540d}".repeat(255);
+        let ids: Vec<Uuid> = (1..=3)
+            .map(|n| Uuid::parse_str(&format!("ffffffff-0000-0000-0000-00000000000{n}")).unwrap())
+            .collect();
+        // Last chars U+4E00 < U+4E01 < U+4E03 (three CJK numerals);
+        // listed out of order.
+        let members: Vec<serde_json::Value> = [(2, '\u{4e03}'), (0, '\u{4e00}'), (1, '\u{4e01}')]
+            .into_iter()
+            .map(|(idx, last_char)| {
+                serde_json::json!({
+                    "id": ids[idx].to_string(),
+                    "username": format!("user{idx}"),
+                    "firstName": first_name,
+                    "lastName": format!("{}{last_char}", "\u{59d3}".repeat(254)),
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/admin/realms/platform/groups/{group_uuid}/members"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(members))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let tenant_id = Uuid::new_v4();
+        let metadata = Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            group_uuid,
+            None,
+        ));
+
+        let first_page = facade
+            .list_users_inner(
+                &build_system_ctx(Uuid::nil()),
+                &list_users_req(
+                    tenant_id,
+                    metadata.clone(),
+                    IdpUserPagination::new(1, None).expect("valid pagination"),
+                    None,
+                )
+                .with_order(long_profile_order()),
+            )
+            .await
+            .expect("page 1");
+        let next = first_page.page_info.next_cursor.expect("more rows remain");
+        assert!(next.len() <= IdpUserPagination::MAX_CURSOR_LEN);
+        assert_eq!(
+            CursorV1::decode(&next).expect("valid CursorV1").k.len(),
+            5,
+            "four key values plus the truncation mask",
+        );
+
+        // `walk_like_am` feeds every cursor through
+        // `IdpUserPagination::new`, which enforces `MAX_CURSOR_LEN`.
+        let (visited, pins) =
+            walk_like_am(&facade, tenant_id, metadata, 1, long_profile_order()).await;
+        assert_eq!(visited, ids, "every member once, in display_name order");
+        assert_eq!(pins, vec!["+display_name,+first_name,+last_name,+id"; 2]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn list_users_truncated_cursor_without_its_row_resumes_from_stored_prefix() {
+    // The cursor's row left the group between pages, so its full key is
+    // gone. Rows clearly before the stored prefix stay skipped; rows
+    // that extend the prefix cannot be placed and are re-emitted rather
+    // than risk being skipped.
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+
+        let group_uuid = Uuid::new_v4();
+        let before = Uuid::new_v4();
+        let equal_to_prefix = Uuid::new_v4();
+        let extends_a = Uuid::new_v4();
+        let extends_b = Uuid::new_v4();
+        let after = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/admin/realms/platform/groups/{group_uuid}/members"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": after.to_string(), "username": "zed"},
+                {"id": extends_b.to_string(), "username": "mmmy"},
+                {"id": before.to_string(), "username": "alice"},
+                {"id": extends_a.to_string(), "username": "mmmx"},
+                {"id": equal_to_prefix.to_string(), "username": "mmm"},
+            ])))
+            .mount(&server)
+            .await;
+
+        let tenant_id = Uuid::new_v4();
+        let cursor = UserFacade::encode_cursor(
+            &ListUsersCursor {
+                filter_hash: UserFacade::filter_hash(
+                    tenant_id,
+                    "platform",
+                    None,
+                    &StringMatcher::Always,
+                ),
+                last_key: vec!["mmm".into(), Uuid::new_v4().to_string()],
+                truncated: vec![0],
+            },
+            &default_order(),
+        );
+
+        let facade = build_facade(&server);
+        let page = facade
+            .list_users_inner(
+                &build_system_ctx(Uuid::nil()),
+                &list_users_req(
+                    tenant_id,
+                    Some(make_metadata(
+                        "platform",
+                        RealmBinding::Shared,
+                        group_uuid,
+                        None,
+                    )),
+                    IdpUserPagination::new(10, Some(cursor)).expect("valid pagination"),
+                    None,
+                ),
+            )
+            .await
+            .expect("continuation succeeds");
+        let ids: Vec<Uuid> = page.items.iter().map(|u| u.id).collect();
+        assert_eq!(ids, vec![extends_a, extends_b, after]);
     })
     .await;
 }
@@ -2018,6 +2592,229 @@ fn build_string_matcher_rejects_in_list() {
 }
 
 #[test]
+fn id_set_matcher_is_exact_and_hashes_the_normalized_set() {
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    let node = FilterNode::InList {
+        field: IdpUserFilterField::Id,
+        values: vec![
+            ODataValue::Uuid(second),
+            ODataValue::Uuid(first),
+            ODataValue::Uuid(second),
+        ],
+    };
+    let matcher = UserFacade::build_string_matcher(Some(&node)).expect("UUID set supported");
+    assert_eq!(
+        matcher,
+        StringMatcher::IdSet([first, second].into_iter().collect())
+    );
+    let user: UserRep =
+        serde_json::from_value(serde_json::json!({"id": first, "username": "alice"}))
+            .expect("user");
+    assert!(matcher.matches(&user));
+    let unrelated: UserRep =
+        serde_json::from_value(serde_json::json!({"id": Uuid::from_u128(3), "username": "alice"}))
+            .expect("user");
+    assert!(!matcher.matches(&unrelated));
+    let reordered = StringMatcher::IdSet([second, first].into_iter().collect());
+    let hash = UserFacade::filter_hash(Uuid::nil(), "platform", None, &matcher);
+    assert_eq!(
+        hash,
+        UserFacade::filter_hash(Uuid::nil(), "platform", None, &reordered)
+    );
+    assert_ne!(
+        hash,
+        UserFacade::filter_hash(
+            Uuid::nil(),
+            "platform",
+            None,
+            &StringMatcher::IdSet([first].into_iter().collect())
+        )
+    );
+    assert!(!StringMatcher::IdSet(std::collections::BTreeSet::new()).matches(&user));
+    let and = FilterNode::and(vec![
+        node.clone(),
+        FilterNode::binary(
+            IdpUserFilterField::Username,
+            FilterOp::Eq,
+            lit_string("bob"),
+        ),
+    ]);
+    assert!(
+        !UserFacade::build_string_matcher(Some(&and))
+            .expect("AND")
+            .matches(&user)
+    );
+    let or = FilterNode::or(vec![
+        node,
+        FilterNode::binary(
+            IdpUserFilterField::Username,
+            FilterOp::Eq,
+            lit_string("bob"),
+        ),
+    ]);
+    assert!(
+        UserFacade::build_string_matcher(Some(&or))
+            .expect("OR")
+            .matches(&user)
+    );
+}
+
+#[test]
+fn id_set_matcher_refuses_non_uuid_values_without_widening_the_filter() {
+    let node = FilterNode::InList {
+        field: IdpUserFilterField::Id,
+        values: vec![
+            ODataValue::Uuid(Uuid::from_u128(1)),
+            lit_string("not-a-uuid"),
+        ],
+    };
+    assert!(matches!(
+        UserFacade::build_string_matcher(Some(&node)),
+        Err(PluginError::UserOpUnsupported { .. })
+    ));
+}
+
+#[tokio::test]
+async fn batch_user_ids_share_one_membership_read_and_exclude_unrequested_users() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let group = Uuid::new_v4();
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let absent = Uuid::from_u128(4);
+        Mock::given(method("GET"))
+            .and(path(format!("/admin/realms/platform/groups/{group}/members")))
+            .and(query_param("first", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": first, "username": "alice", "createdTimestamp": 1000},
+                {"id": second, "username": "bob", "firstName": "Bob", "lastName": "Builder", "createdTimestamp": 2000},
+                {"id": Uuid::from_u128(3), "username": "unrequested", "createdTimestamp": 3000}
+            ])))
+            .expect(1)
+            .mount(&server).await;
+        let query = account_management_sdk::ListUsersQuery::with_ids([second, first, absent]).expect("batch");
+        let req = list_users_req(Uuid::new_v4(), Some(make_metadata("platform", RealmBinding::Shared, group, None)), query.pagination, None)
+            .with_filter(query.filter.expect("ID set"));
+        let page = build_facade(&server).list_users_inner(&build_system_ctx(Uuid::nil()), &req).await.expect("batch lookup");
+        assert_eq!(page.items.iter().map(|user| user.id).collect::<Vec<_>>(), [first, second]);
+        assert_eq!(page.items[1].display_name.as_deref(), Some("Bob Builder"));
+        assert!(page.page_info.next_cursor.is_none());
+        server.verify().await;
+    }).await;
+}
+
+#[tokio::test]
+async fn membership_safety_cap_returns_unavailable_not_false_absence() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let group = Uuid::new_v4();
+        let batch: Vec<_> = (1..=200).map(|id| serde_json::json!({"id": Uuid::from_u128(id), "username": "member", "createdTimestamp": 1000})).collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/admin/realms/platform/groups/{group}/members")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(batch))
+            .expect(u64::try_from(MEMBERS_DRAIN_HARD_CAP.div_ceil(200)).expect("request count"))
+            .mount(&server).await;
+        let query = account_management_sdk::ListUsersQuery::with_ids([Uuid::from_u128(201)]).expect("batch");
+        let req = list_users_req(Uuid::new_v4(), Some(make_metadata("platform", RealmBinding::Shared, group, None)), query.pagination, None)
+            .with_filter(query.filter.expect("ID set"));
+        let result = build_facade(&server).list_users_inner(&build_system_ctx(Uuid::nil()), &req).await;
+        assert!(matches!(result, Err(PluginError::UserOpUnavailable { .. })));
+        server.verify().await;
+    }).await;
+}
+
+/// ID-set cursors resume the same normalized set and refuse a changed set
+/// before any provider call, even when both sets have the same cardinality.
+#[tokio::test]
+async fn batch_user_ids_paginate_and_pin_the_normalized_filter() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant = Uuid::new_v4();
+        let group = Uuid::new_v4();
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/admin/realms/platform/groups/{group}/members"
+            )))
+            .and(query_param("first", "0"))
+            .and(query_param("max", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": ids[2], "username": "unrequested", "createdTimestamp": 500},
+                {"id": ids[0], "username": "alice", "createdTimestamp": 1000},
+                {"id": ids[1], "username": "bob", "createdTimestamp": 1000}
+            ])))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(tenant);
+        let metadata = Some(make_metadata("platform", RealmBinding::Shared, group, None));
+        let query =
+            account_management_sdk::ListUsersQuery::with_ids([ids[0], ids[1]]).expect("batch");
+        let first_request = list_users_req(
+            tenant,
+            metadata.clone(),
+            IdpUserPagination::new(1, None).expect("page"),
+            None,
+        )
+        .with_filter(query.filter.expect("ID filter"));
+        let first = facade
+            .list_users_inner(&ctx, &first_request)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first.items.iter().map(|user| user.id).collect::<Vec<_>>(),
+            [ids[0]]
+        );
+        let cursor = first.page_info.next_cursor.expect("continuation");
+
+        let reordered = FilterNode::InList {
+            field: IdpUserFilterField::Id,
+            values: vec![
+                ODataValue::Uuid(ids[1]),
+                ODataValue::Uuid(ids[0]),
+                ODataValue::Uuid(ids[1]),
+            ],
+        };
+        let second_request = list_users_req(
+            tenant,
+            metadata.clone(),
+            IdpUserPagination::new(1, Some(cursor.clone())).expect("page"),
+            None,
+        )
+        .with_filter(reordered);
+        let second = facade
+            .list_users_inner(&ctx, &second_request)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second.items.iter().map(|user| user.id).collect::<Vec<_>>(),
+            [ids[1]]
+        );
+        assert!(second.page_info.next_cursor.is_none());
+
+        let changed =
+            account_management_sdk::ListUsersQuery::with_ids([ids[0], ids[2]]).expect("batch");
+        let changed_request = list_users_req(
+            tenant,
+            metadata,
+            IdpUserPagination::new(1, Some(cursor)).expect("page"),
+            None,
+        )
+        .with_filter(changed.filter.expect("ID filter"));
+        assert!(matches!(
+            facade.list_users_inner(&ctx, &changed_request).await,
+            Err(PluginError::UserOpRejected { .. })
+        ));
+    })
+    .await;
+}
+
+#[test]
 fn build_string_matcher_rejects_not() {
     let inner = FilterNode::binary(
         IdpUserFilterField::Username,
@@ -2056,7 +2853,6 @@ fn make_rep(
 ) -> UserRep {
     UserRep {
         id,
-        created_timestamp: 0,
         username: Some(username.into()),
         email: email.map(str::to_owned),
         first_name: first.map(str::to_owned),
@@ -2352,4 +3148,1062 @@ fn kc_password_policy_ignores_other_400s() {
     assert!(!is_kc_password_policy_reject(
         r#"{"error":"unknown_error"}"#
     ));
+}
+
+// -----------------------------------------------------------------
+// update_user
+// -----------------------------------------------------------------
+
+fn update_user_req(
+    tenant_id: Uuid,
+    metadata: Option<serde_json::Value>,
+    user_id: Uuid,
+    patch: IdpUserPatch,
+) -> IdpUpdateUserRequest {
+    IdpUpdateUserRequest::new(
+        IdpTenantContext::new(
+            tenant_id,
+            "stub-tenant",
+            GtsTypeId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+            metadata,
+        ),
+        user_id,
+        patch,
+    )
+}
+
+/// Mount `GET /users/{id}` returning a representation bound to
+/// `bound_tenant`. Serves BOTH reads in the update saga: the binding
+/// check (which needs `attributes.tenant_id`) and the post-update
+/// projection (which needs the profile fields) — unknown keys are
+/// ignored by each decoder.
+async fn mount_user_get(
+    server: &MockServer,
+    user_id: Uuid,
+    bound_tenant: Uuid,
+    profile: serde_json::Value,
+) {
+    let mut body = serde_json::json!({
+        "id": user_id.to_string(),
+        "attributes": { "tenant_id": [bound_tenant.to_string()] },
+    });
+    let extra = profile.as_object().expect("profile must be a JSON object");
+    let base = body.as_object_mut().expect("body is a JSON object");
+    for (k, v) in extra {
+        base.insert(k.clone(), v.clone());
+    }
+    Mock::given(method("GET"))
+        .and(path(format!("/admin/realms/platform/users/{user_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn update_user_happy_path_projects_the_reread_representation() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({
+                "username": "alice",
+                "email": "alice@example.com",
+                "firstName": "Alice",
+                "lastName": "Partner",
+            }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.first_name = Some(Some("Alice".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let user = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect("update_user ok");
+        assert_eq!(user.id, user_uuid);
+        assert_eq!(user.username, "alice");
+        // The pair is projected alongside the composed display name: a
+        // caller that patches `first_name` must be able to read it back.
+        assert_eq!(user.first_name.as_deref(), Some("Alice"));
+        assert_eq!(user.last_name.as_deref(), Some("Partner"));
+        assert_eq!(user.display_name.as_deref(), Some("Alice Partner"));
+    })
+    .await;
+}
+
+/// Cross-tenant PATCH is the BOLA case for this endpoint: users live in
+/// KC, so the `AuthZ` SQL clamp that protects AM-DB writes never sees this
+/// path and the stored `tenant_id` attribute is the only defence. A user
+/// bound to another tenant MUST look exactly like a missing user — a
+/// distinguishable error would turn the endpoint into a cross-tenant
+/// existence oracle — and no write may be issued.
+#[tokio::test]
+async fn update_user_cross_tenant_is_not_found_and_issues_no_write() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let caller_tenant = Uuid::new_v4();
+        let owner_tenant = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        // The user exists, but belongs to a different tenant.
+        mount_user_get(
+            &server,
+            user_uuid,
+            owner_tenant,
+            serde_json::json!({ "username": "victim" }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(Some("attacker@example.com".to_owned()));
+        let req = update_user_req(
+            caller_tenant,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("cross-tenant update must fail");
+        assert!(
+            matches!(err, PluginError::UserOpNotFound { .. }),
+            "cross-tenant update MUST be indistinguishable from absent, got {err:?}"
+        );
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            !received.iter().any(|r| r.method.as_str() == "PUT"),
+            "no write may be issued once the binding check fails"
+        );
+    })
+    .await;
+}
+
+/// `display_name` is derived from KC's `firstName`/`lastName` pair and is
+/// not a writable provider attribute, so it is refused before any KC
+/// round trip rather than silently dropped.
+#[tokio::test]
+async fn update_user_display_name_is_refused_without_touching_kc() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.display_name = Some(Some("Alice P.".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("display_name is not writable");
+        assert!(
+            matches!(err, PluginError::UserOpFieldNotWritable { .. }),
+            "expected FieldNotWritable(display_name), got {err:?}"
+        );
+        if let PluginError::UserOpFieldNotWritable { fields, .. } = &err {
+            assert_eq!(*fields, vec![IdpUserAttribute::DisplayName]);
+        }
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            !received
+                .iter()
+                .any(|r| r.url.path().contains("/admin/realms/")),
+            "a statically-unwritable field must cost no KC round trip"
+        );
+    })
+    .await;
+}
+
+/// KC's declarative user profile reports read-only attributes per field;
+/// that `field` is authoritative and must reach AM as the violation
+/// target so a client can disable exactly that input.
+#[tokio::test]
+async fn update_user_kc_read_only_field_maps_to_field_not_writable() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({ "username": "alice" }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "errors": [
+                    {"field": "email", "errorMessage": "error-user-attribute-read-only"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        // Two attributes touched, so the per-field `errors[]` entry — not
+        // single-attribute inference — is what localises the failure.
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(Some("new@example.com".to_owned()));
+        patch.first_name = Some(Some("Alice".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("read-only attribute must fail");
+        assert!(
+            matches!(err, PluginError::UserOpFieldNotWritable { .. }),
+            "expected FieldNotWritable(email) from the per-field errors[], got {err:?}"
+        );
+        if let PluginError::UserOpFieldNotWritable { fields, .. } = &err {
+            assert_eq!(*fields, vec![IdpUserAttribute::Email]);
+        }
+    })
+    .await;
+}
+
+/// A clear (`Some(None)`) is sent to KC as the empty string — `null` is
+/// indistinguishable from "absent" to KC and would silently no-op — while
+/// untouched fields stay out of the body entirely so KC leaves them alone.
+#[tokio::test]
+async fn update_user_clear_sends_empty_string_and_omits_untouched_fields() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({ "username": "alice" }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(None);
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+        facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect("update_user ok");
+
+        let received = server.received_requests().await.unwrap();
+        let put = received
+            .iter()
+            .find(|r| r.method.as_str() == "PUT")
+            .expect("PUT /users/{id} must be sent");
+        let body: serde_json::Value = serde_json::from_slice(&put.body).expect("PUT body is JSON");
+        assert_eq!(
+            body.get("email"),
+            Some(&serde_json::Value::String(String::new())),
+            "a clear MUST be an empty string, not null: {body}"
+        );
+        assert!(
+            body.get("firstName").is_none() && body.get("lastName").is_none(),
+            "untouched fields MUST be absent so KC leaves them unchanged: {body}"
+        );
+    })
+    .await;
+}
+
+/// KC can store a cleared profile field as the empty string, so the
+/// post-update read may carry `""` for `email`, `firstName`, and `lastName`.
+/// Every one of them MUST project as absent: a clear that reads back as `""`
+/// would break the merge-patch contract that `null` removes the field.
+#[tokio::test]
+async fn update_user_projects_blank_profile_fields_as_absent() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({
+                "username": "alice",
+                "email": "",
+                "firstName": "",
+                "lastName": "",
+            }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(None);
+        patch.first_name = Some(None);
+        patch.last_name = Some(None);
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let user = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect("update_user ok");
+        assert_eq!(user.email, None, "a blank email MUST project as absent");
+        assert_eq!(
+            user.first_name, None,
+            "a blank firstName MUST project as absent"
+        );
+        assert_eq!(
+            user.last_name, None,
+            "a blank lastName MUST project as absent"
+        );
+        assert_eq!(
+            user.display_name, None,
+            "no display name can be composed from blank names"
+        );
+    })
+    .await;
+}
+
+/// A password-only patch has no user-profile fields, so the profile PUT
+/// is skipped entirely and only the credential endpoint is called.
+#[tokio::test]
+async fn update_user_password_only_skips_profile_put() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({ "username": "alice" }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!(
+                "/admin/realms/platform/users/{user_uuid}/reset-password"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let patch = IdpUserPatch::new().with_password("s3cret-value", true);
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+        facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect("update_user ok");
+
+        let received = server.received_requests().await.unwrap();
+        let profile_puts = received
+            .iter()
+            .filter(|r| {
+                r.method.as_str() == "PUT"
+                    && r.url.path() == format!("/admin/realms/platform/users/{user_uuid}")
+            })
+            .count();
+        assert_eq!(
+            profile_puts, 0,
+            "a password-only patch must not issue a profile PUT"
+        );
+        let reset = received
+            .iter()
+            .find(|r| r.url.path().ends_with("/reset-password"))
+            .expect("reset-password must be called");
+        let body: serde_json::Value = serde_json::from_slice(&reset.body).expect("body is JSON");
+        assert_eq!(body.get("temporary"), Some(&serde_json::Value::Bool(true)));
+    })
+    .await;
+}
+
+/// One row of a write-failure table: a label for the assertion message,
+/// the mocked KC response, and the predicate the resulting error must meet.
+type WriteFailureCase = (&'static str, ResponseTemplate, fn(&PluginError) -> bool);
+
+/// Run one `update_user` whose binding read succeeds and whose write to
+/// `put_path` (relative to the user resource, `""` for the profile PUT)
+/// answers with `response`, and return the resulting error.
+///
+/// Each call gets its own mock server, so a table of cases cannot leak
+/// mounted responses into one another. The caller must already hold the
+/// `TEST_REALM_ADMIN_SECRET` env var the token endpoint needs.
+async fn update_user_err_for_write_response(
+    put_path: &str,
+    patch: IdpUserPatch,
+    response: ResponseTemplate,
+) -> PluginError {
+    let server = MockServer::start().await;
+    mount_token_endpoint(&server, "platform").await;
+    let tenant_uuid = Uuid::new_v4();
+    let user_uuid = Uuid::new_v4();
+    mount_user_get(
+        &server,
+        user_uuid,
+        tenant_uuid,
+        serde_json::json!({ "username": "alice" }),
+    )
+    .await;
+    Mock::given(method("PUT"))
+        .and(path(format!(
+            "/admin/realms/platform/users/{user_uuid}{put_path}"
+        )))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+
+    let facade = build_facade(&server);
+    let ctx = build_system_ctx(Uuid::nil());
+    let req = update_user_req(
+        tenant_uuid,
+        Some(make_metadata(
+            "platform",
+            RealmBinding::Shared,
+            Uuid::new_v4(),
+            None,
+        )),
+        user_uuid,
+        patch,
+    );
+    facade
+        .update_user_inner(&ctx, &req)
+        .await
+        .expect_err("the mocked write failure must surface as an error")
+}
+
+/// Every non-2xx, non-401 answer to the profile `PUT /users/{id}` maps to
+/// one typed failure: a concurrent delete is `NotFound` (never success), a
+/// 400 that is neither a read-only nor a password-policy refusal is a
+/// terminal `Rejected`, and a 5xx is the retryable `Unavailable` lane.
+#[tokio::test]
+async fn update_user_profile_put_failures_map_to_typed_errors() {
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async {
+        let cases: [WriteFailureCase; 3] = [
+            (
+                "404 after a concurrent delete",
+                ResponseTemplate::new(404),
+                |e| matches!(e, PluginError::UserOpNotFound { .. }),
+            ),
+            (
+                "400 that is not a read-only refusal",
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "errorMessage": "invalidEmailMessage" })),
+                |e| matches!(e, PluginError::UserOpRejected { .. }),
+            ),
+            (
+                "500 from KC",
+                ResponseTemplate::new(500).set_body_string("kc boom"),
+                |e| matches!(e, PluginError::UserOpUnavailable { .. }),
+            ),
+        ];
+        for (label, response, expected) in cases {
+            let mut patch = IdpUserPatch::new();
+            patch.first_name = Some(Some("Alice".to_owned()));
+            let err = update_user_err_for_write_response("", patch, response).await;
+            assert!(expected(&err), "{label}: unexpected error {err:?}");
+        }
+    })
+    .await;
+}
+
+/// The credential write is a separate call with its own classification: a
+/// policy refusal (KC's `invalidPassword*` key) is `PasswordPolicy` so AM
+/// can point at the `password` field, any other 400 is `Rejected`, a
+/// concurrent delete is `NotFound`, and a 5xx is `Unavailable`. No detail
+/// may ever carry the plaintext that was sent.
+#[tokio::test]
+async fn update_user_reset_password_failures_map_to_typed_errors() {
+    const PLAINTEXT: &str = "s3cret-value";
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async {
+        let cases: [WriteFailureCase; 4] = [
+            (
+                "400 password-policy refusal",
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalidPasswordMinLengthMessage",
+                    "error_description": "Invalid password: minimum length 12."
+                })),
+                |e| matches!(e, PluginError::UserOpPasswordPolicy { .. }),
+            ),
+            (
+                "400 that is not a policy refusal",
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "errorMessage": "unknown_error" })),
+                |e| matches!(e, PluginError::UserOpRejected { .. }),
+            ),
+            (
+                "404 after a concurrent delete",
+                ResponseTemplate::new(404),
+                |e| matches!(e, PluginError::UserOpNotFound { .. }),
+            ),
+            (
+                "500 from KC",
+                ResponseTemplate::new(500).set_body_string("kc boom"),
+                |e| matches!(e, PluginError::UserOpUnavailable { .. }),
+            ),
+        ];
+        for (label, response, expected) in cases {
+            let patch = IdpUserPatch::new().with_password(PLAINTEXT, false);
+            let err = update_user_err_for_write_response("/reset-password", patch, response).await;
+            assert!(expected(&err), "{label}: unexpected error {err:?}");
+            assert!(
+                !format!("{err:?}").contains(PLAINTEXT),
+                "{label}: the plaintext password leaked into the error: {err:?}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn update_user_absent_user_is_not_found() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        // Binding read 404s → no usable binding → absent.
+        Mock::given(method("GET"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(Some("ghost@example.com".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("absent user must fail");
+        assert!(
+            matches!(err, PluginError::UserOpNotFound { .. }),
+            "expected UserOpNotFound, got {err:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn update_user_rename_collision_is_duplicate() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({ "username": "bob" }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "errorMessage": "User exists with same username"
+            })))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let patch = IdpUserPatch::new().with_username("alice");
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("collision must fail");
+        assert!(
+            matches!(
+                err,
+                PluginError::UserOpDuplicate {
+                    field: account_management_sdk::IdpUserDuplicateField::Username,
+                    ..
+                }
+            ),
+            "expected UserOpDuplicate(username), got {err:?}"
+        );
+    })
+    .await;
+}
+
+#[test]
+fn kc_read_only_classifier_prefers_the_named_field() {
+    // Per-field shape wins even when several attributes were touched.
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"errors":[{"field":"lastName","errorMessage":"error-user-attribute-read-only"}]}"#,
+            &[IdpUserAttribute::Email, IdpUserAttribute::LastName],
+        ),
+        vec![IdpUserAttribute::LastName]
+    );
+}
+
+/// `errors[]` can carry one entry per locked attribute; every named field
+/// MUST be collected, not just the first, so a multi-field patch is refused
+/// with the whole locked set in one failure.
+#[test]
+fn kc_read_only_classifier_collects_every_named_field() {
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"errors":[
+                {"field":"username","errorMessage":"error-user-attribute-read-only"},
+                {"field":"email","errorMessage":"error-user-attribute-read-only"}
+            ]}"#,
+            &[IdpUserAttribute::Username, IdpUserAttribute::Email],
+        ),
+        vec![IdpUserAttribute::Username, IdpUserAttribute::Email]
+    );
+}
+
+#[test]
+fn kc_read_only_classifier_infers_only_when_unambiguous() {
+    // Read-only KEY with no `field` named + exactly one touched attribute →
+    // the refusal can only be about that one, so it is attributed.
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"errorMessage":"error-user-attribute-read-only"}"#,
+            &[IdpUserAttribute::Email],
+        ),
+        vec![IdpUserAttribute::Email]
+    );
+    // Same body but several touched → not attributable; the caller falls back
+    // to the generic rejection lane rather than blaming an arbitrary field.
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"errorMessage":"error-user-attribute-read-only"}"#,
+            &[IdpUserAttribute::Email, IdpUserAttribute::FirstName],
+        ),
+        Vec::new()
+    );
+}
+
+/// The pre-24 `ReadOnlyAttributesUnsupportedException` prose is deliberately
+/// NOT recognised: this plugin targets KC 26, where every read-only refusal
+/// carries a message key, so a phrase test could only add false positives on
+/// unrelated 400s whose text happens to contain "read only".
+///
+/// Pinned so a future "be more lenient" change has to argue with this test
+/// rather than quietly reintroduce substring matching.
+#[test]
+fn kc_read_only_classifier_does_not_match_prose() {
+    for body in [
+        r#"{"errorMessage":"Update of read-only attribute rejected"}"#,
+        r#"{"errorMessage":"attribute is read only"}"#,
+        r#"{"errorMessage":"this field is readonly"}"#,
+        // The dangerous shape: an unrelated failure that merely mentions the
+        // phrase must never be reported as a locked field.
+        r#"{"errorMessage":"cannot link read-only federated store"}"#,
+    ] {
+        assert_eq!(
+            classify_kc_read_only_reject(body, &[IdpUserAttribute::Email]),
+            Vec::new(),
+            "prose must not classify as a read-only reject: {body}"
+        );
+    }
+}
+
+#[test]
+fn kc_read_only_classifier_ignores_other_400s() {
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"errorMessage":"invalid email format"}"#,
+            &[IdpUserAttribute::Email],
+        ),
+        Vec::new()
+    );
+    assert_eq!(
+        classify_kc_read_only_reject("not json", &[IdpUserAttribute::Email]),
+        Vec::new()
+    );
+}
+
+/// Pre-flight refuses a non-writable attribute from the structured
+/// `userProfileMetadata.attributes[].readOnly` flags, WITHOUT attempting the
+/// write. This is the primary mechanism; parsing a rejection is the fallback.
+///
+/// Refusing before the PUT also means a multi-field patch containing one locked
+/// field cannot land half-applied.
+#[tokio::test]
+async fn update_user_preflight_refuses_read_only_attribute_without_writing() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        // Shape verified against KC 26.5.3: `readOnly` is a real boolean, and
+        // it already reflects the `editUsernameAllowed` realm flag.
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({
+                "username": "alice",
+                "userProfileMetadata": {
+                    "attributes": [
+                        {"name": "username", "readOnly": true, "required": true},
+                        {"name": "email", "readOnly": true, "required": false},
+                        {"name": "firstName", "readOnly": false, "required": false},
+                        {"name": "lastName", "readOnly": false, "required": false},
+                    ]
+                },
+            }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        // `email` is locked, `first_name` is not — the patch as a whole must be
+        // refused and attributed to `email`.
+        let mut patch = IdpUserPatch::new();
+        patch.email = Some(Some("new@example.com".to_owned()));
+        patch.first_name = Some(Some("Alice".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("locked attribute must be refused");
+        assert!(
+            matches!(err, PluginError::UserOpFieldNotWritable { .. }),
+            "expected FieldNotWritable(email) from profile metadata, got {err:?}"
+        );
+        if let PluginError::UserOpFieldNotWritable { fields, .. } = &err {
+            assert_eq!(*fields, vec![IdpUserAttribute::Email]);
+        }
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            !received.iter().any(|r| r.method.as_str() == "PUT"),
+            "pre-flight must refuse before any write, so a partially-applicable \
+             patch cannot land half-applied"
+        );
+    })
+    .await;
+}
+
+/// A writable attribute still goes through when metadata is present — proves
+/// the pre-flight gate is keyed on the intersection with the patch, not on
+/// "metadata present ⇒ refuse".
+#[tokio::test]
+async fn update_user_preflight_allows_writable_attribute() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({
+                "username": "alice",
+                "firstName": "Alice",
+                "userProfileMetadata": {
+                    "attributes": [
+                        {"name": "username", "readOnly": true},
+                        {"name": "firstName", "readOnly": false},
+                    ]
+                },
+            }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        let mut patch = IdpUserPatch::new();
+        patch.first_name = Some(Some("Alice".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let user = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect("writable attribute must be allowed through");
+        assert_eq!(user.first_name.as_deref(), Some("Alice"));
+    })
+    .await;
+}
+
+/// The actual payoff of the `fields: Vec<_>` widening: a patch touching TWO
+/// locked attributes is refused with BOTH named in one failure, not just the
+/// first one found. A client discovering locked fields one round trip at a
+/// time is exactly what the SDK's `FieldNotWritable` doc comment says this
+/// contract exists to avoid.
+#[tokio::test]
+async fn update_user_preflight_reports_every_locked_touched_attribute() {
+    let server = MockServer::start().await;
+    temp_env::async_with_vars([("TEST_REALM_ADMIN_SECRET", Some("ra"))], async move {
+        mount_token_endpoint(&server, "platform").await;
+        let tenant_uuid = Uuid::new_v4();
+        let user_uuid = Uuid::new_v4();
+        mount_user_get(
+            &server,
+            user_uuid,
+            tenant_uuid,
+            serde_json::json!({
+                "username": "alice",
+                "userProfileMetadata": {
+                    "attributes": [
+                        {"name": "username", "readOnly": true},
+                        {"name": "email", "readOnly": true},
+                        {"name": "firstName", "readOnly": false},
+                    ]
+                },
+            }),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/admin/realms/platform/users/{user_uuid}")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let facade = build_facade(&server);
+        let ctx = build_system_ctx(Uuid::nil());
+        // Touches both locked attributes plus one writable one, so a
+        // single-attribute-at-a-time implementation would report only
+        // whichever it happened to check first.
+        let mut patch = IdpUserPatch::new();
+        patch.username = Some("bob".to_owned());
+        patch.email = Some(Some("new@example.com".to_owned()));
+        patch.first_name = Some(Some("Alice".to_owned()));
+        let req = update_user_req(
+            tenant_uuid,
+            Some(make_metadata(
+                "platform",
+                RealmBinding::Shared,
+                Uuid::new_v4(),
+                None,
+            )),
+            user_uuid,
+            patch,
+        );
+
+        let err = facade
+            .update_user_inner(&ctx, &req)
+            .await
+            .expect_err("both locked attributes must be refused");
+        assert!(
+            matches!(err, PluginError::UserOpFieldNotWritable { .. }),
+            "expected FieldNotWritable(username, email), got {err:?}"
+        );
+        if let PluginError::UserOpFieldNotWritable { fields, .. } = &err {
+            assert_eq!(
+                *fields,
+                vec![IdpUserAttribute::Username, IdpUserAttribute::Email],
+                "both locked attributes the patch touched must be reported together"
+            );
+        }
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            !received.iter().any(|r| r.method.as_str() == "PUT"),
+            "pre-flight must refuse before any write when either locked \
+             attribute is touched"
+        );
+    })
+    .await;
+}
+
+/// Regression: KC's real refusal body is a FLAT object carrying an
+/// authoritative `field` — not the `{"errors":[…]}` array. Verified against KC
+/// 26.5.3:
+/// `{"field":"username","errorMessage":"error-user-attribute-read-only","params":["username"]}`
+///
+/// The earlier classifier only looked for `errors[]`, so it ignored that
+/// `field` and fell back to inferring from a single touched attribute — which
+/// returned `None` for a multi-field patch and silently downgraded an
+/// attributable refusal to a generic 400. `field` MUST win over inference.
+#[test]
+fn kc_read_only_classifier_reads_the_flat_field_key() {
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"field":"username","errorMessage":"error-user-attribute-read-only","params":["username"]}"#,
+            // Several attributes touched: inference cannot disambiguate, so
+            // this can only pass by honouring the body's `field`.
+            &[IdpUserAttribute::Username, IdpUserAttribute::Email],
+        ),
+        vec![IdpUserAttribute::Username]
+    );
+}
+
+/// The message is a stable KEY, not localized prose — KC 26.5.3 returns the
+/// same body under `Accept-Language: de`. Exact-key matching is therefore a
+/// contract, and must not depend on the substring fallback.
+#[test]
+fn kc_read_only_classifier_matches_the_exact_message_key() {
+    // Exact key, no read-only substring reachable by prose matching on a
+    // different casing/spelling: still classified.
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"field":"email","errorMessage":"error-user-attribute-read-only"}"#,
+            &[IdpUserAttribute::Email],
+        ),
+        vec![IdpUserAttribute::Email]
+    );
+    // A validation error that is NOT about writability must not be swept in,
+    // even though it names a field.
+    assert_eq!(
+        classify_kc_read_only_reject(
+            r#"{"field":"email","errorMessage":"error-invalid-email"}"#,
+            &[IdpUserAttribute::Email],
+        ),
+        Vec::new()
+    );
 }

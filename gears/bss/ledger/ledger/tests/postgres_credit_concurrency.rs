@@ -31,8 +31,8 @@
 use std::sync::Arc;
 
 use bss_ledger::domain::error::DomainError;
+use bss_ledger::domain::instant::to_naive_date;
 use bss_ledger::domain::model::{AccountRow, CurrencyScaleRow, NewEntry, NewLine};
-use bss_ledger::domain::money::DEFAULT_PLAUSIBLE_MAX_MAJOR;
 use bss_ledger::domain::payment::precedence::Allocated;
 use bss_ledger::domain::payment::settlement::SettlementInput;
 use bss_ledger::domain::ports::metrics::NoopLedgerMetrics;
@@ -42,12 +42,17 @@ use bss_ledger::infra::payment::settle::SettlementService;
 use bss_ledger::infra::posting::service::PostingService;
 use bss_ledger::infra::storage::migrations::Migrator;
 use bss_ledger::infra::storage::repo::ReferenceRepo;
-use bss_ledger_sdk::{AccountClass, MappingStatus, Side, SourceDocType};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use bss_ledger_sdk::{
+    AccountClass, CurrencySpec, MappingStatus, PostedMoney, Side, SourceDocType, canonical_decimal,
+    parse_decimal,
+};
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, Database, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_security::SecurityContext;
@@ -55,6 +60,26 @@ use uuid::Uuid;
 
 fn pg(sql: impl Into<String>) -> Statement {
     Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.into())
+}
+
+/// The USD@2 currency spec every fixture here posts in.
+fn usd_spec() -> CurrencySpec {
+    CurrencySpec::try_new("USD".to_owned(), 2).unwrap()
+}
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`).
+fn usd(cents: i64) -> PostedMoney {
+    PostedMoney::try_new(Decimal::new(cents, 2), usd_spec()).unwrap()
+}
+
+/// The canonical stored text of a USD cent count (`970` ⇒ `"9.7"`).
+fn text(cents: i64) -> String {
+    canonical_decimal(Decimal::new(cents, 2))
+}
+
+/// A USD cent count as a major-unit decimal (`500` ⇒ `5.00`).
+fn major(cents: i64) -> Decimal {
+    Decimal::new(cents, 2)
 }
 
 /// Boot a container, migrate on a raw connection, and return a `bss`-search-path
@@ -107,7 +132,7 @@ fn account(tenant: Uuid, id: Uuid, class: AccountClass, normal: Side) -> Account
 /// the four payment-flow chart accounts, and a stream-less REUSABLE_CREDIT credit
 /// account (the wallet). Mirrors `postgres_credit::setup_seller`.
 async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<DbError>) -> Seller {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let s = Seller {
         tenant: Uuid::now_v7(),
         payer: Uuid::now_v7(),
@@ -116,7 +141,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         psp_fee: Uuid::now_v7(),
         ar: Uuid::now_v7(),
         reusable_credit: Uuid::now_v7(),
-        period_id: format!("{:04}{:02}", now.year(), now.month()),
+        period_id: bss_ledger::domain::instant::yyyymm(now),
     };
 
     let reference = ReferenceRepo::new(provider.clone());
@@ -124,8 +149,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         .upsert_currency_scale(CurrencyScaleRow {
             tenant_id: s.tenant,
             currency: "USD".to_owned(),
-            minor_units: 2,
-            plausible_max_major: DEFAULT_PLAUSIBLE_MAX_MAJOR,
+            currency_scale: 2,
             source: "iso".to_owned(),
         })
         .await
@@ -186,9 +210,9 @@ fn settlement_input(s: &Seller, payment_id: &str, gross: i64) -> SettlementInput
         tenant_id: s.tenant,
         payer_tenant_id: s.payer,
         payment_id: payment_id.to_owned(),
-        gross_minor: gross,
-        fee_minor: 0,
-        currency: "USD".to_owned(),
+        gross: usd(gross),
+
+        fee: usd(0),
         effective_at: None,
     }
 }
@@ -218,8 +242,7 @@ async fn fund_wallet(
                 tenant_id: s.tenant,
                 payer_tenant_id: s.payer,
                 credit_application_id: credit_application_id.to_owned(),
-                currency: "USD".to_owned(),
-                amount_minor: amount,
+                amount: usd(amount),
                 credit_grant_event_type: event_type.to_owned(),
             },
         )
@@ -227,39 +250,45 @@ async fn fund_wallet(
         .expect("grant to fund the wallet");
 }
 
-/// Read one wallet sub-grain's `balance_minor` from the projector cache (the
-/// concurrency invariant surface). `0` when the row is absent.
-async fn wallet_subgrain(raw: &sea_orm::DatabaseConnection, s: &Seller, event_type: &str) -> i64 {
+/// Read one wallet sub-grain's canonical `balance` text from the projector cache (the
+/// concurrency invariant surface), parsed exactly. `0` when the row is absent.
+async fn wallet_subgrain(
+    raw: &sea_orm::DatabaseConnection,
+    s: &Seller,
+    event_type: &str,
+) -> Decimal {
     raw.query_one_raw(pg(format!(
-        "SELECT balance_minor FROM bss.ledger_reusable_credit_subbalance \
+        "SELECT balance FROM bss.ledger_reusable_credit_subbalance \
          WHERE tenant_id='{}' AND payer_tenant_id='{}' AND currency='USD' \
          AND credit_grant_event_type='{}'",
         s.tenant, s.payer, event_type
     )))
     .await
     .unwrap()
-    .map_or(0, |r| r.try_get_by_index::<i64>(0).unwrap())
+    .map_or(Decimal::ZERO, |r| {
+        parse_decimal(&r.try_get_by_index::<String>(0).unwrap()).unwrap()
+    })
 }
 
 async fn ar_invoice_balance(
     raw: &sea_orm::DatabaseConnection,
     s: &Seller,
     invoice_id: &str,
-) -> Option<i64> {
+) -> Option<String> {
     raw.query_one_raw(pg(format!(
-        "SELECT balance_minor FROM bss.ledger_ar_invoice_balance \
+        "SELECT balance FROM bss.ledger_ar_invoice_balance \
          WHERE tenant_id='{}' AND invoice_id='{}'",
         s.tenant, invoice_id
     )))
     .await
     .unwrap()
-    .map(|r| r.try_get_by_index::<i64>(0).unwrap())
+    .map(|r| r.try_get_by_index::<String>(0).unwrap())
 }
 
 /// Seed an OPEN AR invoice by a DIRECT raw INSERT into the cache (mirrors the
 /// `list_open_ar_invoices` / `allocate_too_large` seed idiom in
 /// `postgres_payments.rs` / `postgres_payment_concurrency.rs`): no invoice
-/// posting, just a `balance_minor > 0` candidate row the apply's open-AR read
+/// posting, just a `balance > 0` candidate row the apply's open-AR read
 /// will return. Only the NOT-NULL-without-default columns are supplied;
 /// `original_posted_at` is set so the oldest-first order is deterministic.
 async fn seed_ar_invoice(
@@ -267,7 +296,7 @@ async fn seed_ar_invoice(
     s: &Seller,
     invoice_id: &str,
     amount: i64,
-    posted_at: DateTime<Utc>,
+    posted_at: OffsetDateTime,
 ) {
     // Post a REAL balanced invoice (DR AR / CR PSP_FEE_EXPENSE) so ALL three AR
     // grains (account_balance, ar_payer_balance, ar_invoice_balance) are credited
@@ -290,7 +319,7 @@ async fn seed_ar_invoice(
         reverses_entry_id: None,
         reverses_period_id: None,
         posted_at_utc: posted_at,
-        effective_at: posted_at.date_naive(),
+        effective_at: to_naive_date(posted_at),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: s.tenant,
         correlation_id: Uuid::now_v7(),
@@ -314,15 +343,12 @@ fn ar_line(s: &Seller, invoice_id: &str, amount: i64) -> NewLine {
         account_class: AccountClass::Ar,
         gl_code: None,
         side: Side::Debit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd(amount),
         invoice_id: Some(invoice_id.to_owned()),
         due_date: Some(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()),
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -347,15 +373,12 @@ fn psp_credit_line(s: &Seller, amount: i64) -> NewLine {
         account_class: AccountClass::PspFeeExpense,
         gl_code: None,
         side: Side::Credit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd(amount),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -413,11 +436,11 @@ async fn concurrent_applies_drain_one_wallet_without_overspend() {
     // Fund a 500 "promo" wallet, and seed two open AR invoices of 300 each (600
     // receivable headroom > 500 wallet, so the wallet is the binding cap).
     fund_wallet(&provider, &s, "PAY-WAL", "CR-FUND", "promo", 500).await;
-    seed_ar_invoice(&provider, &s, "inv-1", 300, Utc::now()).await;
-    seed_ar_invoice(&provider, &s, "inv-2", 300, Utc::now()).await;
+    seed_ar_invoice(&provider, &s, "inv-1", 300, OffsetDateTime::now_utc()).await;
+    seed_ar_invoice(&provider, &s, "inv-2", 300, OffsetDateTime::now_utc()).await;
     assert_eq!(
         wallet_subgrain(&raw, &s, "promo").await,
-        500,
+        major(500),
         "wallet funded"
     );
 
@@ -441,10 +464,10 @@ async fn concurrent_applies_drain_one_wallet_without_overspend() {
                         tenant_id: tenant,
                         payer_tenant_id: payer,
                         credit_application_id: credit_application_id.to_owned(),
-                        currency: "USD".to_owned(),
+                        currency: usd_spec(),
                         targets: vec![Allocated {
                             invoice_id: invoice_id.to_owned(),
-                            amount_minor: 300,
+                            amount: usd(300),
                         }],
                     },
                 )
@@ -467,10 +490,16 @@ async fn concurrent_applies_drain_one_wallet_without_overspend() {
     // (`CreditExceedsWallet`), or the projector's no-negative backstop caught the
     // overdraw at post time on the wallet sub-grain (`NegativeBalance`). Both roll
     // back with no overspend.
-    let mut drawn = 0i64;
+    let mut drawn = Decimal::ZERO;
     for result in [&ra, &rb] {
         match result {
-            Ok(outcome) => drawn += outcome.debits.iter().map(|d| d.amount_minor).sum::<i64>(),
+            Ok(outcome) => {
+                drawn += outcome
+                    .debits
+                    .iter()
+                    .map(|d| d.amount.amount())
+                    .sum::<Decimal>();
+            }
             Err(DomainError::CreditExceedsWallet(_) | DomainError::NegativeBalance(_)) => {}
             Err(other) => panic!(
                 "a losing concurrent apply must cleanly reject (CreditExceedsWallet or \
@@ -489,16 +518,16 @@ async fn concurrent_applies_drain_one_wallet_without_overspend() {
     // funded amount minus what the winners drew.
     let remaining = wallet_subgrain(&raw, &s, "promo").await;
     assert!(
-        remaining >= 0,
+        remaining >= Decimal::ZERO,
         "the wallet sub-grain must never go negative, got {remaining}"
     );
     assert!(
-        drawn <= 500,
-        "total drawn ({drawn}) must never exceed the funded wallet (500)"
+        drawn <= major(500),
+        "total drawn ({drawn}) must never exceed the funded wallet (5.00)"
     );
     assert_eq!(
         remaining,
-        500 - drawn,
+        major(500) - drawn,
         "remaining wallet == funded - drawn (no double-spend, no leak)"
     );
 }
@@ -539,17 +568,16 @@ async fn grant_and_apply_on_same_subgrain_serialize_without_deadlock() {
                 tenant_id: s.tenant,
                 payer_tenant_id: s.payer,
                 credit_application_id: "CR-SEED".to_owned(),
-                currency: "USD".to_owned(),
-                amount_minor: 400,
+                amount: usd(400),
                 credit_grant_event_type: "promo".to_owned(),
             },
         )
         .await
         .expect("seed the wallet at 400");
-    seed_ar_invoice(&provider, &s, "inv-1", 300, Utc::now()).await;
+    seed_ar_invoice(&provider, &s, "inv-1", 300, OffsetDateTime::now_utc()).await;
     assert_eq!(
         wallet_subgrain(&raw, &s, "promo").await,
-        400,
+        major(400),
         "wallet seeded"
     );
 
@@ -570,8 +598,7 @@ async fn grant_and_apply_on_same_subgrain_serialize_without_deadlock() {
                     tenant_id: grant_tenant,
                     payer_tenant_id: grant_payer,
                     credit_application_id: "CR-CONC-GRANT".to_owned(),
-                    currency: "USD".to_owned(),
-                    amount_minor: 300,
+                    amount: usd(300),
                     credit_grant_event_type: "promo".to_owned(),
                 },
             )
@@ -594,10 +621,10 @@ async fn grant_and_apply_on_same_subgrain_serialize_without_deadlock() {
                     tenant_id: apply_tenant,
                     payer_tenant_id: apply_payer,
                     credit_application_id: "CR-CONC-APPLY".to_owned(),
-                    currency: "USD".to_owned(),
+                    currency: usd_spec(),
                     targets: vec![Allocated {
                         invoice_id: "inv-1".to_owned(),
-                        amount_minor: 300,
+                        amount: usd(300),
                     }],
                 },
             )
@@ -624,22 +651,26 @@ async fn grant_and_apply_on_same_subgrain_serialize_without_deadlock() {
     // paid the AR. The no-negative CHECK was never violated (the tasks did not
     // panic), and the balance reflects exactly the ops that committed.
     let promo = wallet_subgrain(&raw, &s, "promo").await;
-    assert!(promo >= 0, "the wallet sub-grain must never go negative");
+    assert!(
+        promo >= Decimal::ZERO,
+        "the wallet sub-grain must never go negative"
+    );
     if apply_ok {
         assert_eq!(
-            promo, 400,
+            promo,
+            major(400),
             "grant +300 and apply -300 net to the seeded 400"
         );
         assert_eq!(
             ar_invoice_balance(&raw, &s, "inv-1").await,
-            Some(0),
+            Some(text(0)),
             "the apply fully paid inv-1"
         );
     } else {
-        assert_eq!(promo, 700, "only the grant committed: 400 + 300");
+        assert_eq!(promo, major(700), "only the grant committed: 400 + 300");
         assert_eq!(
             ar_invoice_balance(&raw, &s, "inv-1").await,
-            Some(300),
+            Some(text(300)),
             "the rejected apply left inv-1 open"
         );
     }

@@ -9,6 +9,9 @@ description = "SDK for the api-contracts example module — PaymentApi contract,
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "cf_api_contracts_sdk"
+
 [features]
 default = []
 # Enables both generated clients: the plain `<Trait>RestClient` and its
@@ -41,6 +44,12 @@ rest-server = [
     "dep:axum",
     "dep:http",
 ]
+
+# `#[toolkit::contract]` puts `#[::async_trait::async_trait]` on the trait it
+# generates, so this crate needs `async-trait` in every feature set. cargo-shear
+# misses it because `--expand` expands that attribute away before it scans.
+[package.metadata.cargo-shear]
+ignored = ["async-trait"]
 
 [lints]
 workspace = true

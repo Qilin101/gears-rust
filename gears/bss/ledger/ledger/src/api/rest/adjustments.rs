@@ -1,7 +1,7 @@
 //! Axum handlers + router for the ledger's adjustment (credit-note / debit-note /
 //! exposure) REST surface (Slice 3, design §4.2 / §4.3 / §4.7 / §5, Group E).
 //! Three operations under `/bss-ledger/v1`, tenant-scoped WITHOUT a tenant in the
-//! path (the vhp-core convention, matching the payment / dispute / recognition
+//! path (the platform convention, matching the payment / dispute / recognition
 //! surfaces): the writes carry `tenant_id` in the **body**, the exposure read
 //! takes the invoice id in the path + the owning seller `tenant_id` in the query.
 //!
@@ -55,6 +55,7 @@
 //! `ledger_credit_note_total{,_blocked}` / `ledger_debit_note_total` — are wired in
 //! Group F; this Group-E surface emits none yet.)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, Query};
@@ -79,6 +80,8 @@ use crate::api::rest::error::{
     authz_error_to_canonical, credit_note_not_found, debit_note_not_found,
     invoice_exposure_not_found,
 };
+use crate::api::rest::money::MoneyDto;
+use crate::api::rest::odata_list::{list_seller_tenant, reject_non_odata_list_params};
 use crate::infra::adjustment::credit_note_service::CreditNoteHandler;
 use crate::infra::adjustment::debit_note_service::DebitNoteHandler;
 use crate::infra::adjustment::manual_adjustment_service::ManualAdjustmentHandler;
@@ -134,7 +137,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
              rows and, in the SAME txn, reduces the owning recognition schedule's \
              deferred total (so a later S6 run cannot re-recognize the credited- \
              back amount) and bumps the invoice's credit-note headroom counter. \
-             `requested_deferred_minor` is the split INTENT (how much targets the \
+             `requested_deferred` is the split INTENT (how much targets the \
              deferred balance). Idempotent on `credit_note_id`: a re-post returns \
              the prior posting reference (200) instead of a new one (201). Rejected \
              when the recognized-vs-deferred split is indeterminable \
@@ -176,7 +179,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
              named by the body's `tenant_id` — a DIRECT split mirroring the \
              invoice-post (DR AR incl-tax / CR REVENUE recognized-now / CR \
              CONTRACT_LIABILITY deferred per PO / CR TAX_PAYABLE). When the note \
-             defers (`deferred_minor > 0`) it builds the releasing recognition \
+             defers (`deferred > 0`) it builds the releasing recognition \
              schedule in the SAME txn (D4 — the `recognition` spec is required) so \
              a later S6 run can release it, and it RAISES the invoice's headroom \
              (`debit_note_total += amount`), widening the room for later credit \
@@ -340,21 +343,17 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .operation_id("bss_ledger.list_credit_notes")
         .summary("List recorded credit notes (cursor-paginated)")
         .description(
-            "Cursor-paginated list of the recorded credit notes for the `tenant_id` \
-             query (the caller's own by default). Supports OData `$filter` over \
-             `origin_invoice_id`, `revenue_stream`, and `reason_code`. The `$filter` \
-             ANDs the caller's authorized subtree, so credit notes outside it are \
-             never returned (SQL-level BOLA). Each item is the same `CreditNoteView` \
-             the by-id read returns. Mirrors `list_refunds`.",
+            "Cursor-paginated list of the recorded credit notes for the seller \
+             named by `$filter=tenant_id eq <uuid>` (the caller's own by default). \
+             Supports OData `$filter` over `tenant_id`, `origin_invoice_id`, \
+             `revenue_stream`, and `reason_code`. The `$filter` ANDs the caller's \
+             authorized subtree, so credit notes outside it are never returned \
+             (SQL-level BOLA). Each item is the same `CreditNoteView` the by-id \
+             read returns. Mirrors `list_refunds`.",
         )
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "The credit notes' owning seller tenant (defaults to the caller's own).",
-        )
         .query_param_typed(
             "limit",
             false,
@@ -364,6 +363,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_credit_notes)
         .with_odata_filter::<CreditNoteFilterField>()
+        .with_odata_orderby::<CreditNoteFilterField>()
         .json_response_with_schema::<Page<CreditNoteView>>(
             openapi,
             StatusCode::OK,
@@ -413,21 +413,17 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .operation_id("bss_ledger.list_debit_notes")
         .summary("List recorded debit notes (cursor-paginated)")
         .description(
-            "Cursor-paginated list of the recorded debit notes for the `tenant_id` \
-             query (the caller's own by default). Supports OData `$filter` over \
-             `origin_invoice_id`. The `$filter` ANDs the caller's authorized \
-             subtree, so debit notes outside it are never returned (SQL-level BOLA). \
-             Each item is the same `DebitNoteView` the by-id read returns. Mirrors \
+            "Cursor-paginated list of the recorded debit notes for the seller \
+             named by `$filter=tenant_id eq <uuid>` (the caller's own by default). \
+             Supports OData `$filter` over `tenant_id` and `origin_invoice_id`. \
+             The `$filter` ANDs the caller's authorized subtree, so debit notes \
+             outside it are never returned (SQL-level BOLA). Each item is the \
+             same `DebitNoteView` the by-id read returns. Mirrors \
              `list_credit_notes`.",
         )
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "The debit notes' owning seller tenant (defaults to the caller's own).",
-        )
         .query_param_typed(
             "limit",
             false,
@@ -437,6 +433,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_debit_notes)
         .with_odata_filter::<DebitNoteFilterField>()
+        .with_odata_orderby::<DebitNoteFilterField>()
         .json_response_with_schema::<Page<DebitNoteView>>(
             openapi,
             StatusCode::OK,
@@ -654,28 +651,28 @@ async fn get_invoice_exposure(
     // The SEPARATE true remaining open AR (the `CR AR` cap). Scoped by the same
     // gate; an invoice with no open AR reads 0 (a fully-paid / fully-credited
     // invoice still has a headroom row).
+    let spec = exposure.original_total.currency().clone();
     let open_ar = state
         .exposure_repo
-        .read_open_ar_for_invoice_out_of_txn(&scope, tenant_id, &invoice_id)
+        .read_open_ar_for_invoice_out_of_txn(&scope, tenant_id, &invoice_id, &spec)
         .await
         .map_err(|e| crate::domain::error::DomainError::Internal(format!("read open AR: {e}")))?;
 
     // Remaining headroom = original + debit − credit (the slack in the AC #24
-    // CHECK), floored at 0 (the CHECK guarantees `credit <= original + debit`, so
-    // this never goes negative; the saturating sub is defensive).
-    let remaining_headroom_minor = exposure
-        .original_total_minor
-        .saturating_add(exposure.debit_note_total_minor)
-        .saturating_sub(exposure.credit_note_total_minor)
-        .max(0);
+    // CHECK), the same domain rule the credit-note cap applies, so the read and
+    // the cap can never report different headroom for one row.
+    let remaining_headroom = crate::domain::adjustment::credit_note::remaining_headroom(
+        &exposure.original_total,
+        &exposure.debit_note_total,
+        &exposure.credit_note_total,
+    )?;
     Ok(Json(InvoiceExposureResponse {
         invoice_id: exposure.invoice_id,
-        currency: exposure.currency,
-        original_total_minor: exposure.original_total_minor,
-        debit_note_total_minor: exposure.debit_note_total_minor,
-        credit_note_total_minor: exposure.credit_note_total_minor,
-        remaining_headroom_minor,
-        open_ar_minor: open_ar,
+        original_total: MoneyDto::from(&exposure.original_total),
+        debit_note_total: MoneyDto::from(&exposure.debit_note_total),
+        credit_note_total: MoneyDto::from(&exposure.credit_note_total),
+        remaining_headroom: MoneyDto::from(&remaining_headroom),
+        open_ar: MoneyDto::from(&open_ar),
     }))
 }
 
@@ -721,24 +718,18 @@ async fn get_credit_note(
     Ok(Json(CreditNoteView::from(note)))
 }
 
-/// `GET /credit-notes` non-OData query: the credit notes' owning tenant (the
-/// caller's own when omitted). The `OData` `$filter` / `$orderby` / `limit` /
-/// `cursor` are parsed separately by the `OData` extractor from the same query
-/// string; `tenant_id` stays a plain param alongside them (the list convention).
-#[derive(Debug, serde::Deserialize)]
-struct CreditNoteListQuery {
-    tenant_id: Option<Uuid>,
-}
-
+/// `GET /credit-notes`: seller from `$filter=tenant_id eq`, else the caller.
+#[allow(clippy::implicit_hasher)]
 async fn list_credit_notes(
     Extension(state): Extension<Arc<ApiState>>,
     Extension(enforcer): Extension<authz_resolver_sdk::PolicyEnforcer>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<CreditNoteListQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<CreditNoteView>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    reject_non_odata_list_params(&extras)?;
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     // (entry, read) PEP gate against the credit notes' owning tenant — the SAME
     // action the by-id read / balances run under. The returned scope is the
     // SQL-level BOLA filter the repo binds, so the page never contains a
@@ -808,24 +799,18 @@ async fn get_debit_note(
     Ok(Json(DebitNoteView::from(note)))
 }
 
-/// `GET /debit-notes` non-OData query: the debit notes' owning tenant (the
-/// caller's own when omitted). The `OData` `$filter` / `$orderby` / `limit` /
-/// `cursor` are parsed separately by the `OData` extractor from the same query
-/// string; `tenant_id` stays a plain param alongside them (the list convention).
-#[derive(Debug, serde::Deserialize)]
-struct DebitNoteListQuery {
-    tenant_id: Option<Uuid>,
-}
-
+/// `GET /debit-notes`: seller from `$filter=tenant_id eq`, else the caller.
+#[allow(clippy::implicit_hasher)]
 async fn list_debit_notes(
     Extension(state): Extension<Arc<ApiState>>,
     Extension(enforcer): Extension<authz_resolver_sdk::PolicyEnforcer>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<DebitNoteListQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<DebitNoteView>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    reject_non_odata_list_params(&extras)?;
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     // (entry, read) PEP gate against the debit notes' owning tenant — the SAME
     // action the by-id read / balances run under. The returned scope is the
     // SQL-level BOLA filter the repo binds, so the page never contains a

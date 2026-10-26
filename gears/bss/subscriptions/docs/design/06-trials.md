@@ -1,3 +1,6 @@
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 <!-- CONFLUENCE_TITLE: [BSS]: Subscriptions — Trial Runtime & Conversion (Design) -->
 <!-- Related: ../PRD.md, ../DESIGN.md, ../SEAMS.md | Upstream: Pricing (trial offer, phase, convertsToPhaseId, grant set), Payments (conversion authorization) | Downstream: Rating (phase boundary), Notifications (win-back) | Owners: BSS Subscriptions team -->
 
@@ -201,7 +204,7 @@ them.
 
 ### 3.7 Database Schemas and Tables
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-storage-trial-trl`
+- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-datastore-trial-trl`
 
 Owned here: `trial_phase_state` (active phase, duration, `convertsToPhaseId`) and `conversion_record`
 (idempotency-keyed). Trial attributes ride the aggregate; extension uses the Foundation `approval`.

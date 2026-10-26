@@ -256,11 +256,12 @@ impl tenant_resolver_sdk::TenantResolverClient for NoAncestors {
 struct DenyAll;
 
 #[async_trait::async_trait]
-impl authz_resolver_sdk::AuthZResolverClient for DenyAll {
+impl authz_resolver_sdk::AuthZResolverApi for DenyAll {
     async fn evaluate(
         &self,
+        _: toolkit_security::PlatformSecurityContext,
         _: authz_resolver_sdk::EvaluationRequest,
-    ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+    ) -> Result<authz_resolver_sdk::EvaluationResponse, toolkit_canonical_errors::CanonicalError>
     {
         unimplemented!("routes are registered, not invoked")
     }

@@ -173,6 +173,7 @@ class FileStorageSidecar:
       * ``FS_SIDECAR_PUBLIC_KEY``   base64url Ed25519 public key (no padding)
       * ``FS_SIDECAR_BACKEND_ROOT`` local-fs root dir
       * ``FS_SIDECAR_CONTROL_URL``  control-plane base URL for finalize callback
+      * ``FS_SIDECAR_INTERNAL_TOKEN`` mandatory x-fs-internal-token secret (dev value)
     """
 
     name = "file-storage-sidecar"
@@ -228,6 +229,9 @@ class FileStorageSidecar:
             "FS_SIDECAR_BACKEND_ROOT": self._storage_root,
             # Finalize callback: the sidecar POSTs here after every successful PUT.
             "FS_SIDECAR_CONTROL_URL": self._control_base_url,
+            # Mandatory internal credential; must equal the control plane's
+            # `finalize_internal_secret` (config/e2e-local.yaml). Dev only.
+            "FS_SIDECAR_INTERNAL_TOKEN": "dev-file-storage-internal-secret",
             # Quiet logging for the sidecar unless overridden.
             "RUST_LOG": os.environ.get("RUST_LOG", "info"),
         }
@@ -373,7 +377,7 @@ def _require_e2e_binary():
     AND the sidecar binary.  We gate on a DEDICATED env var (``FS_E2E_BINARY``)
     rather than the shared ``E2E_BINARY`` so that enabling this suite does not
     accidentally un-skip other gears (e.g. mini-chat) that gate on ``E2E_BINARY``
-    and expect their own scoped invocation (``make e2e-mini-chat``).
+    and expect their own scoped invocation (``make e2e-local SUITE=mini-chat``).
     """
     if not os.environ.get("FS_E2E_BINARY"):
         pytest.skip(

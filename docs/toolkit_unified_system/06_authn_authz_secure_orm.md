@@ -61,7 +61,10 @@ OperationBuilder::get("/users-info/v1/health")
 
 The builder enforces at compile time that every route declares its auth posture before `.register()`:
 - `.authenticated()` marks the route as protected, then requires `.require_license_features::<L>(features)` (or `.no_license_required()`) before registration.
-- `.anonymous()` marks the route as unauthenticated and automatically satisfies the license requirement.
+- `.anonymous()` marks the route as unauthenticated and automatically satisfies the license requirement. Handlers on it receive an anonymous `SecurityContext`, on the gateway and on an out-of-process gear's own listener alike. The gateway ignores a presented bearer on these routes; an `OoP` listener with a tenant authenticator validates it and passes the resulting context instead, and no longer demands a bearer on them.
+- `.platform_authenticated()` admits a validated `X-ToolKit-Internal-Token` only, for platform-plane routes that gears in other processes call; a bearer alone gets `401` — on the gear's own listener and through the API Gateway alike. The gateway validates the token with its inbound `internal_auth` authenticator and, with none configured, refuses the route. Its `OpenAPI` operation requires the `internalToken` apiKey scheme, and gateway discovery never publishes it, since the edge strips the internal token. It still requires a license decision. A bearer is never validated on these routes: alone it is dropped and the call gets `401` `MISSING_INTERNAL_TOKEN`. Handlers read the caller with `Extension<PlatformSecurityContext>` only, never a tenant `SecurityContext`, and the gateway's `route_policies` scopes do not apply to platform routes. Listeners install the stack with `toolkit_http_middleware::layer_route_auth`. A plane is per route, never per request: an API offered on both planes gets two route sets on distinct paths (for example `/types-registry/v1/…` for tenants and `/types-registry/platform/v1/…` for platform callers). `#[toolkit::rest_contract]` registers every `PlatformSecurityContext` method with `.platform_authenticated()` and refuses `#[anonymous]` on one.
+
+A request carries one plane (ADR-0008). On routes covered by the auth stack of the gateway or an `OoP` listener, a request presenting both an `Authorization` header and an `X-ToolKit-Internal-Token` is refused with `401` `MIXED_CREDENTIALS` before either authenticator runs, whatever the route's declaration and whether either credential is valid. A lone credential of the other plane is dropped unvalidated, header and all: the bearer on a `.platform_authenticated()` route, the internal token on an `.authenticated()` one (and, on a listener, on a route without a declaration). So a tenant handler never sees a `PlatformSecurityContext`, and, when tenant authentication is enabled, an `.authenticated()` call carrying only a token gets `401` `MISSING_BEARER`. `.anonymous()` routes keep a lone credential of either plane.
 
 The API Gateway middleware uses these declarations to decide how to handle each request:
 - **Protected routes**: extract bearer token → call AuthN Resolver → inject `SecurityContext` into request extensions. Returns 401 if token is invalid.
@@ -114,10 +117,10 @@ pub struct MyGear { /* ... */ }
 2. **Resolve the AuthZ client** from `ClientHub` during `init()`:
 
 ```rust
-use authz_resolver_sdk::AuthZResolverClient;
+use authz_resolver_sdk::AuthZResolverApi;
 
 async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
-    let authz = ctx.client_hub().get::<dyn AuthZResolverClient>()?;
+    let authz = ctx.client_hub().get::<dyn AuthZResolverApi>()?;
     // Pass authz to your domain service...
 }
 ```
@@ -139,29 +142,56 @@ Each resource type declares which properties the PEP can compile from PDP constr
 use authz_resolver_sdk::pep::ResourceType;
 use toolkit_security::pep_properties;
 
-pub const USER: ResourceType = ResourceType {
-    name: "my_gear.user",
-    supported_properties: &[
+pub const USER: ResourceType = ResourceType::from_static(
+    "gts.example.core.my_gear.user.v1~",
+    &[
         pep_properties::OWNER_TENANT_ID,  // tenant scoping
-        pep_properties::RESOURCE_ID,       // resource-level access
+        pep_properties::RESOURCE_ID,      // resource-level access
     ],
-};
+);
 
-pub const DOCUMENT: ResourceType = ResourceType {
-    name: "my_gear.document",
-    supported_properties: &[
+pub const DOCUMENT: ResourceType = ResourceType::from_static(
+    "gts.example.core.my_gear.document.v1~",
+    &[
         pep_properties::OWNER_TENANT_ID,
         pep_properties::RESOURCE_ID,
         pep_properties::OWNER_ID,  // ownership-based access
-        "category_id",             // custom domain property
+        "category_id",            // custom domain property
     ],
-};
+);
 ```
 
 Well-known properties from `toolkit_security::pep_properties`:
 - `OWNER_TENANT_ID` — tenant that owns the resource
 - `RESOURCE_ID` — the resource's primary key
 - `OWNER_ID` — the user who owns the resource
+
+A resource that can execute native `InGroup`/`InGroupSubtree` predicates must
+opt in explicitly and use its exact canonical GTS type path as the
+`ResourceType` name:
+
+```rust
+pub const USER: ResourceType = ResourceType::from_static(
+    "gts.example.core.my_gear.user.v1~",
+    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
+)
+.with_native_group_predicates();
+```
+
+The PEP uses that same identity to qualify
+`resource_group_membership.gts_type_id` through RG's `gts_type.schema_id`;
+consumers do not configure a second membership type. Without the per-resource
+opt-in, or for a non-canonical GTS policy name, `PolicyEnforcer` suppresses
+`GroupMembership` and `GroupHierarchy`, asking the PDP to expand the group scope
+to explicit resource-ID `in` predicates; a PDP that cannot expand must deny (the
+bundled plugins deny — neither implements expansion today).
+
+The querying database must also contain or project the tables each predicate
+executes against before the enforcer is configured with the corresponding
+capability: native `in_group` needs `resource_group_membership` and RG's
+`gts_type` registry; native `in_group_subtree` additionally needs
+`resource_group_closure`. External membership-type registration is tracked
+separately in [#4052](https://github.com/constructorfabric/gears-rust/issues/4052).
 
 ### Defining actions
 
@@ -693,7 +723,7 @@ In tests, build scopes explicitly (`AccessScope::for_tenant(...)`, `AccessScope:
 
 ### AuthZ wiring
 - [ ] Add `deps = ["authz-resolver"]` to your gear declaration.
-- [ ] Resolve `AuthZResolverClient` from `ClientHub` in `init()`.
+- [ ] Resolve `AuthZResolverApi` from `ClientHub` in `init()`.
 - [ ] Create `PolicyEnforcer::new(authz)` once, clone into sub-services.
 - [ ] Define `ResourceType` constants with `supported_properties` for each resource.
 - [ ] Define action constants (`get`, `list`, `create`, `update`, `delete`).

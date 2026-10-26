@@ -1,465 +1,493 @@
-//! ISO 4217 money primitives: the validated [`CurrencyCode`], its minor-unit
-//! scale, and the non-negative [`MinorAmount`].
+//! Exact decimal amounts and half-open tier arithmetic.
 //!
-//! **This gear computes no charge.** It authors, validates and freezes price
-//! rows; the arithmetic that turns a row into an amount owed lives in Tariffs
-//! (evaluation) and Billing (invoicing). So there is deliberately **no add,
-//! subtract, multiply, allocate or round here** — only the checks a publish
-//! needs. A helper that added two `MinorAmount`s would invite exactly the
-//! second implementation of charge arithmetic the design set puts downstream,
-//! and the sibling ledger already owns the rounding and allocation idiom for
-//! the money that is actually posted.
+//! Every decimal of a price is plain decimal text. The authoring decode reads each one with its
+//! field's limit (`bss_pricing_sdk::numeric`) and normalizes it (`0.10` becomes `0.1`). The
+//! stored decode also requires the text to be canonical, so storage holds one spelling of each
+//! value. Serialization always writes canonical text.
 //!
-//! Amounts are integer minor units (`amount_minor`), never a float and never a
-//! decimal type. The per-currency **scale** is the ISO 4217 minor unit: there is
-//! no flat two-decimal rule — JPY takes 0 and BHD takes 3 — which is why
-//! `PRECISION_EXCEEDED` is declared a first-class publish rejection rather than
-//! a rounding decision taken quietly at the boundary.
-//!
-//! # `PRECISION_EXCEEDED` is declared, and on the amount plane it is dormant
-//!
-//! Stated here because three design documents describe it as live enforcement —
-//! `design/01-foundation.md` §3.3, `03-price-structure.md` §§ error sets,
-//! `04-currency-tax.md` — and a reader checking whether
-//! `cpt-cf-bss-pricing-fr-price-amount-validation` is satisfied would otherwise
-//! be told "yes, by these" about functions nothing calls.
-//!
-//! **[`check_scale`], [`check_decimal`] and [`is_expressible`] have no caller in
-//! this gear.** That is not an oversight and relaxing or deleting them would not
-//! be the repair: the barrier is *representational*. Every amount reaches this
-//! module as an `i64` count of minor units (`PriceContentView::amount_minor` →
-//! [`MinorAmount::new`]), so no request can *declare* a scale for the rule to
-//! compare, and a [`crate::domain::price_row::PriceRow`] cannot hold a violation
-//! of it — the argument [`crate::domain::publish::rules`] makes for registering
-//! no pipeline rule, and the one D-311 restates ("there is no check to relax,
-//! and relaxing one would change nothing").
-//!
-//! **What owes the call is the first authoring surface that takes a decimal
-//! literal**, in either scale: [`check_decimal`] for an amount, and
-//! [`RateMinor::from_major_decimal`] — which carries the *rate* scale's own comparison
-//! and not [`check_scale`]'s — for a rate. D-311 staged that surface and has not
-//! built it: the rate wire spelling it chose is the integer `unitRateNanoMinor`,
-//! read back through [`RateMinor::from_nano_minor`], so today
-//! [`RateMinor::from_major_decimal`] is reached only from `domain::repricing_tests`. A
-//! CSV or major-unit bulk import is the obvious first such surface, and the point
-//! of recording this is that it will **not** reach the check by default.
+//! @cpt-dod:cpt-cf-bss-pricing-dod-tier-bands-half-open:p1
+use super::{RuleError, price_book_entry::Model};
+use bss_money::exact::{ExactAmount, ExactError};
+use bss_pricing_sdk::numeric::{
+    self, NumericError, QUANTITY_FRACTIONAL_DIGITS, RATE_FRACTIONAL_DIGITS,
+};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
-use std::fmt;
+/// One band of a tiered price. It is written as JSON, never read from it alone: [`decode`] and
+/// [`decode_stored`] read it with its price.
+#[toolkit_macros::domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Tier {
+    #[serde(serialize_with = "bss_money::serde_text::option::serialize")]
+    pub up_to: Option<Decimal>,
+    #[serde(serialize_with = "bss_money::serde_text::serialize")]
+    pub rate: Decimal,
+}
 
-use toolkit_macros::domain_model;
+/// Untagged storage content: the model is a separate column. It has no `Deserialize`: the only
+/// way in from JSON is [`decode`] or [`decode_stored`], which check each decimal first.
+#[toolkit_macros::domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum PriceData {
+    Flat {
+        #[serde(serialize_with = "bss_money::serde_text::serialize")]
+        amount: Decimal,
+    },
+    PerUnit {
+        #[serde(serialize_with = "bss_money::serde_text::serialize")]
+        rate: Decimal,
+    },
+    Package {
+        #[serde(serialize_with = "bss_money::serde_text::serialize")]
+        package_size: Decimal,
+        #[serde(serialize_with = "bss_money::serde_text::serialize")]
+        package_price: Decimal,
+    },
+    Tiers {
+        tiers: Vec<Tier>,
+    },
+}
+/// The shape Serde reads a price body into, once [`canonical_price`] has checked each decimal.
+/// Private, so no reader can skip that check.
+#[toolkit_macros::domain_model]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TierWire {
+    up_to: Option<Decimal>,
+    rate: Decimal,
+}
+/// The untagged price body as Serde reads it; see [`TierWire`].
+#[toolkit_macros::domain_model]
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum PriceWire {
+    Flat {
+        amount: Decimal,
+    },
+    PerUnit {
+        rate: Decimal,
+    },
+    Package {
+        package_size: Decimal,
+        package_price: Decimal,
+    },
+    Tiers {
+        tiers: Vec<TierWire>,
+    },
+}
+impl From<PriceWire> for PriceData {
+    fn from(wire: PriceWire) -> Self {
+        match wire {
+            PriceWire::Flat { amount } => Self::Flat { amount },
+            PriceWire::PerUnit { rate } => Self::PerUnit { rate },
+            PriceWire::Package {
+                package_size,
+                package_price,
+            } => Self::Package {
+                package_size,
+                package_price,
+            },
+            PriceWire::Tiers { tiers } => Self::Tiers {
+                tiers: tiers
+                    .into_iter()
+                    .map(|t| Tier {
+                        up_to: t.up_to,
+                        rate: t.rate,
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+/// Every decimal of a price is exact text: serde reads a JSON number through f64 and would
+/// round it silently, so any number anywhere in the price is refused.
+fn has_number(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Array(items) => items.iter().any(has_number),
+        Value::Object(fields) => fields.values().any(has_number),
+        _ => false,
+    }
+}
+/// What a client is told when it sent a decimal as a JSON number.
+pub const DECIMALS_ARE_STRINGS: &str =
+    "decimals are JSON strings (\"0.10\"), never JSON numbers, so no digit is lost to f64";
+/// What a client is told when a decimal is not plain decimal text.
+pub const PLAIN_DECIMAL_TEXT: &str = "decimals are plain decimal text such as \"0.10\": digits \
+     with at most one point, and no exponent, + sign, spaces, separators or leading zeros";
 
-use crate::domain::error::DomainError;
-
-/// The minor unit assumed for any code outside the two tables below.
-///
-/// Named rather than inlined so the fallback is a stated policy: an unlisted
-/// code is treated as two-decimal, it is never rejected for being unlisted and
-/// it never resolves to "unknown".
-pub const DEFAULT_MINOR_UNIT: u32 = 2;
-
-/// ISO 4217 codes with **no** minor unit.
-///
-/// A **launch subset**, deliberately: it carries the zero-decimal codes we are
-/// confident about and nothing else, because a half-remembered table is worse
-/// than a named fallback. Anything absent resolves to [`DEFAULT_MINOR_UNIT`].
-/// The four-decimal fund codes (CLF, UYW) are absent on purpose — they are unit
-/// of account codes, not currencies anything is sold in, and admitting one
-/// would put a scale above 3 into the key.
-const ZERO_DECIMAL_CODES: &[&str] = &[
-    "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "VND", "VUV",
-    "XAF", "XOF", "XPF",
+/// A decimal field of a price, and the limit it follows.
+#[toolkit_macros::domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceField {
+    /// `amount` of a flat price: a rate.
+    Amount,
+    /// `rate` of a per-unit price or of a tier: a rate.
+    Rate,
+    /// `package_price` of a package price: a rate.
+    PackagePrice,
+    /// `package_size` of a package price: a positive quantity.
+    PackageSize,
+    /// `up_to` of a tier: a threshold.
+    UpTo,
+}
+/// The decimal fields of a price body, in the order they are judged.
+const PRICE_FIELDS: [PriceField; 4] = [
+    PriceField::Amount,
+    PriceField::Rate,
+    PriceField::PackageSize,
+    PriceField::PackagePrice,
 ];
-
-/// ISO 4217 codes with a **three**-decimal minor unit. Same launch-subset rule
-/// as [`ZERO_DECIMAL_CODES`].
-///
-/// There is no one-decimal roster beside these two, and MGA and MRU are the
-/// reason there could be: both subdivide by **five** rather than by ten, so no
-/// power of ten is their minor unit. The register publishes them at exponent 2,
-/// a fifth is exactly expressible at one decimal, and payment processors treat
-/// at least MGA as zero-decimal — three defensible answers, which is precisely
-/// the "half-remembered table" [`ZERO_DECIMAL_CODES`] refuses. They resolve to
-/// [`DEFAULT_MINOR_UNIT`] until a tenant sells on one and the question is
-/// answered rather than guessed.
-const THREE_DECIMAL_CODES: &[&str] = &["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"];
-
-/// A validated ISO 4217 alpha-3 currency code, held uppercase.
-///
-/// Normalization is load-bearing, not cosmetic: `currency` is a **scope-key
-/// axis**, so `usd` and `USD` must be one key or the duplicate-key index stops
-/// seeing duplicates. The constructor therefore accepts either spelling and
-/// stores exactly one of them.
-///
-/// Membership of the real ISO register is not checked here — that is a
-/// taxonomy question the tenant currency configuration answers (Slice 4). What
-/// this type guarantees is the *shape* every downstream axis comparison relies
-/// on: three ASCII letters, uppercase.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CurrencyCode(String);
-
-impl CurrencyCode {
-    /// Validate and normalize an authored currency code.
-    ///
-    /// # Errors
-    ///
-    /// [`DomainError::CurrencyInvalid`] when `raw` is not three ASCII letters.
-    pub fn new(raw: &str) -> Result<Self, DomainError> {
-        let trimmed = raw.trim();
-        if trimmed.len() != 3 || !trimmed.bytes().all(|b| b.is_ascii_alphabetic()) {
-            return Err(DomainError::CurrencyInvalid(raw.to_owned()));
-        }
-        Ok(Self(trimmed.to_ascii_uppercase()))
-    }
-
-    /// The normalized uppercase code.
+/// The decimal fields of one tier, in the order they are judged.
+const TIER_FIELDS: [PriceField; 2] = [PriceField::UpTo, PriceField::Rate];
+impl PriceField {
+    /// The field's JSON name.
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Amount => "amount",
+            Self::Rate => "rate",
+            Self::PackagePrice => "package_price",
+            Self::PackageSize => "package_size",
+            Self::UpTo => "up_to",
+        }
     }
-
-    /// The ISO 4217 minor unit: the number of decimal places one unit of this
-    /// currency is subdivided into, and therefore the maximum precision a price
-    /// on it can express.
+    /// The most fractional places the field takes.
     #[must_use]
-    pub fn minor_unit(&self) -> u32 {
-        let code = self.0.as_str();
-        if ZERO_DECIMAL_CODES.contains(&code) {
-            0
-        } else if THREE_DECIMAL_CODES.contains(&code) {
-            3
-        } else {
-            DEFAULT_MINOR_UNIT
+    pub const fn places(self) -> u32 {
+        match self {
+            Self::Amount | Self::Rate | Self::PackagePrice => RATE_FRACTIONAL_DIGITS,
+            Self::PackageSize | Self::UpTo => QUANTITY_FRACTIONAL_DIGITS,
+        }
+    }
+    /// Read the field's text with its limit.
+    fn parse(self, text: &str) -> Result<Decimal, NumericError> {
+        match self {
+            Self::Amount | Self::Rate | Self::PackagePrice => numeric::parse_rate(text),
+            Self::PackageSize => numeric::parse_positive_quantity(text),
+            Self::UpTo => numeric::parse_threshold(text),
+        }
+    }
+    /// Check a value the caller already holds against the field's limit.
+    fn check(self, value: Decimal) -> Result<Decimal, NumericError> {
+        match self {
+            Self::Amount | Self::Rate | Self::PackagePrice => numeric::validate_rate(value),
+            Self::PackageSize => numeric::validate_positive_quantity(value),
+            Self::UpTo => numeric::validate_threshold(value),
+        }
+    }
+    /// The refusal of a value the caller already holds, if any.
+    fn refusal(self, value: Decimal) -> Option<RuleError> {
+        self.check(value)
+            .err()
+            .map(|error| RuleError::new(numeric_code(error)))
+    }
+}
+
+/// The rule code of a refused decimal: `AMOUNT_OUT_OF_RANGE` over a limit, else
+/// `AMOUNT_INVALID` (invalid text, a negative value, or a zero package size). The client's
+/// message names the field.
+const fn numeric_code(error: NumericError) -> &'static str {
+    match error {
+        NumericError::OutOfRange => "AMOUNT_OUT_OF_RANGE",
+        NumericError::InvalidMinimumFee => "MIN_FEE_INVALID",
+        NumericError::InvalidText | NumericError::Negative | NumericError::NotPositive => {
+            "AMOUNT_INVALID"
         }
     }
 }
 
-impl fmt::Display for CurrencyCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+/// Why a price body was not read.
+#[toolkit_macros::domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DecodeError {
+    /// A decimal was sent as a JSON number.
+    #[error("decimal sent as a JSON number")]
+    JsonNumber,
+    /// A decimal string that its field's limit refuses.
+    #[error("{}: {error}", field.name())]
+    Numeric {
+        /// The refused field.
+        field: PriceField,
+        /// What the limit refused.
+        error: NumericError,
+    },
+    /// A stored decimal that is not its canonical text. Only [`decode_stored`] returns it.
+    #[error("{} is not canonical decimal text", field.name())]
+    NotCanonical {
+        /// The field that is not canonical.
+        field: PriceField,
+    },
+    /// The JSON does not have the model's shape, or has extra fields.
+    #[error("price is not in the shape of its model")]
+    Shape,
 }
-
-/// An amount in integer **minor units**, validated non-negative.
-///
-/// Non-negativity is a checked property rather than an assumption: typed credit
-/// rows are deliberately Future scope, so a negative price is an authoring
-/// mistake and must be refused where it enters, not carried until some
-/// downstream sum looks wrong.
-///
-/// The type deliberately carries **no currency**: the currency is a scope-key
-/// axis, so pairing one into the amount would create a second place to disagree
-/// about which currency a row is priced in.
-#[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MinorAmount(i64);
-
-impl MinorAmount {
-    /// Validate an authored minor-unit amount.
-    ///
-    /// # Errors
-    ///
-    /// [`DomainError::AmountNegative`] when `units` is below zero. Zero is
-    /// valid — a free trial phase and a zero-rated usage row are both authored
-    /// as `0`, not as an absent amount.
-    pub fn new(units: i64) -> Result<Self, DomainError> {
-        if units < 0 {
-            return Err(DomainError::AmountNegative(units.to_string()));
-        }
-        Ok(Self(units))
-    }
-
-    /// The underlying minor-unit count.
+impl DecodeError {
+    /// The stable rule code.
     #[must_use]
-    pub const fn get(self) -> i64 {
-        self.0
-    }
-}
-
-impl fmt::Display for MinorAmount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The rate (D-311).
-// ---------------------------------------------------------------------------
-
-/// How many decimal places a rate carries **past** the currency's minor unit.
-///
-/// Nine, and the number is argued rather than picked. Six is not enough: AWS
-/// Lambda's `$0.0000166667` per GB-second is `1666.67` micro-minor and stays
-/// fractional. Nine expresses it exactly, and `i64` still reaches about
-/// `$92,000,000` per unit — far past any rate. It matches the "nanos" convention
-/// the estate's neighbours use.
-///
-/// It is **fixed** rather than carried per row on purpose: a stored scale is a
-/// second field two rows could disagree about, and comparing two rates would
-/// then mean normalising first — in a gear whose whole job is that two rows on
-/// one key are comparable.
-pub const RATE_SUB_DECIMALS: u32 = 9;
-
-/// Minor units per stored unit, derived from [`RATE_SUB_DECIMALS`] rather than
-/// written out, so the scale has exactly one place it can be changed.
-const NANO_PER_MINOR: i128 = 10_i128.pow(RATE_SUB_DECIMALS);
-const NANO_PER_MINOR_I64: i64 = 10_i64.pow(RATE_SUB_DECIMALS);
-
-/// A **rate**: a multiplier, in 10⁻⁹ minor units (D-311).
-///
-/// # Why this is not [`MinorAmount`]
-///
-/// An amount reaches an invoice and cannot be finer than the currency's minor
-/// unit — there is no way to bill `$0.015`. A rate is multiplied by a quantity,
-/// and what rounds to a minor unit is the **product**. Metered pricing lives
-/// below a cent as a matter of course: S3 at `$0.023` per GB-month, Lambda at
-/// `$0.0000166667` per GB-second.
-///
-/// One type for both truncates: a `0.0150 / 0.0110` ladder and a
-/// `0.0230 / 0.0120` ladder both collapse to `0.01` at every band, so two
-/// different tariffs become the same tariff on rows that look well-formed.
-///
-/// This carries no arithmetic, for [`MinorAmount`]'s reason and more strongly:
-/// multiplying a rate by a quantity **is** charge computation, and this gear
-/// computes no charge.
-#[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RateMinor(i64);
-
-impl RateMinor {
-    /// The zero rate.
-    ///
-    /// A first-class value rather than a `from_nano_minor(0).expect(…)` at each
-    /// site: zero is a rate — `inst-tb-first` says so in as many words ("a `$0`
-    /// first band is valid") — and since D-45 the compiler *synthesises* one, so
-    /// the `[0, N)` band it prepends has a name rather than a literal.
-    pub const ZERO: Self = Self(0);
-
-    /// Read a rate from a decimal literal in the currency's **major** units — the
-    /// scale an authoring surface submits, and the one this type's other two
-    /// constructors do not take.
-    ///
-    /// `from_major_decimal(usd, "0.01")`, [`RateMinor::from_minor_units(1)`] and
-    /// [`RateMinor::from_nano_minor`]`(1_000_000_000)` are the same rate. Three
-    /// constructors reading three scales is the shape a caller misreads by 100×,
-    /// so the scale is in the name of each — this one included.
-    ///
-    /// # Errors
-    ///
-    /// [`DomainError::InvalidRequest`] when the literal is malformed;
-    /// [`DomainError::AmountNegative`] when it is below zero — zero itself is a
-    /// rate, since a zero-rated usage row is authored rather than absent;
-    /// [`DomainError::PrecisionExceeded`] when it declares more decimals than
-    /// the stored scale can hold.
-    ///
-    /// **This is where `PRECISION_EXCEEDED` gets an operand — not yet a caller.**
-    /// The code was a declared refusal nothing could raise, because `MinorAmount`
-    /// could not hold a violation for it to reject. A rate *can* carry more digits
-    /// than are stored, so the refusal is representable here. Two clauses of
-    /// D-311's landing note are corrected rather than repeated, because both are
-    /// checkable and both read as more than they are:
-    ///
-    /// - **This does not call [`check_scale`], and could not.** That predicate is
-    ///   the *amount* rule — a scale above the currency's minor unit — and the
-    ///   comparison below is the *rate* rule, against `minor_unit +
-    ///   RATE_SUB_DECIMALS`. Two scales, two rules; folding them into one function
-    ///   would give one name two meanings. [`check_scale`], [`check_decimal`] and
-    ///   [`is_expressible`] therefore still have no caller at all.
-    /// - **No production path reaches this constructor.** D-311's wire spelling is
-    ///   the integer `unitRateNanoMinor`, read through
-    ///   [`RateMinor::from_nano_minor`], so the only caller is
-    ///   `domain::repricing_tests`. The operand exists; the surface that would
-    ///   submit one does not. See the module doc for what is owed and by whom.
-    pub fn from_major_decimal(currency: &CurrencyCode, literal: &str) -> Result<Self, DomainError> {
-        let declared = fraction_digits(literal)?;
-        let storable = currency.minor_unit() + RATE_SUB_DECIMALS;
-        if declared > storable {
-            return Err(DomainError::PrecisionExceeded(format!(
-                "a rate on {currency} is stored to {storable} decimal(s), literal declares \
-                 {declared}"
-            )));
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::JsonNumber | Self::NotCanonical { .. } => "AMOUNT_INVALID",
+            Self::Numeric { error, .. } => numeric_code(error),
+            Self::Shape => "PRICE_MISSING",
         }
-        if literal.starts_with('-') {
-            return Err(DomainError::AmountNegative(literal.to_owned()));
-        }
-
-        // Scaled by string rather than through a float: `0.0000166667` has no
-        // exact binary representation, and a rate that changed in the ninth
-        // decimal on its way through the parser is the defect this type exists
-        // to prevent.
-        let body = literal.split('.').collect::<Vec<_>>();
-        let whole: i128 = body[0].parse().map_err(|_| {
-            DomainError::InvalidRequest(format!("malformed decimal literal: {literal}"))
-        })?;
-        let mut nano = whole
-            .checked_mul(10_i128.pow(currency.minor_unit()))
-            .and_then(|minor| minor.checked_mul(NANO_PER_MINOR))
-            .ok_or_else(|| DomainError::InvalidRequest(format!("rate out of range: {literal}")))?;
-        if let Some(fraction) = body.get(1) {
-            let digits: i128 = fraction.parse().map_err(|_| {
-                DomainError::InvalidRequest(format!("malformed decimal literal: {literal}"))
-            })?;
-            let shift = storable - declared;
-            let scaled = digits.checked_mul(10_i128.pow(shift)).ok_or_else(|| {
-                DomainError::InvalidRequest(format!("rate out of range: {literal}"))
-            })?;
-            nano = nano.checked_add(scaled).ok_or_else(|| {
-                DomainError::InvalidRequest(format!("rate out of range: {literal}"))
-            })?;
-        }
-        let nano = i64::try_from(nano)
-            .map_err(|_| DomainError::InvalidRequest(format!("rate out of range: {literal}")))?;
-        Ok(Self(nano))
     }
-
-    /// Wrap an already-scaled count in **nano-minor** units, as a stored row reads
-    /// back — the storage scale, not an author's.
-    ///
-    /// # Errors
-    ///
-    /// [`DomainError::AmountNegative`] when below zero.
-    pub fn from_nano_minor(nano: i64) -> Result<Self, DomainError> {
-        if nano < 0 {
-            return Err(DomainError::AmountNegative(nano.to_string()));
-        }
-        Ok(Self(nano))
-    }
-
-    /// A rate expressed in whole minor units — `1` meaning one cent per unit.
-    ///
-    /// The ordinary metered rate is sub-minor-unit, which is why this type
-    /// exists; the whole-unit case is still a lawful rate, and stating it in the
-    /// unit an author thinks in beats writing the nine zeroes out at each site.
-    ///
-    /// # Errors
-    ///
-    /// [`DomainError::AmountNegative`] when below zero, and
-    /// [`DomainError::InvalidRequest`] when scaling would overflow `i64` — about
-    /// 9.2 billion minor units, far beyond any authored rate.
-    pub fn from_minor_units(minor_units: i64) -> Result<Self, DomainError> {
-        let nano = minor_units.checked_mul(NANO_PER_MINOR_I64).ok_or_else(|| {
-            DomainError::InvalidRequest(format!("rate out of range: {minor_units}"))
-        })?;
-        Self::from_nano_minor(nano)
-    }
-
-    /// The stored count, in 10⁻⁹ minor units.
+    /// What a client is told: a JSON number is told to send a string, invalid text to send plain
+    /// decimal text, a value over its limit gets the limit, and a sign error names the field.
     #[must_use]
-    pub const fn nano_minor(self) -> i64 {
-        self.0
+    pub fn message(self) -> String {
+        match self {
+            Self::JsonNumber => DECIMALS_ARE_STRINGS.into(),
+            Self::Numeric {
+                error: NumericError::InvalidText,
+                ..
+            } => PLAIN_DECIMAL_TEXT.into(),
+            Self::Numeric {
+                field,
+                error: NumericError::OutOfRange,
+            } => format!(
+                "{} has at most {} fractional places and 28 digits in all",
+                field.name(),
+                field.places()
+            ),
+            Self::Numeric {
+                field,
+                error: NumericError::Negative,
+            } => format!("{} must not be negative", field.name()),
+            Self::Numeric {
+                field,
+                error: NumericError::NotPositive,
+            } => format!("{} must be above zero", field.name()),
+            Self::Numeric {
+                error: NumericError::InvalidMinimumFee,
+                ..
+            }
+            | Self::NotCanonical { .. }
+            | Self::Shape => self.code().into(),
+        }
     }
 }
-
-impl fmt::Display for RateMinor {
-    /// The stored count, not a rendered decimal.
-    ///
-    /// Rendering needs the currency, which this type does not carry — the same
-    /// arrangement [`MinorAmount`] has, and for the same reason: a `Display` that
-    /// guessed a scale would put a second opinion about the currency's shape next
-    /// to the one the row already holds.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl From<DecodeError> for RuleError {
+    fn from(error: DecodeError) -> Self {
+        Self::new(error.code())
     }
 }
-
-/// Is an amount authored with `declared_scale` fraction digits expressible in
-/// `currency`?
-///
-/// Crate-private, with [`check_scale`] and [`check_decimal`], for as long as the
-/// cluster is dormant: every amount crossing the wire is `i64` minor units and no
-/// surface accepts a decimal literal, so nothing outside this crate can supply a
-/// declared scale. A `pub` predicate carrying `PRECISION_EXCEEDED` makes a grep
-/// for the code read as enforcement the gear does not perform. D-311 stages the
-/// authoring surface that gives them an operand; widening them again belongs to
-/// that change, in the crate that gains the caller.
-///
-/// The predicate is over the **declared** precision, not over the value: a
-/// price authored as `100.00` on JPY is not expressible, even though `100` is,
-/// because the author has stated a two-decimal price on a currency that has no
-/// decimals. Silently accepting it would mean the read model froze a scale the
-/// currency cannot represent, and every consumer would have to re-derive which
-/// digits were real.
-#[must_use]
-#[allow(
-    dead_code,
-    reason = "dormant until D-311's decimal authoring surface gives it a caller; see `is_expressible`"
-)]
-pub(crate) fn is_expressible(currency: &CurrencyCode, declared_scale: u32) -> bool {
-    declared_scale <= currency.minor_unit()
+/// Read each decimal of `fields` named in `allowed` with its limit, and write it back as
+/// canonical text. With `stored`, text that is not already canonical is refused.
+fn canonical_fields(
+    fields: &mut Map<String, Value>,
+    allowed: &[PriceField],
+    stored: bool,
+) -> Result<(), DecodeError> {
+    for &field in allowed {
+        if let Some(Value::String(text)) = fields.get_mut(field.name()) {
+            let value = field
+                .parse(text)
+                .map_err(|error| DecodeError::Numeric { field, error })?;
+            let canonical = bss_money::canonical_decimal(value);
+            if stored && canonical != *text {
+                return Err(DecodeError::NotCanonical { field });
+            }
+            *text = canonical;
+        }
+    }
+    Ok(())
 }
-
-/// The publish-time form of [`is_expressible`].
-///
-/// **Dormant: nothing calls this.** Kept rather than deleted because the code it
-/// raises is declared by three design documents and an FR, and because the fault
-/// becomes representable the moment an authoring surface takes a decimal literal —
-/// which is the whole of what is owed. The module doc carries the argument; do not
-/// read a caller into this signature without checking for one.
-///
-/// # Errors
-///
-/// [`DomainError::PrecisionExceeded`] when `declared_scale` is above the
-/// currency's ISO 4217 minor unit.
-#[allow(
-    dead_code,
-    reason = "dormant until D-311's decimal authoring surface gives it a caller; see `is_expressible`"
-)]
-pub(crate) fn check_scale(currency: &CurrencyCode, declared_scale: u32) -> Result<(), DomainError> {
-    if is_expressible(currency, declared_scale) {
+/// [`canonical_fields`] over a price body and each of its tiers. Anything that is not where a
+/// decimal belongs is left for Serde to refuse as a shape error.
+fn canonical_price(value: &mut Value, stored: bool) -> Result<(), DecodeError> {
+    let Value::Object(fields) = value else {
         return Ok(());
-    }
-    Err(DomainError::PrecisionExceeded(format!(
-        "{currency} has {} decimal(s), amount declares {declared_scale}",
-        currency.minor_unit()
-    )))
-}
-
-/// The number of fraction digits an authored decimal literal declares.
-///
-/// This is the shape an authoring surface submits (`"1.50"`), so the scale
-/// check has to be able to start from it rather than from an already-split
-/// `(value, scale)` pair.
-///
-/// # Errors
-///
-/// [`DomainError::InvalidRequest`] when `literal` is not a decimal number: an
-/// empty part, a second decimal point, or any non-digit outside the leading
-/// sign. The sign itself is accepted here and judged by [`MinorAmount::new`] —
-/// one rejection per problem, so an author is not told about precision when the
-/// real fault is a negative price.
-pub fn fraction_digits(literal: &str) -> Result<u32, DomainError> {
-    let malformed = || DomainError::InvalidRequest(format!("malformed decimal literal: {literal}"));
-    let body = literal.strip_prefix('-').unwrap_or(literal);
-    let mut parts = body.split('.');
-    let whole = parts.next().unwrap_or_default();
-    let fraction = parts.next();
-    if parts.next().is_some() || whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(malformed());
-    }
-    let Some(fraction) = fraction else {
-        return Ok(0);
     };
-    if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(malformed());
+    canonical_fields(fields, &PRICE_FIELDS, stored)?;
+    if let Some(Value::Array(tiers)) = fields.get_mut("tiers") {
+        for tier in tiers {
+            if let Value::Object(tier) = tier {
+                canonical_fields(tier, &TIER_FIELDS, stored)?;
+            }
+        }
     }
-    u32::try_from(fraction.len()).map_err(|_| malformed())
+    Ok(())
 }
-
-/// Is an authored decimal literal expressible in `currency`?
-///
+/// Read a price body: no JSON number, each decimal within its limit, the model's shape.
+fn read(model: Model, mut value: Value, stored: bool) -> Result<PriceData, DecodeError> {
+    if has_number(&value) {
+        return Err(DecodeError::JsonNumber);
+    }
+    canonical_price(&mut value, stored)?;
+    let data: PriceData = serde_json::from_value::<PriceWire>(value)
+        .map_err(|_| DecodeError::Shape)?
+        .into();
+    if shape_matches(model, &data) {
+        Ok(data)
+    } else {
+        Err(DecodeError::Shape)
+    }
+}
+/// Decode an authored price in the shape declared by the model. Each decimal is normalized:
+/// `"0.10"` is read as `0.1`.
 /// # Errors
-///
-/// [`DomainError::InvalidRequest`] when the literal is malformed;
-/// [`DomainError::PrecisionExceeded`] when it declares more precision than the
-/// currency's minor unit.
-#[allow(
-    dead_code,
-    reason = "dormant until D-311's decimal authoring surface gives it a caller; see `is_expressible`"
-)]
-pub(crate) fn check_decimal(currency: &CurrencyCode, literal: &str) -> Result<(), DomainError> {
-    check_scale(currency, fraction_digits(literal)?)
+/// [`DecodeError::JsonNumber`] for a decimal sent as a JSON number; [`DecodeError::Numeric`]
+/// for text that is not plain decimal text or breaks its field's limit;
+/// [`DecodeError::Shape`] for malformed JSON, extra fields or a model/shape mismatch.
+pub fn decode(model: Model, value: Value) -> Result<PriceData, DecodeError> {
+    read(model, value, false)
 }
-
+/// Decode a stored price: as [`decode`], and each decimal must be stored as its canonical text
+/// (`"0.1"`, never `"0.10"`).
+/// # Errors
+/// Every refusal of [`decode`], and [`DecodeError::NotCanonical`] for another spelling.
+pub fn decode_stored(model: Model, value: Value) -> Result<PriceData, DecodeError> {
+    read(model, value, true)
+}
+/// Read a stored minimum fee: canonical decimal text (`30`, never `30.00`) that is not negative.
+/// `None` means the stored text is corrupt.
+#[must_use]
+pub fn stored_fee(text: &str) -> Option<Decimal> {
+    bss_money::parse_decimal(text)
+        .ok()
+        .filter(|fee| *fee >= Decimal::ZERO && bss_money::canonical_decimal(*fee) == text)
+}
+fn shape_matches(model: Model, data: &PriceData) -> bool {
+    matches!(
+        (model, data),
+        (Model::Flat, PriceData::Flat { .. })
+            | (Model::PerUnit, PriceData::PerUnit { .. })
+            | (Model::Package, PriceData::Package { .. })
+            | (Model::Graduated | Model::Volume, PriceData::Tiers { .. })
+    )
+}
+/// Validate rates, thresholds and ascending bounds with one open top band.
+#[must_use]
+pub fn validate_tiers(tiers: &[Tier]) -> Vec<RuleError> {
+    let mut errors = Vec::new();
+    if tiers.is_empty() {
+        return vec![RuleError::new("TIER_BAND_EMPTY")];
+    }
+    let mut previous = Decimal::ZERO;
+    for (index, tier) in tiers.iter().enumerate() {
+        errors.extend(PriceField::Rate.refusal(tier.rate));
+        errors.extend(tier.up_to.and_then(|top| PriceField::UpTo.refusal(top)));
+        if index + 1 == tiers.len() {
+            if tier.up_to.is_some() {
+                errors.push(RuleError::new("TIER_TOP_CLOSED"));
+            }
+        } else if let Some(top) = tier.up_to.filter(|top| *top > previous) {
+            previous = top;
+        } else {
+            errors.push(RuleError::new("TIER_BANDS_ORDER"));
+        }
+    }
+    errors
+}
+/// Validate prices without computing a period minimum or consumer allowances. Each decimal
+/// follows its field's limit (`bss_pricing_sdk::numeric`).
+#[must_use]
+pub fn validate(model: Model, data: &PriceData) -> Vec<RuleError> {
+    if !shape_matches(model, data) {
+        return vec![RuleError::new("PRICE_MISSING")];
+    }
+    match data {
+        PriceData::Flat { amount } => PriceField::Amount.refusal(*amount).into_iter().collect(),
+        PriceData::PerUnit { rate } => PriceField::Rate.refusal(*rate).into_iter().collect(),
+        PriceData::Package {
+            package_size,
+            package_price,
+        } => PriceField::PackageSize
+            .refusal(*package_size)
+            .or_else(|| PriceField::PackagePrice.refusal(*package_price))
+            .into_iter()
+            .collect(),
+        PriceData::Tiers { tiers } => validate_tiers(tiers),
+    }
+}
+/// The exact value of a price decimal.
+fn exact_decimal(value: Decimal) -> ExactAmount {
+    ExactAmount::from_decimal(value)
+}
+/// A failed exact step as a rule refusal. Valid prices keep every step far inside the exact
+/// budget, so a valid price never reaches this.
+fn exact_step(result: Result<ExactAmount, ExactError>) -> Result<ExactAmount, RuleError> {
+    result.map_err(|error| match error {
+        ExactError::ArithmeticLimit => RuleError::new("AMOUNT_OUT_OF_RANGE"),
+        ExactError::Money(_)
+        | ExactError::DivisionByZero
+        | ExactError::EmptyWeights
+        | ExactError::NegativeWeight
+        | ExactError::TooManyTerms => RuleError::new("AMOUNT_INVALID"),
+    })
+}
+/// Evaluate one quantity in major currency units. No allowance, proration or floor.
+///
+/// The result is exact: nothing is rounded and nothing is narrowed to a `Decimal`. A flat,
+/// per-unit, volume or graduated price only adds, subtracts and multiplies. A package price
+/// counts whole packages, `ceil(quantity / package_size)`, then multiplies that count by the
+/// package price. The count is a number of packages, not money.
+///
+/// The bounds all fit the 256-digit budget of [`ExactAmount`]:
+/// - an input (a quantity, a threshold or a package size) is below 10^28 and has at most 28
+///   places;
+/// - a product is below 10^56 and has at most 56 places;
+/// - a package count is at most 10^56;
+/// - a package amount is below 10^84.
+///
+/// A rate has at most 12 places, so an amount has at most 40. A `quantity` is any `Decimal`
+/// that is not negative; one above 10^28 also fits.
+/// # Errors
+/// Invalid model content and negative quantities are refused.
+pub fn amount_for(
+    model: Model,
+    data: &PriceData,
+    quantity: Decimal,
+) -> Result<ExactAmount, RuleError> {
+    if let Some(error) = validate(model, data).first() {
+        return Err(*error);
+    }
+    if quantity < Decimal::ZERO {
+        return Err(RuleError::new("AMOUNT_INVALID"));
+    }
+    let units = exact_decimal(quantity);
+    match data {
+        PriceData::Flat { amount } => Ok(exact_decimal(*amount)),
+        PriceData::PerUnit { rate } => exact_step(units.checked_mul(&exact_decimal(*rate))),
+        PriceData::Package {
+            package_size,
+            package_price,
+        } => {
+            let packages = exact_step(units.checked_div(&exact_decimal(*package_size)))?;
+            let packages = exact_step(packages.ceil())?;
+            exact_step(packages.checked_mul(&exact_decimal(*package_price)))
+        }
+        PriceData::Tiers { tiers } if model == Model::Volume => {
+            let band = tiers
+                .iter()
+                .find(|tier| tier.up_to.is_none_or(|top| quantity < top))
+                .ok_or_else(|| RuleError::new("TIER_TOP_CLOSED"))?;
+            exact_step(units.checked_mul(&exact_decimal(band.rate)))
+        }
+        PriceData::Tiers { tiers } => {
+            let mut total = exact_decimal(Decimal::ZERO);
+            let mut lower = Decimal::ZERO;
+            for tier in tiers {
+                let upper = tier.up_to.unwrap_or(quantity).min(quantity);
+                if upper > lower {
+                    let width =
+                        exact_step(exact_decimal(upper).checked_sub(&exact_decimal(lower)))?;
+                    let charge = exact_step(width.checked_mul(&exact_decimal(tier.rate)))?;
+                    total = exact_step(total.checked_add(&charge))?;
+                }
+                if upper == quantity {
+                    break;
+                }
+                lower = upper;
+            }
+            Ok(total)
+        }
+    }
+}
 #[cfg(test)]
 #[path = "money_tests.rs"]
-mod money_tests;
+mod tests;

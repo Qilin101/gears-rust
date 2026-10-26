@@ -3,7 +3,7 @@
 //! These tests construct a full service stack (real `ProviderRepositoryImpl` /
 //! `ModelRepositoryImpl` over in-memory `SQLite`, a stub `ResolutionCache`, real
 //! `PolicyEnforcer` backed by a
-//! mock `AuthZResolverClient`, and configurable mock `TenantResolverClient`)
+//! mock `AuthZResolverApi`, and configurable mock `TenantResolverClient`)
 //! and drive the complete provider→model→approval→soft-delete lifecycle.
 //!
 //! ## Test matrix
@@ -29,9 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
-};
+use authz_resolver_sdk::{AuthZResolverApi, EvaluationRequest, EvaluationResponse};
 use model_registry::config::ModelRegistryConfig;
 use model_registry::domain::cache::{NoopResolutionCache, ResolutionCache};
 use model_registry::domain::error::DomainError;
@@ -56,11 +54,12 @@ use tenant_resolver_sdk::{
     GetTenantsOptions, IsAncestorOptions, TenantId, TenantInfo, TenantRef, TenantResolverClient,
     TenantResolverError, TenantStatus,
 };
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::DBRunner;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_odata::{CursorV1, ODataQuery, parse_filter_string};
-use toolkit_security::{AccessScope, SecurityContext};
+use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext};
 use uuid::Uuid;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -84,17 +83,18 @@ fn parent_tenant() -> Uuid {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Mock AuthZResolverClient — always permissive with Eq constraint
+// Mock AuthZResolverApi — always permissive with Eq constraint
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct MockAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for MockAuthZ {
+impl AuthZResolverApi for MockAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let tenant_id = request
             .subject
             .properties
@@ -125,11 +125,12 @@ impl AuthZResolverClient for MockAuthZ {
 struct MockAuthZTenants(Vec<Uuid>);
 
 #[async_trait]
-impl AuthZResolverClient for MockAuthZTenants {
+impl AuthZResolverApi for MockAuthZTenants {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: true,
             context: authz_resolver_sdk::EvaluationResponseContext {
@@ -2037,17 +2038,18 @@ async fn disabled_provider_hides_model_when_no_model_exists() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Mock AuthZResolverClient — action-aware: denies `list_management`, permits all else
+// Mock AuthZResolverApi — action-aware: denies `list_management`, permits all else
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct MockAuthDenyingListManagement;
 
 #[async_trait]
-impl AuthZResolverClient for MockAuthDenyingListManagement {
+impl AuthZResolverApi for MockAuthDenyingListManagement {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         // Deny list_management; allow everything else.
         if request.action.name == "list_management" {
             return Ok(EvaluationResponse {

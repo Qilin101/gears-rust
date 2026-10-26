@@ -32,7 +32,7 @@ See also:
 5. **Extensible domain model via Global Type System** — Gears expose extensible domain objects whose metadata and types are customizable through [GTS](https://github.com/globaltypesystem/gts-spec) — define new event types, user settings, LLM model attributes, etc. CRUD API handlers support customization via hooks and callbacks as serverless functions and workflows.
 
 **Engineering principles:**
-- **Spec-Driven Development**: [Specification templates](docs/spec-templates/README.md) (PRD, Design, ADR, Feature) define what gets built *before* code is written. Every gear is well documented.
+- **Spec-Driven Development**: [Specification templates](studio-kit-gears/artifacts/README.md) (PRD, Design, ADR, Feature) define what gets built *before* code is written. Every gear is well documented.
 - **Shift Left**: Custom architecture lints (via `cargo gears lint`) enforce design rules at compile time, alongside Clippy, [tests](#testing), fuzzing, and security audits in CI
 - **Quality First**: 90%+ test coverage target with unit, integration, E2E, performance, and security testing
 - **Core in Rust**: Compile-time safety, deep static analysis including project-specific lints, so more issues are prevented before review/runtime
@@ -44,22 +44,15 @@ See also [REPO_PLAYBOOK](docs/REPO_PLAYBOOK.md) with the registry of repository-
 
 ## Quick Start
 
-### Prerequisites
+### Prerequisites and installation
 
-- Rust stable with Cargo ([Install via rustup](https://rustup.rs/))
-- Protocol Buffers compiler (`protoc`):
-  - macOS: `brew install protobuf`
-  - Linux: `apt-get install protobuf-compiler`
-  - Windows: Download from https://github.com/protocolbuffers/protobuf/releases
-- MariaDB/PostgreSQL/SQLite or in-memory database
+See [SETUP.md](SETUP.md) for clean-install and run instructions for macOS, Linux, and Windows. It covers Rust and Cargo through rustup, native build prerequisites, `make setup`, and optional Constructor Studio installation.
+
+A MariaDB, PostgreSQL, SQLite, or in-memory database is required for the corresponding runtime configuration.
 
 ### CI/Development Commands
 
 ```bash
-# Clone the repository
-git clone --recurse-submodules <repository-url>
-cd gears-rust
-
 make build      # Build the whole-project example server release binary
 make test       # Run workspace tests
 make check      # Run formatting, validation, linting, security, docs, and tests
@@ -121,7 +114,7 @@ cargo run --bin cf-gears-example-server -- --config config/quickstart.yaml --moc
 
 # Core server configuration (global section)
 server:
-  home_dir: "~/.cfgears
+  home_dir: "~/.cf-gears"
 
 # Database configuration (global section)
 database:
@@ -133,7 +126,7 @@ database:
 logging:
   default:
     console_level: info
-    file: "logs/cfgears.log"
+    file: "logs/cf-gears.log"
     file_level: warn
     max_age_days: 28
     max_backups: 3
@@ -181,7 +174,7 @@ See **[Security Overview §9 — Cryptographic Stack & FIPS-140-3](docs/security
 
 # Global server configuration
 server:
-  home_dir: "~/.cfgears"
+  home_dir: "~/.cf-gears"
 
 # Database configuration
 database:
@@ -223,12 +216,14 @@ gears:
 
 ### Environment Variable Overrides
 
-Configuration supports environment variable overrides with `CF_` prefix:
+Configuration supports environment variable overrides with the `APP__` prefix,
+using `__` to separate nesting levels:
 
 ```bash
-export CF_GEARS_DATABASE_URL="postgres://user:pass@localhost/db"
-export CF_GEARS_API_GATEWAY_BIND_ADDR="0.0.0.0:8080"
-export CF_GEARS_LOGGING_DEFAULT_CONSOLE_LEVEL="debug"
+export APP__SERVER__PORT=8087
+export APP__MODULES__api_gateway__CONFIG__BIND_ADDR="0.0.0.0:8080"
+export APP__LOGGING__DEFAULT__CONSOLE_LEVEL="debug"
+export APP__OPENTELEMETRY__TRACING__ENABLED=true
 ```
 
 ## Testing
@@ -242,7 +237,7 @@ Other tests:
 ```bash
 make test            # unit tests (workspace)
 make test GEAR=file-parser  # unit tests for one gear and its SDK crate
-make test-sqlite     # integration tests (SQLite, no external DB required)
+make test-integration LANE=toolkit-db-sqlite  # integration tests (SQLite, no external DB required)
 make e2e-local       # end-to-end tests (builds + starts server automatically)
 make e2e-local SUITE=file-parser  # suite E2E scope plus the default E2E target
 make e2e-docker      # end-to-end tests (builds + starts server in Docker)

@@ -1,7 +1,7 @@
 //! API-level (router) tests for the journal-entry / balance REST surface:
 //! `POST /journal-entries` (target tenant in the body),
 //! `POST /journal-entries/{entryId}/reversals` (tenant from context),
-//! and the read endpoints (`GET /balances?tenant_id=…`).
+//! and the read endpoints (`GET /balances`).
 //!
 //! Drives the router via `tower::ServiceExt::oneshot` against a stub
 //! `LedgerClientV1` + a stub `InvoicePoster` (no DB) and an in-test
@@ -33,16 +33,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use bss_ledger::api::rest::journal_entries::{ApiState, router};
 use bss_ledger::domain::error::DomainError;
+use bss_ledger::domain::instant::to_naive_date;
 use bss_ledger::domain::invoice::builder::PostedInvoice;
 use bss_ledger::infra::invoice_post::InvoicePoster;
 use bss_ledger_sdk::api::LedgerClientV1;
@@ -50,13 +50,37 @@ use bss_ledger_sdk::posting::{
     ArInvoiceBalanceView, BalanceView, EntryView, LineView, ODataQuery, Page, PostEntry, PostingRef,
 };
 use bss_ledger_sdk::{ProvisionOutcome, ProvisionRequest, SourceDocType};
-use chrono::Utc;
+use time::OffsetDateTime;
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit_db::secure::AccessScope;
 use toolkit_gts::gts_id;
 use toolkit_odata::PageInfo;
+use toolkit_security::PlatformSecurityContext;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`).
+fn usd_cents(minor: i64) -> bss_ledger_sdk::PostedMoney {
+    bss_ledger_sdk::PostedMoney::try_new(
+        rust_decimal::Decimal::new(minor, 2),
+        bss_ledger_sdk::CurrencySpec::try_new("USD".to_owned(), 2).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The wire form of a scale-2 cent count in `currency`.
+fn money_json(minor: i64, currency: &str) -> serde_json::Value {
+    serde_json::json!({
+        "amount": bss_ledger_sdk::canonical_decimal(rust_decimal::Decimal::new(minor, 2)),
+        "currency": currency,
+        "currency_scale": 2
+    })
+}
+
+/// The wire form of a USD scale-2 cent count.
+fn usd_json(minor: i64) -> serde_json::Value {
+    money_json(minor, "USD")
+}
 
 /// The canned posted/replayed entry id the stub poster + `get_entry` return.
 const STUB_ENTRY: Uuid = uuid::uuid!("dddddddd-dddd-dddd-dddd-dddddddddddd");
@@ -133,7 +157,7 @@ impl LedgerClientV1 for StubClient {
         _ctx: &toolkit_security::SecurityContext,
         _tenant_id: Uuid,
         _account_id: Uuid,
-    ) -> Result<Option<i64>, CanonicalError> {
+    ) -> Result<Option<bss_ledger_sdk::PostedMoney>, CanonicalError> {
         unimplemented!("not exercised by the journal router tests")
     }
 
@@ -163,8 +187,8 @@ impl LedgerClientV1 for StubClient {
             source_business_id: "reverses=00000000-0000-0000-0000-000000000001".to_owned(),
             reverses_entry_id: Some(uuid::uuid!("00000000-0000-0000-0000-000000000001")),
             reverses_period_id: Some("202606".to_owned()),
-            posted_at_utc: Utc::now(),
-            effective_at: Utc::now().date_naive(),
+            posted_at_utc: OffsetDateTime::now_utc(),
+            effective_at: to_naive_date(OffsetDateTime::now_utc()),
             posted_by_actor_id: tenant_id,
             origin: "SYSTEM".to_owned(),
             correlation_id: tenant_id,
@@ -192,10 +216,8 @@ impl LedgerClientV1 for StubClient {
             items: vec![BalanceView {
                 account_id: uuid::uuid!("99999999-9999-9999-9999-999999999999"),
                 account_class: bss_ledger_sdk::AccountClass::Ar,
-                currency: "USD".to_owned(),
-                balance_minor: 1200,
-                functional_balance_minor: None,
-                functional_currency: None,
+                balance: usd_cents(1200),
+                functional_balance: None,
             }],
             page_info: complete_page_info(),
         })
@@ -513,7 +535,7 @@ impl LedgerClientV1 for ReadStubClient {
         _ctx: &toolkit_security::SecurityContext,
         _tenant_id: Uuid,
         _account_id: Uuid,
-    ) -> Result<Option<i64>, CanonicalError> {
+    ) -> Result<Option<bss_ledger_sdk::PostedMoney>, CanonicalError> {
         unimplemented!("not exercised by the read-contract tests")
     }
 
@@ -543,8 +565,8 @@ impl LedgerClientV1 for ReadStubClient {
             source_business_id: AUDIT_BUSINESS_ID.to_owned(),
             reverses_entry_id: None,
             reverses_period_id: None,
-            posted_at_utc: Utc::now(),
-            effective_at: Utc::now().date_naive(),
+            posted_at_utc: OffsetDateTime::now_utc(),
+            effective_at: to_naive_date(OffsetDateTime::now_utc()),
             posted_by_actor_id: AUDIT_ACTOR,
             origin: AUDIT_ORIGIN.to_owned(),
             correlation_id: AUDIT_CORRELATION,
@@ -573,15 +595,12 @@ impl LedgerClientV1 for ReadStubClient {
                 account_class: bss_ledger_sdk::AccountClass::Ar,
                 gl_code: None,
                 side: bss_ledger_sdk::Side::Debit,
-                amount_minor: 1200,
-                currency: "USD".to_owned(),
-                currency_scale: 2,
+                money: usd_cents(1200),
                 invoice_id: Some("INV-1".to_owned()),
-                due_date: Some(Utc::now().date_naive()),
+                due_date: Some(to_naive_date(OffsetDateTime::now_utc())),
                 revenue_stream: None,
                 mapping_status: bss_ledger_sdk::MappingStatus::Resolved,
-                functional_amount_minor: None,
-                functional_currency: None,
+                functional_money: None,
                 tax_jurisdiction: None,
                 tax_filing_period: None,
                 ar_status: None,
@@ -612,22 +631,20 @@ impl LedgerClientV1 for ReadStubClient {
         // Two open AR invoices for one payer: one ~45 days past due (1-30? no —
         // 31-60) and one ~10 days past due (1-30). The handler folds these into
         // the domain aging buckets; the test asserts the bucketed shape.
-        let today = Utc::now().date_naive();
+        let today = to_naive_date(OffsetDateTime::now_utc());
         Ok(vec![
             ArInvoiceBalanceView {
                 payer_tenant_id: AGING_PAYER,
                 account_id: uuid::uuid!("a4a4a4a4-a4a4-a4a4-a4a4-a4a4a4a4a4a4"),
                 invoice_id: "INV-OLD".to_owned(),
-                currency: "USD".to_owned(),
-                balance_minor: 5000,
+                balance: usd_cents(5000),
                 due_date: Some(today - chrono::Duration::days(45)),
             },
             ArInvoiceBalanceView {
                 payer_tenant_id: AGING_PAYER,
                 account_id: uuid::uuid!("a4a4a4a4-a4a4-a4a4-a4a4-a4a4a4a4a4a4"),
                 invoice_id: "INV-NEW".to_owned(),
-                currency: "USD".to_owned(),
-                balance_minor: 3000,
+                balance: usd_cents(3000),
                 due_date: Some(today - chrono::Duration::days(10)),
             },
         ])
@@ -757,11 +774,12 @@ fn tenant_in_constraint(tenant_id: Uuid) -> Constraint {
 struct AllowAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for AllowAuthZ {
+impl AuthZResolverApi for AllowAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let tenant_id = subject_tenant_id(&request);
         Ok(EvaluationResponse {
             decision: true,
@@ -778,11 +796,12 @@ impl AuthZResolverClient for AllowAuthZ {
 struct DenyAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for DenyAuthZ {
+impl AuthZResolverApi for DenyAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext {
@@ -867,8 +886,7 @@ fn valid_post_body() -> serde_json::Value {
         "period_id": "202606",
         "items": [
             {
-                "amount_minor_ex_tax": 1000,
-                "currency": "USD",
+                "amount_ex_tax": usd_json(1000),
                 "revenue_stream": "subscription",
                 "catalog_class": "REVENUE",
                 "gl_code": "4000"
@@ -876,8 +894,7 @@ fn valid_post_body() -> serde_json::Value {
         ],
         "tax": [
             {
-                "amount_minor": 200,
-                "currency": "USD",
+                "amount": usd_json(200),
                 "tax_jurisdiction": "US-CA",
                 "tax_filing_period": "2026Q2"
             }
@@ -1079,9 +1096,7 @@ async fn list_balances_returns_stub_rows() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/bss-ledger/v1/balances?tenant_id={SUBJECT_TENANT}"
-                ))
+                .uri("/bss-ledger/v1/balances")
                 .body(Body::empty())
                 .expect("build req"),
         )
@@ -1097,7 +1112,7 @@ async fn list_balances_returns_stub_rows() {
         value["items"][0]["account_id"],
         serde_json::json!("99999999-9999-9999-9999-999999999999")
     );
-    assert_eq!(value["items"][0]["balance_minor"], serde_json::json!(1200));
+    assert_eq!(value["items"][0]["balance"], usd_json(1200));
     assert_eq!(value["items"][0]["account_class"], serde_json::json!("AR"));
     assert!(
         value["page_info"].is_object(),
@@ -1159,7 +1174,7 @@ async fn list_lines_threads_filter_and_surfaces_page() {
         Arc::new(StubPoster) as Arc<dyn InvoicePoster>,
     )
     .layer(axum::Extension(authed_context()));
-    // `$filter` carries the payer equality; `tenant_id` stays a plain param;
+    // `$filter` carries the payer equality; seller is the caller when omitted.
     // `limit` is the plain pagination cap. `%20` encodes the spaces in the
     // OData expression `payer_tenant_id eq <uuid>`.
     let filter = format!("payer_tenant_id%20eq%20{payer}");
@@ -1168,7 +1183,7 @@ async fn list_lines_threads_filter_and_surfaces_page() {
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/bss-ledger/v1/journal-lines?tenant_id={SUBJECT_TENANT}&$filter={filter}&limit=1"
+                    "/bss-ledger/v1/journal-lines?$filter={filter}&limit=1"
                 ))
                 .body(Body::empty())
                 .expect("build req"),
@@ -1185,13 +1200,56 @@ async fn list_lines_threads_filter_and_surfaces_page() {
         serde_json::json!(payer.to_string()),
         "the $filter payer_tenant_id threaded into the client call"
     );
-    assert_eq!(value["items"][0]["amount_minor"], serde_json::json!(1200));
+    assert_eq!(value["items"][0]["money"], usd_json(1200));
     // The continuation token rides in `page_info.next_cursor` (canonical Page).
     assert_eq!(
         value["page_info"]["next_cursor"],
         serde_json::json!(NEXT_CURSOR),
         "the page's next_cursor must reach the wire under page_info"
     );
+}
+
+#[tokio::test]
+async fn list_lines_named_tenant_id_returns_400() {
+    let router = router_with_stubs(
+        Arc::new(ReadStubClient) as Arc<dyn LedgerClientV1>,
+        Arc::new(StubPoster) as Arc<dyn InvoicePoster>,
+    )
+    .layer(axum::Extension(authed_context()));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/bss-ledger/v1/journal-lines?tenant_id={SUBJECT_TENANT}"
+                ))
+                .body(Body::empty())
+                .expect("build req"),
+        )
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_journal_entries_ungranted_filter_tenant_returns_403() {
+    let other = uuid::uuid!("dddddddd-eeee-ffff-0000-111111111111");
+    let router = base_router().layer(axum::Extension(authed_context()));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/bss-ledger/v1/journal-entries?$filter=tenant_id%20eq%20{other}"
+                ))
+                .body(Body::empty())
+                .expect("build req"),
+        )
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 /// `GET /balances/ar-aging` returns the bucketed AR shape: the stub
@@ -1234,14 +1292,14 @@ async fn ar_aging_returns_bucketed_shape() {
     };
     let b_31_60 = find("31-60").expect("a 31-60 bucket for the payer");
     assert_eq!(
-        b_31_60["amount_minor"],
-        serde_json::json!(5000),
+        b_31_60["amount"],
+        usd_json(5000),
         "the ≈45-day-past-due invoice ages into 31-60"
     );
     let b_1_30 = find("1-30").expect("a 1-30 bucket for the payer");
     assert_eq!(
-        b_1_30["amount_minor"],
-        serde_json::json!(3000),
+        b_1_30["amount"],
+        usd_json(3000),
         "the ≈10-day-past-due invoice ages into 1-30"
     );
     assert_eq!(b_1_30["currency"], serde_json::json!("USD"));
@@ -1382,8 +1440,7 @@ async fn correct_mapping_happy_path_posts_correction() {
         "reason": "remap to revenue",
         "corrected_items": [
             {
-                "amount_minor_ex_tax": 1000,
-                "currency": "USD",
+                "amount_ex_tax": usd_json(1000),
                 "revenue_stream": "subscription",
                 "catalog_class": "REVENUE",
                 "gl_code": "4000"

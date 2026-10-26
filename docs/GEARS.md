@@ -21,7 +21,7 @@ The GTS naming conventions provide simple, human-readable, globally unique ident
 
 ## Detailed Overview
 
-![architecture.drawio.png](img/architecture.drawio.png)
+<img src="img/architecture.drawio.svg" alt="Gears architecture diagram">
 
 The diagram above illustrates the principal Gear architecture. The deployed component set depends on the target environment and build configuration; for example it can be a single executable for the desktop build or multiple containers for a cloud server.
 
@@ -42,6 +42,16 @@ All gears can be divided into several categories:
 - **Core Platform Services** - external services that implement Core Platform functionality, such as tenancy management, access policies, licensing, credentials, and outbound egress control
 - **OSS (Operations Support System)** - operational gears for infrastructure management, DNS, certificates, monitoring, service catalog, and multi-region operations
 - **Studio** - developer experience and governance gears for the Constructor Studio product
+
+These categories reach Gearbox through the `category` field of a gear's `gear.gdl`, which takes
+the kebab-case slug: `api-ingress`, `bss`, `core-functionality`, `core-platform-integration`,
+`gen-ai`, `oss`, `serverless`, plus `example` for the sample gears. **Business Logic Gears, Core
+Platform Services and Studio have no slug yet**, so a descriptor using one raises `GBX0108`.
+That is a warning rather than an error: the gear still loads and composes, and the taxonomy is
+the team's to extend.
+
+A gear without a `gear.gdl` is invisible to composition. See [GEARBOX.md](GEARBOX.md) for what
+the file holds and [gdl.md](gdl.md) for the language.
 
 The **Core Platform Integration Gears** layer abstracts integration with core platform services, such as IdP, policy management, licensing, and credentials management that that can be out of scope of Gears. This keeps Gears reusable: it can run as a standalone platform, or it can integrate into an existing enterprise platform by wiring adapters to the platform’s services.
 
@@ -112,7 +122,7 @@ Provide conversational capabilities (chat messages, conversation history) as a c
 #### More details
 - [PRD](../gears/chat-engine/docs/PRD.md)
 - [Design](../gears/chat-engine/docs/DESIGN.md)
-- [API](../gears/chat-engine/api/README.md)
+- [Webhook protocol](../gears/chat-engine/docs/WEBHOOK-PROTOCOL.md)
 - TODO: SDK link
 
 ### Models Registry
@@ -127,8 +137,8 @@ Maintain a catalog of available models with tenant-level availability and approv
 - [ ] p3 - auto-approval configuration per tenant/provider
 - [ ] p4 - model lifecycle tracking (deprecated, archived)
 #### More details
-- [PRD](../gears/model-registry/docs/PRD.md)
-- [Design](../gears/model-registry/docs/DESIGN.md)
+- TODO: PRD
+- TODO: Design
 - [API](../gears/model-registry/README.md)
 - TODO: SDK link
 
@@ -217,8 +227,6 @@ Provide unified access to multiple LLM providers with multimodal support, tool c
 - [ ] p3 - embeddings batching
 - [ ] p4 - audit events (audit plugin)
 #### More details
-- [PRD](../gears/llm-gateway/docs/PRD.md)
-- [Design](../gears/llm-gateway/docs/DESIGN.md)
 - [API](../gears/llm-gateway/README.md)
 - [SDK](../gears/llm-gateway/llm-gateway-sdk/)
 
@@ -659,18 +667,15 @@ Introduces an abstraction layer behind real token validation and claims extracti
 
 ### License Resolver
 #### Responsibility
-Introduces an abstraction layer over the upstream License Manager service. The goal is to provide a single entry point for license retrieval without coupling feature code to a specific subscription & billing system.
+Introduces an abstraction layer over the upstream License Manager service. The goal is to provide a single entry point for one yes/no question — is this Subject licensed for this Resource — without coupling feature code to a specific subscription & billing system. Check-only and read-only by design: exactly one `is_licensed` method, no license retrieval, no listing, and no grant store of its own.
 #### High Level Scenarios
-- [ ] p1 - features and quota provisioning on tenants/users/resources
-- [ ] p1 - adapter for single-user and single-tenant use-cases (desktop app)
-- [ ] p2 - cache and refresh license state
-- [ ] p2 - metrics collection for license acquisitions
-- [ ] p3 - audit with retention for license acquisitions
+- [x] p1 - license check for a subject/resource pair
+- [ ] p2 - helpers for registering the well-known `SecurityContext` subject contracts (user, tenant)
 #### More details
-- TODO: PRD link
-- TODO: Design link
-- TODO: API link
-- TODO: SDK link
+- [PRD](../gears/system/license-resolver/docs/PRD.md)
+- [Design](../gears/system/license-resolver/docs/DESIGN.md)
+- [API](../gears/system/license-resolver/license-resolver/README.md)
+- [SDK](../gears/system/license-resolver/license-resolver-sdk/README.md)
 
 ### Credentials Store
 #### Responsibility
@@ -704,7 +709,7 @@ Introduces an abstraction layer behind the real Outbound API Gateway. The main g
 
 ### Event Broker
 
-Multi-consumer, partitioned, append-only event streaming for Cyber Ware modules.
+Multi-consumer, partitioned, append-only event streaming for Gears modules.
 Typed events, at-least-once delivery, idempotent producers (chained/monotonic/stateless),
 pluggable storage backends, consumer-group cursor tracking.
 

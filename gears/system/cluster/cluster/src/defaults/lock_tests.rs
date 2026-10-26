@@ -7,6 +7,7 @@ use crate::defaults::test_cache::MemoryCache;
 use cluster_sdk::cache::ClusterCacheBackend;
 use cluster_sdk::cache::types::{PutRequest, Ttl};
 use cluster_sdk::error::{ClusterError, ProviderErrorKind};
+use cluster_sdk::lease::LeaseToken;
 use cluster_sdk::lock::DistributedLockBackend;
 
 async fn settle() {
@@ -101,7 +102,12 @@ async fn release_does_not_delete_a_foreign_holders_entry() {
 #[tokio::test(start_paused = true)]
 async fn crashed_holder_is_reaped_by_ttl() {
     let cache = MemoryCache::linearizable();
-    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+    // Virtual clock: the steal-on-expiry below turns on the lease deadline lapsing
+    // under `advance` (H3; the record's physical TTL includes the 1h retention, so
+    // it is not the cache sweeper that frees it).
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache)
+        .map(CasBasedDistributedLockBackend::with_virtual_clock)
+    else {
         panic!("construct");
     };
     let Ok(guard) = backend.try_lock("ledger", Duration::from_secs(5)).await else {
@@ -148,6 +154,57 @@ async fn blocking_lock_waits_then_acquires_on_release() {
     };
     let Ok(acquired) = joined else {
         panic!("waiter must acquire after release");
+    };
+    assert_eq!(acquired.name(), "ledger");
+}
+
+#[tokio::test]
+async fn blocking_lock_acquires_uncontended_over_a_watchless_cache() {
+    // A cache that serves no exact watch (features().watch == false, watch()
+    // -> Unsupported) must not fail a blocking lock(). The pre-fix code
+    // subscribed *before* the first claim, so even an uncontended acquisition
+    // failed at that `?`. Now the wait degrades to bounded polling. Regression
+    // for the live redis `watch_mode: disabled` bug (plan D3).
+    let cache = MemoryCache::linearizable_without_watch();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("linearizable cache must construct");
+    };
+    let Ok(guard) = backend
+        .lock("ledger", Duration::from_secs(30), Duration::from_secs(30))
+        .await
+    else {
+        panic!("uncontended blocking lock must acquire without a cache watch");
+    };
+    assert_eq!(guard.name(), "ledger");
+}
+
+#[tokio::test]
+async fn blocking_lock_polls_to_acquire_over_a_watchless_cache() {
+    // Contended: with no watch to wake on, the waiter must poll the claim on the
+    // bounded interval and acquire once the holder releases.
+    let cache = MemoryCache::linearizable_without_watch();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("linearizable cache must construct");
+    };
+    let backend = Arc::new(backend);
+    let Ok(guard) = backend.try_lock("ledger", Duration::from_secs(30)).await else {
+        panic!("first holder acquires");
+    };
+    let waiter_backend = Arc::clone(&backend);
+    let waiter = tokio::spawn(async move {
+        waiter_backend
+            .lock("ledger", Duration::from_secs(30), Duration::from_secs(30))
+            .await
+    });
+    // Let the waiter block (its first claim contends), then release; the waiter
+    // acquires on its next poll rather than on a watch event.
+    settle().await;
+    assert!(guard.release().await.is_ok());
+    let Ok(joined) = waiter.await else {
+        panic!("waiter task must join");
+    };
+    let Ok(acquired) = joined else {
+        panic!("waiter must acquire after release via polling");
     };
     assert_eq!(acquired.name(), "ledger");
 }
@@ -304,4 +361,378 @@ async fn blocking_lock_times_out_when_held() {
         joined,
         Err(ClusterError::LockTimeout { name, .. }) if name == "ledger"
     ));
+}
+
+// The lease-token half of the trait (§5.8.1, item `L1`)
+
+/// Two backends over one cache — the in-process stand-in for two cluster replicas
+/// over one backing store.
+fn two_handles(
+    cache: &Arc<MemoryCache>,
+) -> (
+    CasBasedDistributedLockBackend,
+    CasBasedDistributedLockBackend,
+) {
+    // Virtual clock on both handles: these two-replica tests lapse leases under
+    // `tokio::time::advance`, which the production wall clock (H3) never moves.
+    let build = || {
+        CasBasedDistributedLockBackend::new(Arc::clone(cache) as Arc<dyn ClusterCacheBackend>)
+            .expect("a linearizable cache must construct")
+            .with_virtual_clock()
+    };
+    (build(), build())
+}
+
+#[tokio::test]
+async fn acquire_returns_the_token_and_contends_while_held() {
+    let cache = MemoryCache::linearizable();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("construct");
+    };
+    let Ok(token) = backend
+        .acquire("ledger", "owner-a", Duration::from_secs(30))
+        .await
+    else {
+        panic!("a free lock must acquire");
+    };
+    assert_eq!(token.name, "ledger");
+    assert_eq!(token.owner, "owner-a");
+    assert_eq!(token.fence, 1);
+    assert!(matches!(
+        backend.acquire("ledger", "owner-b", Duration::from_secs(30)).await,
+        Err(ClusterError::LockContended { name }) if name == "ledger"
+    ));
+}
+
+#[tokio::test]
+async fn a_lease_is_renewable_and_releasable_through_another_backend_handle() {
+    // `L1` exit criterion, at the trait boundary: the answer to a lease operation
+    // is a property of the record, so a handle that never saw the acquire serves it
+    // identically (invariant I7).
+    let cache = MemoryCache::linearizable();
+    let (acquirer, other_replica) = two_handles(&cache);
+
+    let Ok(token) = acquirer
+        .acquire("ledger", "owner-a", Duration::from_secs(30))
+        .await
+    else {
+        panic!("acquire");
+    };
+    assert!(
+        other_replica
+            .renew(&token, Duration::from_mins(1))
+            .await
+            .is_ok(),
+        "a replica that never saw the acquire must serve the renew"
+    );
+    assert!(other_replica.release(&token).await.is_ok());
+    // The lock is free again, from either handle's point of view.
+    assert!(
+        acquirer
+            .acquire("ledger", "owner-b", Duration::from_secs(30))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn renew_through_another_handle_refuses_a_non_matching_token() {
+    let cache = MemoryCache::linearizable();
+    let (acquirer, other_replica) = two_handles(&cache);
+    let Ok(token) = acquirer
+        .acquire("ledger", "owner-a", Duration::from_secs(30))
+        .await
+    else {
+        panic!("acquire");
+    };
+
+    let wrong_owner = LeaseToken::new(&token.name, "owner-b", token.fence);
+    let wrong_fence = LeaseToken::new(&token.name, &token.owner, token.fence + 1);
+    assert!(matches!(
+        other_replica.renew(&wrong_owner, Duration::from_secs(30)).await,
+        Err(ClusterError::LockExpired { name }) if name == "ledger"
+    ));
+    assert!(matches!(
+        other_replica
+            .renew(&wrong_fence, Duration::from_secs(30))
+            .await,
+        Err(ClusterError::LockExpired { .. })
+    ));
+    // Neither attempt disturbed the real holder.
+    assert!(
+        other_replica
+            .renew(&token, Duration::from_secs(30))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn renew_through_another_handle_refuses_a_lapsed_lease() {
+    let cache = MemoryCache::linearizable();
+    let (acquirer, other_replica) = two_handles(&cache);
+    let Ok(token) = acquirer
+        .acquire("ledger", "owner-a", Duration::from_secs(5))
+        .await
+    else {
+        panic!("acquire");
+    };
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(matches!(
+        other_replica.renew(&token, Duration::from_secs(5)).await,
+        Err(ClusterError::LockExpired { .. })
+    ));
+}
+
+#[tokio::test]
+async fn release_of_a_lease_nobody_holds_is_ok() {
+    let cache = MemoryCache::linearizable();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("construct");
+    };
+    assert!(
+        backend
+            .release(&LeaseToken::new("ledger", "owner-a", 1))
+            .await
+            .is_ok(),
+        "releasing an absent lease is success, not an error (DESIGN 6.10)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquiring_an_expired_lock_strictly_increases_the_fence() {
+    let cache = MemoryCache::linearizable();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache)
+        .map(CasBasedDistributedLockBackend::with_virtual_clock)
+    else {
+        panic!("construct");
+    };
+    let Ok(first) = backend
+        .acquire("ledger", "owner-a", Duration::from_secs(5))
+        .await
+    else {
+        panic!("acquire");
+    };
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let Ok(second) = backend
+        .acquire("ledger", "owner-b", Duration::from_secs(5))
+        .await
+    else {
+        panic!("an expired lease must be stealable");
+    };
+    assert!(
+        second.fence > first.fence,
+        "{} !> {}",
+        second.fence,
+        first.fence
+    );
+}
+
+#[tokio::test]
+async fn a_guard_and_a_token_are_the_same_lease() {
+    // The guard path is built over the token path, so a lock held through
+    // `try_lock` contends against a token acquisition and vice versa.
+    let cache = MemoryCache::linearizable();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("construct");
+    };
+    let Ok(_guard) = backend.try_lock("ledger", Duration::from_secs(30)).await else {
+        panic!("acquire");
+    };
+    assert!(matches!(
+        backend
+            .acquire("ledger", "owner-a", Duration::from_secs(30))
+            .await,
+        Err(ClusterError::LockContended { .. })
+    ));
+
+    let Ok(token) = backend
+        .acquire("other", "owner-a", Duration::from_secs(30))
+        .await
+    else {
+        panic!("acquire");
+    };
+    assert!(matches!(
+        backend.try_lock("other", Duration::from_secs(30)).await,
+        Err(ClusterError::LockContended { .. })
+    ));
+    assert!(backend.release(&token).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquire_waiting_takes_the_lease_when_the_incumbent_lapses() {
+    // A lapsing lease writes nothing, so no watch event announces it: the waiter
+    // has to wake itself at the incumbent's deadline.
+    let cache = MemoryCache::linearizable();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache)
+        .map(CasBasedDistributedLockBackend::with_virtual_clock)
+    else {
+        panic!("construct");
+    };
+    let Ok(held) = backend
+        .acquire("ledger", "owner-a", Duration::from_secs(5))
+        .await
+    else {
+        panic!("acquire");
+    };
+    // The holder "crashes" — no release, no renewal.
+    let waiter = tokio::spawn({
+        let backend = Arc::new(backend);
+        let handle = Arc::clone(&backend);
+        async move {
+            handle
+                .acquire_waiting(
+                    "ledger",
+                    "owner-b",
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                )
+                .await
+        }
+    });
+    tokio::time::advance(Duration::from_secs(6)).await;
+    settle().await;
+    let Ok(Ok(taken)) = waiter.await else {
+        panic!("the waiter must take the lease once it lapses");
+    };
+    assert!(
+        taken.fence > held.fence,
+        "and it must fence its predecessor"
+    );
+}
+
+// Watchless wait policy (§3.11, plan D3) — the poll-fallback helpers and the two
+// failure/steal exits of a watchless blocking `lock()`.
+
+#[test]
+fn watchless_poll_interval_is_floored_and_jittered() {
+    use super::{WATCHLESS_POLL_INTERVAL, watchless_poll_interval};
+    // U(base, 2*base): a floor of one full base (so a poll never degenerates into
+    // a spin) plus up to one base of jitter. Draw a handful and check the range.
+    let base = WATCHLESS_POLL_INTERVAL;
+    for _ in 0..64 {
+        let d = watchless_poll_interval(base);
+        assert!(d >= base, "never below the one-interval floor: {d:?}");
+        assert!(d < 2 * base, "never at or above 2x base: {d:?}");
+    }
+}
+
+#[test]
+fn grow_watchless_doubles_then_saturates_at_the_cap() {
+    use super::{WATCHLESS_POLL_INTERVAL, WATCHLESS_POLL_INTERVAL_CAP, grow_watchless};
+    // Doubles while below the cap.
+    assert_eq!(
+        grow_watchless(WATCHLESS_POLL_INTERVAL),
+        WATCHLESS_POLL_INTERVAL * 2
+    );
+    // Saturates at the cap and never exceeds it, however many times grown.
+    let mut base = WATCHLESS_POLL_INTERVAL;
+    for _ in 0..16 {
+        base = grow_watchless(base);
+        assert!(
+            base <= WATCHLESS_POLL_INTERVAL_CAP,
+            "never past the cap: {base:?}"
+        );
+    }
+    assert_eq!(base, WATCHLESS_POLL_INTERVAL_CAP, "reaches the cap");
+    assert_eq!(
+        grow_watchless(WATCHLESS_POLL_INTERVAL_CAP),
+        WATCHLESS_POLL_INTERVAL_CAP,
+        "and stays there"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn next_wait_step_watchless_classifies_tick_vs_elapse() {
+    use super::{WATCHLESS_POLL_INTERVAL, WaitStep, next_wait_step};
+    let base = WATCHLESS_POLL_INTERVAL;
+    // `wait >= 2*base`: the jittered poll is always strictly below `wait`, so the
+    // step is a poll tick → Retry (deterministic despite jitter).
+    let wide = 4 * base;
+    assert!(
+        matches!(next_wait_step(None, base, wide).await, WaitStep::Retry),
+        "a poll shorter than the budget is a retry tick"
+    );
+    // `wait <= base`: the poll clamps to `wait` (jitter >= base >= wait), consuming
+    // the whole budget → Elapsed (deterministic).
+    let tight = base / 2;
+    assert!(
+        matches!(next_wait_step(None, base, tight).await, WaitStep::Elapsed),
+        "a poll that consumes the whole budget is an elapse"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocking_lock_times_out_when_held_over_a_watchless_cache() {
+    // The only failure exit of the watchless wait is `poll == wait ⇒ Elapsed ⇒
+    // LockTimeout`. With no watch to wake on, the waiter polls the claim against a
+    // lock held past its own patience and must still time out on time.
+    let cache = MemoryCache::linearizable_without_watch();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache) else {
+        panic!("linearizable cache must construct");
+    };
+    let backend = Arc::new(backend);
+    // Held with a long TTL so it is never reaped during the test.
+    let Ok(_held) = backend.try_lock("ledger", Duration::from_secs(100)).await else {
+        panic!("hold the lock");
+    };
+    let waiter_backend = Arc::clone(&backend);
+    let waiter = tokio::spawn(async move {
+        waiter_backend
+            .lock("ledger", Duration::from_secs(100), Duration::from_secs(1))
+            .await
+    });
+    // Advance past the acquisition timeout; the polling waiter bounds out.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let Ok(joined) = waiter.await else {
+        panic!("waiter task must join");
+    };
+    assert!(
+        matches!(joined, Err(ClusterError::LockTimeout { ref name, .. }) if name == "ledger"),
+        "a watchless waiter must time out via polling, got {joined:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocking_lock_steals_a_lapsed_lease_over_a_watchless_cache() {
+    // A lapsing lease writes nothing, so even a native watch sees no event — the
+    // waiter wakes itself at the incumbent's deadline. Over a watchless cache the
+    // same steal must land off the poll timer: the watchless twin of
+    // `acquire_waiting_takes_the_lease_when_the_incumbent_lapses`.
+    let cache = MemoryCache::linearizable_without_watch();
+    let Ok(backend) = CasBasedDistributedLockBackend::new(cache)
+        .map(CasBasedDistributedLockBackend::with_virtual_clock)
+    else {
+        panic!("construct");
+    };
+    let Ok(held) = backend
+        .acquire("ledger", "owner-a", Duration::from_secs(5))
+        .await
+    else {
+        panic!("acquire");
+    };
+    // The holder "crashes" — no release, no renewal.
+    let waiter = tokio::spawn({
+        let backend = Arc::new(backend);
+        let handle = Arc::clone(&backend);
+        async move {
+            handle
+                .acquire_waiting(
+                    "ledger",
+                    "owner-b",
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                )
+                .await
+        }
+    });
+    tokio::time::advance(Duration::from_secs(6)).await;
+    settle().await;
+    let Ok(Ok(taken)) = waiter.await else {
+        panic!("the waiter must take the lease once it lapses, off the poll timer");
+    };
+    assert!(
+        taken.fence > held.fence,
+        "and it must fence its predecessor"
+    );
 }

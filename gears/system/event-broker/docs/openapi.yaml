@@ -39,24 +39,34 @@ paths:
       tags: [events]
       summary: Publish a single event
       description: |
-        Enqueue one event into the per-topic ingest outbox. Default response is
-        `202 Accepted` once the event is durably enqueued; opt into synchronous
-        backend persistence via the `Sync-Wait: true` header or `?wait=persisted`
-        query parameter. Offset is assigned asynchronously by the storage backend
-        and is never returned inline.
+        Enqueue one event into the per-topic ingest outbox. The broker resolves the
+        owning topic from the `topic` trait on the event `type`'s resolved GTS type
+        schema. Publish is asynchronous: `202 Accepted` once the event is durably
+        enqueued in ingest's own store, after which the event is delivered to the
+        storage backend out of band. Offset is assigned asynchronously by the
+        storage backend and is never returned inline.
+
+        Synchronous persistence - holding the response until the backend confirms
+        the event is persisted - is requested with the standard `Prefer: wait`
+        header (RFC 7240). It is not implemented yet and is answered
+        `501 Not Implemented`. `Prefer: respond-async` names the default (async)
+        behaviour and is accepted as a no-op (still `202`).
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "./schemas/event.v1.schema.json"
+              $ref: "./schemas/gts.cf.core.events.event.v1~.schema.json"
       responses:
         "202":
           description: Accepted, durably enqueued in the outbox
-        "201":
-          description: Persisted to backend (sync mode)
+        "200":
+          description: >-
+            Idempotent duplicate - a lost-ack retry of the producer chain's current
+            head. The event is already durable; nothing is written and the response
+            carries no body.
         "400":
-          description: Validation error (InvalidPartition, InvalidTraceParent, etc.)
+          description: Validation error (read-only/unknown field, unknown producer, etc.)
           content:
             application/problem+json:
               schema:
@@ -67,8 +77,35 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+        "404":
+          description: Topic or event type not registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "412":
-          description: SequenceViolation — producer's `previous`/`sequence` does not match the broker's stored `last_sequence`. Response body includes the broker's current `last_sequence` so the producer can resync.
+          description: >-
+            SequenceViolation - the producer chain does not advance by exactly one
+            from the broker's stored `last_sequence`. `context.resource_name` names
+            the resolved topic; the violation carries `expected_previous=<n>` so the
+            producer can resync (re-read `GET /v1/producers/{id}/cursors`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: >-
+            SchemaViolation - the event `data` does not satisfy the event type's
+            `data_schema`. `context.resource_name` names the resolved topic and the
+            `(payload)`/`schema_validation` field violation says what is wrong
+            without echoing submitted content.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "501":
+          description: >-
+            Synchronous publish (`Prefer: wait`) is not implemented yet.
           content:
             application/problem+json:
               schema:
@@ -80,7 +117,8 @@ paths:
       summary: Publish a batch of events (atomic per topic)
       description: |
         Atomic per-topic batch of up to 100 events. All-or-nothing per topic.
-        Mixing topics in one batch is rejected.
+        Each event's owning topic is resolved from the `topic` trait on its `type`;
+        a batch whose event types resolve to more than one topic is rejected.
       requestBody:
         required: true
         content:
@@ -92,12 +130,12 @@ paths:
                 events:
                   type: array
                   items:
-                    $ref: "./schemas/event.v1.schema.json"
+                    $ref: "./schemas/gts.cf.core.events.event.v1~.schema.json"
                   minItems: 1
                   maxItems: 100
       responses:
         "202":
-          description: Accepted
+          description: Accepted (async; the whole batch durably enqueued)
         "400":
           description: Validation error
           content:
@@ -110,14 +148,33 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+        "404":
+          description: Topic or event type not registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "412":
-          description: SequenceViolation — atomic batch rejection when any event in the batch fails dedup validation
+          description: SequenceViolation - atomic batch rejection when any event in the batch fails the chain check
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
         "413":
-          description: BatchTooLarge
+          description: BatchTooLarge (more events than the configured max) or BatchPayloadTooLarge (total payload over the configured byte ceiling)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: SchemaViolation - an event's `data` does not satisfy its event type's `data_schema` (atomic batch rejection)
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "501":
+          description: >-
+            Synchronous publish (`Prefer: wait`) is not implemented yet.
           content:
             application/problem+json:
               schema:
@@ -170,7 +227,10 @@ paths:
                   and a JSON body with top-level `kind` of `event | heartbeat | topology | control`.
                 type: string
         "400":
-          description: Bad Request (missing or invalid `subscription_id`).
+          description: >-
+            Invalid Argument - a missing or invalid `subscription_id`, or an
+            unrecognised query parameter. Only `subscription_id` is recognised; a
+            legacy `timeout`/`collect` parameter is rejected, not ignored.
           content:
             application/problem+json:
               schema:
@@ -236,6 +296,15 @@ paths:
           description: Long-lived text/event-stream
           content:
             text/event-stream: {}
+        "400":
+          description: >-
+            Invalid Argument - a missing or invalid `subscription_id`, or an
+            unrecognised query parameter. Only `subscription_id` is recognised; a
+            legacy `timeout`/`collect` parameter is rejected, not ignored.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "404":
           description: SubscriptionNotFound (or transport disabled in deployment)
           content:
@@ -427,6 +496,9 @@ paths:
       description: |
         Returns a paginated, filterable list of topics. To retrieve a single topic by its
         GTS identifier use `$filter=id eq '<gts-id>'`. No `GET /v1/topics/{id}` path exists.
+        Items are `Topic` DTOs projected from each topic's registered instance. Topics are
+        registered in `types_registry` by their owning gear - no creation path exists in the
+        REST API.
       parameters:
         - name: $filter
           in: query
@@ -454,7 +526,7 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: "./schemas/topic.v1.schema.json"
+                      $ref: "#/components/schemas/Topic"
                   page_info:
                     $ref: "#/components/schemas/PageInfo"
         "400":
@@ -527,7 +599,9 @@ paths:
       description: |
         Returns a paginated, filterable list of event types. Event types are registered
         via the in-process SDK and types_registry — no creation path exists in the REST API.
-        To retrieve a single event type by GTS id use `$filter=id eq '<gts-id>'`.
+        To retrieve a single event type by GTS id use `$filter=id eq '<gts-id>'`. Items are
+        `EventType` DTOs projected from each event type's registered type schema, `data_schema`
+        included.
       parameters:
         - name: $filter
           in: query
@@ -555,7 +629,7 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: "./schemas/event_type.v1.schema.json"
+                      $ref: "#/components/schemas/EventType"
                   page_info:
                     $ref: "#/components/schemas/PageInfo"
         "400":
@@ -579,7 +653,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "./schemas/consumer_group.v1.schema.json#/definitions/CreateRequest"
+              $ref: "./schemas/gts.cf.core.events.consumer_group.v1~.schema.json#/definitions/CreateRequest"
       responses:
         "201":
           description: Created
@@ -590,7 +664,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "./schemas/consumer_group.v1.schema.json"
+                $ref: "./schemas/gts.cf.core.events.consumer_group.v1~.schema.json"
         "403":
           description: Forbidden (caller lacks `consumer_group:define` permission)
           content:
@@ -627,7 +701,7 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: "./schemas/consumer_group.v1.schema.json"
+                      $ref: "./schemas/gts.cf.core.events.consumer_group.v1~.schema.json"
                   page_info:
                     $ref: "#/components/schemas/PageInfo"
 
@@ -647,7 +721,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "./schemas/consumer_group.v1.schema.json"
+                $ref: "./schemas/gts.cf.core.events.consumer_group.v1~.schema.json"
         "403":
           description: Forbidden
           content:
@@ -690,11 +764,14 @@ paths:
     get:
       tags: [subscriptions]
       summary: List active subscriptions visible to the caller
+      description: >-
+        Ordered newest-first by `created_at` descending, with `id` as a stable
+        tiebreaker, so a freshly created subscription is on the first page.
       parameters:
         - name: $filter
           in: query
           schema: { type: string }
-          description: "OData v4 filter expression. Filterable fields: `id` (eq/ne/in), `consumer_group` (eq/ne), `expires_at` (gt/ge/lt/le)."
+          description: "OData v4 filter expression. Filterable fields: `id` (eq/ne/in), `consumer_group` (eq/ne)."
         - name: $orderby
           in: query
           schema: { type: string }
@@ -717,7 +794,7 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: "./schemas/subscription.v1.schema.json"
+                      $ref: "./schemas/gts.cf.core.events.subscription.v1~.schema.json"
                   page_info:
                     $ref: "#/components/schemas/PageInfo"
         "400":
@@ -741,14 +818,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "./schemas/subscription.v1.schema.json"
+              $ref: "./schemas/gts.cf.core.events.subscription.v1~.schema.json"
       responses:
         "201":
           description: Subscription created; assignment computed
           content:
             application/json:
               schema:
-                $ref: "./schemas/subscription.v1.schema.json"
+                $ref: "./schemas/gts.cf.core.events.subscription.v1~.schema.json"
         "400":
           description: |
             Validation error. Common codes:
@@ -815,7 +892,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "./schemas/subscription.v1.schema.json"
+                $ref: "./schemas/gts.cf.core.events.subscription.v1~.schema.json"
         "403":
           description: Forbidden
           content:
@@ -875,8 +952,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [partition_positions]
+              required: [topology_version, partition_positions]
               properties:
+                topology_version:
+                  type: integer
+                  format: int64
+                  description: |
+                    The topology_version the caller last observed for the subscription
+                    (from the JOIN response or a subscription read). The broker fences
+                    the whole seek against a concurrent rebalance: if this differs from
+                    the subscription's current topology_version, the seek is rejected
+                    412 topology_version_mismatch (no cursor seeded) and the caller
+                    re-reads the subscription and re-seeks.
                 partition_positions:
                   type: array
                   description: |
@@ -943,10 +1030,24 @@ paths:
         "409":
           description: |
             `PartitionNotAssigned` — request references a partition not currently
-            assigned to this subscription.
+            assigned to this subscription (the versions match, so it is a genuine
+            client error, not a stale view).
             `StreamingInProgress` — a SEEK was issued while a `:stream` is open on
             this subscription; SEEK is pre-stream-only (the cursor auto-advances
             with delivery).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "412":
+          description: |
+            `TopologyVersionMismatch` — the `topology_version` differs from
+            the subscription's current topology_version: a concurrent rebalance moved
+            the assignment under the caller. Retriable — the caller re-reads the
+            subscription (`GET /v1/subscriptions/{id}`) for the current
+            topology_version and assignment, then re-seeks. The body is minimal (no
+            topology_version, no assignment); the re-read is the single source of the
+            fresh state.
           content:
             application/problem+json:
               schema:
@@ -955,15 +1056,80 @@ paths:
 components:
   schemas:
     Topic:
-      $ref: "./schemas/topic.v1.schema.json"
+      type: object
+      description: |
+        A topic as this API reports it. A concrete topic is an instance of
+        `gts.cf.core.events.topic.v1~`, carrying the stream's own data and no trait metadata.
+        How many partitions the broker gives it and which backend stores them are the
+        broker's configuration and are not reported here. This DTO is projected from the
+        registered instance.
+      required: [id, description]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          x-gts-instance-ref: "gts.cf.core.events.topic.v1~"
+          description: >-
+            GTS instance identifier of the topic, chained under
+            `gts.cf.core.events.topic.v1~`.
+        description:
+          type: string
+          description: What the stream carries, for a reader deciding whether to subscribe.
+        retention:
+          type: ["string", "null"]
+          format: duration
+          description: >-
+            ISO 8601 duration events on this topic are retained for. Absent means the
+            broker's configured default.
     EventType:
-      $ref: "./schemas/event_type.v1.schema.json"
+      type: object
+      description: |
+        An event type as this API reports it. A concrete event type is a derived type schema
+        under `gts.cf.core.events.event.v1~`. This DTO is projected from the resolved schema:
+        `topic` and `allowed_subject_types` are trait values merged across the derivation
+        chain, and `data_schema` is the payload contract composed out of the schema's `data`
+        narrowings. Traits are schema-only, so none of them appear in a published event and a
+        producer cannot supply them.
+      required: [id, topic, allowed_subject_types, partition_key, data_schema]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: >-
+            GTS type identifier of the event type, chained under
+            `gts.cf.core.events.event.v1~` and ending in `~`.
+        topic:
+          type: string
+          description: >-
+            GTS instance identifier of the topic events of this type are published to,
+            chained under `gts.cf.core.events.topic.v1~`.
+        description:
+          type: ["string", "null"]
+        partition_key:
+          type: string
+          description: >-
+            JSON Pointer naming the event member whose value the partition is derived
+            from — a resolved trait of the event type. The base defaults it (to
+            `/tenant_id`), so every event type reports one.
+        allowed_subject_types:
+          type: array
+          items: { type: string }
+          description: >-
+            GTS Type-id patterns the event's `subject_type` must match - a concrete Type, a
+            wildcard suffix `<prefix>.*`, or a bare base Type `<base>~`.
+        data_schema:
+          type: object
+          additionalProperties: true
+          description: >-
+            JSON Schema for the event's `data` member, composed from the type's `data`
+            narrowings along the derivation chain. Producers and consumers validate payloads
+            against it. It is a projection of the resolved schema rather than a stored field.
     Event:
-      $ref: "./schemas/event.v1.schema.json"
+      $ref: "./schemas/gts.cf.core.events.event.v1~.schema.json"
     Subscription:
-      $ref: "./schemas/subscription.v1.schema.json"
+      $ref: "./schemas/gts.cf.core.events.subscription.v1~.schema.json"
     ConsumerGroup:
-      $ref: "./schemas/consumer_group.v1.schema.json"
+      $ref: "./schemas/gts.cf.core.events.consumer_group.v1~.schema.json"
     PageInfo:
       type: object
       required: [limit]
@@ -1013,9 +1179,13 @@ components:
           additionalProperties: true
           description: |
             Per-category structured context. Common fields include
-            `retry_after_seconds` (ServiceUnavailable) and ingest error details
-            (e.g. SequenceViolation carries `last_sequence`; partition-validation
-            errors carry the offending partitions).
+            `retry_after_seconds` (ServiceUnavailable) and, for a `NotFound` or any
+            resource-scoped error, `resource_type` / `resource_name` naming the
+            addressed resource. Every publish-path error names the targeted stream
+            (`resource_type: "gts.cf.core.events.topic.v1~"`, `resource_name`: the
+            resolved topic id); the specific fault lives in the `field_violations`
+            or `violations` entry (e.g. SequenceViolation's violation carries
+            `expected_previous=<n>`). Error bodies never echo submitted values.
 
   responses:
     Problem:

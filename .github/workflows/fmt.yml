@@ -5,7 +5,14 @@ on:
     branches: [ main, develop ]
     paths:
       - '**/*.rs'
+      - 'Makefile'
+      - '.gears-dna/gears.mk'
+      - 'gears-rust.mk'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -21,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain from rust-toolchain.toml
         run: |
@@ -29,11 +36,11 @@ jobs:
           rustup show
 
       - name: Cache Cargo/target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-bin: false
           cache-targets: false
-          shared-key: pr-fmt-stable-1.95
+          shared-key: pr-fmt-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: cargo fmt (check)
         run: make fmt

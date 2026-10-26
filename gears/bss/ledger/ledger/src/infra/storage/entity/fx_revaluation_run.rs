@@ -1,12 +1,12 @@
 //! `SeaORM` entity for `bss.ledger_fx_revaluation_run` — the Mode-B
-//! FX-revaluation completion marker (VHP-1859 review C3). One COMPLETE row per
+//! FX-revaluation completion marker. One COMPLETE row per
 //! `(tenant_id, period_id)`, written by the period-end revaluation job after a
 //! clean `run_period`; the close gate requires it when Mode-B is enabled, so a
 //! failed/lagged run BLOCKS close instead of leaving a forever-unpostable missing
 //! `FX_REVALUATION`. Tenant-scoped via `SecureORM`.
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ pub struct Model {
     pub scope: String,
     /// Lifecycle status — only [`STATUS_COMPLETE`] is persisted.
     pub status: String,
-    pub completed_at_utc: DateTime<Utc>,
+    pub completed_at_utc: OffsetDateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

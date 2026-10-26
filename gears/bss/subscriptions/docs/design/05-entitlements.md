@@ -1,3 +1,6 @@
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 <!-- CONFLUENCE_TITLE: [BSS]: Subscriptions — Entitlement Lifecycle (Design) -->
 <!-- Related: ../PRD.md, ../DESIGN.md, ../SEAMS.md | Upstream: Pricing (grant-set templates, incl. per-phase map), Rating (usage aggregates) | Downstream: OSS (enforcement), Billing/Rating (prepaid drawdown) | Owners: BSS Subscriptions team -->
 
@@ -180,7 +183,7 @@ events.
 
 ### 3.7 Database Schemas and Tables
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-storage-entitlement-ent`
+- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-datastore-entitlement-ent`
 
 Owned here: `entitlement` (state + effective dates + grant-set source), **`seat_binding`**
 (2026-07-28 billing-pass review #7 — the guard's `COUNT(active)` is transactionally consistent

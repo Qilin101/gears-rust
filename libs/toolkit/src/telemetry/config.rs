@@ -33,6 +33,20 @@ impl OpenTelemetryConfig {
     pub fn metrics_exporter(&self) -> Option<&Exporter> {
         self.metrics.exporter.as_ref().or(self.exporter.as_ref())
     }
+    /// Whether JSON log records should carry top-level `trace_id` / `span_id`.
+    ///
+    /// On by default: a log line an operator cannot join to the `trace_id` an
+    /// error response handed the caller is a broken incident trail, and that
+    /// join is the whole point of the correlation. The cost is a span-context
+    /// lookup per event; set this to `false` explicitly to opt out.
+    #[must_use]
+    pub fn inject_trace_ids_into_logs(&self) -> bool {
+        self.tracing
+            .logs_correlation
+            .as_ref()
+            .and_then(|c| c.inject_trace_ids_into_logs)
+            .unwrap_or(true)
+    }
 }
 
 /// OpenTelemetry resource identity — attached to all traces and metrics.
@@ -100,6 +114,11 @@ pub enum ExporterKind {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Exporter {
+    /// Defaults to `otlp_grpc`, matching `extract_exporter_config`. Without a
+    /// default, overriding only the endpoint (e.g. via
+    /// `APP__OPENTELEMETRY__EXPORTER__ENDPOINT`) would fail to load because
+    /// `kind` would be missing from the partially-built map.
+    #[serde(default)]
     pub kind: ExporterKind,
     pub endpoint: Option<String>,
     pub headers: Option<HashMap<String, String>>,
@@ -132,4 +151,72 @@ pub struct HttpOpts {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogsCorrelation {
     pub inject_trace_ids_into_logs: Option<bool>,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{LogsCorrelation, OpenTelemetryConfig, TracingConfig};
+
+    /// A config whose `logs_correlation` section is exactly `lc`.
+    fn with_logs_correlation(lc: Option<LogsCorrelation>) -> OpenTelemetryConfig {
+        OpenTelemetryConfig {
+            tracing: TracingConfig {
+                logs_correlation: lc,
+                ..TracingConfig::default()
+            },
+            ..OpenTelemetryConfig::default()
+        }
+    }
+
+    fn flag(inject: Option<bool>) -> LogsCorrelation {
+        LogsCorrelation {
+            inject_trace_ids_into_logs: inject,
+        }
+    }
+
+    /// The default is ON: a default config, an absent `logs_correlation`
+    /// section, and a section that omits the flag all resolve to `true`; only an
+    /// explicit `false` opts out. No prior test pinned this.
+    #[test]
+    fn inject_trace_ids_default_is_on_unless_explicitly_disabled() {
+        assert!(
+            OpenTelemetryConfig::default().inject_trace_ids_into_logs(),
+            "the default config must splice ids into logs"
+        );
+        assert!(
+            with_logs_correlation(None).inject_trace_ids_into_logs(),
+            "an absent logs_correlation section must default ON"
+        );
+        assert!(
+            with_logs_correlation(Some(flag(None))).inject_trace_ids_into_logs(),
+            "a logs_correlation section without the flag must default ON"
+        );
+        assert!(
+            with_logs_correlation(Some(flag(Some(true)))).inject_trace_ids_into_logs(),
+            "an explicit true stays ON"
+        );
+        assert!(
+            !with_logs_correlation(Some(flag(Some(false)))).inject_trace_ids_into_logs(),
+            "an explicit false is the only way to opt out"
+        );
+    }
+
+    /// The bootstrap layers resolve the flag over an `Option<&OpenTelemetryConfig>`,
+    /// absent when a gear ships no `[opentelemetry]` section. That absent case must
+    /// land ON, matching the in-process default — `is_none_or`, not `is_some_and`.
+    #[test]
+    fn absent_opentelemetry_section_resolves_the_splice_on() {
+        let absent: Option<&OpenTelemetryConfig> = None;
+        assert!(
+            absent.is_none_or(OpenTelemetryConfig::inject_trace_ids_into_logs),
+            "no [opentelemetry] section must resolve the splice ON"
+        );
+
+        let disabled = with_logs_correlation(Some(flag(Some(false))));
+        assert!(
+            !Some(&disabled).is_none_or(OpenTelemetryConfig::inject_trace_ids_into_logs),
+            "an explicit false must still opt out when a section is present"
+        );
+    }
 }

@@ -1,3 +1,6 @@
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 <!-- CONFLUENCE_TITLE: [BSS]: Subscriptions — Multi-Tenant Ownership & Transfer (Design) -->
 <!-- Related: ../PRD.md, ../DESIGN.md, ../SEAMS.md | Upstream: AMS (tenant identity, delegation proofs), Policy Engine (transfer gate) | Downstream: Rating/Billing (tenant axes), Analytics (roll-ups) | Owners: BSS Subscriptions team -->
 
@@ -160,7 +163,7 @@ the attempt audited.
 
 ### 3.7 Database Schemas and Tables
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-storage-tenancy-tnt`
+- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-datastore-tenancy-tnt`
 
 Owned here: `ownership_transfer` (flow state + new binding) using the Foundation `approval`; tenant
 axes + delegation-proof references ride the aggregate / transition record. Roll-up read models are

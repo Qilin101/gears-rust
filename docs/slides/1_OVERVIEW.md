@@ -12,7 +12,7 @@ paginate: true
 
 ### A secure, modular XaaS development framework & middleware
 
-By the **Cyber Fabric Foundation** · Apache-2.0
+By the **Constructor Fabric Foundation** · Apache-2.0
 
 *Composable building blocks · Defense-in-depth · Multi-tenancy · GenAI-ready*
 
@@ -616,7 +616,7 @@ Large features start with **specs that live alongside the code**:
 - **FEATURE** — flows, algorithms, states, requirements
 - **UPSTREAM_REQS** — incoming technical requirements from other gears
 
-> Templates in `docs/spec-templates/`. Every gear is well documented.
+> Templates in `studio-kit-gears/artifacts/`. Every gear is well documented.
 
 ---
 
@@ -626,7 +626,7 @@ A **dual-layer** strategy with an explicit **zero-overlap** rule:
 
 - **Unit & integration** — in-process, SQLite `:memory:`, **mocked AuthZ**
   - domain invariants, validation, error chains, DTO conversions, seeding — *no HTTP, no real DB*
-- **End-to-end** — pytest vs. a running `cyberware-server` with a **real DB**
+- **End-to-end** — pytest vs. a running `cf-gears-example-server` with a **real DB**
   - JSON wire format, real AuthZ wiring, DB-specific SQL, cross-gear SDK boundaries
 
 Unit-test gate: (1) deterministic domain logic? (2) atomic & fast? (3) removing it lowers confidence?
@@ -675,7 +675,7 @@ Run modes: SQLite (`config/quickstart.yaml`), no-DB (`config/no-db.yaml`), or `-
 ## Configuration
 
 ```yaml
-server:   { home_dir: "~/.cfgears" }
+server:   { home_dir: "~/.cf-gears" }
 database: { url: "sqlite://database/database.db", max_conns: 10 }
 gears:
   api_gateway:
@@ -687,7 +687,7 @@ gears:
 
 Build selects compiled-in gears by Cargo feature flags. YAML config supplies each compiled-in gear's `config` and optional gear-owned `database` settings.
 
-Env overrides with `CF_` prefix, e.g. `CF_GEARS_DATABASE_URL=postgres://...`
+Env overrides with `APP__` prefix and `__` between levels, e.g. `APP__SERVER__PORT=8087`
 
 ---
 
@@ -698,7 +698,7 @@ make check           # full quality gate: fmt + clippy + test + security
 make all             # build + check + SQLite integration + E2E + OpenAPI
 make test            # unit tests (workspace)
 make test GEAR=file-parser  # unit tests for one gear + SDK scope
-make test-sqlite     # integration tests (SQLite, no external DB)
+make test-integration LANE=toolkit-db-sqlite  # integration tests (SQLite, no external DB)
 make e2e-local       # E2E — builds + starts server automatically
 make e2e-local SUITE=file-parser  # suite E2E scope + default E2E target
 make coverage-unit   # unit-test coverage
@@ -760,4 +760,4 @@ On **Windows** (no `make`): `python tools/scripts/ci.py check`
 
 Start: `make example` → http://127.0.0.1:8087/cf/docs
 
-Apache-2.0 · Cyber Fabric Foundation
+Apache-2.0 · Constructor Fabric Foundation

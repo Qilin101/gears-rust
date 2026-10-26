@@ -30,7 +30,6 @@ use std::sync::Arc;
 use bss_ledger::domain::error::DomainError;
 use bss_ledger::domain::invoice::reversal::build_reversal;
 use bss_ledger::domain::model::{AccountRow, CurrencyScaleRow, NewEntry, NewLine};
-use bss_ledger::domain::money::DEFAULT_PLAUSIBLE_MAX_MAJOR;
 use bss_ledger::infra::events::publisher::LedgerEventPublisher;
 use bss_ledger::infra::invoice_post::InvoicePostService;
 use bss_ledger::infra::metrics::test_harness::MetricsHarness;
@@ -38,10 +37,11 @@ use bss_ledger::infra::posting::service::PostingService;
 use bss_ledger::infra::storage::migrations::Migrator;
 use bss_ledger::infra::storage::repo::ReferenceRepo;
 use bss_ledger_sdk::{AccountClass, EntryView, LineView, MappingStatus, Side, SourceDocType};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::NaiveDate;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_security::SecurityContext;
@@ -49,6 +49,16 @@ use uuid::Uuid;
 
 fn pg(sql: impl Into<String>) -> Statement {
     Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.into())
+}
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`): the old
+/// minor-unit fixtures expressed as validated major-unit money.
+fn usd_cents(minor: i64) -> bss_ledger_sdk::PostedMoney {
+    bss_ledger_sdk::PostedMoney::try_new(
+        rust_decimal::Decimal::new(minor, 2),
+        bss_ledger_sdk::CurrencySpec::try_new("USD".to_owned(), 2).unwrap(),
+    )
+    .unwrap()
 }
 
 fn naive(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -107,8 +117,7 @@ async fn setup(
         .upsert_currency_scale(CurrencyScaleRow {
             tenant_id: f.tenant,
             currency: "USD".to_owned(),
-            minor_units: 2,
-            plausible_max_major: DEFAULT_PLAUSIBLE_MAX_MAJOR,
+            currency_scale: 2,
             source: "iso".to_owned(),
         })
         .await
@@ -169,7 +178,7 @@ fn entry(
         source_business_id: business_id.to_owned(),
         reverses_entry_id,
         reverses_period_id: reverses_entry_id.map(|_| f.period_id.clone()),
-        posted_at_utc: Utc::now(),
+        posted_at_utc: OffsetDateTime::now_utc(),
         effective_at: naive(2026, 6, 1),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: f.tenant,
@@ -209,15 +218,12 @@ fn line(
         account_class: class,
         gl_code: None,
         side,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd_cents(amount),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -237,7 +243,7 @@ fn line(
 /// carry pinned evidence-ref columns, so the reversal it builds has no pinned
 /// refs — exactly the production behaviour the guard tolerates.
 fn original_view(f: &Fixture, entry_id: Uuid) -> EntryView {
-    let now: DateTime<Utc> = Utc::now();
+    let now: OffsetDateTime = OffsetDateTime::now_utc();
     EntryView {
         entry_id,
         tenant_id: f.tenant,
@@ -284,15 +290,12 @@ fn view_line(
         account_class: class,
         gl_code: None,
         side,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd_cents(amount),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
     }

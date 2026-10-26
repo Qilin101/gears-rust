@@ -27,8 +27,10 @@ STANDARDS ALIGNMENT:
 
 This design extends the ToolKit gear system to support out-of-process deployment. The core principle is **deployment
 transparency**: the same Rust trait, OperationBuilder routes, and ClientHub wiring work across all three deployment
-profiles without source changes. The **Flight Control** system gear manages the Platform Host process — orchestrating
-OoP gear lifecycle, discovery coordination, and gateway registration. The architecture is built on four pillars:
+profiles without source changes. **Flight Control** is the minimal platform control-plane deployment unit — it runs the
+orchestrator (`service-discovery` / `DirectoryService`), the transport + edge (`grpc-hub`, `api-gateway`), and edge JWT
+validation (`authn-resolver`), coordinating OoP gear lifecycle, discovery, and gateway registration. The AuthZ plane and
+application gears run out-of-process. The architecture is built on four pillars:
 
 1. **OoP gears run their own HTTP server** using the same ToolKit middleware stack (OperationBuilder, error handling,
    OpenAPI generation) as in-process gears. The gear's `register_rest()` builds routes on a local Axum router
@@ -75,7 +77,7 @@ OoP gear lifecycle, discovery coordination, and gateway registration. The archit
 
 | ADR ID                              | Decision Summary                                                                                       |
 |-------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `cpt-cf-adr-deployment-profiles`    | Three named deployment profiles (Embedded, Host+Workers, K8s Native) instead of arbitrary combinations |
+| `cpt-cf-adr-deployment-profiles`    | Three named deployment profiles (Embedded, Self-Hosted, K8s Native) instead of arbitrary combinations |
 | `cpt-cf-adr-two-plane-auth`         | Two-plane auth: tenant plane re-validates JWT per hop; platform plane uses SA tokens (mTLS+SPIFFE next) |
 | `cpt-cf-adr-platform-plane-auth`   | Platform-plane authentication: SA tokens (Profile 3) / bootstrap token (Profile 2) first, mTLS + SPIFFE next |
 | `cpt-cf-adr-rest-first-oop`         | REST as primary OoP protocol; each gear runs its own HTTP server                                     |
@@ -227,7 +229,7 @@ token). `encode_bin` / `decode_bin` (which exclude `bearer_token`) remain in use
 
 | Entity                   | Description                                                                                       |
 |--------------------------|---------------------------------------------------------------------------------------------------|
-| DeploymentProfile        | Enum: `Embedded`, `HostWorkers`, `K8sNative`. Determines bootstrap behavior.                      |
+| DeploymentProfile        | Enum: `Embedded`, `SelfHosted`, `K8sNative`. Determines bootstrap behavior.                      |
 | OopWorkerConfig          | Configuration for an OoP gear: gear list, listen address, DirectoryService endpoint, profile. |
 | ServiceEndpoint          | Extended with `rest_url` field. Represents a discovered gear's HTTP endpoint.                   |
 | RegisterInstanceInfo     | Extended with `rest_endpoint` and `openapi_spec` fields for REST service registration.            |
@@ -238,12 +240,10 @@ token). `encode_bin` / `decode_bin` (which exclude `bearer_token`) remain in use
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                       Platform Host                            │
+│                       Flight Control                           │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
-│  │  gear-       │  │  grpc-hub    │  │  api-gateway       │    │
-│  │  orchestrator│  │              │  │  (GatewayProvider) │    │
-│  │  (Directory  │  │              │  │                    │    │
-│  │   Service)   │  │              │  │                    │    │
+│  │  service-    │  │  grpc-hub    │  │  api-gateway       │    │
+│  │  discovery   │  │              │  │  (GatewayProvider) │    │
 │  └──────┬───────┘  └──────────────┘  └─────────┬──────────┘    │
 │         │  gRPC                         reverse-proxy          │
 │         │                                       │              │
@@ -403,7 +403,7 @@ extended for the cross-process case:
 7. **Close HTTP listener and exit.**
 
 In Profile 1 (in-process), steps 1-3 are no-ops (no LB to flip); the reverse-topo STOP loop in `HostRuntime` handles
-ordering directly. In Profile 2/3 the orchestrator (Platform Host or k8s controller) MUST issue `SIGTERM`s in
+ordering directly. In Profile 2/3 the orchestrator (Flight Control or k8s controller) MUST issue `SIGTERM`s in
 reverse-dependency order; this is documented as an operator requirement, not enforced by ToolKit runtime.
 
 ##### Responsibility boundaries
@@ -743,7 +743,7 @@ The component provides a profile-specific credential abstraction:
 pub enum InternalCredential {
     /// Profile 1: no auth needed (in-process)
     None,
-    /// Profile 2 single-node: ephemeral random token from Platform Host
+    /// Profile 2 single-node: ephemeral random token from Flight Control
     BootstrapToken(SecretString),
     /// Profile 3: k8s ServiceAccount JWT (auto-mounted, auto-rotated)
     KubeServiceAccountToken { token_path: PathBuf, audience: String },
@@ -754,7 +754,7 @@ pub enum InternalCredential {
 
 **Profile 2 (single-node)** — Bootstrap Token:
 
-1. Platform Host generates a cryptographically random 256-bit token at startup (in-memory only).
+1. Flight Control generates a cryptographically random 256-bit token at startup (in-memory only).
 2. Passes it to spawned workers via `TOOLKIT_INTERNAL_TOKEN` env var.
 3. Workers attach it to all system calls: gRPC metadata `x-toolkit-internal-token`, HTTP header
    `X-ToolKit-Internal-Token`.
@@ -865,8 +865,8 @@ belong on the tenant plane — they are *not* candidates for `PlatformSecurityCo
 ##### Responsibility scope
 
 - Define the `InternalCredential` enum and `attach_internal_auth` / `validate_internal_auth` helpers.
-- Profile 2: generate bootstrap token in Platform Host, pass via env, validate in Flight Control.
-- Profile 3: read projected SA token, attach to calls, validate via TokenReview in Flight Control.
+- Profile 2: Flight Control generates a bootstrap token, passes it to spawned workers via env, and validates it at its `service-discovery` DirectoryService.
+- Profile 3: read projected SA token, attach to calls, validate via TokenReview at Flight Control's `service-discovery`.
 - Provide `InternalAuthMiddleware` for both gRPC (tonic interceptor) and HTTP (Axum middleware) that validates incoming
   system calls.
 - All logic lives in ToolKit runtime — gear developers do not interact with internal auth.
@@ -1055,7 +1055,7 @@ and no bespoke gateway admin API is needed. Notes:
 - **Single-endpoint selection (Profile 3)**: a matched path resolves to a single, stable upstream endpoint (the first
   in deterministic instance order); cross-replica load balancing is delegated to the gear's stable k8s Service DNS
   rather than balanced in the proxy. The registry is instance-keyed and retains *all* of a gear's registered endpoints,
-  so this selection is a localized policy — the extension seam for Profile 2 (Host + Workers), where the proxy is the
+  so this selection is a localized policy — the extension seam for Profile 2 (Self-Hosted), where the proxy is the
   only load balancer and must select across distinct worker endpoints (e.g. round-robin), and for future metadata
   routing. In k8s all replicas advertise the same Service DNS address, so the retained endpoints are identical and
   selection reduces to that one VIP.
@@ -1071,7 +1071,7 @@ and no bespoke gateway admin API is needed. Notes:
 
 | Dependency Gear     | Interface Used                   | Purpose                                                |
 |-----------------------|----------------------------------|--------------------------------------------------------|
-| gear-orchestrator   | DirectoryClient SDK              | Service registration and discovery for OoP gears     |
+| service-discovery   | DirectoryClient SDK              | Service registration and discovery for OoP gears     |
 | grpc-hub              | gRPC server hosting              | Hosts DirectoryService gRPC endpoint                   |
 | api-gateway           | ToolKitGatewayProvider (internal) | Reverse-proxy routes for OoP gear public APIs        |
 | authn-resolver        | AuthNResolverClient SDK          | JWT validation at gateway edge                         |
@@ -1107,7 +1107,7 @@ and no bespoke gateway admin API is needed. Notes:
 
 **Use cases**: `cpt-cf-usecase-deploy-oop-onprem`
 
-**Actors**: `cpt-cf-actor-platform-host`, `cpt-cf-actor-oop-worker`
+**Actors**: `cpt-cf-actor-flight-control`, `cpt-cf-actor-oop-worker`
 
 ```mermaid
 sequenceDiagram
@@ -1169,13 +1169,13 @@ transparently.
 
 **Use cases**: `cpt-cf-usecase-deploy-oop-onprem`
 
-**Actors**: `cpt-cf-actor-platform-host`, `cpt-cf-actor-oop-worker`
+**Actors**: `cpt-cf-actor-flight-control`, `cpt-cf-actor-oop-worker`
 
 ```mermaid
 sequenceDiagram
-    participant Host as Platform Host
+    participant Host as Flight Control
     participant Worker as OoP Gear (ToolKit Runtime)
-    participant Dir as DirectoryService<br/>(gear-orchestrator)
+    participant Dir as DirectoryService<br/>(service-discovery)
     participant Edge as api-gateway edge<br/>(GatewayProvider)
 
     Host->>Worker: spawn process (config: listen addr, directory endpoint)
@@ -1225,7 +1225,7 @@ sequenceDiagram
     Note over Edge: next poll prunes the gear's routes
 ```
 
-**Description**: The Platform Host spawns an OoP gear. The ToolKit runtime starts the HTTP server immediately (liveness
+**Description**: Flight Control spawns an OoP gear. The ToolKit runtime starts the HTTP server immediately (liveness
 OK), then runs three background tasks managed entirely by the runtime: (1) self-registration with the DirectoryService
 (REST endpoint + OpenAPI spec) via retry with exponential backoff, (2) dependency resolution by polling DirectoryService
 for each `deps` entry and wiring REST clients into ClientHub as they appear, (3) heartbeat. Readiness becomes OK only
@@ -1320,8 +1320,8 @@ from an in-process implementation — the host gear code is unchanged.
 
 ### 3.7 Database schemas & tables
 
-No new database tables. The Flight Control gear uses DirectoryService (gRPC, in-memory registry) for service discovery
-state. Persistent state (if needed for multi-host P2) will be addressed in a future ADR.
+No new database tables. Flight Control's `service-discovery` uses DirectoryService (gRPC, in-memory registry) for
+service discovery state. Persistent state (if needed for multi-host P2) will be addressed in a future ADR.
 
 ### 3.8 Deployment Topology
 
@@ -1347,11 +1347,11 @@ state. Persistent state (if needed for multi-host P2) will be addressed in a fut
 - No network calls between gears.
 - api-gateway serves all routes directly from the shared Axum router.
 
-#### Profile 2: Host + Workers (On-Premise)
+#### Profile 2: Self-Hosted
 
 ```
 ┌──────────────────────────────┐
-│       Platform Host          │
+│       Flight Control         │
 │  ┌───────────┐ ┌───────────┐ │
 │  │api-gateway│ │gear-orch  │ │
 │  │(reverse   │ │(Directory │ │
@@ -1371,7 +1371,7 @@ state. Persistent state (if needed for multi-host P2) will be addressed in a fut
 └────────────┘  └────────────┘
 ```
 
-- Platform Host runs system gears and optionally some application gears.
+- Flight Control runs system gears and optionally some application gears.
 - OoP gears are separate processes on the same host (UDS) or remote hosts (TCP, P2: mTLS).
 - api-gateway reverse-proxies public OoP routes via `ToolKitGatewayProvider`.
 - DirectoryService tracks all gear endpoints.
@@ -1403,10 +1403,9 @@ state. Persistent state (if needed for multi-host P2) will be addressed in a fut
 ```
 
 - Each gear is an independent k8s Deployment + Service.
-- External gateway (Kong, Tyk, Envoy) handles public API ingress.
+- Public API ingress follows the edge mode (§ 3.10): **Mode A** keeps the built-in api-gateway (in the platform pod) as the edge; **Mode B** uses an external gateway (Kong, Tyk, Envoy).
 - k8s DNS provides service discovery; DirectoryService is optional for metadata.
-- Platform services (gear-orchestrator, types-registry, credstore) run as separate pods. The trust-coupled core (authz-resolver, tenant-resolver, resource-group, account-management) remains in the Platform Host pod (see § Platform Host Composition).
-- No built-in api-gateway in this profile.
+- The minimal Flight Control control-plane unit (service-discovery, grpc-hub, types-registry, api-gateway, authn-resolver) runs as the platform pod (see § Flight Control Composition). The AuthZ plane (authz-resolver + its trust-coupled chain tenant-resolver + resource-group, kept together in one unit) runs as its own pod and serves `/evaluate` via directory resolution. Higher-level platform services (account-management, credstore) run as their own pods; account-management remains trust-coupled to the AuthZ plane until `am.system` migrates to S2S credentials.
 
 > **Amended by [ADR-0009 (Instance-Addressable Discovery)](ADR/0009-cpt-cf-adr-instance-addressable-discovery.md)** for role-split / sharded gears:
 > - *"Each gear is an independent Deployment + Service"* holds for a single-role gear, but a gear running in differentiated **roles** or **sharded** maps to *multiple* role-qualified names — hence *multiple* Deployments/StatefulSets and *multiple* Services, one per role-name — not a single Service in front of the whole gear. Shard-targeted role-names advertise a **per-instance-addressable** endpoint (not a shared VIP); the workload mechanism (`StatefulSet` + headless Service or a self-registering `Deployment`) is the gear developer's choice.
@@ -1420,6 +1419,8 @@ state. Persistent state (if needed for multi-host P2) will be addressed in a fut
 
 ```
 deploy/
+  README.md                            # Chart mechanics + release/publishing guide
+  components.yaml                      # Publishable units: image recipe + chart path per component
   helm/
     toolkit-common/                    # Library chart (type: library)
       Chart.yaml
@@ -1428,32 +1429,36 @@ deploy/
         _deployment.tpl               # Standard ToolKit Deployment
         _service.tpl                  # ClusterIP Service
         _configmap.tpl                # Gear config as ConfigMap
+        _secret.tpl                   # Optional Secrets from values.secrets[]
+        _rbac.tpl                     # TokenReview (auth-delegator) ClusterRoleBinding
         _ingress.tpl                  # Optional Ingress resource
         _hpa.tpl                      # Optional HorizontalPodAutoscaler
         _pdb.tpl                      # Optional PodDisruptionBudget
         _networkpolicy.tpl            # Optional NetworkPolicy
         _serviceaccount.tpl           # Optional ServiceAccount
     toolkit-platform/                  # Umbrella chart (type: application)
-      Chart.yaml                      # Dependencies: all gear charts (conditional)
-      values.yaml                     # Global defaults
-      values-minimal.yaml             # Flight Control + api-gateway + authn-resolver
-      values-production.yaml          # All gears, resource limits, HPA, PDB
-      values-dev.yaml                 # All gears, minimal resources, debug logging
-      templates/
-        NOTES.txt                     # Post-install instructions
+      Chart.yaml                      # Dependencies: all unit charts (conditional)
+      values.yaml                     # Minimal deployment
+      values-dev.yaml                 # Full dev deployment
 
-gears/<group>/<name>/
-  chart/
-    Chart.yaml                        # type: application, depends on toolkit-common
+<gear-source-dir>/                    # Path to the gear source directory
+  deploy/helm/<name>/
+    Chart.yaml
     values.yaml                       # Gear-specific defaults
-    values.schema.json                # JSON Schema for values validation
     templates/
       deployment.yaml                 # {{ include "toolkit-common.deployment" . }}
       service.yaml                    # {{ include "toolkit-common.service" . }}
       configmap.yaml                  # {{ include "toolkit-common.configmap" . }}
-      ingress.yaml                    # {{ include "toolkit-common.ingress" . }}
-      _gear-specific.yaml           # Any gear-specific resources (CRDs, Jobs, etc.)
+      serviceaccount.yaml             # {{ include "toolkit-common.serviceAccount" . }}
+
+tools/scripts/
+  update-helm-deps.sh                  # Resolves toolkit-common for every gear chart + umbrella
+  resolve_release.py                   # Resolves a release to its image/chart build outputs
 ```
+
+The `toolkit-common` dependency is referenced from each gear chart via a relative
+`file://` path to `deploy/helm/toolkit-common`, resolved by `tools/scripts/update-helm-deps.sh`.
+
 
 #### Library Chart — `toolkit-common`
 
@@ -1479,45 +1484,41 @@ conventions into reusable named templates.
 
 #### Umbrella Chart — `toolkit-platform`
 
-The umbrella chart declares all gear charts as conditional dependencies:
+The umbrella chart declares each deployable unit's chart as a conditional dependency:
 
 ```yaml
 # deploy/helm/toolkit-platform/Chart.yaml
 dependencies:
-  - name: flight-control
+  - name: flight-control          # composed control-plane pod (directory + edge + authn)
     version: "0.1.x"
-    repository: "file://../../gears/system/flight-control/chart"
+    repository: "file://../../../apps/cf-gears-flight-control/deploy/helm/flight-control"
     condition: flight-control.enabled
-  - name: api-gateway
-    version: "0.1.x"
-    repository: "file://../../gears/system/api-gateway/chart"
-    condition: api-gateway.enabled
-  # ... per gear
+  # ... one chart per OoP gear/unit, each under its source dir's deploy/helm/<name>
 ```
 
 **Preset values files** provide tested combinations:
 
-| Preset                   | Enabled gears                             | Resources        | Autoscaling | Use case                   |
-|--------------------------|---------------------------------------------|------------------|-------------|----------------------------|
-| `values-minimal.yaml`    | flight-control, api-gateway, authn-resolver | Low              | Off         | Quick start, CI, demo      |
-| `values-production.yaml` | All                                         | Tuned per gear | HPA + PDB   | Production deployment      |
-| `values-dev.yaml`        | All                                         | Minimal          | Off         | Local k8s (minikube, kind) |
+| Preset            | Enabled units                  | Use case                   |
+|-------------------|--------------------------------|----------------------------|
+| `values.yaml`     | flight-control only            | Control-plane smoke test    |
+| `values-dev.yaml` | All demo gears                 | Local development cluster   |
+
+There is no production preset yet. The current image/config defaults include development authentication and must not be used as a production profile.
 
 **User installation**:
 
 ```bash
 # Minimal platform
-helm install my-platform oci://ghcr.io/cyberfabric/charts/toolkit-platform \
-  -f values-minimal.yaml
+helm install my-platform oci://ghcr.io/constructorfabric/charts/toolkit-platform
 
 # Custom overrides
-helm install my-platform oci://ghcr.io/cyberfabric/charts/toolkit-platform \
+helm install my-platform oci://ghcr.io/constructorfabric/charts/toolkit-platform \
   --set global.imageRegistry=my-registry.corp.com \
   --set mini-chat.enabled=true \
   --set mini-chat.replicaCount=3
 
 # Single gear standalone
-helm install mini-chat oci://ghcr.io/cyberfabric/charts/mini-chat \
+helm install mini-chat oci://ghcr.io/constructorfabric/charts/mini-chat \
   --set global.directoryEndpoint=dns:///flight-control.default.svc:50051
 ```
 
@@ -1529,9 +1530,9 @@ Every gear chart follows this `values.yaml` structure:
 replicaCount: 1
 
 image:
-  registry: ghcr.io/cyberfabric    # overridable by global.imageRegistry
+  registry: ghcr.io/constructorfabric    # overridable by global.imageRegistry
   repository: <gear-name>
-  tag: ""                           # defaults to .Chart.AppVersion
+  tag: "0.0.0"                      # placeholder; the release pipeline stamps the version
 
 service:
   type: ClusterIP
@@ -1591,10 +1592,10 @@ Every parameter is documented with `# --` comment annotations (compatible with `
 
 ```
 chart change detected
-  → helm dependency build (resolve toolkit-common)
+  → helm dependency update (resolve toolkit-common)
   → helm lint
   → helm template (dry-run render)
-  → helm package → push to OCI registry (ghcr.io/cyberfabric/charts/<name>)
+  → helm package → push to OCI registry (ghcr.io/constructorfabric/charts/<name>)
 ```
 
 Published charts include the resolved `toolkit-common` library, so users install from the OCI registry without needing
@@ -1889,31 +1890,68 @@ deserialization. This requires either:
 
 Option 1 is the minimal change. The method should be added to `toolkit-security`.
 
-### Platform Host Composition
+### Flight Control Composition
 
-#### OoP-eligible services
+The model is simple: **every gear runs out-of-process as its own pod, except the control-plane gears that compose
+Flight Control itself.** OoP gears register with Flight Control's directory and are discovered through it.
 
-These services have no trust-coupling and can run as separate pods in K8s (Profile 3):
+#### Linked in Flight Control (the control plane)
 
-| Component | REST surface needed | Persistence | Notes |
-|-----------|-------------------|-------------|-------|
-| gear-orchestrator (DirectoryService) | Yes — REST extension for service discovery | No DB; in-memory registry. Gears re-register on heartbeat, so restart recovery is handled. | Already has gRPC via grpc-hub; REST surface enables k8s-native discovery. |
-| types-registry | Yes — REST write (registration) and read (query) endpoints | Needs persistence or re-registration. Currently in-memory (link-time inventory). As a separate pod, gears register over REST at startup; heartbeat re-registration handles pod restarts. DB persistence is a future optimization. | Critical path: `post_init` graph validation must work across distributed registrations. |
-| credstore | Yes — REST endpoint for secret retrieval | No DB; stateless plugin-based lookups. | Alternative: embed per-pod (like authn-resolver) to avoid secrets-in-transit. If separate, mTLS protects the wire. |
-| api-gateway | Already HTTP; GatewayProvider registers routes via API | No DB; route table is in-memory, populated by GatewayProvider registrations. | Separate pod in Mode A; absent in Mode B (external gateway). |
-| authn-resolver | None (embeds in each OoP pod) | No DB; JWKS cache only. | Stateless; zero network latency for JWT validation. |
+| Component | Role | State | Notes |
+|-----------|------|-------|-------|
+| service-discovery (DirectoryService) | Service registration + discovery | No DB; in-memory registry. Gears re-register on heartbeat, so restart recovery is handled. | Serves gRPC via grpc-hub; its REST surface (co-hosted on api-gateway) enables k8s-native discovery. **One per installation** — see below. |
+| grpc-hub | gRPC transport for the directory + platform-plane RPCs | Stateless. | Hosts the DirectoryService gRPC endpoint. |
+| api-gateway | Edge + REST host: reverse-proxies exposed OoP routes and co-hosts the other control-plane gears' REST routes (directory, types-registry) on one HTTP server | No DB; in-memory route table populated from directory registrations. | Built-in edge in Profile 2 and Profile 3 Mode A; in Mode B an external gateway (Kong/Tyk) replaces the edge. |
+| types-registry | GTS catalogue | In-memory (link-time inventory + config seed + runtime registrations). Shared/DB persistence is a future optimization for multi-instance. | `post_init` graph validation must see a consistent view across distributed registrations. |
+| authn-resolver | Edge JWT validation (bearer token → tenant `SecurityContext`) | No DB; JWKS cache only. | Stateless. Runs at the edge here and also embeds in each OoP pod for per-hop re-validation. |
 
-#### Trust-coupled core (must remain co-located)
+##### One directory per installation
 
-These services use synthetic or anonymous `SecurityContext` internally and cannot cross a network boundary
-without migrating to IdP-issued credentials:
+The row above answers *restart* and not *duplication*, and the two are different
+questions. The registry is this process's own instance map — a `DashMap` in
+`GearManager`, with no store, no replication, no gossip and no quorum — and
+every worker is handed exactly one endpoint: `TOOLKIT_DIRECTORY_ENDPOINT` is a
+string, not a list, and there is no failover path.
 
-| Component | Why co-located | OoP path |
-|-----------|---------------|----------|
-| authz-resolver | Chains to tenant-resolver → resource-group via `SecurityContext::anonymous()` | Requires REST surface on resource-group + IdP-issued credentials for the AuthZ→TR→RG chain |
-| tenant-resolver | `rg-tr-plugin` reads resource-group's DB directly | Requires REST surface on resource-group or shared DB access |
-| resource-group | Foundation for AuthZ + TR chain; DB-level coupling | Would need its own REST surface for hierarchy reads |
-| account-management | Synthetic system actor (`am.system`) for background flows | OoP-eligible after migrating `am.system` to S2S credentials (see migration table above) |
+So two `service-discovery` instances in one installation are two disjoint maps
+that never meet, and every consequence is silent rather than loud:
+
+* **The edge withdraws the other half's public routes.** api-gateway's
+  `compute_removals` treats an *empty* snapshot as a transient directory hiccup
+  and skips the prune. A second directory produces a **partial** snapshot, which
+  takes the ordinary filter path — so the routes belonging to gears registered
+  with the other directory are deregistered and the public API returns 404, with
+  no warning, because from the edge's point of view those gears legitimately
+  went away.
+* **Readiness never arrives.** A gear whose dependency registered with the other
+  directory stays at `503 {"state":"starting"}`. The re-registration loop is
+  idempotent and unbounded, so it neither succeeds nor fails.
+* **Instance targeting answers wrongly rather than emptily.** A half-view yields
+  a complete-looking ownership map over half the shards, and a non-match is
+  specified as `Ok(empty)` — so a caller cannot tell "no such shard" from "that
+  shard is registered with the other directory".
+
+This cannot be enforced the way `MultipleRestHosts` and `MultipleGrpcHubs` are.
+Those work because a process can enumerate its own gears; no process can
+enumerate another, so an installation-wide claim has no runtime vantage point.
+The gear therefore states it — `#[toolkit::gear(one_per_installation = true)]` —
+and composition tooling refuses a topology that would deploy it twice.
+
+#### Runs outside Flight Control (OoP)
+
+Everything not in the control plane runs OoP. The default is **one gear, one pod**: each gear runs by itself, registers
+with Flight Control's directory, and is discovered through it.
+
+The exception is **coupling**. When a gear is trust-coupled to another — it reaches its peer under a synthetic /
+anonymous `SecurityContext` that is safe only in-process — the two cannot yet sit on opposite sides of a network
+boundary. In the meantime, coupled gears stay **embedded together** in a single OoP unit rather than split into
+separate pods. Once the coupling is removed — a remote REST/gRPC surface on the peer, plus IdP-issued / S2S credentials
+to replace the anonymous context — each can move to its own pod.
+
+The **AuthZ plane** is one such bundle: `authz-resolver` (the PDP) with `tenant-resolver` and `resource-group`, which
+chain to each other under `SecurityContext::anonymous()`. They deploy as one OoP unit that serves
+`/authz-resolver/v1/evaluate` over its own HTTP server; PEPs reach it via directory resolution. Other coupled sets are
+handled the same way — bundled while the coupling stands, split once it is removed.
 
 ## 5. Traceability
 

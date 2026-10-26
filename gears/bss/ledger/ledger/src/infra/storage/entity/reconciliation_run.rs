@@ -5,9 +5,9 @@
 //! covered. Tenant-scoped via `SecureORM`; the resource col is the business
 //! `run_id`.
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde_json::Value as JsonValue;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -21,12 +21,13 @@ pub struct Model {
     pub run_id: Uuid,
     pub period_id: String,
     pub check_type: String,
-    pub variance_minor: i64,
+    /// Tagged count or currency-qualified money variance (Task 9 contract).
+    pub variance: JsonValue,
     pub within_tolerance: bool,
     pub status: String,
     pub watermark: Option<i64>,
     pub detail: Option<JsonValue>,
-    pub at_utc: DateTime<Utc>,
+    pub at_utc: OffsetDateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

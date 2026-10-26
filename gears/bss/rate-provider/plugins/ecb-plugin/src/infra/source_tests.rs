@@ -1,7 +1,8 @@
 //! ECB parser + mapping tests over the daily-XML fixture.
 
 use bss_ledger_sdk::{CurrencyPair, RateProviderError};
-use chrono::{Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, NaiveDate};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use super::{ecb_rates_to_provider_rates, parse_ecb_xml};
 
@@ -9,6 +10,12 @@ const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/eurofxref-daily.xml"
 
 /// The `provider_id` the mapper stamps onto every rate under test.
 const PROVIDER: &str = "ecb";
+
+fn midnight_utc(year: i32, month: u8, day: u8) -> OffsetDateTime {
+    let month = Month::try_from(month).unwrap();
+    let date = Date::from_calendar_date(year, month, day).unwrap();
+    PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_utc()
+}
 
 #[test]
 fn parses_date_and_all_pairs() {
@@ -18,6 +25,21 @@ fn parses_date_and_all_pairs() {
     assert!(raw.iter().any(|(c, r)| c == "USD" && r == "1.0856"));
 }
 
+/// chrono's `%Y-%m-%d` accepts a signed year past 9999 and `time` does not hold
+/// it. On main the far-future `as_of` was refused by the publication-time guard;
+/// an epoch fallback would pass that guard and store the feed permanently stale,
+/// so the date is refused at the parse stage instead.
+#[test]
+fn a_publication_date_time_cannot_hold_is_refused_not_the_epoch() {
+    let date = NaiveDate::from_ymd_opt(12345, 1, 1).unwrap();
+    let raw = vec![("USD".to_owned(), "1.0856".to_owned())];
+    let err = ecb_rates_to_provider_rates(date, &raw, &[], PROVIDER).unwrap_err();
+    assert!(
+        matches!(&err, RateProviderError::Internal(detail) if detail.contains("12345-01-01")),
+        "{err:?}"
+    );
+}
+
 #[test]
 fn whole_table_when_no_pairs_requested() {
     let (date, raw) = parse_ecb_xml(FIXTURE).unwrap();
@@ -25,11 +47,8 @@ fn whole_table_when_no_pairs_requested() {
     assert_eq!(rates.len(), 3);
     let usd = rates.iter().find(|r| r.quote == "USD").unwrap();
     assert_eq!(usd.base, "EUR");
-    assert_eq!(usd.rate_micro, 1_085_600);
-    assert_eq!(
-        usd.as_of,
-        Utc.with_ymd_and_hms(2026, 7, 21, 0, 0, 0).unwrap()
-    );
+    assert_eq!(usd.rate.to_string(), "1.0856");
+    assert_eq!(usd.as_of, midnight_utc(2026, 7, 21));
 }
 
 #[test]
@@ -444,4 +463,52 @@ fn unparseable_publication_date_is_reported_as_missing_not_silently_ignored() {
         parse_ecb_xml(BAD_DATE_XML),
         Err(RateProviderError::Internal(_))
     ));
+}
+
+#[test]
+fn xml_quotes_preserve_precision_without_rounding() {
+    let xml = br#"<Envelope><Cube><Cube time="2026-07-21"><Cube currency="USD" rate="1.123456789"/><Cube currency="GBP" rate="0.0000001"/></Cube></Cube></Envelope>"#;
+    let (date, raw) = parse_ecb_xml(xml).unwrap();
+    let rates = ecb_rates_to_provider_rates(date, &raw, &[], PROVIDER).unwrap();
+    assert_eq!(
+        rates
+            .iter()
+            .find(|r| r.quote == "USD")
+            .unwrap()
+            .rate
+            .to_string(),
+        "1.123456789"
+    );
+    assert_eq!(
+        rates
+            .iter()
+            .find(|r| r.quote == "GBP")
+            .unwrap()
+            .rate
+            .to_string(),
+        "0.0000001"
+    );
+}
+
+#[test]
+fn provider_lexical_forms_remain_mappable_from_xml() {
+    let xml = br#"<Envelope><Cube><Cube time="2026-07-21"><Cube currency="USD" rate=" +01.123456789 "/><Cube currency="GBP" rate="000.0000001"/><Cube currency="JPY" rate="1_234.5_6"/></Cube></Cube></Envelope>"#;
+    let (date, raw) = parse_ecb_xml(xml).unwrap();
+    let rates = ecb_rates_to_provider_rates(date, &raw, &[], PROVIDER).unwrap();
+    assert_eq!(rates.len(), 3);
+    for (quote, expected) in [
+        ("USD", "1.123456789"),
+        ("GBP", "0.0000001"),
+        ("JPY", "1234.56"),
+    ] {
+        assert_eq!(
+            rates
+                .iter()
+                .find(|rate| rate.quote == quote)
+                .unwrap()
+                .rate
+                .to_string(),
+            expected
+        );
+    }
 }

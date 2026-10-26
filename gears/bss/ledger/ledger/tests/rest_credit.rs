@@ -34,17 +34,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::constraints::{Constraint, InPredicate, Predicate};
-use authz_resolver_sdk::error::AuthZResolverError;
 use authz_resolver_sdk::models::{
     EvaluationRequest, EvaluationResponse, EvaluationResponseContext,
 };
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use bss_ledger::api::rest::credit::{ApiState, router};
+use bss_ledger::domain::instant::to_naive_date;
 use bss_ledger::domain::model::{AccountRow, CurrencyScaleRow, NewEntry, NewLine};
-use bss_ledger::domain::money::DEFAULT_PLAUSIBLE_MAX_MAJOR;
 use bss_ledger::domain::payment::settlement::SettlementInput;
 use bss_ledger::domain::ports::metrics::NoopLedgerMetrics;
 use bss_ledger::infra::events::publisher::LedgerEventPublisher;
@@ -63,18 +62,42 @@ use bss_ledger_sdk::{
     AccountClass, AllocationSplit, MappingStatus, ProvisionOutcome, ProvisionRequest, Side,
     SourceDocType,
 };
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::NaiveDate;
 use sea_orm::{ConnectionTrait, Database, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use time::OffsetDateTime;
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_gts::gts_id;
-use toolkit_security::SecurityContext;
+use toolkit_security::{PlatformSecurityContext, SecurityContext};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`).
+fn usd_cents(minor: i64) -> bss_ledger_sdk::PostedMoney {
+    bss_ledger_sdk::PostedMoney::try_new(
+        rust_decimal::Decimal::new(minor, 2),
+        bss_ledger_sdk::CurrencySpec::try_new("USD".to_owned(), 2).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The wire form of a scale-2 cent count in `currency`.
+fn money_json(minor: i64, currency: &str) -> serde_json::Value {
+    serde_json::json!({
+        "amount": bss_ledger_sdk::canonical_decimal(rust_decimal::Decimal::new(minor, 2)),
+        "currency": currency,
+        "currency_scale": 2
+    })
+}
+
+/// The wire form of a USD scale-2 cent count.
+fn usd_json(minor: i64) -> serde_json::Value {
+    money_json(minor, "USD")
+}
 
 fn pg(sql: impl Into<String>) -> Statement {
     Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.into())
@@ -143,8 +166,7 @@ impl LedgerClientV1 for RealCreditClient {
                             tenant_id: g.tenant_id,
                             payer_tenant_id: g.payer_tenant_id,
                             credit_application_id: g.credit_application_id,
-                            currency: g.currency,
-                            amount_minor: g.amount_minor,
+                            amount: g.money,
                             credit_grant_event_type: g.credit_grant_event_type,
                         },
                     )
@@ -165,7 +187,7 @@ impl LedgerClientV1 for RealCreditClient {
                                 .into_iter()
                                 .map(|s| bss_ledger::domain::payment::precedence::Allocated {
                                     invoice_id: s.invoice_id,
-                                    amount_minor: s.amount_minor,
+                                    amount: s.money,
                                 })
                                 .collect(),
                         },
@@ -184,7 +206,7 @@ impl LedgerClientV1 for RealCreditClient {
                 .into_iter()
                 .map(|d| CreditDebitView {
                     credit_grant_event_type: d.credit_grant_event_type,
-                    amount_minor: d.amount_minor,
+                    money: d.amount,
                 })
                 .collect(),
             applications: outcome
@@ -192,7 +214,7 @@ impl LedgerClientV1 for RealCreditClient {
                 .into_iter()
                 .map(|t| AllocationSplit {
                     invoice_id: t.invoice_id,
-                    amount_minor: t.amount_minor,
+                    money: t.amount,
                 })
                 .collect(),
         })
@@ -248,7 +270,7 @@ impl LedgerClientV1 for RealCreditClient {
         _ctx: &SecurityContext,
         _tenant_id: Uuid,
         _account_id: Uuid,
-    ) -> Result<Option<i64>, CanonicalError> {
+    ) -> Result<Option<bss_ledger_sdk::PostedMoney>, CanonicalError> {
         unimplemented!("not exercised by the credit router tests")
     }
 
@@ -385,11 +407,12 @@ fn tenant_in_constraint(tenant_id: Uuid) -> Constraint {
 struct AllowAuthZ;
 
 #[async_trait]
-impl AuthZResolverClient for AllowAuthZ {
+impl AuthZResolverApi for AllowAuthZ {
     async fn evaluate(
         &self,
+        _ctx: PlatformSecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         let tenant_id = subject_tenant_id(&request);
         Ok(EvaluationResponse {
             decision: true,
@@ -463,7 +486,7 @@ fn account(tenant: Uuid, id: Uuid, class: AccountClass, normal: Side) -> Account
 /// for the current month, the four payment-flow chart accounts, and a stream-less
 /// REUSABLE_CREDIT credit account. Mirrors `rest_payments.rs::setup_seller`.
 async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<DbError>) -> Seller {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let s = Seller {
         tenant: SUBJECT_TENANT,
         payer: Uuid::now_v7(),
@@ -472,7 +495,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         psp_fee: Uuid::now_v7(),
         ar: Uuid::now_v7(),
         reusable_credit: Uuid::now_v7(),
-        period_id: format!("{:04}{:02}", now.year(), now.month()),
+        period_id: bss_ledger::domain::instant::yyyymm(now),
     };
 
     let reference = ReferenceRepo::new(provider.clone());
@@ -480,8 +503,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         .upsert_currency_scale(CurrencyScaleRow {
             tenant_id: s.tenant,
             currency: "USD".to_owned(),
-            minor_units: 2,
-            plausible_max_major: DEFAULT_PLAUSIBLE_MAX_MAJOR,
+            currency_scale: 2,
             source: "iso".to_owned(),
         })
         .await
@@ -531,15 +553,12 @@ fn ar_line(s: &Seller, invoice_id: &str, amount: i64) -> NewLine {
         account_class: AccountClass::Ar,
         gl_code: None,
         side: Side::Debit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd_cents(amount),
         invoice_id: Some(invoice_id.to_owned()),
         due_date: Some(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()),
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -564,15 +583,12 @@ fn psp_credit_line(s: &Seller, amount: i64) -> NewLine {
         account_class: AccountClass::PspFeeExpense,
         gl_code: None,
         side: Side::Credit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd_cents(amount),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -594,7 +610,7 @@ async fn seed_ar_invoice(
     s: &Seller,
     invoice_id: &str,
     amount: i64,
-    posted_at: DateTime<Utc>,
+    posted_at: OffsetDateTime,
 ) {
     let posting = PostingService::new(provider.clone(), Arc::new(LedgerEventPublisher::noop()));
     let ctx = SecurityContext::anonymous();
@@ -610,7 +626,7 @@ async fn seed_ar_invoice(
         reverses_entry_id: None,
         reverses_period_id: None,
         posted_at_utc: posted_at,
-        effective_at: posted_at.date_naive(),
+        effective_at: to_naive_date(posted_at),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: s.tenant,
         correlation_id: Uuid::now_v7(),
@@ -639,9 +655,8 @@ async fn fund_pool(provider: &DBProvider<DbError>, s: &Seller, payment_id: &str,
             tenant_id: s.tenant,
             payer_tenant_id: s.payer,
             payment_id: payment_id.to_owned(),
-            gross_minor: gross,
-            fee_minor: 0,
-            currency: "USD".to_owned(),
+            gross: usd_cents(gross),
+            fee: usd_cents(0),
             effective_at: None,
         },
     )
@@ -670,8 +685,7 @@ async fn grant_wallet(
             tenant_id: s.tenant,
             payer_tenant_id: s.payer,
             credit_application_id: credit_application_id.to_owned(),
-            currency: "USD".to_owned(),
-            amount_minor: amount,
+            amount: usd_cents(amount),
             credit_grant_event_type: event_type.to_owned(),
         },
     )
@@ -714,8 +728,8 @@ fn grant_body(
         "payer_tenant_id": s.payer,
         "credit_application_id": credit_application_id,
         "currency": "USD",
-        "scale": 2,
-        "amount_minor": amount,
+        "currency_scale": 2,
+        "money": usd_json(amount),
         "credit_grant_event_type": event_type
     })
 }
@@ -731,7 +745,7 @@ fn apply_body(
         "payer_tenant_id": s.payer,
         "credit_application_id": credit_application_id,
         "currency": "USD",
-        "scale": 2,
+        "currency_scale": 2,
         "targets": targets
     })
 }
@@ -811,7 +825,7 @@ async fn apply_returns_201() {
         &s,
         "inv-1",
         500,
-        Utc::now() - chrono::Duration::hours(1),
+        OffsetDateTime::now_utc() - time::Duration::hours(1),
     )
     .await;
 
@@ -822,7 +836,7 @@ async fn apply_returns_201() {
         Some(apply_body(
             &s,
             "CR-A-201",
-            serde_json::json!([{ "invoice_id": "inv-1", "amount_minor": 500 }]),
+            serde_json::json!([{ "invoice_id": "inv-1", "money": usd_json(500) }]),
         )),
     )
     .await;
@@ -836,11 +850,11 @@ async fn apply_returns_201() {
         debits[0]["credit_grant_event_type"],
         serde_json::json!("promo")
     );
-    assert_eq!(debits[0]["amount_minor"], serde_json::json!(500));
+    assert_eq!(debits[0]["money"], usd_json(500));
     let applications = body["applications"].as_array().expect("applications array");
     assert_eq!(applications.len(), 1, "one receivable paid");
     assert_eq!(applications[0]["invoice_id"], serde_json::json!("inv-1"));
-    assert_eq!(applications[0]["amount_minor"], serde_json::json!(500));
+    assert_eq!(applications[0]["money"], usd_json(500));
 }
 
 /// A grant whose amount exceeds the payer's live unallocated pool → 409
@@ -892,7 +906,7 @@ async fn apply_over_open_ar_returns_409_with_code() {
         &s,
         "inv-1",
         300,
-        Utc::now() - chrono::Duration::hours(1),
+        OffsetDateTime::now_utc() - time::Duration::hours(1),
     )
     .await;
 
@@ -903,7 +917,7 @@ async fn apply_over_open_ar_returns_409_with_code() {
         Some(apply_body(
             &s,
             "CR-A-400",
-            serde_json::json!([{ "invoice_id": "inv-1", "amount_minor": 500 }]),
+            serde_json::json!([{ "invoice_id": "inv-1", "money": usd_json(500) }]),
         )),
     )
     .await;
@@ -938,8 +952,8 @@ async fn cross_tenant_target_is_forbidden_403() {
         "payer_tenant_id": s.payer,
         "credit_application_id": "CR-FOREIGN",
         "currency": "USD",
-        "scale": 2,
-        "amount_minor": 100,
+        "currency_scale": 2,
+        "money": usd_json(100),
         "credit_grant_event_type": "promo"
     });
     let (status, problem) = send(
@@ -958,7 +972,7 @@ async fn cross_tenant_target_is_forbidden_403() {
     // No wallet sub-grain was created for the foreign tenant.
     let foreign_subgrain = raw
         .query_one_raw(pg(format!(
-            "SELECT balance_minor FROM bss.ledger_reusable_credit_subbalance \
+            "SELECT balance FROM bss.ledger_reusable_credit_subbalance \
              WHERE tenant_id='{foreign}'"
         )))
         .await

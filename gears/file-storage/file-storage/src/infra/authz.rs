@@ -1,19 +1,14 @@
-//! Authorization Service integration (M8): a [`PolicyEnforcerAuthorizer`] that
-//! delegates per-type access decisions to the platform Authorization Service
-//! over `gts.cf.fstorage.file.type.v1~` (`cpt-cf-file-storage-fr-authorization`).
+//! `PolicyEnforcerAuthorizer`: delegates per-type access decisions to the platform
+//! Authorization Service over `gts.cf.fstorage.file.type.v1~`.
 //!
-//! This implements the domain [`Authorizer`] abstraction; the gear can swap it
-//! in for [`crate::domain::authz::TenantOnlyAuthorizer`] once the deployment's
-//! PDP is configured to return tenant-scoped constraints. Tenant-boundary
-//! enforcement (`cpt-cf-file-storage-fr-tenant-boundary`) is preserved either
-//! way — point operations prefetch within the caller's tenant before the
-//! decision, and listing applies the tenant scope.
+//! Tenant-boundary enforcement is preserved either way: point operations prefetch within the
+//! caller's tenant before the decision, and listing applies the tenant scope.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
-use authz_resolver_sdk::{AuthZResolverClient, EnforcerError, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, EnforcerError, PolicyEnforcer};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
@@ -33,7 +28,7 @@ const FILE_RESOURCE: ResourceType = ResourceType::from_static(
     ],
 );
 
-/// Authorizer backed by the platform Authorization Service via [`PolicyEnforcer`].
+/// Authorizer backed by the platform Authorization Service via `PolicyEnforcer`.
 pub struct PolicyEnforcerAuthorizer {
     enforcer: PolicyEnforcer,
 }
@@ -41,7 +36,7 @@ pub struct PolicyEnforcerAuthorizer {
 impl PolicyEnforcerAuthorizer {
     /// Build from the `ClientHub`-resolved `AuthZ` resolver client.
     #[must_use]
-    pub fn new(authz: Arc<dyn AuthZResolverClient>) -> Self {
+    pub fn new(authz: Arc<dyn AuthZResolverApi>) -> Self {
         Self {
             enforcer: PolicyEnforcer::new(authz),
         }

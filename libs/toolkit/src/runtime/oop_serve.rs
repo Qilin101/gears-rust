@@ -49,11 +49,12 @@ use url::Url;
 
 use cf_system_sdks::directory::{DirectoryClient, RegisterInstanceInfo, ServiceEndpoint};
 use toolkit_canonical_errors::CanonicalError;
-use toolkit_http_middleware::{internal_auth_middleware, security_context_middleware};
+use toolkit_http_middleware::{RouteAuthPolicy, layer_route_auth};
 use toolkit_security::{DynBearerAuthenticator, DynInternalAuthenticator};
 
 use super::readiness::ReadinessState;
 use crate::api::canonical_error_middleware;
+use crate::api::operation_builder::OperationSpec;
 
 /// `Retry-After` (seconds) advertised while the gear is draining.
 const DRAIN_RETRY_AFTER_SECONDS: u64 = 5;
@@ -69,11 +70,17 @@ const STARTING_RETRY_AFTER_SECONDS: u64 = 1;
 /// Configuration and collaborators for the `OoP` HTTP runtime, assembled by the
 /// bootstrap layer and consumed by `HostRuntime`'s `OoP` serving path.
 ///
-/// `#[non_exhaustive]` so new fields (like `labels`) stay additive: the type is
-/// built by the bootstrap layer, never struct-literal-constructed from another
-/// crate, so adding a field never breaks a downstream constructor. (A `Default`
-/// impl is intentionally not provided — the `directory` collaborator is a
-/// required dependency with no meaningful default.)
+/// `#[non_exhaustive]` so new fields (like `labels`) stay additive. Construct via
+/// [`OopServeOptions::new`] + the `with_*` builders rather than a struct literal,
+/// exactly as [`RunOptions`](super::RunOptions) is built: the five arguments to
+/// `new` are the fields with no meaningful default, and everything else defaults
+/// to the same values the bootstrap config layer uses. (A `Default` impl is still
+/// not provided — the `directory` collaborator is a required dependency.)
+///
+/// The builders are what keep [`run_oop_serving`](super::run_oop_serving)
+/// callable: it is `pub` and takes this type by value, so an out-of-crate caller
+/// — an integration test driving the real serve path, for instance — needs some
+/// way to build one.
 #[non_exhaustive]
 pub struct OopServeOptions {
     /// Logical gear name (used for registration + `OpenAPI` title).
@@ -113,6 +120,94 @@ pub struct OopServeOptions {
     /// Stable addressing labels (k8s `matchLabels` style) advertised with this
     /// instance's directory registration for label-based selection.
     pub labels: BTreeMap<String, String>,
+}
+
+impl OopServeOptions {
+    /// Create `OopServeOptions` with the fields that have no meaningful default;
+    /// every optional field defaults to the bootstrap config layer's own default
+    /// (`drain_timeout` 30s, `heartbeat_interval` 5s, `healthcheck_timeout`
+    /// 500ms, no probe sidecar port, no authenticators, no labels). Layer the
+    /// rest on with the `with_*` builders.
+    #[must_use]
+    pub fn new(
+        gear_name: String,
+        instance_id: String,
+        advertise_uri: String,
+        listen_addr: std::net::SocketAddr,
+        directory: Arc<dyn DirectoryClient>,
+    ) -> Self {
+        Self {
+            gear_name,
+            instance_id,
+            version: None,
+            advertise_uri,
+            listen_addr,
+            probe_bind_addr: None,
+            drain_timeout: Duration::from_secs(30),
+            heartbeat_interval: Duration::from_secs(5),
+            healthcheck_timeout: Duration::from_millis(500),
+            directory,
+            bearer_authenticator: None,
+            internal_authenticator: None,
+            labels: BTreeMap::new(),
+        }
+    }
+
+    /// Set the gear version (used for registration + `OpenAPI` version).
+    #[must_use]
+    pub fn with_version(mut self, version: Option<String>) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Serve probes on a separate sidecar port *in addition to* the main listener.
+    #[must_use]
+    pub fn with_probe_bind_addr(mut self, addr: Option<std::net::SocketAddr>) -> Self {
+        self.probe_bind_addr = addr;
+        self
+    }
+
+    /// Override how long in-flight requests may drain on shutdown.
+    #[must_use]
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// Override the `DirectoryService` heartbeat interval.
+    #[must_use]
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
+    /// Override the per-check readiness healthcheck timeout.
+    #[must_use]
+    pub fn with_healthcheck_timeout(mut self, timeout: Duration) -> Self {
+        self.healthcheck_timeout = timeout;
+        self
+    }
+
+    /// Install the tenant-plane authenticator (`security_context_middleware`).
+    #[must_use]
+    pub fn with_bearer_authenticator(mut self, auth: Option<DynBearerAuthenticator>) -> Self {
+        self.bearer_authenticator = auth;
+        self
+    }
+
+    /// Install the platform-plane authenticator (`internal_auth_middleware`).
+    #[must_use]
+    pub fn with_internal_authenticator(mut self, auth: Option<DynInternalAuthenticator>) -> Self {
+        self.internal_authenticator = auth;
+        self
+    }
+
+    /// Advertise stable addressing labels for label-based selection.
+    #[must_use]
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = labels;
+        self
+    }
 }
 
 impl std::fmt::Debug for OopServeOptions {
@@ -374,44 +469,93 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 // Router assembly
 // ---------------------------------------------------------------------------
 
-/// Apply the framework middleware stack to the composed gear router: auth planes
-/// (when injected), the drain guard, and the canonical-error layer.
-///
-/// Probes are NOT layered here — they live on the outer router (see
-/// [`build_outer_router`]) so they stay unguarded and answerable during startup
-/// and drain.
+/// Derive the listener policy from [`OperationSpec::auth`].
+pub(super) fn route_auth_policy<S>(specs: impl IntoIterator<Item = S>) -> RouteAuthPolicy
+where
+    S: std::ops::Deref<Target = OperationSpec>,
+{
+    specs
+        .into_iter()
+        .map(|spec| (spec.method.clone(), spec.path.clone(), spec.auth))
+        .collect()
+}
+
+/// Layer policy, auth, drain guard and canonical errors. Probes stay on
+/// [`build_outer_router`] so they remain available during startup and drain.
 fn layer_gear_router(
     gear_router: Router,
+    route_auth: RouteAuthPolicy,
     drain_guard: DrainGuard,
     options: &OopServeOptions,
 ) -> Router {
-    let mut gear = gear_router;
-
-    // Auth planes (installed only when injected). Add tenant plane first so it
-    // is *inner* to the platform plane — `internal_auth_middleware` must run
-    // BEFORE `security_context_middleware` (`cpt-cf-adr-two-plane-auth`).
-    if let Some(bearer) = options.bearer_authenticator.clone() {
-        gear = gear.layer(from_fn_with_state(
-            Arc::new(bearer),
-            security_context_middleware::<DynBearerAuthenticator>,
-        ));
-    }
-    if let Some(internal) = options.internal_authenticator.clone() {
-        gear = gear.layer(from_fn_with_state(
-            Arc::new(internal),
-            internal_auth_middleware::<DynInternalAuthenticator>,
-        ));
-    }
+    // Policy, both auth planes (each only when injected) and the platform gate, in the
+    // order `cpt-cf-adr-two-plane-auth` requires. A missing internal authenticator fails
+    // closed for platform routes only; without a tenant authenticator, tenant routes are
+    // served without bearer validation (the bearer authenticator is optional, see
+    // `resolve_bearer_authenticator`).
+    let mut gear = layer_route_auth(
+        gear_router,
+        route_auth,
+        options.bearer_authenticator.clone(),
+        options.internal_authenticator.clone(),
+    );
 
     // Drain guard sits just inside the canonical-error layer: it rejects new
     // requests while draining and tracks the in-flight count (catching handler
     // panics so the counter can never leak and stall the drain).
     gear = gear.layer(from_fn_with_state(drain_guard, drain_guard_middleware));
 
-    // Canonical-error middleware is the outermost gear layer so it post-processes
-    // every gear/auth response into `problem+json` with `trace_id` / `instance`
-    // filled — matching the in-process (`api-gateway`) path.
-    gear.layer(from_fn(canonical_error_middleware))
+    // Canonical-error middleware post-processes every gear/auth response into
+    // `problem+json` with `trace_id` / `instance` filled — matching the
+    // in-process (`api-gateway`) path.
+    gear = gear.layer(from_fn(canonical_error_middleware));
+
+    // Trace-context layer is the *outermost* gear layer so its `http_request`
+    // span is active for every inner layer, including the canonical-error layer
+    // that resolves the wire `trace_id` and emits the log line.
+    gear.layer(from_fn(trace_context_middleware))
+}
+
+/// Run every gear request inside an `http_request` span that continues the
+/// caller's W3C trace when the inbound `traceparent` carries one.
+///
+/// Without this an `OoP` gear's request span is a fresh root, so the canonical-
+/// error layer would put the caller's inbound trace id on the wire while the
+/// gear's own log lines carried a different, freshly-minted one. Seeding the
+/// parent makes the span's trace id equal the inbound one, so the wire
+/// `trace_id` and the log-correlation splice agree. (`api-gateway` does the same
+/// in-process via its own `TraceLayer`.)
+async fn trace_context_middleware(req: Request, next: Next) -> Response {
+    use tracing::Instrument as _;
+    use tracing::field::Empty;
+
+    // Record the gateway-supplied `x-request-id` (forwarded to this gear, absent
+    // when the gear is reached without the gateway) and the wire `trace_id` /
+    // `parent.trace_id` on the span, so an OoP gear's log lines join to the
+    // gateway access log and the wire trace even with the text console format,
+    // without OTel, or with the log-correlation splice off. The id is the
+    // gateway's; this gear does not mint one.
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("n/a");
+
+    let span = tracing::info_span!(
+        "http_request",
+        method = %req.method(),
+        uri = %req.uri().path(),
+        request_id = %request_id,
+        trace_id = Empty,
+        parent.trace_id = Empty,
+    );
+
+    // Seed the span's parent from the inbound W3C trace context and record
+    // `trace_id` / `parent.trace_id`. Shared with the api-gateway via
+    // `toolkit_trace_context`; without `otel` it records the ids from the header.
+    toolkit_trace_context::set_parent_from_headers(&span, req.headers());
+
+    next.run(req).instrument(span).await
 }
 
 // ---------------------------------------------------------------------------
@@ -628,15 +772,25 @@ impl OopHttpServer {
         }
     }
 
-    /// Publish the composed gear routes (they go live atomically) and start
-    /// background directory presence + dependency resolution.
+    /// Atomically publish the composed gear routes (with auth policy) and their
+    /// `OpenAPI` document, then start background directory presence.
     ///
-    /// Presence (registration + heartbeat) and dep resolution start here — only
-    /// once the gear can actually serve — so the directory never advertises a
-    /// not-yet-serving instance.
-    pub(super) fn attach(&mut self, gear_router: Router, openapi_json: String) {
+    /// Presence (registration + heartbeat + self-heal) starts only once the gear
+    /// can serve requests, so discovery never advertises a not-yet-serving instance.
+    /// Dependency resolution runs in the proxy-wiring phase before serving.
+    pub(super) fn attach(
+        &mut self,
+        gear_router: Router,
+        openapi_json: String,
+        route_auth: RouteAuthPolicy,
+    ) {
         let openapi_arc: Arc<str> = Arc::from(openapi_json);
-        let layered = layer_gear_router(gear_router, self.drain_guard.clone(), &self.options);
+        let layered = layer_gear_router(
+            gear_router,
+            route_auth,
+            self.drain_guard.clone(),
+            &self.options,
+        );
         self.late.publish(layered, Arc::clone(&openapi_arc));
         self.readiness.mark_startup_complete();
         tracing::info!(gear = %self.options.gear_name, "OoP gear routes attached (now serving)");

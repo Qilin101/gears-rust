@@ -1,27 +1,37 @@
-//! `UserFacade` — provision/deprovision/list users against Keycloak per DESIGN "Interactions & Sequences".
+//! `UserFacade` — provision/update/deprovision/list users against Keycloak
+//! per DESIGN "Interactions & Sequences".
 //!
-//! Implements `provision_user_inner`, `deprovision_user_inner`, and
-//! `list_users_inner` across all three [`RealmBinding`] modes (Shared /
-//! Adopted / Created). Metadata decode, secret-source selection (DESIGN "Domain Model"),
-//! and user-operation audit events are handled within this facade; the SDK
-//! boundary in `idp_impl.rs` translates [`PluginError`] into the typed
-//! `IdpUserOperationFailure` variants (`Rejected` / `Unavailable` /
-//! `UnsupportedOperation`).
+//! Implements `provision_user_inner`, `update_user_inner`,
+//! `deprovision_user_inner`, and `list_users_inner` across all three
+//! [`RealmBinding`] modes (Shared / Adopted / Created). Metadata decode,
+//! secret-source selection (DESIGN "Domain Model"), and user-operation audit events
+//! are handled within this facade; the SDK boundary in `idp_impl.rs`
+//! translates [`PluginError`] into the typed `IdpUserOperationFailure`
+//! variants (`Rejected` / `Unavailable` / `UnsupportedOperation` /
+//! `NotFound` / `FieldNotWritable`).
+//!
+//! Both mutating paths that take a `user_id` from the caller
+//! (`update_user_inner`, `deprovision_user_inner`) MUST verify the user's
+//! stored `tenant_id` attribute against the requesting tenant before
+//! writing. Users live in Keycloak, not the AM database, so the
+//! authorization layer's SQL scope predicate never constrains these calls
+//! and that attribute check is the only thing standing between a
+//! tenant-scoped caller and another tenant's user records.
 //!
 //! [`TenantFacade`]: crate::domain::tenant_facade::TenantFacade
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use account_management_sdk::idp_user::{
-    IdpDeprovisionUserRequest, IdpListUsersRequest, IdpProvisionUserRequest, IdpUser,
-    IdpUserFilterField,
+    IdpDeprovisionUserRequest, IdpListUsersRequest, IdpProvisionUserRequest, IdpUpdateUserRequest,
+    IdpUser, IdpUserAttribute, IdpUserFilterField, IdpUserPagination, IdpUserPatch,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use credstore_sdk::SecretRef;
 use serde::Deserialize;
-use toolkit_odata::filter::{FilterNode, FilterOp, ODataValue};
-use toolkit_odata::{CursorV1, Page, PageInfo, SortDir};
+use toolkit_odata::filter::{FilterField, FilterNode, FilterOp, ODataValue};
+use toolkit_odata::{CursorV1, ODataOrderBy, OrderKey, Page, PageInfo, SortDir};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
@@ -134,6 +144,164 @@ fn is_kc_password_policy_reject(body_text: &str) -> bool {
         || error.starts_with("invalidpassword")
 }
 
+/// Map a Keycloak `UserRepresentation` property name onto the SDK
+/// attribute token AM attributes field violations to.
+///
+/// `display_name` is absent by design: it is not a KC property at all
+/// (see [`UserFacade::user_rep_to_idp_user`] — AM's `display_name` is
+/// *derived* from `firstName`/`lastName`), so KC can never name it in a
+/// validation error. The un-writability of `display_name` is a static
+/// fact about this plugin's mapping, rejected before any KC call by
+/// [`UserFacade::preflight_unwritable_attribute`].
+fn kc_field_to_attribute(kc_field: &str) -> Option<IdpUserAttribute> {
+    match kc_field {
+        "username" => Some(IdpUserAttribute::Username),
+        "email" => Some(IdpUserAttribute::Email),
+        "firstName" => Some(IdpUserAttribute::FirstName),
+        "lastName" => Some(IdpUserAttribute::LastName),
+        _ => None,
+    }
+}
+
+/// Detect a KC read-only-attribute reject on user-update and localise it
+/// to every refused attribute the body names.
+///
+/// This is the SAFETY NET, not the primary mechanism: `update_user` decides
+/// writability up front from the structured
+/// `userProfileMetadata.attributes[].readOnly` flags
+/// ([`UserFacade::read_user_for_update`]), so a well-behaved patch never
+/// reaches here. This path catches what pre-flight cannot: a KC that does not
+/// serve profile metadata, a lock introduced between the read and the write,
+/// or a lock the metadata does not model.
+///
+/// # Signal precedence
+///
+/// 1. **`errorMessage` equals a known read-only message KEY.** KC returns a
+///    message key, not localized prose — verified against KC 26.5.3, where the
+///    body is byte-identical under `Accept-Language: de`:
+///    `{"field":"username","errorMessage":"error-user-attribute-read-only","params":["username"]}`.
+///    Exact comparison only, over keys observed in real response bodies — see
+///    the list's own notes on what is excluded and why. There is deliberately
+///    NO substring fallback: a phrase test over the message could only add
+///    false positives on unrelated 400s (`"cannot link read-only federated
+///    store"` is not a locked field). KC does define
+///    `updateReadOnlyAttributesRejectedMessage` for the legacy
+///    read-only-attributes rejection, so that path is not keyless as such — it
+///    is merely unproven on the admin API, and unreachable for the five profile
+///    fields AM patches.
+/// 2. **`field` from the body**, whether the body is that flat object or the
+///    `{"errors":[…]}` array some validation paths emit. KC names the refused
+///    property itself, so it is always preferred over inference, and EVERY
+///    named entry is collected -- a multi-field patch can draw one `errors[]`
+///    entry per locked attribute, and the caller needs the whole set in one
+///    round trip, not just the first.
+/// 3. **Single-touched-attribute inference**, only once (1) has already
+///    established this IS a read-only reject and no entry named a modelled
+///    field. Bounded by construction: it chooses *which* field, never
+///    *whether*, so it cannot manufacture a locked-field error out of an
+///    unrelated failure.
+///
+/// Returns an empty `Vec` for any 400 that is not a read-only reject, and for
+/// a read-only reject that cannot be attributed to a modelled request
+/// property — the caller then uses the generic rejection lane rather than
+/// blaming an arbitrary field.
+///
+/// Several unrelated Keycloak features land here, which is why detection is not
+/// tied to one config source:
+///
+/// * **Realm flag** — `editUsernameAllowed=false` locks `username`. This is
+///   Keycloak's DEFAULT and needs no federation, so on a stock platform it is
+///   the most likely trigger of this whole code path. Verified against the
+///   `platform` realm: renaming a login is refused there out of the box.
+/// * **Declarative user profile** (default since KC 24) — an attribute whose
+///   `permissions.edit` excludes the caller. Produces the per-field
+///   `errors[]` shape handled first below.
+/// * **Federated read-only attributes** — an LDAP/User-Storage provider in
+///   `editMode=READ_ONLY`, or an individual `user-attribute-ldap-mapper` with
+///   `read.only=true`. The external directory owns the value, so Keycloak
+///   refuses to write it.
+/// * **Keycloak's internal attribute guard** — over system attributes
+///   (`LDAP_ID`, `LDAP_ENTRY_DN`, `KERBEROS_PRINCIPAL`, `CREATED_TIMESTAMP`,
+///   …). AM patches none of these — [`IdpUserAttribute`] models only the five
+///   profile fields — so this cannot fire from here. Listed for completeness,
+///   NOT handled: it surfaces as a generic `UserOpRejected` 400 if a future
+///   field mapping ever reaches it, which is the correct conservative outcome
+///   for a request AM should never have sent.
+///
+/// AM does not need to distinguish them: from a caller's perspective all four
+/// mean "this provider will not let you write this field", which is exactly
+/// what `IDP_MANAGED_FIELD` says.
+fn classify_kc_read_only_reject(
+    body_text: &str,
+    touched: &[IdpUserAttribute],
+) -> Vec<IdpUserAttribute> {
+    /// The one message key KC is known to return for a read-only-attribute
+    /// refusal. Compared for equality, not searched for: it is a stable
+    /// identifier, byte-identical from KC 26.5.3 under `Accept-Language: de`.
+    ///
+    /// Observed verbatim:
+    /// `{"field":"username","errorMessage":"error-user-attribute-read-only","params":["username"]}`
+    ///
+    /// Should a second key ever need adding, it MUST come with an observed
+    /// admin-API body. Two earlier guesses did not: `error-user-read-only`
+    /// turned out not to exist in KC 26.5.3's bundles at all, and a substring
+    /// test over the message could only ever add false positives (an unrelated
+    /// 400 reading `"cannot link read-only federated store"` is not a locked
+    /// field). Real keys that remain excluded for want of evidence that the
+    /// admin API returns them as `errorMessage` rather than rendering them as
+    /// themed display text: `updateReadOnlyAttributesRejectedMessage` (the
+    /// legacy read-only-attributes rejection), `readOnlyUserMessage`,
+    /// `readOnlyUsernameMessage`, `readOnlyPasswordMessage`.
+    const READ_ONLY_MESSAGE_KEY: &str = "error-user-attribute-read-only";
+
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body_text) else {
+        return Vec::new();
+    };
+
+    // KC states the refusal either as a flat object or as an `errors[]` array,
+    // so treat the body as a list of candidate entries: the array's members
+    // when present (most specific), then the root object itself.
+    let nested: &[serde_json::Value] = v
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[], Vec::as_slice);
+
+    let mut read_only_signalled = false;
+    let mut fields = Vec::new();
+    for entry in nested.iter().chain(std::iter::once(&v)) {
+        if entry
+            .get("errorMessage")
+            .and_then(serde_json::Value::as_str)
+            != Some(READ_ONLY_MESSAGE_KEY)
+        {
+            continue;
+        }
+        read_only_signalled = true;
+        // KC named the property — collected rather than returned
+        // immediately, because a multi-field patch can draw one entry per
+        // locked attribute and the caller needs the whole set. A field AM
+        // does not model (a custom realm attribute) still signals a
+        // read-only reject even though it contributes nothing to `fields`.
+        if let Some(attribute) = entry
+            .get("field")
+            .and_then(serde_json::Value::as_str)
+            .and_then(kc_field_to_attribute)
+            && !fields.contains(&attribute)
+        {
+            fields.push(attribute);
+        }
+    }
+    // No entry named a modelled field. A single-attribute patch is still
+    // unambiguous: the refusal can only be about that one.
+    if fields.is_empty()
+        && read_only_signalled
+        && let [only] = touched
+    {
+        fields.push(*only);
+    }
+    fields
+}
+
 /// Subset of Keycloak's `UserRepresentation` the facade needs:
 ///
 /// * UUID discovery after `provision_user` — only `id` is required.
@@ -143,20 +311,12 @@ fn is_kc_password_policy_reject(body_text: &str) -> bool {
 /// `firstName` / `lastName` are concatenated into [`IdpUser::display_name`]
 /// per DESIGN "Interactions & Sequences" (KC `firstName + lastName` is the canonical KC profile
 /// shape; OIDC `name` claim is not surfaced by the admin REST endpoint).
-///
-/// `createdTimestamp` is used by the `list_users` cursor sort key
-/// `(createdTimestamp ASC, id ASC)` per DESIGN "Interactions & Sequences".
 // Field subset of Keycloak's `UserRepresentation`; the derive is the decoder.
 #[allow(unknown_lints, de0101_no_serde_in_contract)]
 #[domain_model]
 #[derive(Deserialize)]
 struct UserRep {
     id: Uuid,
-    // `default` resolves to 0 (epoch). Real KC always emits `createdTimestamp`;
-    // the default exists only for minimal test fixtures. Such users sort
-    // before all real users — acceptable for v1 but document if writing new fixtures.
-    #[serde(default, rename = "createdTimestamp")]
-    created_timestamp: i64,
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
@@ -181,20 +341,25 @@ struct UserRep {
 ///
 /// Field mapping into [`CursorV1`]:
 ///
-///   * `k = [last_created_at_ms.to_string(), last_user_id.to_string()]`
-///     — composite tiebreaker per DESIGN "Interactions & Sequences" sort
-///     `(createdTimestamp ASC, id ASC)`.
-///   * `o = SortDir::Asc`, `s = [CURSOR_ORDER_TOKENS]` — pin the
-///     hard-coded plugin sort order in the cursor so AM's handler
-///     can recover `req.order` on continuation requests via
-///     `ODataOrderBy::from_signed_tokens`.
+///   * `k` — the last emitted user's key tuple, one projected string
+///     per key of the effective order (see [`ListUsersOrder`]). When
+///     the full tuple would push the cursor past
+///     [`IdpUserPagination::MAX_CURSOR_LEN`] (long profile values
+///     across several keys), the profile values are cut to a common
+///     byte cap and `k` carries one extra trailing element: a mask of
+///     `'0'` / `'1'`, one per key, marking the values that are now
+///     strict prefixes. The `id` value is never cut, so the cursor
+///     still names its row exactly (see
+///     [`UserFacade::list_users_impl`]'s cursor skip).
+///   * `o` / `s` — the effective order's leading direction and signed
+///     tokens (e.g. `"+username,+id"`). AM's handler recovers
+///     `req.order` from `s` on continuation requests and checks it
+///     against the `IdpUserFilterField` allow-list, so `s` only ever
+///     names fields from that set (DESIGN "Interactions & Sequences").
 ///   * `f = Some(filter_hash)` — short FNV-1a fingerprint of
-///     `(tenant_id, realm_name, id_filter, string_filters)`. The
-///     `realm_name` fold replaces the pre-CursorV1 explicit
-///     `decoded.realm_name != metadata.realm_name` reject — same
-///     effective check, now bundled in the hash so a re-binding
-///     across pages surfaces as `invalid cursor` through the same
-///     path as a filter / tenant change.
+///     `(tenant_id, realm_name, id_filter, string_filters)`. A realm
+///     re-binding or filter change across pages surfaces as
+///     `invalid cursor`.
 ///   * `d = "fwd"` — the plugin does not implement backward
 ///     pagination (it would require fetching from an offset > 0,
 ///     which v1 forbids).
@@ -202,59 +367,147 @@ struct UserRep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ListUsersCursor {
     filter_hash: String,
-    last_created_at: i64,
-    last_user_id: Uuid,
+    last_key: Vec<String>,
+    /// Indices into `last_key` whose value is a strict prefix of the
+    /// row's sort value; empty when the tuple is carried in full.
+    truncated: Vec<usize>,
 }
 
-/// Pre-CursorV1 cursor shape kept ALIVE on the decode side for the
-/// rolling-deploy grace window. Mirrors the JSON shape the previous
-/// encoder produced: opaque base64url-no-pad of a serde-tagged struct
-/// with `realm_name` carried alongside `filter_hash`. Used ONLY by
-/// [`UserFacade::decode_cursor_with_legacy_fallback`]; the encoder
-/// always emits the current [`CursorV1`] shape.
-///
-/// Why keep this around: the rolling rollout window means clients
-/// that fetched page 1 BEFORE the deploy and page 2 AFTER the deploy
-/// would otherwise see `invalid cursor` mid-walk on a server-issued
-/// token. The grace decode accepts both shapes; once all in-flight
-/// pagination drains (matter of minutes), the legacy struct can be
-/// retired.
-// The derive IS the grace-window decoder described above.
-#[allow(unknown_lints, de0101_no_serde_in_contract)]
+/// Effective `list_users` order, resolved from
+/// `IdpListUsersRequest.order` against the [`IdpUserFilterField`]
+/// allow-list. Always ends in an `id` key, so it is a total order.
 #[domain_model]
-#[derive(Debug, Deserialize)]
-struct LegacyListUsersCursor {
-    realm_name: String,
-    filter_hash: String,
-    #[serde(default)]
-    last_created_at: Option<i64>,
-    #[serde(default)]
-    last_user_id: Option<Uuid>,
+#[derive(Debug, Clone)]
+struct ListUsersOrder {
+    /// Wire form, pinned in [`CursorV1::s`] / [`CursorV1::o`].
+    odata: ODataOrderBy,
+    /// Typed keys, parallel to `odata.0`.
+    keys: Vec<(IdpUserFilterField, SortDir)>,
 }
 
-/// Pre-CursorV1 `filter_hash` computation. Kept ALIVE for the same
-/// rolling-deploy grace window as [`LegacyListUsersCursor`]: a legacy
-/// cursor is accepted only if its `filter_hash` re-derives from this
-/// function given the current request's `(tenant_id, id_filter)` —
-/// i.e. the legacy filter context matches today's request.
-///
-/// Scope of revalidation: tenant + UUID-typed `id` filter only.
-/// Legacy cursors were minted before the string-filter predicate
-/// ([`StringMatcher`]) was folded into the hash; the encoded hash
-/// never folded `realm_name` or
-/// `username/email/first_name/last_name/display_name` into its
-/// state, so this routine intentionally does not either. Feeding
-/// today's [`StringMatcher`] in would change every legacy hash
-/// byte-for-byte and reject every legacy cursor minted by the prior
-/// release — defeating the rolling-deploy grace window.
-///
-/// Safety vs. drift: realm rebinding is caught upstream by the
-/// explicit `legacy.realm_name != expected_realm` check in
-/// [`UserFacade::decode_cursor_with_legacy_fallback`]. A request
-/// that adds string filters mid-walk reuses a legacy cursor for at
-/// most one more page — the response always emits a fresh `CursorV1`
-/// `next_cursor` with the full modern hash, after which the modern
-/// equality check guards every subsequent page.
+impl ListUsersOrder {
+    /// Resolve the effective order: the request's order, or
+    /// `username ASC` when a direct SPI caller omits it, with an
+    /// `id ASC` tiebreaker appended — the same default and tiebreaker
+    /// AM injects before SPI dispatch and `static-idp-plugin` applies.
+    ///
+    /// # Errors
+    ///
+    /// [`PluginError::UserOpUnsupported`] when a key names a field
+    /// outside [`IdpUserFilterField`] (e.g. `created_at`).
+    fn resolve(order: Option<&ODataOrderBy>) -> Result<Self, PluginError> {
+        let odata = order
+            .cloned()
+            .unwrap_or_else(|| {
+                ODataOrderBy(vec![OrderKey {
+                    field: IdpUserFilterField::Username.name().to_owned(),
+                    dir: SortDir::Asc,
+                }])
+            })
+            .ensure_tiebreaker(IdpUserFilterField::Id.name(), SortDir::Asc);
+        let keys = odata
+            .0
+            .iter()
+            .map(|key| {
+                IdpUserFilterField::FIELDS
+                    .iter()
+                    .find(|f| f.name() == key.field)
+                    .map(|f| (*f, key.dir))
+                    .ok_or_else(|| PluginError::UserOpUnsupported {
+                        detail: format!("list_users: unsupported order field `{}`", key.field),
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self { odata, keys })
+    }
+
+    /// Project `rep` to its key tuple under this order. Each key maps to
+    /// a comparable string: `id` via its canonical text form, absent or
+    /// empty profile fields as `""` (KC stores a cleared field as `""`,
+    /// and [`UserFacade::user_rep_to_idp_user`] reads it back as absent)
+    /// — the same projection `static-idp-plugin` sorts on.
+    fn project(&self, rep: &UserRep) -> Vec<String> {
+        self.keys
+            .iter()
+            .map(|(field, _)| match field {
+                IdpUserFilterField::Id => rep.id.to_string(),
+                IdpUserFilterField::Username => rep.username.clone().unwrap_or_default(),
+                IdpUserFilterField::Email => rep.email.clone().unwrap_or_default(),
+                IdpUserFilterField::DisplayName => {
+                    UserFacade::user_rep_display_name(rep).unwrap_or_default()
+                }
+                IdpUserFilterField::FirstName => rep.first_name.clone().unwrap_or_default(),
+                IdpUserFilterField::LastName => rep.last_name.clone().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// Compare two key tuples key by key, applying each key's direction.
+    fn compare(&self, a: &[String], b: &[String]) -> std::cmp::Ordering {
+        for (idx, (_, dir)) in self.keys.iter().enumerate() {
+            let lhs = a.get(idx).map_or("", String::as_str);
+            let rhs = b.get(idx).map_or("", String::as_str);
+            let ord = match dir {
+                SortDir::Asc => lhs.cmp(rhs),
+                SortDir::Desc => rhs.cmp(lhs),
+            };
+            if !ord.is_eq() {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Whether `key` is the row `cursor` was issued for: every full
+    /// value equal, every truncated value a prefix. The `id` value is
+    /// never truncated, so at most one row matches.
+    fn matches_cursor(&self, key: &[String], cursor: &ListUsersCursor) -> bool {
+        (0..self.keys.len()).all(|idx| {
+            let value = key.get(idx).map_or("", String::as_str);
+            let stored = cursor.last_key.get(idx).map_or("", String::as_str);
+            if cursor.truncated.contains(&idx) {
+                value.starts_with(stored)
+            } else {
+                value == stored
+            }
+        })
+    }
+
+    /// Whether `key` sorts strictly after the cursor's position, judged
+    /// from the stored values alone. A truncated value only bounds the
+    /// row's real value by a prefix, so a `key` value that extends the
+    /// same prefix cannot be placed: it counts as after (re-emitted
+    /// rather than skipped).
+    fn is_after_cursor(&self, key: &[String], cursor: &ListUsersCursor) -> bool {
+        for (idx, (_, dir)) in self.keys.iter().enumerate() {
+            let value = key.get(idx).map_or("", String::as_str);
+            let stored = cursor.last_key.get(idx).map_or("", String::as_str);
+            let ord = if cursor.truncated.contains(&idx) {
+                if value.len() > stored.len() && value.starts_with(stored) {
+                    return true;
+                }
+                // Equal to the prefix means shorter than the real value.
+                value.cmp(stored).then(std::cmp::Ordering::Less)
+            } else {
+                value.cmp(stored)
+            };
+            let ord = match dir {
+                SortDir::Asc => ord,
+                SortDir::Desc => ord.reverse(),
+            };
+            if !ord.is_eq() {
+                return ord.is_gt();
+            }
+        }
+        false
+    }
+
+    /// Leading key's direction, pinned in [`CursorV1::o`].
+    fn primary_dir(&self) -> SortDir {
+        self.keys.first().map_or(SortDir::Asc, |(_, dir)| *dir)
+    }
+}
+
 /// FNV-1a 64-bit offset basis / prime — deterministic, non-cryptographic
 /// fingerprint (DE0708: no non-FIPS hashers). Public Fowler–Noll–Vo spec with
 /// fixed constants → identical output across Rust versions and platforms.
@@ -269,31 +522,7 @@ fn fnv1a_update(state: &mut u64, bytes: impl AsRef<[u8]>) {
     }
 }
 
-fn legacy_filter_hash(tenant_id: Uuid, user_id_filter: Option<Uuid>) -> String {
-    let mut h = FNV1A_BASIS;
-    fnv1a_update(&mut h, tenant_id.as_bytes());
-    match user_id_filter {
-        Some(u) => {
-            fnv1a_update(&mut h, [1u8]);
-            fnv1a_update(&mut h, u.as_bytes());
-        }
-        None => {
-            fnv1a_update(&mut h, [0u8]);
-        }
-    }
-    format!("{h:016x}")
-}
-
-/// Plugin's sort order, hard-coded to `(createdTimestamp ASC, id
-/// ASC)` per DESIGN "Interactions & Sequences". The literal token strings here are opaque
-/// to KC — they live only in the cursor envelope so [`CursorV1`]'s
-/// `o`/`s` fields round-trip correctly through the AM handler's
-/// order-recovery step. If the plugin ever forwards `req.order` to
-/// the KC sort (the open TODO inside `list_users_impl`), the literals
-/// here become inputs to a runtime computation instead of a fixed
-/// constant.
-const CURSOR_ORDER_TOKENS: &str = "+created_at,+id";
-const CURSOR_ORDER_DIR: SortDir = SortDir::Asc;
+/// Pagination direction pinned in [`CursorV1::d`]; forward-only.
 const CURSOR_DIRECTION: &str = "fwd";
 
 /// Hard cap on the total tenant-group members drained in one
@@ -317,7 +546,8 @@ enum StringMatchOp {
 /// evaluated over each KC-fetched member. Mirrors the operator subset
 /// the `/users` list contract supports: `and` / `or` of `eq` /
 /// `contains` clauses on the string fields (`username` / `email` /
-/// `first_name` / `last_name` / `display_name`).
+/// `first_name` / `last_name` / `display_name`), and exact typed UUID sets
+/// (`id in (...)`) at any supported nesting level.
 ///
 /// `id eq <uuid>` is captured separately by
 /// [`UserFacade::extract_id_filter`]; inside a top-level `and` it
@@ -331,6 +561,8 @@ enum StringMatchOp {
 enum StringMatcher {
     #[default]
     Always,
+    /// Exact typed ID set, evaluated in place even inside a composite filter.
+    IdSet(std::collections::BTreeSet<Uuid>),
     Field {
         field: IdpUserFilterField,
         op: StringMatchOp,
@@ -349,6 +581,7 @@ impl StringMatcher {
     fn matches(&self, rep: &UserRep) -> bool {
         match self {
             StringMatcher::Always => true,
+            StringMatcher::IdSet(ids) => ids.contains(&rep.id),
             StringMatcher::All(children) => children.iter().all(|c| c.matches(rep)),
             StringMatcher::Any(children) => children.iter().any(|c| c.matches(rep)),
             StringMatcher::Field { field, op, needle } => {
@@ -379,6 +612,13 @@ impl StringMatcher {
     fn feed_hash(&self, state: &mut u64) {
         match self {
             StringMatcher::Always => fnv1a_update(state, [0u8]),
+            StringMatcher::IdSet(ids) => {
+                fnv1a_update(state, [4u8]);
+                fnv1a_update(state, ids.len().to_be_bytes());
+                for id in ids {
+                    fnv1a_update(state, id.as_bytes());
+                }
+            }
             StringMatcher::Field { field, op, needle } => {
                 let field_tag: u8 = match field {
                     IdpUserFilterField::Id => 0,
@@ -416,6 +656,7 @@ impl StringMatcher {
     }
 }
 
+/// Keycloak-backed user operations (provision / deprovision / update / list) within a tenant.
 #[domain_model]
 pub struct UserFacade {
     cfg: UserFacadeConfig,
@@ -429,6 +670,8 @@ pub struct UserFacade {
 }
 
 impl UserFacade {
+    /// Construct the facade over the Keycloak admin-client factory, metadata codec and
+    /// segregated metric ports.
     #[must_use]
     pub fn new(
         cfg: UserFacadeConfig,
@@ -1152,30 +1395,643 @@ impl UserFacade {
         Ok((metadata.realm_name, metadata.realm_binding))
     }
 
+    /// Apply AM's merge patch to a user in the tenant's bound realm and
+    /// return the post-update projection.
+    ///
+    /// Emits `user.updated` on success and records a failure metric
+    /// otherwise, mirroring [`Self::provision_user_inner`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::update_user_impl`].
+    pub async fn update_user_inner(
+        &self,
+        ctx: &SecurityContext,
+        req: &IdpUpdateUserRequest,
+    ) -> Result<IdpUser, PluginError> {
+        let started = Instant::now();
+        let result = self.update_user_impl(req).await;
+        let elapsed = started.elapsed().as_secs_f64();
+        self.user_metrics
+            .user_op_duration(UserOp::UpdateUser, elapsed);
+        match &result {
+            Ok((user, realm_name, realm_binding)) => {
+                audit::emit_user_updated(
+                    ctx,
+                    req.tenant_context.tenant_id,
+                    realm_name,
+                    *realm_binding,
+                    user.id,
+                    &Self::changed_labels(&req.patch),
+                );
+            }
+            Err(e) => {
+                self.record_user_op_failure(PluginOp::UpdateUser, e);
+            }
+        }
+        result.map(|(user, _, _)| user)
+    }
+
+    /// Inner implementation returning the [`IdpUser`] plus the bound realm
+    /// name / binding so the wrapper can label the audit event without
+    /// re-decoding the metadata.
+    ///
+    /// Ordering (each step gated on the previous):
+    ///
+    /// 1. Decode tenant metadata; resolve the realm-admin secret source.
+    /// 2. Pre-flight the statically-unwritable attributes
+    ///    ([`Self::preflight_unwritable_attribute`]) — refused before any
+    ///    KC call, so a `display_name` patch costs no round trip.
+    /// 3. **Binding check** — the user's stored `tenant_id` attribute MUST
+    ///    equal the requesting tenant. This is the only defence against
+    ///    cross-tenant user mutation: users live in KC, so the `AuthZ` SQL
+    ///    clamp that protects AM-DB writes never sees this path. Same
+    ///    guard as [`Self::deprovision_user_impl`] step 2.5, but a
+    ///    mismatch here returns [`PluginError::UserOpNotFound`] rather
+    ///    than folding into success — an update must not silently no-op.
+    /// 4. `PUT /users/{id}` with only the touched profile fields.
+    /// 5. `PUT /users/{id}/reset-password` when the patch carries one.
+    /// 6. Re-read the user and project it.
+    ///
+    /// Step 6 is a real GET rather than echoing the request: KC normalises
+    /// what it stores (lower-cases `username`, may trim or reformat
+    /// profile fields), so the only truthful 200 body is the one read back
+    /// from the provider.
+    ///
+    /// # Errors
+    ///
+    /// * [`PluginError::UserOpFieldNotWritable`] — an attribute is
+    ///   provider-managed (`display_name` always; any attribute KC
+    ///   reports read-only).
+    /// * [`PluginError::UserOpNotFound`] — user absent from the realm, or
+    ///   bound to a different tenant.
+    /// * [`PluginError::UserOpDuplicate`] — a `username` rename collided.
+    /// * [`PluginError::UserOpPasswordPolicy`] — KC rejected the password.
+    /// * [`PluginError::UserOpRejected`] — any other terminal 400/422.
+    /// * [`PluginError::UserOpUnavailable`] — 5xx / transport / timeout.
+    async fn update_user_impl(
+        &self,
+        req: &IdpUpdateUserRequest,
+    ) -> Result<(IdpUser, String, RealmBinding), PluginError> {
+        // ---- Step 1: metadata + secret source. ----
+        let metadata = self.decode_tenant_metadata(req.tenant_context.metadata.as_ref())?;
+        let secret_source = self.build_secret_source(&metadata)?;
+
+        // ---- Step 2: statically-unwritable attributes. ----
+        if let Some(attribute) = Self::preflight_unwritable_attribute(&req.patch) {
+            return Err(PluginError::UserOpFieldNotWritable {
+                fields: vec![attribute],
+                detail: format!(
+                    "{} is derived from the Keycloak firstName/lastName pair and is not a \
+                     writable provider attribute; patch first_name / last_name instead",
+                    attribute.as_field_token()
+                ),
+            });
+        }
+
+        // ---- Step 3: single pre-write read — binding + writability. ----
+        let expected_tid = req.tenant_context.tenant_id;
+        let (actual_tid, read_only) = self
+            .kc_factory
+            .with_reactive_401(
+                &metadata.realm_name,
+                &metadata.admin_client_id,
+                &secret_source,
+                |realm_admin| {
+                    let realm_name = metadata.realm_name.clone();
+                    async move {
+                        self.read_user_for_update(&realm_admin, &realm_name, req.user_id)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map_err(user_translate_kc)?;
+        if actual_tid != Some(expected_tid) {
+            tracing::warn!(
+                target: "keycloak_idp_plugin.user_binding",
+                user_id = %req.user_id,
+                expected_tenant_id = %expected_tid,
+                actual_tenant_id = ?actual_tid,
+                realm_name = %metadata.realm_name,
+                "user update refused: stored tenant_id attribute does not match request - cross-tenant PATCH prevented"
+            );
+            // Deliberately indistinguishable from a genuine absence: a
+            // caller must not be able to probe for users in other
+            // tenants by comparing 403 against 404.
+            return Err(PluginError::UserOpNotFound {
+                detail: format!("user {} not found in this tenant scope", req.user_id),
+            });
+        }
+
+        // ---- Step 3b: refuse attributes KC reports as non-writable. ----
+        //
+        // Decided from the structured `readOnly` flags rather than from a
+        // rejected write, which buys three things: the refusal names the exact
+        // field even when the patch touched several, no write is attempted for
+        // a patch that cannot fully apply (so a multi-field patch cannot land
+        // half-applied), and the classification does not depend on KC's error
+        // wording. `classify_kc_read_only_reject` still guards the PUT for
+        // locks this read cannot see.
+        //
+        // Ordering is deliberate where both could apply: a locked `username` is
+        // reported even when the requested login would ALSO collide with an
+        // existing one. The two answers are not equally useful —
+        // `already_exists` invites a retry with a different login, which is
+        // false when no login would be accepted. Refusing on the unconditional
+        // fact beats reporting the incidental one, and it means uniqueness is
+        // never probed for a field the caller cannot write.
+        let touched = Self::touched_attributes(&req.patch);
+        let locked_touched: Vec<IdpUserAttribute> = touched
+            .iter()
+            .copied()
+            .filter(|a| read_only.contains(a))
+            .collect();
+        if !locked_touched.is_empty() {
+            return Err(PluginError::UserOpFieldNotWritable {
+                detail: format!(
+                    "kc reports {} as read-only for this realm",
+                    locked_touched
+                        .iter()
+                        .map(|a| a.as_field_token())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                fields: locked_touched,
+            });
+        }
+
+        // ---- Step 4: profile PUT (skipped for a password-only patch). ----
+        if !touched.is_empty() {
+            self.kc_factory
+                .with_reactive_401(
+                    &metadata.realm_name,
+                    &metadata.admin_client_id,
+                    &secret_source,
+                    |realm_admin| {
+                        let realm_name = metadata.realm_name.clone();
+                        let touched = touched.clone();
+                        async move {
+                            self.patch_user(&realm_admin, &realm_name, req, &touched)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .map_err(user_translate_kc)?;
+        }
+
+        // ---- Step 5: credential reset. ----
+        if let Some(password) = req.patch.password.as_ref() {
+            self.kc_factory
+                .with_reactive_401(
+                    &metadata.realm_name,
+                    &metadata.admin_client_id,
+                    &secret_source,
+                    |realm_admin| {
+                        let realm_name = metadata.realm_name.clone();
+                        async move {
+                            self.reset_password(&realm_admin, &realm_name, req.user_id, password)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .map_err(user_translate_kc)?;
+        }
+
+        // ---- Step 6: re-read and project. ----
+        let rep = self
+            .kc_factory
+            .with_reactive_401(
+                &metadata.realm_name,
+                &metadata.admin_client_id,
+                &secret_source,
+                |realm_admin| {
+                    let realm_name = metadata.realm_name.clone();
+                    async move {
+                        self.read_user_rep(&realm_admin, &realm_name, req.user_id)
+                            .await
+                    }
+                },
+            )
+            .await
+            .map_err(user_translate_kc)?;
+        Ok((
+            Self::user_rep_to_idp_user(rep),
+            metadata.realm_name,
+            metadata.realm_binding,
+        ))
+    }
+
+    /// Attributes in `patch` that this plugin cannot write at all,
+    /// independent of realm configuration.
+    ///
+    /// Only `display_name`: AM models it as a first-class field, but
+    /// Keycloak has no such property — the projection composes it from
+    /// `firstName`/`lastName` (see [`Self::user_rep_to_idp_user`]).
+    /// Accepting the write and silently dropping it would make a 200
+    /// response a lie, and splitting a single string back into given /
+    /// family names is guesswork, so the honest answer is a refusal
+    /// naming the field, which AM renders as a 400 carrying
+    /// `field=display_name, reason=IDP_MANAGED_FIELD`.
+    fn preflight_unwritable_attribute(patch: &IdpUserPatch) -> Option<IdpUserAttribute> {
+        patch
+            .display_name
+            .as_ref()
+            .map(|_| IdpUserAttribute::DisplayName)
+    }
+
+    /// Writable profile attributes the patch touches, in a stable order.
+    /// `Some(_)` counts as touched whether it sets or clears; `password`
+    /// is excluded because it is written through a separate endpoint and
+    /// is not a user-profile attribute.
+    fn touched_attributes(patch: &IdpUserPatch) -> Vec<IdpUserAttribute> {
+        let mut touched = Vec::new();
+        if patch.username.is_some() {
+            touched.push(IdpUserAttribute::Username);
+        }
+        if patch.email.is_some() {
+            touched.push(IdpUserAttribute::Email);
+        }
+        if patch.first_name.is_some() {
+            touched.push(IdpUserAttribute::FirstName);
+        }
+        if patch.last_name.is_some() {
+            touched.push(IdpUserAttribute::LastName);
+        }
+        touched
+    }
+
+    /// AM request-property names the patch touched, for the audit event.
+    /// Names only — never values (see [`audit::emit_user_updated`]).
+    fn changed_labels(patch: &IdpUserPatch) -> Vec<&'static str> {
+        let mut changed: Vec<&'static str> = Self::touched_attributes(patch)
+            .iter()
+            .map(|a| a.as_field_token())
+            .collect();
+        if patch.password.is_some() {
+            changed.push("password");
+        }
+        changed
+    }
+
+    /// `PUT /admin/realms/{realm}/users/{user_id}` — apply the touched
+    /// profile fields.
+    ///
+    /// Only touched fields are sent, which is what preserves AM's merge
+    /// semantics: KC leaves a property it does not receive unchanged. A
+    /// *clear* (`Some(None)`) is sent as an empty string, which is KC's
+    /// way of blanking a profile field — `null` is indistinguishable from
+    /// "absent" to KC and would silently no-op. Because step 6 re-reads
+    /// the user, a realm that refuses to blank a field surfaces the
+    /// still-populated value in the 200 body rather than a false claim of
+    /// success.
+    ///
+    /// `display_name` never reaches here — [`Self::preflight_unwritable_attribute`]
+    /// rejects it first.
+    async fn patch_user(
+        &self,
+        realm_admin: &KcAdminClient,
+        realm_name: &str,
+        req: &IdpUpdateUserRequest,
+        touched: &[IdpUserAttribute],
+    ) -> Result<(), PluginError> {
+        const PATH: &str = "/admin/realms/{realm}/users/{user_id}";
+        let url = format!(
+            "{}admin/realms/{}/users/{}",
+            self.kc_factory.base_url_str(),
+            encode_component(realm_name),
+            req.user_id,
+        );
+        let mut body = serde_json::Map::new();
+        // `username` is set-only: AM rejects an explicit `null` upstream
+        // (the login identifier is required), so `Some(v)` is always a
+        // rename to a concrete value.
+        if let Some(username) = req.patch.username.as_ref() {
+            body.insert(
+                "username".into(),
+                serde_json::Value::String(username.clone()),
+            );
+        }
+        // Tri-state → KC: `Some(Some(v))` sets, `Some(None)` blanks via
+        // the empty string, `None` omits the key entirely.
+        let mut insert_tristate = |key: &str, value: Option<&Option<String>>| {
+            if let Some(slot) = value {
+                body.insert(
+                    key.to_owned(),
+                    serde_json::Value::String(slot.clone().unwrap_or_default()),
+                );
+            }
+        };
+        insert_tristate("email", req.patch.email.as_ref());
+        insert_tristate("firstName", req.patch.first_name.as_ref());
+        insert_tristate("lastName", req.patch.last_name.as_ref());
+        let body = serde_json::Value::Object(body);
+        let (status, body_text) = realm_admin
+            .raw_request("PUT", &url, Some(&body), PATH)
+            .await
+            .map_err(user_translate_kc)?;
+        if (200..=299).contains(&status) {
+            return Ok(());
+        }
+        if status == 401 {
+            // Idempotent request → safe for the wrapper's exactly-once
+            // retry after re-minting the bearer.
+            return Err(PluginError::KcRest {
+                method: "PUT",
+                path_template: PATH.into(),
+                status: KcStatusKind::Http(401),
+                body_first_2kb: redact_secrets(&truncate_2kb(&body_text)),
+            });
+        }
+        let redacted = redact_secrets(&truncate_2kb(&body_text));
+        if status == 404 || status == 410 {
+            return Err(PluginError::UserOpNotFound {
+                detail: format!("user {} not found in this tenant scope", req.user_id),
+            });
+        }
+        if status == 409 {
+            // On this endpoint a 409 can only be a uniqueness collision
+            // from the rename; the body only refines which field.
+            return Err(PluginError::UserOpDuplicate {
+                field: classify_kc_conflict(&body_text),
+                detail: format!("user already exists: kc:PUT {PATH} -> 409: {redacted}"),
+            });
+        }
+        if status == 400 || status == 422 {
+            let read_only_fields = classify_kc_read_only_reject(&body_text, touched);
+            if !read_only_fields.is_empty() {
+                return Err(PluginError::UserOpFieldNotWritable {
+                    detail: format!(
+                        "kc reports {} read-only: kc:PUT {PATH} -> {status}: {redacted}",
+                        read_only_fields
+                            .iter()
+                            .map(|a| a.as_field_token())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    fields: read_only_fields,
+                });
+            }
+            if is_kc_password_policy_reject(&body_text) {
+                return Err(PluginError::UserOpPasswordPolicy {
+                    detail: format!(
+                        "password policy rejected: kc:PUT {PATH} -> {status}: {redacted}"
+                    ),
+                });
+            }
+            return Err(PluginError::UserOpRejected {
+                detail: format!("kc:PUT {PATH} -> {status}: {redacted}"),
+            });
+        }
+        Err(PluginError::UserOpUnavailable {
+            detail: format!("kc:PUT {PATH} -> {status}: {redacted}"),
+        })
+    }
+
+    /// `PUT /admin/realms/{realm}/users/{user_id}/reset-password` — set a
+    /// new credential.
+    ///
+    /// A separate call because KC accepts an embedded `credentials` array
+    /// only on user-create; on update the credential endpoint is the
+    /// supported path. `temporary: true` makes KC require a password
+    /// change at next login. The plaintext lives only on this request's
+    /// stack and the outbound HTTPS body — it is never logged (the
+    /// failure details below carry only KC's response, itself passed
+    /// through [`redact_secrets`]).
+    async fn reset_password(
+        &self,
+        realm_admin: &KcAdminClient,
+        realm_name: &str,
+        user_id: Uuid,
+        password: &account_management_sdk::NewUserPassword,
+    ) -> Result<(), PluginError> {
+        const PATH: &str = "/admin/realms/{realm}/users/{user_id}/reset-password";
+        let url = format!(
+            "{}admin/realms/{}/users/{}/reset-password",
+            self.kc_factory.base_url_str(),
+            encode_component(realm_name),
+            user_id,
+        );
+        let body = serde_json::json!({
+            "type": "password",
+            "value": password.value,
+            "temporary": password.temporary,
+        });
+        let (status, body_text) = realm_admin
+            .raw_request("PUT", &url, Some(&body), PATH)
+            .await
+            .map_err(user_translate_kc)?;
+        if (200..=299).contains(&status) {
+            return Ok(());
+        }
+        if status == 401 {
+            return Err(PluginError::KcRest {
+                method: "PUT",
+                path_template: PATH.into(),
+                status: KcStatusKind::Http(401),
+                body_first_2kb: redact_secrets(&truncate_2kb(&body_text)),
+            });
+        }
+        let redacted = redact_secrets(&truncate_2kb(&body_text));
+        if status == 404 || status == 410 {
+            return Err(PluginError::UserOpNotFound {
+                detail: format!("user {user_id} not found in this tenant scope"),
+            });
+        }
+        if status == 400 || status == 422 {
+            if is_kc_password_policy_reject(&body_text) {
+                return Err(PluginError::UserOpPasswordPolicy {
+                    detail: format!(
+                        "password policy rejected: kc:PUT {PATH} -> {status}: {redacted}"
+                    ),
+                });
+            }
+            return Err(PluginError::UserOpRejected {
+                detail: format!("kc:PUT {PATH} -> {status}: {redacted}"),
+            });
+        }
+        Err(PluginError::UserOpUnavailable {
+            detail: format!("kc:PUT {PATH} -> {status}: {redacted}"),
+        })
+    }
+
+    /// `GET /admin/realms/{realm}/users/{user_id}?userProfileMetadata=true`
+    /// → `(stored tenant_id, attributes KC reports as non-writable)`.
+    ///
+    /// The update path's single pre-write read. It answers both questions
+    /// `update_user` must settle before touching anything, in one round trip:
+    ///
+    /// * **Who owns this user** — `attributes.tenant_id[0]`, the cross-tenant
+    ///   binding check (same datum [`Self::read_user_owner_tenant`] reads for
+    ///   the deprovision path).
+    /// * **Which attributes are writable** —
+    ///   `userProfileMetadata.attributes[].readOnly`, a structured boolean per
+    ///   attribute. This is KC's own computed verdict, so it accounts uniformly
+    ///   for every locking mechanism (the `editUsernameAllowed` realm flag,
+    ///   declarative-user-profile `permissions.edit`, a federated read-only
+    ///   mapper) without this code having to know which one applied.
+    ///
+    /// Preferring this over parsing the refusal is what keeps
+    /// [`classify_kc_read_only_reject`] a fallback: a structured boolean cannot
+    /// drift with KC's wording, and it lets the refusal name the offending
+    /// field even when the patch touched several.
+    ///
+    /// `tenant_id` mirrors [`Self::read_user_owner_tenant`]'s tolerance: an
+    /// absent user, a missing attribute, or an unparseable value all yield
+    /// `None`, which the caller treats as "no usable binding" and refuses. An
+    /// absent `userProfileMetadata` (older KC, or the query param ignored)
+    /// yields an empty lock set — pre-flight then permits everything and the
+    /// post-hoc classifier remains the guard.
+    async fn read_user_for_update(
+        &self,
+        realm_admin: &KcAdminClient,
+        realm_name: &str,
+        user_id: Uuid,
+    ) -> Result<(Option<Uuid>, Vec<IdpUserAttribute>), PluginError> {
+        const PATH: &str = "/admin/realms/{realm}/users/{user_id}";
+        let url = format!(
+            "{}admin/realms/{}/users/{}?userProfileMetadata=true",
+            self.kc_factory.base_url_str(),
+            encode_component(realm_name),
+            user_id,
+        );
+        let (status, body_text) = realm_admin
+            .raw_request("GET", &url, None, PATH)
+            .await
+            .map_err(user_translate_kc)?;
+        if status == 404 || status == 410 {
+            return Ok((None, Vec::new()));
+        }
+        if status == 401 {
+            return Err(PluginError::KcRest {
+                method: "GET",
+                path_template: PATH.into(),
+                status: KcStatusKind::Http(401),
+                body_first_2kb: redact_secrets(&truncate_2kb(&body_text)),
+            });
+        }
+        if !(200..=299).contains(&status) {
+            return Err(PluginError::UserOpUnavailable {
+                detail: format!(
+                    "kc:GET {PATH}?userProfileMetadata=true -> {status}: {}",
+                    redact_secrets(&truncate_2kb(&body_text)),
+                ),
+            });
+        }
+        // Parsed loosely as `Value`: only two sub-trees are needed, and
+        // tolerating the rest keeps this resilient to KC representation growth.
+        let user: serde_json::Value =
+            serde_json::from_str(&body_text).map_err(|e| PluginError::UserOpUnavailable {
+                detail: format!("kc:GET {PATH}?userProfileMetadata=true json decode: {e}"),
+            })?;
+        let tenant_id = user
+            .get("attributes")
+            .and_then(|a| a.get("tenant_id"))
+            .and_then(|t| t.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let read_only = user
+            .get("userProfileMetadata")
+            .and_then(|m| m.get("attributes"))
+            .and_then(serde_json::Value::as_array)
+            .map(|attrs| {
+                attrs
+                    .iter()
+                    .filter(|a| {
+                        a.get("readOnly")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|a| a.get("name").and_then(serde_json::Value::as_str))
+                    .filter_map(kc_field_to_attribute)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((tenant_id, read_only))
+    }
+
+    /// `GET /admin/realms/{realm}/users/{user_id}` → parsed [`UserRep`].
+    ///
+    /// The post-update read for [`Self::update_user_impl`]. Distinct from
+    /// [`Self::read_user_owner_tenant`], which decodes only the
+    /// `attributes.tenant_id` binding and folds a 404 into `Ok(None)`;
+    /// here an absent user is a genuine
+    /// [`PluginError::UserOpNotFound`] — it can only mean the user was
+    /// deleted concurrently between the patch and the read.
+    async fn read_user_rep(
+        &self,
+        realm_admin: &KcAdminClient,
+        realm_name: &str,
+        user_id: Uuid,
+    ) -> Result<UserRep, PluginError> {
+        const PATH: &str = "/admin/realms/{realm}/users/{user_id}";
+        let url = format!(
+            "{}admin/realms/{}/users/{}",
+            self.kc_factory.base_url_str(),
+            encode_component(realm_name),
+            user_id,
+        );
+        let (status, body_text) = realm_admin
+            .raw_request("GET", &url, None, PATH)
+            .await
+            .map_err(user_translate_kc)?;
+        if status == 401 {
+            return Err(PluginError::KcRest {
+                method: "GET",
+                path_template: PATH.into(),
+                status: KcStatusKind::Http(401),
+                body_first_2kb: redact_secrets(&truncate_2kb(&body_text)),
+            });
+        }
+        if status == 404 || status == 410 {
+            return Err(PluginError::UserOpNotFound {
+                detail: format!("user {user_id} not found in this tenant scope"),
+            });
+        }
+        if !(200..=299).contains(&status) {
+            return Err(PluginError::UserOpUnavailable {
+                detail: format!(
+                    "kc:GET {PATH} -> {status}: {}",
+                    redact_secrets(&truncate_2kb(&body_text)),
+                ),
+            });
+        }
+        serde_json::from_str::<UserRep>(&body_text).map_err(|e| PluginError::UserOpUnavailable {
+            detail: format!("kc:GET {PATH} json decode: {e}"),
+        })
+    }
+
     /// List users from the tenant's bound realm (DESIGN "Interactions & Sequences").
     ///
     /// 1. Decode tenant metadata.
     /// 2. Resolve realm-admin secret source.
-    /// 3. Decode the opaque cursor (if any) and validate that its
-    ///    `realm_name` + `filter_hash` still match this request —
-    ///    mismatch → [`PluginError::UserOpRejected`] ("invalid cursor").
+    /// 3. Resolve the effective order (`req.order`, default
+    ///    `username ASC`, plus an `id ASC` tiebreaker) — a key outside
+    ///    [`IdpUserFilterField`] → [`PluginError::UserOpUnsupported`].
+    ///    Decode the opaque cursor (if any) and validate that its order
+    ///    pin + `filter_hash` still match this request — mismatch →
+    ///    [`PluginError::UserOpRejected`] ("invalid cursor").
     /// 4. Resolve effective page limit:
     ///    `limit = min(req.pagination.top(), max)`. (`top()` is already
     ///    `>= 1` and `<= MAX_TOP` per SDK constructor invariants; the
     ///    facade's own `list_users_page_limit_max` is the stricter
     ///    cap.)
     /// 5. `GET /admin/realms/{realm}/groups/{tenant_group_id}/members?first=0&max={limit+1}`.
-    /// 6. Sort response `(createdTimestamp ASC, id ASC)` client-side.
-    /// 7. Skip entries already returned on prior pages (cursor tiebreaker).
+    /// 6. Sort the drained members by the effective order client-side.
+    /// 7. Skip entries already returned on prior pages (cursor key tuple).
     /// 8. Apply optional `user_id_filter` post-skip.
-    /// 9. Emit first `limit` items; encode `(last_created_at, last_user_id)`
-    ///    of the last-emitted user as `next_cursor` when `limit+1` results
-    ///    were present after the skip step.
+    /// 9. Emit first `limit` items; encode the last-emitted user's key
+    ///    tuple as `next_cursor` when more rows remain after the skip.
     ///
     /// # Errors
     ///
     /// * [`PluginError::UserOpRejected`] — malformed metadata or
     ///   mismatched cursor.
+    /// * [`PluginError::UserOpUnsupported`] — unsupported `$filter`
+    ///   shape or order key.
     /// * [`PluginError::UserOpUnavailable`] — KC 4xx (non-404 group
     ///   gone) / 5xx / transport / timeout on the members fetch.
     pub async fn list_users_inner(
@@ -1194,21 +2050,19 @@ impl UserFacade {
         result
     }
 
-    // TODO(admin-bind follow-up): the `order` clause is still dropped in
-    // favour of the hard-coded `(createdTimestamp ASC, id ASC)` cursor
-    // sort, and the v1 client-side filter strategy fetches a single
-    // page from KC's `/groups/{tenant_group_id}/members` endpoint
+    // TODO(admin-bind follow-up): the v1 client-side filter strategy drains bounded
+    // pages from KC's `/groups/{tenant_group_id}/members` endpoint
     // (which has no search params) and post-filters. That is correct
     // for small/medium tenants but doesn't scale to "find one user in
     // a tenant with 100k members". Larger follow-up: (a) switch to
     // KC's realm-wide `/users?username=…&q=tenant_id:<uuid>&exact=true`
     // when string filters are present so KC narrows server-side; (b)
-    // forward `req.order` to the chosen sort key (timestamp /
-    // username / email); (c) widen the test matrix across
+    // widen the test matrix across
     // field×op×order×pagination shapes. The wire-contract bug
     // (string-field filters returning the full user set) is closed by
     // [`Self::build_string_matcher`] + the post-id-filter retain
-    // below — `InList`/`not`/`ne`/`startswith`/`endswith`/non-string
+    // below. Typed UUID `id in (...)` supports batch lookup; other
+    // `InList`/`not`/`ne`/`startswith`/`endswith`/invalid literal
     // shapes (and `id eq` inside `or`) surface `UnsupportedOperation`
     // (HTTP 501) instead of silently dropping the filter clause.
     async fn list_users_impl(
@@ -1224,37 +2078,34 @@ impl UserFacade {
         // ---- Step 3: decode + validate the inbound cursor (if any). ----
         let tenant_id = req.tenant_context.tenant_id;
         let id_filter = Self::extract_id_filter(req.filter.as_ref());
-        // Lower the string half of the filter into a predicate (`eq` /
-        // `contains` / `and` / `or`). Unsupported operators (`ne`, `in`,
+        // Lower string clauses and typed UUID ID sets into a predicate.
+        // Unsupported operators (`ne`, non-ID `in`,
         // `not`, `startswith`, …, or `id eq` inside `or`) surface as
         // `UnsupportedOperation` → 501 BEFORE any KC call, distinct from
         // a 200-with-unfiltered-set false-success.
         let string_matcher = Self::build_string_matcher(req.filter.as_ref())?;
         let filter_hash =
             Self::filter_hash(tenant_id, &metadata.realm_name, id_filter, &string_matcher);
-        // Decode the optional inbound cursor + verify its filter_hash
-        // matches the current request's filter shape. The hash folds in
+        // Sort on the caller's effective order (DESIGN "Interactions &
+        // Sequences": ordering is honored, not fixed). An order key
+        // outside `IdpUserFilterField` is `UnsupportedOperation` before
+        // any KC call.
+        let order = ListUsersOrder::resolve(req.order.as_ref())?;
+        // Decode the optional inbound cursor + verify it was issued
+        // under this order and this filter shape. The hash folds in
         // `realm_name`, so a realm-rebinding mid-pagination surfaces
-        // here as `invalid cursor` (replaces the pre-CursorV1 explicit
-        // `decoded.realm_name != metadata.realm_name` reject).
-        let (last_created_at_param, last_user_id_param) = match req.pagination.cursor() {
+        // here as `invalid cursor` too.
+        let after: Option<ListUsersCursor> = match req.pagination.cursor() {
             Some(c) => {
-                // `decode_cursor_with_legacy_fallback` validates the
-                // cursor against the current request's filter context
-                // internally — both for the modern CursorV1 shape AND
-                // the legacy pre-CursorV1 shape accepted during the
-                // rolling-deploy grace window. Caller no longer
-                // compares hashes here.
-                let (created_at, user_id) = Self::decode_cursor_with_legacy_fallback(
-                    c,
-                    &metadata.realm_name,
-                    tenant_id,
-                    id_filter,
-                    &filter_hash,
-                )?;
-                (Some(created_at), Some(user_id))
+                let cursor = Self::decode_cursor(c, &order)?;
+                if cursor.filter_hash != filter_hash {
+                    return Err(PluginError::UserOpRejected {
+                        detail: "invalid cursor".into(),
+                    });
+                }
+                Some(cursor)
             }
-            None => (None, None),
+            None => None,
         };
 
         // ---- Step 4: resolve effective page limit. ----
@@ -1268,8 +2119,8 @@ impl UserFacade {
         //
         // `/admin/realms/{realm}/groups/{tenant_group_id}/members` has no
         // server-side sort or `q=`-filter knobs, so the facade pages the
-        // ENTIRE membership into memory and applies the DESIGN "Interactions & Sequences" sort
-        // key `(createdTimestamp ASC, id ASC)` + cursor-skip + filters
+        // ENTIRE membership into memory and applies the effective order
+        // + cursor-skip + filters
         // itself. The loop drains every KC page (`first += page_size`)
         // until a short page signals the end.
         //
@@ -1327,9 +2178,11 @@ impl UserFacade {
                                     drained = all.len(),
                                     cap = MEMBERS_DRAIN_HARD_CAP,
                                     "list_users: tenant group membership exceeds drain \
-                                     hard-cap; returning a truncated member set"
+                                     hard-cap before complete enumeration; refusing an incomplete result"
                                 );
-                                break;
+                                return Err(PluginError::UserOpUnavailable {
+                                    detail: "tenant membership enumeration exceeded its safety limit".into(),
+                                });
                             }
                             offset = offset.saturating_add(page_size);
                         }
@@ -1340,30 +2193,42 @@ impl UserFacade {
             .await
             .map_err(user_translate_kc)?;
 
-        // Defensive sort: KC does not guarantee stable order across pages.
-        members.sort_by(|a, b| {
-            a.created_timestamp
-                .cmp(&b.created_timestamp)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        // Offset paging over that unstable order can re-observe a row that
-        // shifted across a page boundary during the drain. Equal-id rows
-        // are adjacent after the sort above (same user ⇒ same timestamp),
-        // so drop adjacent duplicates by id to keep a user from being
+        // KC does not guarantee a stable order across offset pages, so
+        // the drain can re-observe a row that shifted across a page
+        // boundary. Keep the first sighting of each id so a user is never
         // double-counted in the page or the cursor math.
-        members.dedup_by(|a, b| a.id == b.id);
+        let mut seen = HashSet::with_capacity(members.len());
+        members.retain(|u| seen.insert(u.id));
 
-        // Skip entries already returned on prior pages (cursor tiebreaker).
-        if let (Some(t_cur), Some(id_cur)) = (last_created_at_param, last_user_id_param) {
-            members.retain(|u| (u.created_timestamp, u.id) > (t_cur, id_cur));
+        // Project each member to its key tuple once, then sort on it.
+        let mut keyed: Vec<(Vec<String>, UserRep)> = members
+            .into_iter()
+            .map(|u| (order.project(&u), u))
+            .collect();
+        keyed.sort_by(|(a, _), (b, _)| order.compare(a, b));
+
+        // Skip entries already returned on prior pages. Resume from the
+        // cursor's row by its full current key when the row is still a
+        // member — exact even when the cursor carries truncated values.
+        // If it left the group (or was renamed) between pages, place the
+        // remaining rows against the stored values instead.
+        if let Some(after) = after.as_ref() {
+            let anchor = keyed
+                .iter()
+                .find(|(key, _)| order.matches_cursor(key, after))
+                .map(|(key, _)| key.clone());
+            match anchor {
+                Some(anchor) => keyed.retain(|(key, _)| order.compare(key, &anchor).is_gt()),
+                None => keyed.retain(|(key, _)| order.is_after_cursor(key, after)),
+            }
         }
 
         // Apply optional id-eq filter post-skip.
-        members.retain(|u| id_filter.is_none_or(|wanted| u.id == wanted));
+        keyed.retain(|(_, u)| id_filter.is_none_or(|wanted| u.id == wanted));
         // Apply the string-field predicate (`eq` / `contains` / `and` /
         // `or`) lowered from `$filter`. `StringMatcher::Always` (the
         // no-`$filter` case) matches every row, so this is a no-op then.
-        members.retain(|u| string_matcher.matches(u));
+        keyed.retain(|(_, u)| string_matcher.matches(u));
 
         // `has_more` is computed AFTER cursor-skip + filter-retain so
         // it reflects how many rows the CALLER still has past this
@@ -1372,27 +2237,23 @@ impl UserFacade {
         // by stamping `has_more = true` even when client-side skip
         // left no real follow-on row. Now `has_more` is the
         // authoritative "should I emit a cursor" signal.
-        let has_more = members.len() > limit as usize;
-        members.truncate(limit as usize);
+        let has_more = keyed.len() > limit as usize;
+        keyed.truncate(limit as usize);
 
-        // Encode (last_created_at, last_user_id) of the last emitted
-        // user as the next page's cursor. CursorV1 envelope; the
-        // realm_name pinning lives inside `filter_hash` now.
+        // Encode the last emitted user's key tuple as the next page's
+        // cursor, pinned to the effective order. CursorV1 envelope; the
+        // realm_name pinning lives inside `filter_hash`.
         let next_cursor = if has_more {
-            members.last().map(|last| {
-                Self::encode_cursor(&ListUsersCursor {
-                    filter_hash: filter_hash.clone(),
-                    last_created_at: last.created_timestamp,
-                    last_user_id: last.id,
-                })
-            })
+            keyed
+                .last()
+                .map(|(last_key, _)| Self::bounded_cursor(&filter_hash, last_key, &order))
         } else {
             None
         };
 
-        let items: Vec<IdpUser> = members
+        let items: Vec<IdpUser> = keyed
             .into_iter()
-            .map(Self::user_rep_to_idp_user)
+            .map(|(_, u)| Self::user_rep_to_idp_user(u))
             .collect();
 
         Ok(Page::new(
@@ -1633,17 +2494,35 @@ impl UserFacade {
     fn user_rep_to_idp_user(rep: UserRep) -> IdpUser {
         let username = rep.username.unwrap_or_default();
         let mut user = IdpUser::new(rep.id, username);
-        if let Some(email) = rep.email {
+        // KC blanks a profile field by storing the empty string (that is
+        // also how `patch_user` clears one), so treat empty as absent
+        // throughout -- `email` included: a cleared field must read back as
+        // omitted, not `""`.
+        if let Some(email) = rep.email.filter(|e| !e.is_empty()) {
             user = user.with_email(email);
         }
-        let display_name = match (rep.first_name, rep.last_name) {
-            (Some(f), Some(l)) if !f.is_empty() && !l.is_empty() => Some(format!("{f} {l}")),
-            (Some(f), _) if !f.is_empty() => Some(f),
-            (_, Some(l)) if !l.is_empty() => Some(l),
-            _ => None,
+        let first_name = rep.first_name.filter(|f| !f.is_empty());
+        let last_name = rep.last_name.filter(|l| !l.is_empty());
+        let display_name = match (first_name.as_deref(), last_name.as_deref()) {
+            (Some(f), Some(l)) => Some(format!("{f} {l}")),
+            (Some(f), None) => Some(f.to_owned()),
+            (None, Some(l)) => Some(l.to_owned()),
+            (None, None) => None,
         };
         if let Some(dn) = display_name {
             user = user.with_display_name(dn);
+        }
+        // Project the underlying pair as well, not just the composed
+        // `display_name`. The SDK models `first_name` / `last_name`
+        // separately and they are the only writable half of the pair, so
+        // a caller that patches `first_name` has to be able to read it
+        // back — otherwise a successful update appears to have dropped
+        // the field.
+        if let Some(f) = first_name {
+            user = user.with_first_name(f);
+        }
+        if let Some(l) = last_name {
+            user = user.with_last_name(l);
         }
         user
     }
@@ -1682,6 +2561,7 @@ impl UserFacade {
     ///   * `<string_field> eq '<literal>'` — exact, case-sensitive
     ///   * `<string_field> contains '<literal>'` — substring, case-insensitive
     ///   * `<a> and <b> …`, `<a> or <b> …` — nested freely
+    ///   * `id in (<uuid>, …)` — exact UUID set, including under `and` / `or`
     ///   * `id eq <uuid>` — captured by [`Self::extract_id_filter`];
     ///     inside a top-level `and` it lowers to
     ///     [`StringMatcher::Always`] here.
@@ -1690,10 +2570,10 @@ impl UserFacade {
     /// `last_name` / `display_name`.
     ///
     /// Unsupported shapes surface as [`PluginError::UserOpUnsupported`]
-    /// (HTTP 501): operators other than `eq` / `contains` / `and` /
-    /// `or` (`ne`, `in`, `not`, `startswith`, `endswith`, comparisons),
-    /// a non-string literal on a field, or an `id` clause nested inside
-    /// an `or` (the id half cannot be hoisted out of a disjunction).
+    /// (HTTP 501): operators other than the shapes above (`ne`, non-ID `in`,
+    /// `not`, `startswith`, `endswith`, comparisons), a literal of the wrong
+    /// type, or `id eq` nested inside an `or` (the equality half cannot be
+    /// hoisted out of a disjunction).
     /// `None` (no `$filter`) lowers to [`StringMatcher::Always`].
     fn build_string_matcher(
         filter: Option<&FilterNode<IdpUserFilterField>>,
@@ -1782,6 +2662,21 @@ impl UserFacade {
                      supported: `and`, `or`"
                 ),
             }),
+            FilterNode::InList {
+                field: IdpUserFilterField::Id,
+                values,
+            } => {
+                let ids = values
+                    .iter()
+                    .map(|value| match value {
+                        ODataValue::Uuid(id) => Ok(*id),
+                        _ => Err(PluginError::UserOpUnsupported {
+                            detail: "id-set lookup requires UUID literals".into(),
+                        }),
+                    })
+                    .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                Ok(StringMatcher::IdSet(ids))
+            }
             FilterNode::InList { .. } => Err(PluginError::UserOpUnsupported {
                 detail: "operator `in` not supported on /users filter".into(),
             }),
@@ -1859,10 +2754,10 @@ impl UserFacade {
     /// parses our cursor through the exact same `CursorV1::decode`
     /// path, with no plugin-specific extractor hook.
     ///
-    /// The `k`/`o`/`s` triple pins the plugin's hard-coded sort
-    /// order; AM's handler recovers `req.order` from `cursor.s` via
+    /// The `k`/`o`/`s` triple pins the effective order; AM's handler
+    /// recovers `req.order` from `cursor.s` via
     /// `ODataOrderBy::from_signed_tokens`, so a continuation request
-    /// without `$orderby` still reaches the plugin with the right
+    /// without `$orderby` still reaches the plugin with the same
     /// effective order.
     //
     // `CursorV1::encode` returns `serde_json::Result<String>`;
@@ -1874,14 +2769,25 @@ impl UserFacade {
         clippy::expect_used,
         reason = "CursorV1 has no serialiser-defeating shape; the expect anchors that invariant"
     )]
-    fn encode_cursor(cursor: &ListUsersCursor) -> String {
+    fn encode_cursor(cursor: &ListUsersCursor, order: &ListUsersOrder) -> String {
+        let mut k = cursor.last_key.clone();
+        if !cursor.truncated.is_empty() {
+            k.push(
+                (0..order.keys.len())
+                    .map(|idx| {
+                        if cursor.truncated.contains(&idx) {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect(),
+            );
+        }
         CursorV1 {
-            k: vec![
-                cursor.last_created_at.to_string(),
-                cursor.last_user_id.to_string(),
-            ],
-            o: CURSOR_ORDER_DIR,
-            s: CURSOR_ORDER_TOKENS.to_owned(),
+            k,
+            o: order.primary_dir(),
+            s: order.odata.to_signed_tokens(),
             f: Some(cursor.filter_hash.clone()),
             d: CURSOR_DIRECTION.to_owned(),
         }
@@ -1889,95 +2795,113 @@ impl UserFacade {
         .expect("CursorV1 with primitive fields is always serialisable")
     }
 
-    /// Decode the opaque pagination cursor. Failure modes that all
-    /// surface as [`PluginError::UserOpRejected`] ("invalid cursor"):
+    /// Encode the `next_cursor` for the row keyed `last_key`, keeping
+    /// it within [`IdpUserPagination::MAX_CURSOR_LEN`] — AM rejects a
+    /// longer continuation cursor before it reaches the plugin.
+    ///
+    /// The full key tuple is used when it fits. Otherwise every profile
+    /// value longer than a byte cap is cut to that cap (on a char
+    /// boundary) and marked truncated; the cap is the largest one that
+    /// fits. Encoded length only grows with the cap, and a cap of zero
+    /// leaves the `id` value, the order pin, and the filter hash —
+    /// far below the limit — so the search always lands on a cursor
+    /// that fits.
+    fn bounded_cursor(filter_hash: &str, last_key: &[String], order: &ListUsersOrder) -> String {
+        let encode_capped = |cap: Option<usize>| {
+            let mut key = Vec::with_capacity(last_key.len());
+            let mut truncated = Vec::new();
+            for (idx, (value, (field, _))) in last_key.iter().zip(&order.keys).enumerate() {
+                match cap {
+                    Some(cap) if *field != IdpUserFilterField::Id && value.len() > cap => {
+                        key.push(value[..value.floor_char_boundary(cap)].to_owned());
+                        truncated.push(idx);
+                    }
+                    _ => key.push(value.clone()),
+                }
+            }
+            Self::encode_cursor(
+                &ListUsersCursor {
+                    filter_hash: filter_hash.to_owned(),
+                    last_key: key,
+                    truncated,
+                },
+                order,
+            )
+        };
+        let full = encode_capped(None);
+        if full.len() <= IdpUserPagination::MAX_CURSOR_LEN {
+            return full;
+        }
+        // Binary search for the largest fitting cap: `fits` always
+        // fits, `overflows` never does (it truncates nothing).
+        let (mut fits, mut overflows) = (0, last_key.iter().map(String::len).max().unwrap_or(0));
+        while overflows - fits > 1 {
+            let mid = fits.midpoint(overflows);
+            if encode_capped(Some(mid)).len() <= IdpUserPagination::MAX_CURSOR_LEN {
+                fits = mid;
+            } else {
+                overflows = mid;
+            }
+        }
+        encode_capped(Some(fits))
+    }
+
+    /// Decode the opaque pagination cursor issued under `order`.
+    /// Failure modes that all surface as [`PluginError::UserOpRejected`]
+    /// ("invalid cursor"):
     ///
     ///   * Malformed base64 / unsupported `v` / shape mismatch from
     ///     [`CursorV1::decode`].
-    ///   * `o` or `s` deviates from the plugin's hard-coded
-    ///     `(createdTimestamp ASC, id ASC)` sort. A request that
-    ///     somehow surfaces a different order-pin almost certainly
-    ///     came from a different list endpoint's cursor — reject so
-    ///     the caller cannot accidentally walk our pages with
-    ///     someone else's tiebreakers.
-    ///   * `k` doesn't carry exactly the two tiebreaker strings the
-    ///     `(created_at, id)` shape expects, or those strings don't
-    ///     parse back to `i64` / `Uuid`.
-    ///   * `f` (`filter_hash`) is absent — the cursor was emitted
-    ///     under "no filter context", which the plugin always sets,
+    ///   * `o` / `s` deviate from the effective order — the cursor was
+    ///     issued under a different `$orderby` (or by another list
+    ///     endpoint, or by a build that pinned `+created_at,+id`), so
+    ///     its key tuple is not a position in this walk.
+    ///   * `d` is not the forward direction.
+    ///   * `k` doesn't carry exactly one string per order key, plus at
+    ///     most a truncation mask that marks only profile values (never
+    ///     `id`) and marks at least one.
+    ///   * `f` (`filter_hash`) is absent — the plugin always sets one,
     ///     so this is structurally invalid.
-    fn decode_cursor(raw: &str) -> Result<ListUsersCursor, PluginError> {
+    fn decode_cursor(raw: &str, order: &ListUsersOrder) -> Result<ListUsersCursor, PluginError> {
         let invalid = || PluginError::UserOpRejected {
             detail: "invalid cursor".into(),
         };
         let cursor = CursorV1::decode(raw).map_err(|_| invalid())?;
-        if cursor.o != CURSOR_ORDER_DIR || cursor.s != CURSOR_ORDER_TOKENS {
+        if cursor.o != order.primary_dir()
+            || !order.odata.equals_signed_tokens(&cursor.s)
+            || cursor.d != CURSOR_DIRECTION
+        {
             return Err(invalid());
         }
-        let [created, id] = cursor.k.as_slice() else {
+        let mut last_key = cursor.k;
+        let truncated = if last_key.len() == order.keys.len() + 1 {
+            let mask = last_key.pop().unwrap_or_default();
+            if mask.len() != order.keys.len() {
+                return Err(invalid());
+            }
+            let mut truncated = Vec::new();
+            for (idx, (flag, (field, _))) in mask.chars().zip(&order.keys).enumerate() {
+                match flag {
+                    '0' => {}
+                    '1' if *field != IdpUserFilterField::Id => truncated.push(idx),
+                    _ => return Err(invalid()),
+                }
+            }
+            if truncated.is_empty() {
+                return Err(invalid());
+            }
+            truncated
+        } else if last_key.len() == order.keys.len() {
+            Vec::new()
+        } else {
             return Err(invalid());
         };
-        let last_created_at: i64 = created.parse().map_err(|_| invalid())?;
-        let last_user_id: Uuid = id.parse().map_err(|_| invalid())?;
         let filter_hash = cursor.f.ok_or_else(invalid)?;
         Ok(ListUsersCursor {
             filter_hash,
-            last_created_at,
-            last_user_id,
+            last_key,
+            truncated,
         })
-    }
-
-    /// Production decode used by [`UserFacade::list_users_impl`]. Tries
-    /// the modern [`Self::decode_cursor`] shape first and validates its
-    /// `filter_hash` against the current request's modern hash. On
-    /// failure, falls back to the pre-CursorV1
-    /// [`LegacyListUsersCursor`] shape for the rolling-deploy grace
-    /// window: a pre-deploy client whose page 1 lands on the new
-    /// build still gets page 2 served correctly (realm + legacy
-    /// `filter_hash` are revalidated against the current request).
-    ///
-    /// Returns the `(last_created_at, last_user_id)` tiebreaker pair
-    /// once validation passes. Any failure path (parse, shape, realm
-    /// mismatch, filter mismatch) collapses to
-    /// `PluginError::UserOpRejected { detail: "invalid cursor" }` so
-    /// the caller cannot distinguish between modern-invalid and
-    /// legacy-invalid (both are equally "client must re-paginate").
-    fn decode_cursor_with_legacy_fallback(
-        raw: &str,
-        expected_realm: &str,
-        expected_tenant_id: Uuid,
-        expected_id_filter: Option<Uuid>,
-        expected_modern_filter_hash: &str,
-    ) -> Result<(i64, Uuid), PluginError> {
-        let invalid = || PluginError::UserOpRejected {
-            detail: "invalid cursor".into(),
-        };
-
-        // --- Modern shape: validated by `decode_cursor`, then compare
-        //     filter_hash against the current request's context.
-        if let Ok(modern) = Self::decode_cursor(raw) {
-            if modern.filter_hash != expected_modern_filter_hash {
-                return Err(invalid());
-            }
-            return Ok((modern.last_created_at, modern.last_user_id));
-        }
-
-        // --- Legacy shape: pre-CursorV1 base64url(serde_json).
-        //     Revalidate realm + legacy filter context so a query
-        //     change mid-walk still rejects, matching the modern
-        //     path's safety guarantee.
-        let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| invalid())?;
-        let legacy: LegacyListUsersCursor =
-            serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-        if legacy.realm_name != expected_realm {
-            return Err(invalid());
-        }
-        if legacy.filter_hash != legacy_filter_hash(expected_tenant_id, expected_id_filter) {
-            return Err(invalid());
-        }
-        let last_created_at = legacy.last_created_at.ok_or_else(invalid)?;
-        let last_user_id = legacy.last_user_id.ok_or_else(invalid)?;
-        Ok((last_created_at, last_user_id))
     }
 }
 

@@ -39,10 +39,12 @@ pub struct ProducerBuilder<
     topics: Vec<String>,
     event_type_patterns: Vec<String>,
     validation_timing: ValidationTiming,
+    broker_partitions: u32,
     _state: ProducerBuilderState<Broker, Ctx, Identity, Dedup, Topics, Patterns>,
 }
 
 impl ProducerBuilder {
+    /// Creates a builder with no broker, context or identity set.
     pub(crate) fn new() -> Self {
         Self {
             broker: None,
@@ -52,6 +54,7 @@ impl ProducerBuilder {
             topics: Vec::new(),
             event_type_patterns: Vec::new(),
             validation_timing: ValidationTiming::Eager,
+            broker_partitions: super::schema_cache::DEFAULT_BROKER_PARTITIONS,
             _state: PhantomData,
         }
     }
@@ -68,6 +71,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: self.topics,
             event_type_patterns: self.event_type_patterns,
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -82,6 +86,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: self.topics,
             event_type_patterns: self.event_type_patterns,
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -96,6 +101,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: self.topics,
             event_type_patterns: self.event_type_patterns,
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -113,6 +119,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: self.topics,
             event_type_patterns: self.event_type_patterns,
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -131,6 +138,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: topics.into_iter().map(Into::into).collect(),
             event_type_patterns: self.event_type_patterns,
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -149,6 +157,7 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
             topics: self.topics,
             event_type_patterns: patterns.into_iter().map(Into::into).collect(),
             validation_timing: self.validation_timing,
+            broker_partitions: self.broker_partitions,
             _state: PhantomData,
         }
     }
@@ -156,6 +165,17 @@ impl<B, C, I, D, T, P> ProducerBuilder<B, C, I, D, T, P> {
     #[must_use]
     pub fn lazy_validation(mut self) -> Self {
         self.validation_timing = ValidationTiming::Lazy;
+        self
+    }
+
+    /// Partition count the producer assumes the broker gives every topic it
+    /// publishes to. It feeds the partition a producer-state chain is keyed by and
+    /// the partition hint an outbox envelope carries. A topic does not report a
+    /// count, so a producer whose broker is configured away from the default must
+    /// declare it here.
+    #[must_use]
+    pub fn broker_partitions(mut self, partitions: u32) -> Self {
+        self.broker_partitions = partitions;
         self
     }
 }
@@ -182,7 +202,7 @@ impl ProducerBuilder<Has, Has, Has, Has, Has, Has> {
         identity.validate()?;
         deduplication.validate()?;
 
-        let cache = Arc::new(ProducerSchemaCache::default());
+        let cache = Arc::new(ProducerSchemaCache::new(self.broker_partitions));
         if prepare_all {
             cache
                 .prepare_all(&broker, &ctx, &self.topics, &self.event_type_patterns)
@@ -297,7 +317,7 @@ impl Producer {
                 .await?;
             advance_cursor(
                 &mut batch_sequence_state,
-                &event.event.topic,
+                &event.topic,
                 event.broker_partition,
                 event.event.meta.as_ref(),
             );
@@ -307,11 +327,13 @@ impl Producer {
             .iter()
             .map(|prepared| prepared.event.clone())
             .collect::<Vec<_>>();
-        let outcomes = self.broker.publish_batch(&self.ctx, &wire_events).await?;
-        for (prepared, outcome) in prepared.iter().zip(outcomes.iter()) {
-            self.advance_after_acceptance(prepared, *outcome).await;
+        // A batch is all-or-nothing: the broker reports one outcome for the
+        // whole batch. Apply it to every prepared event's local chain state.
+        let outcome = self.broker.publish_batch(&self.ctx, &wire_events).await?;
+        for prepared in &prepared {
+            self.advance_after_acceptance(prepared, outcome).await;
         }
-        Ok(outcomes)
+        Ok(vec![outcome; prepared.len()])
     }
 
     pub async fn reset_chain(&self, scope: ResetScope<'_>) -> Result<(), EventBrokerError> {
@@ -413,7 +435,7 @@ impl Producer {
             .insert(
                 (
                     ProducerId(producer_id),
-                    prepared.event.topic.clone(),
+                    prepared.topic.clone(),
                     prepared.broker_partition,
                 ),
                 sequence,
@@ -432,7 +454,7 @@ impl Producer {
             .write()
             .expect("producer sequence state lock poisoned")
             .extend(cursors.topics.into_iter().flat_map(|topic| {
-                let topic_id = topic.topic;
+                let topic_id = topic.topic.into_string();
                 topic.partitions.into_iter().map(move |p| {
                     (
                         (producer_id, topic_id.clone(), p.partition),
@@ -491,7 +513,6 @@ fn validate_non_empty(field: &'static str, values: &[String]) -> Result<(), Even
     if values.is_empty() || values.iter().any(|value| value.trim().is_empty()) {
         Err(EventBrokerError::InvalidProducerOptions {
             detail: format!("{field} must contain at least one non-empty entry"),
-            instance: String::new(),
         })
     } else {
         Ok(())

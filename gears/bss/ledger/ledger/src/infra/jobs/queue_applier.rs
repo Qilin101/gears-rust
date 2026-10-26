@@ -34,6 +34,7 @@ use crate::domain::ports::metrics::LedgerMetricsPort;
 use crate::infra::events::publisher::LedgerEventPublisher;
 use crate::infra::payment::queue_apply::QueueApplier;
 use crate::infra::storage::repo::PendingQueueRepo;
+use time::OffsetDateTime;
 
 /// The allocation deferred-apply queue flow this job sweeps — the
 /// `PAYMENT_ALLOCATE` literal (kept in lockstep with
@@ -91,8 +92,13 @@ const SWEEP_DISCOVERY_LIMIT: u64 = 10_000;
 pub struct QueueApplierReport {
     /// Distinct tenants that had at least one due queued row this pass.
     pub tenants_swept: u64,
-    /// Rows that posted + flipped `→APPLIED` this pass.
+    /// Rows that posted + flipped `→APPLIED` this pass. The quarantine and
+    /// dispute-hold flows also add their replays to this count.
     pub applied: u64,
+    /// Rows another drain had already applied: the apply replayed the posted
+    /// entry and changed nothing. Only the allocation, chargeback and claw-back
+    /// flows count a replay apart in this field.
+    pub replayed: u64,
     /// Rows left `QUEUED` because the payment is not yet settled.
     pub not_ready: u64,
     /// Rows left `QUEUED` after an apply-time cap/precondition rejection.
@@ -165,7 +171,7 @@ impl QueueApplierJob {
     /// swallowed within the pass.
     pub async fn run(&self) -> anyhow::Result<QueueApplierReport> {
         let repo = PendingQueueRepo::new(self.db.clone());
-        let now = chrono::Utc::now();
+        let now = OffsetDateTime::now_utc();
 
         // Cross-tenant candidate feed (UNSCOPED, system-context). Collapse to the
         // distinct tenant set — the per-tenant `drain` re-claims under SKIP LOCKED
@@ -201,6 +207,7 @@ impl QueueApplierJob {
                 Ok(drain) => {
                     swept.insert(tenant);
                     report.applied += drain.applied;
+                    report.replayed += drain.replayed;
                     report.not_ready += drain.not_ready;
                     report.blocked += drain.blocked;
                 }
@@ -232,6 +239,7 @@ impl QueueApplierJob {
                 Ok(drain) => {
                     swept.insert(tenant);
                     report.applied += drain.applied;
+                    report.replayed += drain.replayed;
                     report.not_ready += drain.not_ready;
                     report.blocked += drain.blocked;
                 }
@@ -251,8 +259,8 @@ impl QueueApplierJob {
         // claw-back posts (APPLIED); one that aged out without reconciling is
         // CANCELLED + escalated (the alarm fires inside the drain). Aggregated into
         // the same report counters (a still-deferred / escalated row counts as
-        // neither applied nor not_ready — only `applied` is reflected here, mirroring
-        // how the report aggregates the other flows' applied totals).
+        // neither applied nor not_ready — only `applied` and `replayed` are
+        // reflected here, mirroring how the report aggregates the other flows').
         let cb_clawback_due = repo
             .list_all_due(FLOW_REFUND_CLAWBACK, now, SWEEP_DISCOVERY_LIMIT)
             .await?;
@@ -267,6 +275,7 @@ impl QueueApplierJob {
                 Ok(drain) => {
                     swept.insert(tenant);
                     report.applied += drain.applied;
+                    report.replayed += drain.replayed;
                 }
                 Err(e) => {
                     tracing::error!(

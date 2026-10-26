@@ -8,16 +8,16 @@ Authorization resolution for Gears — evaluates access requests and produces SQ
 
 The authorization design that Gears operate on is described in [DESIGN.md](../../../docs/arch/authorization/DESIGN.md).
 The decision to use AuthZEN 1.0 with constraint extensions is documented in
-[ADR-0001](../../../docs/arch/authorization/adr/0001-pdp-pep-authorization-model.md) and
-the split from authentication in [ADR-0002](../../../docs/arch/authorization/adr/0002-split-authn-and-authz-resolvers.md).
+[ADR-0001](../../../docs/arch/authorization/ADR/0001-pdp-pep-authorization-model.md) and
+the split from authentication in [ADR-0002](../../../docs/arch/authorization/ADR/0002-split-authn-authz-resolvers.md).
 
 The **authz_resolver** gear is an integration point for authorization policy evaluation. It discovers and delegates to a vendor-specific plugin via the types-registry — the plugin acts as the **Policy Decision Point (PDP)**, evaluating Subject + Action + Resource requests and returning a decision with optional row-level constraints.
 
 ## Public API
 
-The gear registers [`AuthZResolverClient`](authz-resolver-sdk/src/api.rs) in ClientHub:
+The gear registers [`AuthZResolverApi`](authz-resolver-sdk/src/api.rs) in ClientHub:
 
-- `evaluate(request)` — Evaluate an authorization request and return a decision with constraints
+- `evaluate(ctx, request)` — Evaluate an authorization request (`ctx` carries the caller's `SecurityContext`) and return a decision with constraints
 
 ### Evaluation Model (AuthZEN-based)
 
@@ -73,10 +73,10 @@ The SDK provides [`PolicyEnforcer`](authz-resolver-sdk/src/pep/enforcer.rs) — 
 use authz_resolver_sdk::pep::{PolicyEnforcer, ResourceType};
 use toolkit_security::pep_properties;
 
-const USER: ResourceType = ResourceType {
-    name: "gts.cf.core.users.user.v1~",
-    supported_properties: &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
-};
+const USER: ResourceType = ResourceType::from_static(
+    "gts.cf.core.users.user.v1~",
+    &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
+);
 
 let enforcer = PolicyEnforcer::new(authz_client.clone());
 
@@ -138,9 +138,9 @@ Most gears should use `PolicyEnforcer` (see PEP section above) rather than calli
 
 ```rust
 // Direct evaluation (low-level)
-let authz = hub.get::<dyn AuthZResolverClient>()?;
+let authz = hub.get::<dyn AuthZResolverApi>()?;
 
-let response = authz.evaluate(EvaluationRequest {
+let response = authz.evaluate(ctx.clone(), EvaluationRequest {
     subject: Subject { id: ctx.subject_id, ..Default::default() },
     action: Action { name: "list".into() },
     resource: Resource { resource_type: "my_gear.entity".into(), ..Default::default() },
@@ -161,5 +161,7 @@ let response = authz.evaluate(EvaluationRequest {
 
 ### Phase 2: Production PDP Plugin (Planned)
 
-- Advanced predicates: `in_tenant_subtree`, `in_group`, `in_group_subtree` (group predicates are RG-internal only; domain services receive degraded `in` predicates)
+- Advanced predicates: `in_tenant_subtree`, `in_group`, `in_group_subtree`.
+- Native `in_group` requires `ResourceType::with_native_group_predicates()`, an exact canonical GTS resource name, and local `resource_group_membership` and `gts_type` tables; the same resource identity qualifies membership rows. Native `in_group_subtree` additionally requires `resource_group_closure` and advertises both `GroupMembership` and `GroupHierarchy`.
+- A service MUST omit a group capability when any required projection is unavailable. Capability omission asks a capable PDP to return expanded resource-ID `in` predicates; degradation is not automatic in the PEP, so a PDP unable to expand must deny.
 - Local projection tables for hierarchy-aware constraints (`tenant_closure`, `resource_group_closure`; `resource_group_membership` projection not recommended but not forbidden)

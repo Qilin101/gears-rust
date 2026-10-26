@@ -18,13 +18,24 @@ use bss_ledger::domain::model::{EntryKey, NewEntry, NewLine};
 use bss_ledger::infra::storage::migrations::Migrator;
 use bss_ledger::infra::storage::repo::JournalRepo;
 use bss_ledger_sdk::{AccountClass, MappingStatus, Side, SourceDocType};
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
+use time::OffsetDateTime;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use uuid::Uuid;
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`): the old
+/// minor-unit fixtures expressed as validated major-unit money.
+fn usd_cents(minor: i64) -> bss_ledger_sdk::PostedMoney {
+    bss_ledger_sdk::PostedMoney::try_new(
+        rust_decimal::Decimal::new(minor, 2),
+        bss_ledger_sdk::CurrencySpec::try_new("USD".to_owned(), 2).unwrap(),
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn balanced_entry_round_trips_on_sqlite() {
@@ -52,7 +63,7 @@ async fn balanced_entry_round_trips_on_sqlite() {
         source_business_id: "inv-1".to_owned(),
         reverses_entry_id: None,
         reverses_period_id: None,
-        posted_at_utc: Utc::now(),
+        posted_at_utc: OffsetDateTime::now_utc(),
         effective_at: NaiveDate::from_ymd_opt(2026, 6, 18).unwrap(),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: Uuid::now_v7(),
@@ -70,15 +81,12 @@ async fn balanced_entry_round_trips_on_sqlite() {
         account_class,
         gl_code: None,
         side,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd_cents(amount),
         invoice_id: Some("inv-1".to_owned()),
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -138,18 +146,23 @@ async fn balanced_entry_round_trips_on_sqlite() {
     assert_eq!(record.entry_currency, "USD");
     assert_eq!(record.lines.len(), 2);
 
-    let total_dr: i64 = record
+    let total_dr: rust_decimal::Decimal = record
         .lines
         .iter()
         .filter(|l| l.side == "DR")
-        .map(|l| l.amount_minor)
+        .map(|l| l.money.amount())
         .sum();
-    let total_cr: i64 = record
+    let total_cr: rust_decimal::Decimal = record
         .lines
         .iter()
         .filter(|l| l.side == "CR")
-        .map(|l| l.amount_minor)
+        .map(|l| l.money.amount())
         .sum();
     assert_eq!(total_dr, total_cr, "lines must round-trip balanced");
-    assert!(record.lines.iter().all(|l| l.currency == "USD"));
+    assert!(
+        record
+            .lines
+            .iter()
+            .all(|l| l.money.currency().code() == "USD" && l.money.currency().scale() == 2)
+    );
 }

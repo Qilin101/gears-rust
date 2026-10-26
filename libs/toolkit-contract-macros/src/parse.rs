@@ -1,8 +1,8 @@
-use syn::spanned::Spanned;
 use syn::{FnArg, ItemTrait, Meta, Pat, ReturnType, TraitItem, TraitItemFn, Type};
 
 use crate::model::{
     ContractKind, ContractModel, Idempotency, MethodKind, MethodModel, ParamModel, ParamRole,
+    StreamOpen,
 };
 
 /// Param-level attributes the macro consumes and must NOT leak into the
@@ -14,8 +14,11 @@ fn is_secctx_attr(attr: &syn::Attribute) -> bool {
     SECCTX_ATTRS.iter().any(|n| attr.path().is_ident(n))
 }
 
+/// Parsed arguments of the `#[contract(...)]` attribute.
 pub struct ContractAttr {
+    /// Owning gear name the contract belongs to.
     pub gear: String,
+    /// Contract version string (the major version is also encoded in versioned trait names).
     pub version: String,
 }
 
@@ -65,6 +68,7 @@ impl syn::parse::Parse for ContractAttr {
     }
 }
 
+/// Builds a [`ContractModel`] from the attribute arguments and the annotated trait, validating the name suffix and methods.
 pub fn parse_trait(attr: ContractAttr, item: &ItemTrait) -> syn::Result<ContractModel> {
     let trait_name = item.ident.to_string();
     let kind = ContractKind::from_suffix(&trait_name).ok_or_else(|| {
@@ -124,12 +128,45 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<MethodModel> {
     let is_streaming = has_attr(&method.attrs, "streaming");
     let idempotency = parse_idempotency(&method.attrs)?;
 
-    if is_streaming && sig.asyncness.is_some() {
-        return Err(syn::Error::new(
-            sig.asyncness.span(),
-            "#[streaming] methods must not be `async fn`; use `fn` instead",
-        ));
-    }
+    // The open shape (immediate vs fallible/awaited) is selected explicitly by
+    // `#[streaming(open = fallible)]` and cross-checked against `async` — see
+    // `stream_attr`. A framing selector is rejected here: the base trait is
+    // transport-agnostic, so `multipart_mixed`/`sse` name a media type it does
+    // not have. `async fn` *without* `#[streaming]` is just the unary form.
+    let mut streaming_attrs = method
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("streaming"));
+    let open = match streaming_attrs.next() {
+        Some(attr) => {
+            // Reject a SECOND `#[streaming]` rather than silently parsing only
+            // the first — the projections dedup the same way, and letting a
+            // second attribute be ignored hides an authoring mistake.
+            if let Some(dup) = streaming_attrs.next() {
+                return Err(syn::Error::new_spanned(
+                    dup,
+                    "duplicate `#[streaming]` attribute: a streaming method declares it exactly \
+                     once (the open selector goes in that one attribute)",
+                ));
+            }
+            let args = crate::stream_attr::parse_streaming_args(attr)?;
+            if args.framing.is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[contract]: `#[streaming]` takes no framing selector on the base trait. A \
+                     framing such as `multipart_mixed` names an HTTP media type, and the base \
+                     contract is transport-agnostic. Declare the framing on the `#[rest_contract]` \
+                     projection instead. `open = fallible` is allowed here.",
+                ));
+            }
+            crate::stream_attr::resolve_stream_open(
+                args.open,
+                sig.asyncness.is_some(),
+                name.span(),
+            )?
+        }
+        None => StreamOpen::Immediate,
+    };
 
     let kind = if is_streaming {
         MethodKind::ServerStreaming
@@ -160,6 +197,7 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<MethodModel> {
     Ok(MethodModel {
         name,
         kind,
+        open,
         idempotency,
         params,
         output_type,

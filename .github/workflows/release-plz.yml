@@ -49,11 +49,16 @@ jobs:
       contents: write
       # release-plz resolves PR numbers and contributors for changelogs and releases.
       pull-requests: read
+    # Exposed so the publish jobs below know what was released. `releases` is a JSON
+    # array of {package_name, tag, version}; empty when nothing was published.
+    outputs:
+      releases: ${{ steps.release-plz.outputs.releases }}
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
     steps:
       # No `ref:` needed. On push, checkout defaults to github.sha, which is exactly the
       # commit that was pushed — for a release PR merge, its merge commit.
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -77,7 +82,7 @@ jobs:
           df -h
 
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
           tool-cache: true
           android: true
@@ -93,7 +98,7 @@ jobs:
           cache: false
 
       - name: Install protoc
-        uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: protoc@3.34.1
 
@@ -108,7 +113,8 @@ jobs:
       # build cannot be published.
 
       - name: release-plz release
-        uses: release-plz/action@52440b50d383aa252927de395c8b2c1e0a9cf8e9 # v0.3.155
+        id: release-plz
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.3.155
         with:
           command: release
         env:
@@ -146,10 +152,26 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # cargo-semver-checks (via release-plz/action >= 0.5.136) rustdocs toolkit
+      # with extra features, including contract-grpc-client and fips. That pulls
+      # prost-build (needs protoc) and aws-lc-fips-sys (needs Go). The publish
+      # job already installs both; this job did not, and started failing on
+      # every push to main after #4831.
+      - name: Install Go (required for aws-lc-fips-sys FIPS build)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.21.x'  # pinned - see docs/security/fips/TOOLCHAIN.md
+          cache: false
+
+      - name: Install protoc
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: protoc@3.34.1
 
       - name: Install Rust toolchain from rust-toolchain.toml
         run: |
@@ -157,8 +179,62 @@ jobs:
           rustup show
 
       - name: release-plz release-pr
-        uses: release-plz/action@52440b50d383aa252927de395c8b2c1e0a9cf8e9 # v0.3.155
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.3.155
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Share one build directory across release-plz tasks to save disk space.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-plz-target
+
+  # Publish the Docker image + Helm chart for each released, publishable gear, in this
+  # same run. Driven by release-plz's `releases` output, NOT by tag pushes: release-plz
+  # creates its tags with the default GITHUB_TOKEN, which cannot trigger tag/`push`
+  # workflows, and a release of >3 crates is suppressed by GitHub anyway. Reading the
+  # output sidesteps both. (Regular gears are publish=true; examples and flight-control
+  # are git_only — either way they appear in `releases`. The toolkit-platform umbrella
+  # isn't a crate, so it's published via workflow_dispatch on publish-artifacts.yml.)
+  plan-publish:
+    name: Plan publish
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build publish matrix from released packages
+        id: plan
+        # Maps release-plz's `releases` to a {component, version} matrix of the
+        # released gears that are publishable; non-gear crates are skipped.
+        env:
+          RELEASES: ${{ needs.release.outputs.releases }}
+        run: python3 tools/scripts/resolve_release.py plan
+
+  publish:
+    name: Publish (${{ matrix.entry.component }} ${{ matrix.entry.version }})
+    needs: plan-publish
+    if: needs.plan-publish.outputs.any == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      # Cap concurrent publishes so a large release doesn't saturate runners.
+      max-parallel: 4
+      matrix:
+        entry: ${{ fromJSON(needs.plan-publish.outputs.matrix) }}
+    uses: ./.github/workflows/publish-artifacts.yml
+    with:
+      component: ${{ matrix.entry.component }}
+      version: ${{ matrix.entry.version }}
+      latest: true
+    secrets: inherit

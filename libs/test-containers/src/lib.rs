@@ -29,6 +29,8 @@
 //! | `GEARS_TEST_MYSQL_TAG` | [`MYSQL_TAG`] |
 //! | `GEARS_TEST_TIMESCALEDB_TAG` | [`TIMESCALEDB_TAG`] |
 //! | `GEARS_TEST_MARIADB_TAG` | [`MARIADB_TAG`] |
+//! | `GEARS_TEST_CLICKHOUSE_TAG` | [`CLICKHOUSE_TAG`] |
+//! | `GEARS_TEST_REDIS_TAG` | [`REDIS_TAG`] |
 //!
 //! An unset *or empty* variable means "use the constant".
 //!
@@ -61,7 +63,7 @@
 //! ```
 
 use testcontainers::{ContainerRequest, GenericImage, ImageExt};
-use testcontainers_modules::{mysql::Mysql, postgres::Postgres};
+use testcontainers_modules::{mysql::Mysql, postgres::Postgres, redis::Redis};
 
 /// Tag of the official `postgres` image. The workspace floor.
 pub const POSTGRES_TAG: &str = "18-alpine";
@@ -106,6 +108,19 @@ pub const MARIADB_IMAGE: &str = "mariadb";
 /// engines with nothing in the diff.
 pub const MARIADB_TAG: &str = "11.8";
 
+/// Repository of the `ClickHouse` server image.
+pub const CLICKHOUSE_IMAGE: &str = "clickhouse/clickhouse-server";
+
+/// Tag of the `ClickHouse` server image.
+///
+/// Keep in sync with `ClickHouseSidecar` in `testing/e2e/lib/sidecars.py`: a
+/// skew means the plugin's schema `DDL` is validated against a different
+/// `ClickHouse` version than `E2E` runs.
+pub const CLICKHOUSE_TAG: &str = "25.6";
+
+/// Tag of the official `redis` image.
+pub const REDIS_TAG: &str = "8-alpine";
+
 /// Environment variable overriding [`POSTGRES_TAG`].
 pub const ENV_POSTGRES_TAG: &str = "GEARS_TEST_PG_TAG";
 /// Environment variable overriding [`POSTGRES_GRAPH_TAG`].
@@ -116,6 +131,10 @@ pub const ENV_MYSQL_TAG: &str = "GEARS_TEST_MYSQL_TAG";
 pub const ENV_TIMESCALEDB_TAG: &str = "GEARS_TEST_TIMESCALEDB_TAG";
 /// Environment variable overriding [`MARIADB_TAG`].
 pub const ENV_MARIADB_TAG: &str = "GEARS_TEST_MARIADB_TAG";
+/// Environment variable overriding [`CLICKHOUSE_TAG`].
+pub const ENV_CLICKHOUSE_TAG: &str = "GEARS_TEST_CLICKHOUSE_TAG";
+/// Environment variable overriding [`REDIS_TAG`].
+pub const ENV_REDIS_TAG: &str = "GEARS_TEST_REDIS_TAG";
 
 /// Environment variable turning an unavailable `PostgreSQL` 19 image into a
 /// failure instead of a skip. See [`graph_lane_required()`].
@@ -180,6 +199,18 @@ pub fn mariadb_tag() -> String {
     tag_from(env_override(ENV_MARIADB_TAG), MARIADB_TAG)
 }
 
+/// `ClickHouse` tag in effect, honoring `GEARS_TEST_CLICKHOUSE_TAG`.
+#[must_use]
+pub fn clickhouse_tag() -> String {
+    tag_from(env_override(ENV_CLICKHOUSE_TAG), CLICKHOUSE_TAG)
+}
+
+/// `Redis` tag in effect, honoring `GEARS_TEST_REDIS_TAG`.
+#[must_use]
+pub fn redis_tag() -> String {
+    tag_from(env_override(ENV_REDIS_TAG), REDIS_TAG)
+}
+
 /// A `PostgreSQL` container request on the pinned tag.
 ///
 /// Chain `ImageExt` methods (`with_env_var`, `with_mount`, …) onto the result
@@ -228,6 +259,11 @@ pub fn mysql() -> ContainerRequest<Mysql> {
     ContainerRequest::from(Mysql::default()).with_tag(mysql_tag())
 }
 
+/// A `Redis` container request on the pinned tag.
+pub fn redis() -> ContainerRequest<Redis> {
+    ContainerRequest::from(Redis::default()).with_tag(redis_tag())
+}
+
 /// A `TimescaleDB` image on the pinned tag.
 ///
 /// Unlike [`postgres()`] and [`mysql()`] there is no image module for this
@@ -240,6 +276,17 @@ pub fn timescaledb() -> GenericImage {
 /// A `MariaDB` image on the pinned tag. Same caveat as [`timescaledb()`].
 pub fn mariadb() -> GenericImage {
     GenericImage::new(MARIADB_IMAGE.to_owned(), mariadb_tag())
+}
+
+/// A `ClickHouse` image on the pinned tag. Same caveat as [`timescaledb()`]:
+/// the caller supplies the wait strategy and environment.
+///
+/// This image writes its server log to files under `/var/log/clickhouse-server`
+/// rather than stdout/stderr, so a `message_on_stdout` wait strategy can only
+/// ever time out. Callers pair this with `WaitFor::Nothing` and poll
+/// `SELECT 1` over the mapped `HTTP` port instead.
+pub fn clickhouse() -> GenericImage {
+    GenericImage::new(CLICKHOUSE_IMAGE.to_owned(), clickhouse_tag())
 }
 
 /// Whether an unavailable `PostgreSQL` 19 image must fail the run rather than
@@ -301,6 +348,11 @@ mod tests {
             "8.1",
             "testcontainers-modules changed its default MySQL tag"
         );
+        assert_eq!(
+            Redis::default().tag(),
+            "5.0",
+            "testcontainers-modules changed its default Redis tag"
+        );
     }
 
     /// The pins themselves, as literals.
@@ -318,6 +370,9 @@ mod tests {
         assert_eq!(TIMESCALEDB_TAG, "2.29.2-pg18");
         assert_eq!(MARIADB_IMAGE, "mariadb");
         assert_eq!(MARIADB_TAG, "11.8");
+        assert_eq!(CLICKHOUSE_IMAGE, "clickhouse/clickhouse-server");
+        assert_eq!(CLICKHOUSE_TAG, "25.6");
+        assert_eq!(REDIS_TAG, "8-alpine");
     }
 
     /// Known floating-alias words. Checked per component (split on `-`/`_`),
@@ -340,6 +395,8 @@ mod tests {
             MYSQL_TAG,
             TIMESCALEDB_TAG,
             MARIADB_TAG,
+            CLICKHOUSE_TAG,
+            REDIS_TAG,
         ] {
             assert!(
                 !is_floating_alias(tag),
@@ -365,6 +422,8 @@ mod tests {
             "9.7",
             "2.29.2-pg18",
             "11.8",
+            "25.6",
+            "8-alpine",
             "stablefoo",
         ] {
             assert!(!is_floating_alias(tag), "{tag} should not be flagged");
@@ -381,6 +440,8 @@ mod tests {
         assert_eq!(ENV_MYSQL_TAG, "GEARS_TEST_MYSQL_TAG");
         assert_eq!(ENV_TIMESCALEDB_TAG, "GEARS_TEST_TIMESCALEDB_TAG");
         assert_eq!(ENV_MARIADB_TAG, "GEARS_TEST_MARIADB_TAG");
+        assert_eq!(ENV_CLICKHOUSE_TAG, "GEARS_TEST_CLICKHOUSE_TAG");
+        assert_eq!(ENV_REDIS_TAG, "GEARS_TEST_REDIS_TAG");
         assert_eq!(ENV_GRAPH_LANE_REQUIRED, "GEARS_TEST_PG_GRAPH_REQUIRED");
     }
 
@@ -392,7 +453,7 @@ mod tests {
         /// (environment variable, accessor it must reach, constant it falls back to)
         type AccessorCase = (&'static str, fn() -> String, &'static str);
 
-        let cases: [AccessorCase; 5] = [
+        let cases: [AccessorCase; 7] = [
             (ENV_POSTGRES_TAG, postgres_tag, POSTGRES_TAG),
             (
                 ENV_POSTGRES_GRAPH_TAG,
@@ -402,6 +463,8 @@ mod tests {
             (ENV_MYSQL_TAG, mysql_tag, MYSQL_TAG),
             (ENV_TIMESCALEDB_TAG, timescaledb_tag, TIMESCALEDB_TAG),
             (ENV_MARIADB_TAG, mariadb_tag, MARIADB_TAG),
+            (ENV_CLICKHOUSE_TAG, clickhouse_tag, CLICKHOUSE_TAG),
+            (ENV_REDIS_TAG, redis_tag, REDIS_TAG),
         ];
         for (var, accessor, default) in cases {
             temp_env::with_var(var, Some("sentinel-value"), || {
@@ -432,6 +495,7 @@ mod tests {
             format!("postgres:{}", postgres_graph_tag())
         );
         assert_eq!(mysql().descriptor(), format!("mysql:{}", mysql_tag()));
+        assert_eq!(redis().descriptor(), format!("redis:{}", redis_tag()));
         assert_eq!(
             postgres_named("cluster_test").descriptor(),
             format!("postgres:{}", postgres_tag())
@@ -451,6 +515,9 @@ mod tests {
         temp_env::with_var(ENV_MYSQL_TAG, Some("tag-under-test"), || {
             assert_eq!(mysql().descriptor(), "mysql:tag-under-test");
         });
+        temp_env::with_var(ENV_REDIS_TAG, Some("tag-under-test"), || {
+            assert_eq!(redis().descriptor(), "redis:tag-under-test");
+        });
     }
 
     #[test]
@@ -460,6 +527,8 @@ mod tests {
         assert_eq!(timescaledb().tag(), timescaledb_tag());
         assert_eq!(mariadb().name(), MARIADB_IMAGE);
         assert_eq!(mariadb().tag(), mariadb_tag());
+        assert_eq!(clickhouse().name(), CLICKHOUSE_IMAGE);
+        assert_eq!(clickhouse().tag(), clickhouse_tag());
     }
 
     /// `postgres_tagged` exists so a higher local floor does not cost the
@@ -523,6 +592,30 @@ mod tests {
         });
     }
 
+    /// Asserts the Python `E2E` sidecar module binds each `name` to the
+    /// `value` this crate pins it to, spelled as a module-level assignment.
+    ///
+    /// `drift_consequence` completes the sentence "…would run different ___",
+    /// so a failure says what actually breaks rather than only what differs.
+    fn assert_sidecar_pins(bindings: &[(&str, &str)], drift_consequence: &str) {
+        let sidecars = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testing/e2e/lib/sidecars.py"
+        );
+        let Ok(source) = std::fs::read_to_string(sidecars) else {
+            panic!("cannot read {sidecars}; update this test if the file moved");
+        };
+        for (name, value) in bindings {
+            let expected = format!("{name} = \"{value}\"");
+            assert!(
+                source.contains(&expected),
+                "testing/e2e/lib/sidecars.py does not define `{expected}`; \
+                 the E2E lane and the Rust plugin tests would run different \
+                 {drift_consequence}"
+            );
+        }
+    }
+
     /// The `TimescaleDB` image is pinned twice — here and in the Python `E2E`
     /// sidecar — so the comments that point at each other are backed by a
     /// check. A skew validates plugin migrations against a different
@@ -534,24 +627,29 @@ mod tests {
     /// version matrix while the Rust fixtures follow it.
     #[test]
     fn e2e_sidecar_pins_the_same_timescaledb_image() {
-        let sidecars = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../testing/e2e/lib/sidecars.py"
+        assert_sidecar_pins(
+            &[
+                ("TIMESCALEDB_IMAGE", TIMESCALEDB_IMAGE),
+                ("TIMESCALEDB_TAG", TIMESCALEDB_TAG),
+                ("ENV_TIMESCALEDB_TAG", ENV_TIMESCALEDB_TAG),
+            ],
+            "PostgreSQL majors",
         );
-        let Ok(source) = std::fs::read_to_string(sidecars) else {
-            panic!("cannot read {sidecars}; update this test if the file moved");
-        };
-        for expected in [
-            format!("TIMESCALEDB_IMAGE = \"{TIMESCALEDB_IMAGE}\""),
-            format!("TIMESCALEDB_TAG = \"{TIMESCALEDB_TAG}\""),
-            format!("ENV_TIMESCALEDB_TAG = \"{ENV_TIMESCALEDB_TAG}\""),
-        ] {
-            assert!(
-                source.contains(&expected),
-                "testing/e2e/lib/sidecars.py does not define `{expected}`; \
-                 the E2E lane and the Rust plugin tests would run different \
-                 PostgreSQL majors"
-            );
-        }
+    }
+
+    /// Same contract as `e2e_sidecar_pins_the_same_timescaledb_image`, for
+    /// `ClickHouse`. Until this existed the two lanes were kept together by a
+    /// comment in each file and nothing else; a skew validates the plugin's
+    /// schema `DDL` against a different `ClickHouse` version than `E2E` runs.
+    #[test]
+    fn e2e_sidecar_pins_the_same_clickhouse_image() {
+        assert_sidecar_pins(
+            &[
+                ("CLICKHOUSE_IMAGE", CLICKHOUSE_IMAGE),
+                ("CLICKHOUSE_TAG", CLICKHOUSE_TAG),
+                ("ENV_CLICKHOUSE_TAG", ENV_CLICKHOUSE_TAG),
+            ],
+            "ClickHouse versions",
+        );
     }
 }

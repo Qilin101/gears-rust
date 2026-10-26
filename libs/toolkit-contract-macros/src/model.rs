@@ -1,11 +1,20 @@
+/// Parsed form of a `#[contract]` trait, the input to contract codegen.
 pub struct ContractModel {
+    /// Owning gear name.
     pub gear: String,
+    /// Contract version string.
     pub version: String,
+    /// Identifier of the contract trait.
     pub trait_name: syn::Ident,
+    /// Visibility of the contract trait, reused on generated items.
     pub vis: syn::Visibility,
+    /// Supertraits declared on the contract trait.
     pub supertraits: syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    /// Contract methods in declaration order.
     pub methods: Vec<MethodModel>,
+    /// Attributes (including docs) carried over to the emitted trait.
     pub attrs: Vec<syn::Attribute>,
+    /// Contract kind derived from the trait-name suffix.
     pub kind: ContractKind,
 }
 
@@ -13,9 +22,13 @@ pub struct ContractModel {
 /// macro crate. Codegen converts it back to absolute-path token form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractKind {
+    /// Trait name ends in `Api`: a public cross-gear API.
     Api,
+    /// Trait name ends in `Embedded`: an in-process-only contract.
     Embedded,
+    /// Trait name ends in `Backend`: a pluggable backend contract.
     Backend,
+    /// Trait name ends in `Extension`: an extension-point contract.
     Extension,
 }
 
@@ -62,23 +75,39 @@ impl ContractKind {
     }
 }
 
+/// A contract method as parsed from the trait.
 pub struct MethodModel {
+    /// Method identifier.
     pub name: syn::Ident,
+    /// Whether the method is unary or server-streaming.
     pub kind: MethodKind,
+    /// How a server-streaming method's stream is obtained. Meaningless when
+    /// `kind` is [`MethodKind::Unary`], where it stays at its default.
+    pub open: StreamOpen,
+    /// Idempotency classification from the method attributes.
     pub idempotency: Idempotency,
+    /// Parameters of the method, excluding the receiver.
     pub params: Vec<ParamModel>,
+    /// Success type extracted from the `Result` return type.
     pub output_type: syn::Type,
+    /// Error type extracted from the `Result` return type.
     pub error_type: syn::Type,
+    /// Attributes (including docs) carried over to the emitted method.
     pub attrs: Vec<syn::Attribute>,
+    /// Original method signature, used to re-emit the trait method.
     pub sig: syn::Signature,
     /// `true` when the trait declares a default body — peers MAY omit
     /// this method (`PoC` convention).
     pub optional: bool,
 }
 
+/// A parameter of a contract method.
 pub struct ParamModel {
+    /// Parameter name.
     pub name: syn::Ident,
+    /// Parameter type.
     pub ty: syn::Type,
+    /// Semantic role of the parameter (wire field or security context).
     pub role: ParamRole,
 }
 
@@ -88,20 +117,130 @@ pub struct ParamModel {
 /// re-running a name/type heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParamRole {
+    /// Ordinary parameter serialised on the wire.
     #[default]
     Wire,
+    /// Security-context parameter, injected by the transport rather than sent as a field.
     SecurityContext,
 }
 
+/// Whether a contract method returns a single response or a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodKind {
+    /// Single request/response call.
     Unary,
+    /// Server-streaming call yielding a sequence of items.
     ServerStreaming,
 }
 
+/// How a server-streaming method's stream is obtained.
+///
+/// [`StreamOpen::Immediate`] is the historical shape: the method is a plain
+/// `fn` and hands back the stream synchronously, so an open-time failure can
+/// only be reported as the stream's first item. [`StreamOpen::Awaited`] is
+/// `async fn` and returns `Result<Stream, E>`, so the open is a distinct,
+/// fallible operation that completes before any item exists.
+///
+/// In the base [`MethodModel`] this is carried beside [`MethodKind`] rather
+/// than folded into it, because `MethodKind` is *also* emitted into the runtime
+/// IR descriptor (`method_kind_tokens`) — a second role a shape enum would not
+/// carry. The REST/gRPC method models instead use [`MethodShape`], which does
+/// fold the streaming flag and the open together (they have no such second
+/// role).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamOpen {
+    /// `#[streaming] fn` — the stream is returned synchronously.
+    #[default]
+    Immediate,
+    /// `#[streaming] async fn` — the open is awaited and may fail before the
+    /// first item.
+    Awaited,
+}
+
+/// The shape of a projected contract method: unary, or server-streaming with a
+/// given [`StreamOpen`] strategy.
+///
+/// Replaces the independent `streaming: bool` (REST) / `server_streaming: bool`
+/// (gRPC) flag plus a separate `open: StreamOpen` field. That pair could
+/// represent `(streaming = false, open = Awaited)` — meaningless, since `open`
+/// is only consulted for a streaming method — and the two were read at ~20
+/// sites where nothing tied them together. Folding them here makes the illegal
+/// state unrepresentable: an `open` exists exactly when the method streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodShape {
+    /// A unary request/response method.
+    Unary,
+    /// A server-streaming method, tagged with how its stream is opened.
+    Stream(StreamOpen),
+}
+
+impl MethodShape {
+    /// `true` for any streaming shape.
+    #[must_use]
+    pub const fn is_streaming(self) -> bool {
+        matches!(self, Self::Stream(_))
+    }
+
+    /// The open strategy for a streaming method, or `None` when unary.
+    #[must_use]
+    pub const fn stream_open(self) -> Option<StreamOpen> {
+        match self {
+            Self::Stream(open) => Some(open),
+            Self::Unary => None,
+        }
+    }
+}
+
+/// Wire framing for a server-streaming REST method, selected by
+/// `#[streaming(sse | multipart_mixed)]`.
+///
+/// A macro-local mirror of `toolkit_contract::ir::binding::StreamFraming`. The
+/// two cannot be one definition: this is a proc-macro crate that the contract
+/// crate depends on, not the other way round. What crosses the gap is
+/// [`Self::ir_variant`] — the variant path the emitted binding IR and generated
+/// client name — and [`Self::media_type`], which MUST agree with the runtime
+/// enum's own `media_type`, since the client advertises this value in `Accept`
+/// while the runtime parser is selected from the variant.
+///
+/// Framing *parameterises* `#[streaming]` rather than being an attribute of its
+/// own: which wire format a stream speaks is intrinsic to what the marker
+/// means, not orthogonal configuration alongside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamFraming {
+    /// `text/event-stream` — W3C Server-Sent Events. What a bare
+    /// `#[streaming]` has always meant, and still does.
+    #[default]
+    ServerSentEvents,
+    /// `multipart/mixed` — one JSON item per body part.
+    MultipartMixed,
+}
+
+impl StreamFraming {
+    /// Variant name in `toolkit_contract::ir::binding::StreamFraming`.
+    pub fn ir_variant(self) -> &'static str {
+        match self {
+            StreamFraming::ServerSentEvents => "ServerSentEvents",
+            StreamFraming::MultipartMixed => "MultipartMixed",
+        }
+    }
+
+    /// Media type the generated client advertises in `Accept`. Must agree with
+    /// the runtime enum's `media_type` for the same variant.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            StreamFraming::ServerSentEvents => "text/event-stream",
+            StreamFraming::MultipartMixed => "multipart/mixed",
+        }
+    }
+}
+
+/// Idempotency classification of a contract method, mirroring the runtime IR enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Idempotency {
+    /// Read-only call without side effects.
     SafeRead,
+    /// Write that is safe to repeat with the same effect.
     IdempotentWrite,
+    /// Write that is not safe to repeat.
     NonIdempotentWrite,
 }

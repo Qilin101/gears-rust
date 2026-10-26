@@ -30,8 +30,9 @@ use chat_engine::domain::service::plugin_service::PluginService;
 use chat_engine::infra::db::repo::stream_event_repo::SeaStreamEventBuffer;
 use chat_engine_sdk::models::{FileCitation, MessagePartInput, MessagePartType};
 use chat_engine_sdk::{
-    ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingCompleteEvent,
-    StreamingEvent, StreamingPartEvent, StreamingStateEvent, StreamingToolEvent,
+    ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingCitationEvent,
+    StreamingCompleteEvent, StreamingEvent, StreamingPartEvent, StreamingStateEvent,
+    StreamingToolEvent,
 };
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +102,7 @@ fn make_request(session_id: Uuid) -> SendMessageRequest {
         file_ids: vec![],
         parent_message_id: None,
         capabilities: None,
+        metadata: None,
     }
 }
 
@@ -215,6 +217,102 @@ async fn cancel_after_partial_chunks_persists_is_complete_false_against_sqlite()
 }
 
 // ===========================================================================
+// 1d. Cancellation preserves what was streamed — a part and a citation the
+//     plugin emitted before the cancel are persisted alongside the partial
+//     text, not dropped.
+// ===========================================================================
+
+#[tokio::test]
+async fn cancel_persists_parts_and_citations_streamed_before_the_cancel_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "cancel-parts-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let placeholder = Uuid::nil();
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::EventsThenHang(vec![
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolCall,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": { "city": "Berlin" },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Citation(StreamingCitationEvent {
+                message_id: placeholder,
+                part_number: 0,
+                file_citations: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "document_id": "doc-1",
+                        "document_name": "Doc One",
+                        "quote": "the answer is 42",
+                    }))
+                    .expect("build file citation"),
+                ],
+                link_citations: vec![],
+                references: vec![],
+            }),
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: placeholder,
+                chunk: "checking".into(),
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(session_id), &make_ctx(), cancel.clone())
+        .await
+        .expect("send_message dispatch");
+
+    // Cancel once the chunk that follows the part has reached the wire, so
+    // the driver has certainly accumulated the part.
+    while let Some(evt) = stream.next().await {
+        if matches!(evt, StreamingEvent::Chunk(_)) {
+            cancel.cancel();
+            break;
+        }
+    }
+
+    let row = db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+    assert!(
+        !row.is_complete,
+        "cancelled row must stay is_complete=false"
+    );
+
+    let parts = db::message_parts_ordered(&harness.db, session_id, "assistant").await;
+    let types: Vec<&str> = parts.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(
+        types,
+        vec!["text", "tool_call"],
+        "a part streamed before the cancel must persist beside the partial text",
+    );
+    assert_eq!(
+        parts[1].2["arguments"]["city"], "Berlin",
+        "the preserved part must keep its content verbatim",
+    );
+
+    let cites = db::file_citations_for_message(&harness.db, row.message_id).await;
+    assert_eq!(
+        cites.len(),
+        1,
+        "a mid-stream citation must persist against the partial text part",
+    );
+    assert_eq!(cites[0]["document_id"], "doc-1");
+}
+
+// ===========================================================================
 // 1a. Multi-part body — a message sent with several ordered typed parts
 //     persists them into message_parts and reads them back in order (FR-022).
 // ===========================================================================
@@ -259,6 +357,7 @@ async fn multi_part_user_message_round_trips_in_order_against_sqlite() {
         file_ids: vec![],
         parent_message_id: None,
         capabilities: None,
+        metadata: None,
     };
 
     let cancel = CancellationToken::new();
@@ -412,6 +511,136 @@ async fn send_message_stamps_tenant_and_author_against_sqlite() {
     assert_eq!(
         assistant.user_id, None,
         "assistant message has no human author",
+    );
+}
+
+// ===========================================================================
+// 1c. Per-turn client metadata — persisted on the user row, absent from the
+//     assistant stub, and rejected when reserved or oversized
+// ===========================================================================
+
+#[tokio::test]
+async fn send_message_persists_client_metadata_on_the_user_row_against_sqlite() {
+    use chat_engine::infra::db::entity::message;
+
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "message-metadata-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    // The plugin completes with metadata of its own, so the assistant row is
+    // finalised with a populated map — otherwise the "client keys absent"
+    // assertion below would hold trivially against a NULL column.
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::Events(vec![
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: Uuid::nil(),
+                chunk: "ok".into(),
+            }),
+            StreamingEvent::Complete(StreamingCompleteEvent {
+                message_id: Uuid::nil(),
+                metadata: Some(serde_json::json!({ "finish_reason": "stop" })),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let client_metadata = serde_json::json!({
+        "device": "ios",
+        "skill_level": "beginner",
+        "time_remaining_s": 42,
+    });
+    let mut req = make_request(session_id);
+    req.metadata = Some(client_metadata.clone());
+
+    let mut stream = svc
+        .send_message(req, &make_ctx(), CancellationToken::new())
+        .await
+        .expect("send_message dispatch");
+    while stream.next().await.is_some() {}
+
+    let rows = db::list_messages(&harness.db, session_id).await;
+    let user = rows
+        .iter()
+        .find(|m| matches!(m.role, message::MessageRole::User))
+        .expect("user message persisted");
+    assert_eq!(
+        user.metadata.as_ref(),
+        Some(&client_metadata),
+        "per-turn client metadata must land verbatim on the user row",
+    );
+
+    // Read the assistant row only after the detached driver has finalised it,
+    // so its metadata column is populated rather than still NULL.
+    let assistant = db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+    let assistant_meta = assistant.metadata.expect("assistant metadata present");
+    assert_eq!(
+        assistant_meta["finish_reason"], "stop",
+        "the plugin's own metadata must survive finalize",
+    );
+    // Driven off the payload itself so the assertion cannot drift from what
+    // the request actually sent.
+    for key in client_metadata
+        .as_object()
+        .expect("client metadata is a JSON object")
+        .keys()
+    {
+        assert!(
+            assistant_meta.get(key).is_none(),
+            "client metadata key '{key}' must not leak onto the assistant row",
+        );
+    }
+}
+
+#[tokio::test]
+async fn send_message_rejects_reserved_and_oversized_metadata_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "message-metadata-reject-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let plugin = FakePlugin::new(plugin_id, FakePluginScript::Events(vec![]));
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let mut reserved = make_request(session_id);
+    reserved.metadata = Some(serde_json::json!({"model_used": "spoofed"}));
+    let err = svc
+        .send_message(reserved, &make_ctx(), CancellationToken::new())
+        .await
+        .err()
+        .expect("reserved key must be rejected");
+    assert!(
+        matches!(
+            err,
+            chat_engine::domain::error::ChatEngineError::BadRequest { .. }
+        ),
+        "reserved metadata key must map to 400, got {err:?}",
+    );
+
+    let mut oversized = make_request(session_id);
+    oversized.metadata = Some(serde_json::json!({"blob": "x".repeat(9 * 1024)}));
+    let err = svc
+        .send_message(oversized, &make_ctx(), CancellationToken::new())
+        .await
+        .err()
+        .expect("oversized metadata must be rejected");
+    assert!(
+        matches!(
+            err,
+            chat_engine::domain::error::ChatEngineError::BadRequest { .. }
+        ),
+        "oversized metadata must map to 400, got {err:?}",
+    );
+
+    assert!(
+        db::list_messages(&harness.db, session_id).await.is_empty(),
+        "a rejected send must not persist any message row",
     );
 }
 
@@ -768,6 +997,106 @@ async fn streamed_parts_and_metadata_persist_against_sqlite() {
     assert_eq!(
         meta["finish_reason"], "stop",
         "plugin metadata must be preserved"
+    );
+}
+
+// ===========================================================================
+// 3d. Tool calling (FR-022): a plugin that invokes a tool streams the call and
+// its result as parts; both persist with their discriminants and verbatim
+// content, so the exchange survives into reads and session exports.
+// ===========================================================================
+
+#[tokio::test]
+async fn streamed_tool_call_and_result_parts_persist_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "tool-calling-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let placeholder = Uuid::nil();
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::Events(vec![
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolCall,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": { "city": "Berlin" },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Part(StreamingPartEvent {
+                message_id: placeholder,
+                part: MessagePartInput {
+                    part_type: MessagePartType::ToolResult,
+                    content: serde_json::json!({
+                        "tool_call_id": "call_1",
+                        "name": "get_weather",
+                        "result": { "temp_c": 12 },
+                    }),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
+                },
+            }),
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: placeholder,
+                chunk: "It is 12 degrees in Berlin.".into(),
+            }),
+            StreamingEvent::Complete(StreamingCompleteEvent {
+                message_id: placeholder,
+                metadata: None,
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(session_id), &make_ctx(), cancel)
+        .await
+        .expect("send_message dispatch");
+    while stream.next().await.is_some() {}
+
+    db::wait_for_finalize(&harness.db, session_id, Duration::from_secs(2)).await;
+
+    let parts = db::message_parts_ordered(&harness.db, session_id, "assistant").await;
+    let types: Vec<&str> = parts.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert!(
+        types.contains(&"tool_call") && types.contains(&"tool_result"),
+        "tool parts must persist with their own discriminants; got {types:?}",
+    );
+
+    let call = parts
+        .iter()
+        .find(|(t, _, _)| t == "tool_call")
+        .expect("tool_call part");
+    assert_eq!(
+        call.2["arguments"]["city"], "Berlin",
+        "tool_call arguments must round-trip verbatim",
+    );
+
+    let result = parts
+        .iter()
+        .find(|(t, _, _)| t == "tool_result")
+        .expect("tool_result part");
+    assert_eq!(
+        result.2["tool_call_id"], call.2["tool_call_id"],
+        "the result must pair with its call by tool_call_id",
+    );
+    assert_eq!(
+        result.2["result"]["temp_c"], 12,
+        "tool_result payload must round-trip verbatim",
     );
 }
 

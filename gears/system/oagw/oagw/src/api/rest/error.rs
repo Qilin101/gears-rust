@@ -39,12 +39,12 @@
 
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
-use toolkit_canonical_errors::{CanonicalError, Problem, resource_error};
+use toolkit_canonical_errors::{CanonicalError, Http, Problem, resource_error};
 
 use crate::domain::error::DomainError;
 use crate::domain::gts_helpers as gts;
 use oagw_sdk::api::ErrorSource;
-use oagw_sdk::{field, quota, reason};
+use oagw_sdk::{field, precondition, quota, reason};
 
 // ---------------------------------------------------------------------------
 // Retry-after defaults for `service_unavailable` emissions
@@ -167,6 +167,38 @@ impl From<DomainError> for CanonicalError {
                     .create(),
             },
 
+            // A state precondition: the row changes only with its
+            // types-registry instance, so retrying the request cannot help.
+            DomainError::RegistryManaged { entity, id } => {
+                let detail = format!(
+                    "{entity} {id} is managed by the types registry; \
+                     change its registry instance instead"
+                );
+                match entity {
+                    "upstream" => OagwUpstreamError::failed_precondition()
+                        .with_precondition_violation(
+                            precondition::MANAGED_BY,
+                            detail,
+                            precondition::REGISTRY_MANAGED,
+                        )
+                        .create(),
+                    "route" => OagwRouteError::failed_precondition()
+                        .with_precondition_violation(
+                            precondition::MANAGED_BY,
+                            detail,
+                            precondition::REGISTRY_MANAGED,
+                        )
+                        .create(),
+                    _ => OagwProxyError::failed_precondition()
+                        .with_precondition_violation(
+                            precondition::MANAGED_BY,
+                            detail,
+                            precondition::REGISTRY_MANAGED,
+                        )
+                        .create(),
+                }
+            }
+
             DomainError::MissingTargetHost { .. } => OagwProxyError::invalid_argument()
                 .with_field_violation(
                     "x-target-host",
@@ -212,6 +244,7 @@ impl From<DomainError> for CanonicalError {
             DomainError::PayloadTooLarge { detail, .. } => {
                 OagwProxyError::out_of_range(detail.clone())
                     .with_field_violation("body", detail, field::PAYLOAD_TOO_LARGE)
+                    .with_override(Http::status_code(413))
                     .create()
             }
 
@@ -236,7 +269,11 @@ impl From<DomainError> for CanonicalError {
             // both, but the canonical category differs).
             DomainError::SecretRefNotAccessible { detail, .. } => {
                 OagwUpstreamError::failed_precondition()
-                    .with_precondition_violation("auth.config.secret_ref", detail, "STATE")
+                    .with_precondition_violation(
+                        "auth.config.secret_ref",
+                        detail,
+                        precondition::STATE,
+                    )
                     .create()
             }
 
@@ -244,6 +281,7 @@ impl From<DomainError> for CanonicalError {
                 tracing::warn!(reason = %detail, "OAGW downstream error");
                 CanonicalError::service_unavailable()
                     .with_retry_after_seconds(RETRY_AFTER_TRANSIENT_SECS)
+                    .with_override(Http::status_code(502))
                     .create()
             }
 
@@ -251,6 +289,7 @@ impl From<DomainError> for CanonicalError {
                 tracing::warn!(reason = %detail, "OAGW upstream protocol error");
                 CanonicalError::service_unavailable()
                     .with_retry_after_seconds(RETRY_AFTER_TRANSIENT_SECS)
+                    .with_override(Http::status_code(502))
                     .create()
             }
 
@@ -302,6 +341,7 @@ impl From<DomainError> for CanonicalError {
                 tracing::warn!(reason = %detail, "OAGW upstream stream aborted");
                 CanonicalError::service_unavailable()
                     .with_retry_after_seconds(RETRY_AFTER_TRANSIENT_SECS)
+                    .with_override(Http::status_code(502))
                     .create()
             }
 
@@ -423,7 +463,7 @@ fn guard_rejected_to_canonical(
                 .with_resource(id)
                 .create(),
             None => OagwGuardPluginError::failed_precondition()
-                .with_precondition_violation(error_code, detail, "STATE")
+                .with_precondition_violation(error_code, detail, precondition::STATE)
                 .create(),
         },
         409 => match resource_id {
@@ -549,6 +589,7 @@ pub fn error_response(err: DomainError) -> Response {
 mod tests {
     use super::*;
     use toolkit_gts::{gts_id, gts_uri};
+    use uuid::Uuid;
 
     /// Build the wire `Problem` the canonical error middleware would emit
     /// for a given `DomainError`. Tests run without the middleware in
@@ -707,13 +748,17 @@ mod tests {
 
     #[test]
     fn service_unavailable_emissions_carry_retry_after_seconds() {
-        // Schema in categories/14-service-unavailable.md requires
-        // `retry_after_seconds` on every service_unavailable response;
-        // verify each oagw → service_unavailable path populates it with
-        // the per-failure-mode default.
-        fn assert_retry(err: DomainError, expected: u64, label: &str) {
+        // categories/14-service-unavailable.md requires `retry_after_seconds`
+        // on every service_unavailable emission. Wire status splits by
+        // attribution: upstream faults override to 502, gateway/admin
+        // unavailability stays at the 503 default.
+        fn assert_retry(err: DomainError, expected_status: u16, expected: u64, label: &str) {
             let p: Problem = err.into_test_problem();
-            assert_eq!(p.status, Some(503), "{label} should map to 503");
+            assert_eq!(
+                p.status,
+                Some(expected_status),
+                "{label} should map to {expected_status}",
+            );
             assert_eq!(
                 p.context["retry_after_seconds"].as_u64(),
                 Some(expected),
@@ -727,6 +772,7 @@ mod tests {
                 detail: "x".into(),
                 instance: i(),
             },
+            502,
             RETRY_AFTER_TRANSIENT_SECS,
             "DownstreamError",
         );
@@ -735,6 +781,7 @@ mod tests {
                 detail: "x".into(),
                 instance: i(),
             },
+            502,
             RETRY_AFTER_TRANSIENT_SECS,
             "ProtocolError",
         );
@@ -742,6 +789,7 @@ mod tests {
             DomainError::UpstreamDisabled {
                 alias: "alias".into(),
             },
+            503,
             RETRY_AFTER_ADMIN_SECS,
             "UpstreamDisabled",
         );
@@ -750,6 +798,7 @@ mod tests {
                 detail: "x".into(),
                 instance: i(),
             },
+            502,
             RETRY_AFTER_TRANSIENT_SECS,
             "StreamAborted",
         );
@@ -758,6 +807,7 @@ mod tests {
                 detail: "x".into(),
                 instance: i(),
             },
+            503,
             RETRY_AFTER_LINK_SECS,
             "LinkUnavailable",
         );
@@ -766,6 +816,7 @@ mod tests {
                 detail: "x".into(),
                 instance: i(),
             },
+            503,
             RETRY_AFTER_CIRCUIT_BREAKER_SECS,
             "CircuitBreakerOpen",
         );
@@ -777,51 +828,68 @@ mod tests {
                 instance: i(),
                 resource_id: None,
             },
+            503,
             RETRY_AFTER_GUARD_SECS,
             "GuardRejected 503",
         );
     }
 
     #[test]
-    fn payload_too_large_now_maps_to_400() {
+    fn payload_too_large_maps_to_413() {
         let err = DomainError::PayloadTooLarge {
             detail: "request body exceeds 100MB limit".into(),
             instance: "/oagw/v1/proxy/api.openai.com/v1/chat".into(),
         };
         let p: Problem = err.into_test_problem();
-        // ⚠ wire change accepted in the migration plan: 413 → 400.
-        assert_eq!(p.status, Some(400));
+        assert_eq!(p.status, Some(413));
+        // Canonical category is unchanged — only the wire status is overridden.
+        assert_eq!(
+            p.problem_type,
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.out_of_range.v1~")
+        );
     }
 
     #[test]
-    fn downstream_error_now_maps_to_503() {
+    fn downstream_error_maps_to_502() {
         let err = DomainError::DownstreamError {
             detail: "upstream connection refused".into(),
             instance: "/oagw/v1/proxy/api.openai.com/v1/chat".into(),
         };
         let p: Problem = err.into_test_problem();
-        // ⚠ wire change accepted in the migration plan: 502 → 503.
-        assert_eq!(p.status, Some(503));
+        assert_eq!(p.status, Some(502));
+        // Canonical category is unchanged — only the wire status is overridden.
+        assert_eq!(
+            p.problem_type,
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~")
+        );
     }
 
     #[test]
-    fn protocol_error_now_maps_to_503() {
+    fn protocol_error_maps_to_502() {
         let err = DomainError::ProtocolError {
             detail: "upstream HTTP/2 error".into(),
             instance: "/oagw/v1/proxy/api.openai.com/v1/chat".into(),
         };
         let p: Problem = err.into_test_problem();
-        assert_eq!(p.status, Some(503));
+        assert_eq!(p.status, Some(502));
+        assert_eq!(
+            p.problem_type,
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~")
+        );
     }
 
     #[test]
-    fn stream_aborted_now_maps_to_503() {
+    fn stream_aborted_maps_to_502() {
         let err = DomainError::StreamAborted {
             detail: "upstream stream read error".into(),
             instance: "/oagw/v1/proxy/api.openai.com/v1/chat".into(),
         };
         let p: Problem = err.into_test_problem();
-        assert_eq!(p.status, Some(503));
+        assert_eq!(p.status, Some(502));
+        assert_eq!(
+            p.problem_type,
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~")
+        );
     }
 
     #[test]
@@ -837,6 +905,10 @@ mod tests {
                 entity: "upstream",
                 resource: "test".into(),
                 detail: "test".into(),
+            },
+            DomainError::RegistryManaged {
+                entity: "route",
+                id: Uuid::nil(),
             },
             DomainError::MissingTargetHost {
                 instance: "/test".into(),
@@ -1095,6 +1167,37 @@ mod tests {
             p.problem_type,
             gts_uri!("cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~")
         );
+    }
+
+    /// ADR-0018: PERS-OWN-001.
+    #[test]
+    fn registry_managed_maps_to_failed_precondition_400_per_resource() {
+        // Not retryable and not a malformed request: the row changes only
+        // with its types-registry instance.
+        // An entity without its own scope falls back to the proxy, as for Conflict.
+        let proxy = gts_id!("cf.core.oagw.proxy.v1~");
+        for (entity, resource_type) in [
+            ("upstream", gts::UPSTREAM_SCHEMA),
+            ("route", gts::ROUTE_SCHEMA),
+            ("plugin", proxy),
+        ] {
+            let id = Uuid::new_v4();
+            let p: Problem = DomainError::registry_managed(entity, id).into_test_problem();
+            assert_eq!(p.status, Some(400));
+            assert_eq!(
+                p.problem_type,
+                gts_uri!("cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~")
+            );
+            assert_eq!(p.context["resource_type"], resource_type);
+            let violation = &p.context["violations"][0];
+            assert_eq!(violation["type"], "REGISTRY_MANAGED");
+            assert_eq!(violation["subject"], "managed_by");
+            let description = violation["description"].as_str().unwrap();
+            assert!(
+                description.contains(&format!("{entity} {id}")),
+                "{description}"
+            );
+        }
     }
 
     #[test]

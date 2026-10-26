@@ -1,6 +1,6 @@
 //! Axum handlers + router for the ledger's journal-entry / balance REST surface
 //! (architecture §6). Eight operations under `/bss-ledger/v1`, all tenant-scoped
-//! WITHOUT a tenant in the path (the vhp-core convention, matching the
+//! WITHOUT a tenant in the path (the platform convention, matching the
 //! provisioning surface): writes carry `tenant_id` in the **body**, reads take a
 //! `?tenant_id=` **query** param (the caller's own tenant by default); both are
 //! PDP-`In` scoped (SQL-level BOLA).
@@ -23,23 +23,23 @@
 //!
 //! Reads (`(entry, read)`, PDP-scoped):
 //! - `GET /journal-entries/{entryId}` — tenant from the context.
-//! - `GET /journal-lines?tenant_id=&$filter=&$orderby=&cursor=&limit=` — canonical
-//!   `$filter` over `payer_tenant_id`/`account_class`/`period_id`/`invoice_id`.
-//! - `GET /balances?tenant_id=&$filter=&$orderby=&cursor=&limit=` — `$filter` over
-//!   `account_class`/`currency`.
+//! - `GET /journal-lines?$filter=&$orderby=&cursor=&limit=` — canonical
+//!   `$filter` over `tenant_id`/`payer_tenant_id`/`account_class`/`period_id`/`invoice_id`.
+//! - `GET /balances?$filter=&$orderby=&cursor=&limit=` — `$filter` over
+//!   `tenant_id`/`account_class`/`currency`.
 //! - `GET /balances/ar-aging?tenant_id=&payer=` — buckets via
 //!   [`crate::domain::invoice::aging::ar_aging`].
 //!
 //! Routes register through `OperationBuilder` so `/openapi.json` lists each
 //! operation with its declared request / response schemas.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, Query};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, http::StatusCode};
 use bss_ledger_sdk::api::LedgerClientV1;
-use chrono::Utc;
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::api::odata::OData;
 use toolkit::api::operation_builder::OperationBuilderODataExt;
@@ -58,15 +58,25 @@ use crate::api::rest::dto::{
 };
 use crate::api::rest::error::{
     authz_error_to_canonical, entry_not_found, reversal_error_to_canonical,
+    stored_reversal_error_to_canonical,
 };
+use crate::api::rest::odata_list::{
+    list_seller_tenant, reject_non_odata_list_params, reject_non_odata_list_params_allowing,
+};
+use crate::domain::instant::to_naive_date;
 use crate::domain::invoice::aging::ar_aging;
 use crate::domain::invoice::builder::build_invoice_entry;
 use crate::domain::invoice::mapping::resolve;
 use crate::domain::invoice::policy::AgingThresholds;
-use crate::domain::invoice::reversal::{build_mapping_correction, build_reversal};
+use crate::domain::invoice::reversal::{
+    build_mapping_correction, build_reversal, reverse_governed_amount,
+};
 use crate::infra::invoice_post::InvoicePoster;
 use crate::infra::storage::repo::{JournalRepo, PostingPolicyRepo};
-use crate::odata::{BalanceFilterField, JournalEntryFilterField, JournalLineFilterField};
+use crate::odata::{
+    BalanceFilterField, JournalEntryFilterField, JournalLineFilterField, JournalLineOrderField,
+};
+use time::OffsetDateTime;
 
 /// `OpenAPI` tag applied to the journal-entry operations.
 const TAG: &str = "BSS Ledger Journal";
@@ -82,7 +92,7 @@ pub struct ApiState {
     /// Invoice-post write port (writes: post / reversal / mapping-correction).
     /// A trait object so the router tests can stub the post path without a DB.
     pub posting: Arc<dyn InvoicePoster>,
-    /// Dual-control lifecycle engine (VHP-1852): the reverse gate routes a
+    /// Dual-control lifecycle engine: the reverse gate routes a
     /// high-value reversal to the preparer→approver queue instead of posting it.
     /// `None` disables the gate (router unit tests without a governance DB).
     pub approval: Option<Arc<crate::infra::approval::service::ApprovalService>>,
@@ -99,7 +109,7 @@ pub struct ApiState {
     /// `ApiState` with `None` (mirrors `approval`); production ALWAYS wires `Some`
     /// (see `module.rs`).
     pub journal_repo: Option<JournalRepo>,
-    /// Tenant posting-policy repo (VHP-1853) — the AR-aging read resolves the
+    /// Tenant posting-policy repo — the AR-aging read resolves the
     /// tenant's configured bucket thresholds through it. `Option` for the stub
     /// REST tests (`None` ⇒ the gear default buckets); production wires `Some`.
     pub posting_policy: Option<PostingPolicyRepo>,
@@ -234,12 +244,13 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .operation_id("bss_ledger.list_journal_entries")
         .summary("List journal entry headers (cursor-paginated)")
         .description(
-            "Cursor-paginated list of journal entry HEADERS for the `tenant_id` \
-             query (the caller's own by default). Supports OData `$filter` over \
-             `source_doc_type`, `source_business_id`, and `period_id` — the \
-             header-only dims that enable cross-cuts like \"all `MANUAL_ADJUSTMENT` \
-             entries\" or \"all `REFUND` / `CREDIT_NOTE` entries\" (these live on \
-             the entry HEADER, not on `journal_line`). Each item is a lightweight \
+            "Cursor-paginated list of journal entry HEADERS for the seller named \
+             by `$filter=tenant_id eq <uuid>` (the caller's own by default). \
+             Supports OData `$filter` over `tenant_id`, `source_doc_type`, \
+             `source_business_id`, and `period_id` — the header-only dims that \
+             enable cross-cuts like \"all `MANUAL_ADJUSTMENT` entries\" or \
+             \"all `REFUND` / `CREDIT_NOTE` entries\" (these live on the entry \
+             HEADER, not on `journal_line`). Each item is a lightweight \
              `EntryHeaderView` (NO lines, NO hash-chain fields); read the full \
              entry with its lines via `GET /journal-entries/{entryId}`. The \
              `$filter` ANDs the caller's authorized subtree, so headers outside it \
@@ -248,11 +259,6 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "Target tenant (defaults to the caller's own)",
-        )
         .query_param_typed(
             "limit",
             false,
@@ -262,6 +268,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_journal_entries)
         .with_odata_filter::<JournalEntryFilterField>()
+        .with_odata_orderby::<JournalEntryFilterField>()
         .json_response_with_schema::<Page<EntryHeaderView>>(
             openapi,
             StatusCode::OK,
@@ -306,20 +313,16 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .operation_id("bss_ledger.list_lines")
         .summary("List journal lines (cursor-paginated)")
         .description(
-            "Cursor-paginated list of journal lines for the `tenant_id` query \
-             (the caller's own by default). Supports OData `$filter` over \
-             `payer_tenant_id`, `account_class`, `period_id`, and `invoice_id`. \
-             The `$filter` ANDs the caller's authorized subtree, so rows outside \
-             it are never returned (SQL-level BOLA).",
+            "Cursor-paginated list of journal lines for the seller named by \
+             `$filter=tenant_id eq <uuid>` (the caller's own by default). \
+             Supports OData `$filter` over `tenant_id`, `payer_tenant_id`, \
+             `account_class`, `period_id`, and `invoice_id`. The `$filter` ANDs \
+             the caller's authorized subtree, so rows outside it are never \
+             returned (SQL-level BOLA).",
         )
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "Target tenant (defaults to the caller's own)",
-        )
         .query_param_typed(
             "limit",
             false,
@@ -329,6 +332,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_lines)
         .with_odata_filter::<JournalLineFilterField>()
+        .with_odata_orderby::<JournalLineOrderField>()
         .json_response_with_schema::<Page<LineDto>>(
             openapi,
             StatusCode::OK,
@@ -345,24 +349,19 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .summary("List account-balance cache rows (cursor-paginated)")
         .description(
             "Cursor-paginated list of the account-balance cache rows for the \
-             `tenant_id` query (the caller's own by default). Supports OData \
-             `$filter` over `account_class` and `currency`. The `$filter` ANDs \
-             the caller's authorized subtree, so rows outside it are excluded \
-             (SQL-level BOLA). Each row carries BOTH the transaction-currency \
-             `balance_minor` and the Slice-5 functional valuation \
-             (`functional_balance_minor` / `functional_currency`); the latter is \
-             `null` on a single-currency grain, where the functional value equals \
-             `balance_minor` by identity (`?valuation=functional` fallback, P1 \
-             decision 8).",
+             seller named by `$filter=tenant_id eq <uuid>` (the caller's own by \
+             default). Supports OData `$filter` over `tenant_id`, `account_class` \
+             and `currency`. The `$filter` ANDs the caller's authorized subtree, \
+             so rows outside it are excluded (SQL-level BOLA). Each row carries \
+             BOTH the transaction-currency `balance` and the Slice-5 \
+             functional valuation `functional_balance` (a money object with \
+             its own currency); the latter is `null` on a single-currency \
+             grain, where the functional value equals `balance` by identity \
+             (`?valuation=functional` fallback, P1 decision 8).",
         )
         .tag(TAG)
         .authenticated()
         .no_license_required()
-        .query_param(
-            "tenant_id",
-            false,
-            "Target tenant (defaults to the caller's own)",
-        )
         .query_param(
             "valuation",
             false,
@@ -380,6 +379,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .query_param("cursor", false, "Opaque base64url pagination cursor")
         .handler(list_balances)
         .with_odata_filter::<BalanceFilterField>()
+        .with_odata_orderby::<BalanceFilterField>()
         .json_response_with_schema::<Page<BalanceDto>>(
             openapi,
             StatusCode::OK,
@@ -493,7 +493,7 @@ async fn post_invoice(
         .into_domain(ctx.subject_id())
         .map_err(CanonicalError::from)?;
 
-    // Dual-control gate (VHP-1852, Group J): a post whose `effective_at` predates
+    // Dual-control gate: a post whose `effective_at` predates
     // the tenant's A6 backdating window is a *material backdating* — route it to
     // the preparer→approver queue (409) instead of posting inline. The ledger
     // object does not exist yet (the gate fires before the post) and the source
@@ -506,9 +506,15 @@ async fn post_invoice(
                 crate::domain::approval::intent::BackdatedInvoiceSnapshot::from(&inv),
             ),
         );
+        // The exact gross (`Σ items + Σ tax`) in the invoice's own currency and
+        // scale; a currency/scale disagreement is the same named 400 the post
+        // path raises.
+        let gross = inv
+            .gross()
+            .map_err(|e| CanonicalError::from(crate::infra::invoice_post::map_invoice_error(e)))?;
         let facts = crate::domain::approval::policy::OperationFacts {
             kind: crate::domain::approval::ApprovalKind::MaterialBackdating,
-            amount_usd_eq_minor: Some(inv.gross_minor()),
+            amount: Some(gross),
             effective_at: Some(inv.effective_at),
             has_outstanding_balance: false,
         };
@@ -615,16 +621,11 @@ async fn reverse_entry(
     .await
     .map_err(authz_error_to_canonical)?;
 
-    // Dual-control gate (VHP-1852): a reversal whose magnitude crosses the D2
+    // Dual-control gate: a reversal whose magnitude crosses the D2
     // threshold routes to the preparer→approver queue (409) instead of posting
     // inline; below threshold it stays single-actor (unchanged).
     if let Some(approval) = &state.approval {
-        let reverse_amount: i64 = original
-            .lines
-            .iter()
-            .filter(|l| l.side == bss_ledger_sdk::Side::Debit)
-            .map(|l| l.amount_minor)
-            .sum();
+        let reverse_amount = reverse_governed_amount(&original).map_err(CanonicalError::from)?;
         let intent = crate::domain::approval::intent::ApprovalIntent::Reverse(
             crate::domain::approval::intent::ReverseIntent {
                 entry_id: original.entry_id,
@@ -635,7 +636,7 @@ async fn reverse_entry(
         );
         let facts = crate::domain::approval::policy::OperationFacts {
             kind: crate::domain::approval::ApprovalKind::Reverse,
-            amount_usd_eq_minor: Some(reverse_amount),
+            amount: reverse_amount,
             effective_at: None,
             has_outstanding_balance: false,
         };
@@ -653,7 +654,9 @@ async fn reverse_entry(
     }
 
     let into_period = body.period_id.unwrap_or_else(|| original.period_id.clone());
-    let effective_on = body.effective_at.unwrap_or_else(|| Utc::now().date_naive());
+    let effective_on = body
+        .effective_at
+        .unwrap_or_else(|| to_naive_date(OffsetDateTime::now_utc()));
     let reversal = build_reversal(
         &original,
         into_period,
@@ -661,7 +664,7 @@ async fn reverse_entry(
         ctx.subject_id(),
         original.correlation_id,
     )
-    .map_err(reversal_error_to_canonical)?;
+    .map_err(stored_reversal_error_to_canonical)?;
 
     let reference = state
         .posting
@@ -718,7 +721,9 @@ async fn correct_mapping(
         .period_id
         .clone()
         .unwrap_or_else(|| original.period_id.clone());
-    let effective_on = body.effective_at.unwrap_or_else(|| Utc::now().date_naive());
+    let effective_on = body
+        .effective_at
+        .unwrap_or_else(|| to_naive_date(OffsetDateTime::now_utc()));
 
     // Cross-currency mapping-correction is not yet supported: the reversal half
     // (step 1) clears the original's functional at the original rate, but the
@@ -727,11 +732,7 @@ async fn correct_mapping(
     // drift on the corrected grains, which `m031` cannot catch because they seed as
     // single-currency). Reject up front until Slice 7 carries the functional onto
     // the corrected lines; single-currency corrections are unaffected.
-    if original
-        .lines
-        .iter()
-        .any(|l| l.functional_currency.is_some())
-    {
+    if original.lines.iter().any(|l| l.functional_money.is_some()) {
         return Err(CanonicalError::from(
             crate::domain::error::DomainError::FxOperationUnsupported(format!(
                 "cross-currency mapping correction for entry {} is not yet supported \
@@ -749,7 +750,7 @@ async fn correct_mapping(
         ctx.subject_id(),
         original.correlation_id,
     )
-    .map_err(reversal_error_to_canonical)?;
+    .map_err(stored_reversal_error_to_canonical)?;
     let reversal_ref = state
         .posting
         // A mapping-correction's reversal leg is internal plumbing, not a §6
@@ -763,7 +764,7 @@ async fn correct_mapping(
     //    fresh direct-split entry, then re-keyed under the correction.
     let invoice_id = &original.source_business_id;
     let mapped: Vec<_> = corrected_items.iter().map(resolve).collect();
-    let rebuilt = corrected_invoice(&original, invoice_id, &corrected_items, &mapped);
+    let rebuilt = corrected_invoice(&original, invoice_id, &corrected_items, &mapped)?;
     let correction = build_mapping_correction(
         &original,
         reversal_ref.entry_id,
@@ -773,7 +774,8 @@ async fn correct_mapping(
         ctx.subject_id(),
         original.correlation_id,
         rebuilt.lines,
-    );
+    )
+    .map_err(reversal_error_to_canonical)?;
     // The corrected re-post's lines carry nil placeholder account_ids (freshly
     // built); `post_correction` binds them from the chart before posting.
     let reference = state
@@ -794,7 +796,7 @@ fn corrected_invoice(
     invoice_id: &str,
     items: &[crate::domain::invoice::builder::InvoiceItem],
     mapped: &[crate::domain::invoice::mapping::MappedLine],
-) -> bss_ledger_sdk::PostEntry {
+) -> Result<bss_ledger_sdk::PostEntry, CanonicalError> {
     // Reconstruct a minimal PostedInvoice over the original's dims. The payer +
     // seller come from the original AR line / entry tenant; tax is empty (the
     // correction re-books the recognized revenue split — a tax correction is a
@@ -817,7 +819,10 @@ fn corrected_invoice(
         posted_by_actor_id: original.posted_by_actor_id,
         correlation_id: original.correlation_id,
     };
+    // A rebuilt entry that fails the exact money contract (mixed currency /
+    // scale, out-of-range total) is the same named 400 the post path raises.
     build_invoice_entry(&inv, mapped)
+        .map_err(|e| CanonicalError::from(crate::infra::invoice_post::map_invoice_error(e)))
 }
 
 async fn get_entry(
@@ -924,40 +929,22 @@ async fn set_entry_annotation(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// `GET /journal-lines` non-OData query: the target tenant (the caller's own
-/// when omitted). The `OData` `$filter` / `$orderby` / `limit` / `cursor` are
-/// parsed separately by the `OData` extractor from the same query string;
-/// `tenant_id` stays a plain param alongside them (the RBAC list convention).
-#[derive(Debug, serde::Deserialize)]
-struct LinesQuery {
-    tenant_id: Option<Uuid>,
-}
-
+/// `GET /journal-lines`: seller from `$filter=tenant_id eq`, else the caller.
+#[allow(clippy::implicit_hasher)]
 async fn list_lines(
     Extension(state): Extension<Arc<ApiState>>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<LinesQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<LineDto>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    reject_non_odata_list_params(&extras)?;
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     let page = state.client.list_lines(&ctx, tenant_id, &odata).await?;
     Ok(Json(Page {
         items: page.items.into_iter().map(LineDto::from).collect(),
         page_info: page.page_info,
     }))
-}
-
-/// `GET /journal-entries` non-OData query: the target tenant (the caller's own
-/// when omitted). The `OData` `$filter` / `$orderby` / `limit` / `cursor` are
-/// parsed separately by the `OData` extractor from the same query string;
-/// `tenant_id` stays a plain param alongside them (the list convention). NOTE: the
-/// same path also serves `POST /journal-entries` (the invoice-post write) and is
-/// the prefix of `GET /journal-entries/{entryId}` (the by-id read) — this is the
-/// HEADER-list `GET` over the bare collection.
-#[derive(Debug, serde::Deserialize)]
-struct JournalEntriesQuery {
-    tenant_id: Option<Uuid>,
 }
 
 /// `GET /journal-entries`: cursor-paginated list of journal entry HEADERS (R5).
@@ -969,15 +956,17 @@ struct JournalEntriesQuery {
 /// repo binds, so the page never contains a foreign-tenant header (no existence
 /// leak). The `$filter` over `source_doc_type` / `source_business_id` / `period_id`
 /// is additive over that scope (it never replaces it).
+#[allow(clippy::implicit_hasher)]
 async fn list_journal_entries(
     Extension(state): Extension<Arc<ApiState>>,
     Extension(enforcer): Extension<authz_resolver_sdk::PolicyEnforcer>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<JournalEntriesQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<EntryHeaderView>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    reject_non_odata_list_params(&extras)?;
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     // (entry, read) PEP gate against the target tenant — the SAME action the by-id
     // entry read / journal-lines / balances run under. The returned scope is the
     // SQL-level BOLA filter the repo binds, so the page never contains a foreign-
@@ -1007,22 +996,18 @@ async fn list_journal_entries(
     }))
 }
 
-/// `GET /balances` non-OData query: the target tenant (the caller's own when
-/// omitted). The `OData` `$filter` / `$orderby` / `limit` / `cursor` are parsed
-/// separately by the `OData` extractor; `tenant_id` stays a plain param.
-#[derive(Debug, serde::Deserialize)]
-struct BalancesQuery {
-    tenant_id: Option<Uuid>,
-}
-
+/// `GET /balances`: seller from `$filter=tenant_id eq`, else the caller.
+/// `valuation` stays a named lens (not a filter).
+#[allow(clippy::implicit_hasher)]
 async fn list_balances(
     Extension(state): Extension<Arc<ApiState>>,
     extension_ctx: Option<Extension<SecurityContext>>,
-    Query(query): Query<BalancesQuery>,
+    Query(extras): Query<HashMap<String, String>>,
     OData(odata): OData,
 ) -> Result<Json<Page<BalanceDto>>, CanonicalError> {
     let ctx = require_authenticated(extension_ctx)?;
-    let tenant_id = query.tenant_id.unwrap_or_else(|| ctx.subject_tenant_id());
+    reject_non_odata_list_params_allowing(&extras, &["valuation"])?;
+    let tenant_id = list_seller_tenant(odata.filter.as_deref(), ctx.subject_tenant_id())?;
     let page = state.client.list_balances(&ctx, tenant_id, &odata).await?;
     Ok(Json(Page {
         items: page.items.into_iter().map(BalanceDto::from).collect(),
@@ -1054,7 +1039,7 @@ async fn ar_aging_handler(
         .client
         .list_ar_invoice_balances(&ctx, tenant_id, query.payer)
         .await?;
-    // VHP-1853: bucket by the tenant's configured AR-aging thresholds (the gear
+    // Bucket by the tenant's configured AR-aging thresholds (the gear
     // default when no policy row / a stub state). The policy read is scoped on
     // `ENTRY:read` — the same grant the AR balance read above already requires,
     // so this adds no new authorization surface.
@@ -1071,7 +1056,7 @@ async fn ar_aging_handler(
             )
             .await
             .map_err(authz_error_to_canonical)?;
-            repo.read_effective_policy(&scope, tenant_id, Utc::now())
+            repo.read_effective_policy(&scope, tenant_id, OffsetDateTime::now_utc())
                 .await
                 .map_err(|e| {
                     CanonicalError::from(crate::domain::error::DomainError::Internal(format!(
@@ -1082,7 +1067,16 @@ async fn ar_aging_handler(
         }
         None => AgingThresholds::default(),
     };
-    let buckets = ar_aging(&rows, Utc::now().date_naive(), &thresholds);
+    // Buckets are exact per-currency sums over stored balances; a total outside
+    // the bounded decimal contract, or two stored scales for one grain, is a
+    // stored-data failure the caller of this body-less GET cannot fix, so it is
+    // an internal error (500), never a client 400 or a truncated figure.
+    let buckets =
+        ar_aging(&rows, to_naive_date(OffsetDateTime::now_utc()), &thresholds).map_err(|e| {
+            CanonicalError::from(crate::domain::error::DomainError::Internal(format!(
+                "ar aging over stored balances failed: {e}"
+            )))
+        })?;
     Ok(Json(ArAgingDto::from(buckets)))
 }
 

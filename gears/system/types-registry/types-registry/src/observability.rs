@@ -1,0 +1,149 @@
+//! Admission tracing spans.
+
+use gts::CompatibilityVerdict;
+use tracing::{Span, field};
+use uuid::Uuid;
+
+use crate::domain::compat::Baseline;
+use crate::domain::enums::OperationKind;
+use crate::domain::key::EntityKey;
+
+/// The label an operation's kind carries.
+const fn kind_label(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Registration => "registration",
+        OperationKind::Deletion => "deletion",
+    }
+}
+
+/// An operation the registry has durably accepted, or found under the same key and request.
+///
+/// The bridge from a client whose acknowledgement was lost: the client knows the
+/// `Idempotency-Key` it sent, and this event pairs it with the operation. Only a key spelled
+/// exactly as a canonical hyphenated UUID — what the SDK generates — is logged; any other key
+/// may carry a caller's data, and reformatting one could merge distinct case-sensitive keys,
+/// so it is logged by kind and length only.
+pub fn operation_accepted(
+    operation_id: Uuid,
+    kind: OperationKind,
+    dry_run: bool,
+    items: usize,
+    replayed: bool,
+    idempotency_key: &str,
+) {
+    let uuid_key = Uuid::try_parse(idempotency_key)
+        .ok()
+        .filter(|uuid| uuid.hyphenated().to_string() == idempotency_key);
+    tracing::info!(
+        log_kind = "operation_accepted",
+        %operation_id,
+        kind = kind_label(kind),
+        dry_run,
+        items,
+        replayed,
+        idempotency_key = uuid_key.map(field::display),
+        idempotency_key_kind = if uuid_key.is_some() { "uuid" } else { "opaque" },
+        idempotency_key_len = idempotency_key.len(),
+        "types_registry accepted an operation"
+    );
+}
+
+/// The span covering one admission pass over one operation.
+#[must_use]
+pub fn operation_span(operation_id: Uuid) -> Span {
+    tracing::info_span!(
+        "types_registry.admission.operation",
+        %operation_id,
+        kind = field::Empty,
+        dry_run = field::Empty,
+    )
+}
+
+/// Fill in the two fields [`operation_span`] left empty.
+pub fn record_operation_facts(span: &Span, kind: OperationKind, dry_run: bool) {
+    span.record("kind", kind_label(kind));
+    span.record("dry_run", dry_run);
+}
+
+/// Span for one candidate. Record binary GTS versions now (ADR-0003);
+/// [`record_compat_facts`] fills fields learned during evaluation.
+///
+/// `entity_key` is the key the request named; `gts_id` is only ever an
+/// identifier — the key itself when it is one, and otherwise what a deletion
+/// resolved it to, recorded by [`record_resolved_gts_id`].
+#[must_use]
+pub fn unit_span(
+    operation_id: Uuid,
+    key: &EntityKey,
+    kind: OperationKind,
+    dry_run: bool,
+    operation_item_id: i64,
+) -> Span {
+    let span = tracing::info_span!(
+        "types_registry.admission.unit",
+        %operation_id,
+        entity_key = %key,
+        gts_id = field::Empty,
+        kind = kind_label(kind),
+        dry_run,
+        operation_item_id,
+        gts_spec_version = gts::GTS_SPECIFICATION_VERSION,
+        gts_impl_version = gts::GTS_IMPLEMENTATION_VERSION,
+        baseline = field::Empty,
+        baseline_gts_id = field::Empty,
+        baseline_revision = field::Empty,
+        compat_verdict = field::Empty,
+        // T20: how many live direct dependants blocked a deletion. A count,
+        // and on the span rather than in a label: identities are unbounded and
+        // the caller may not be entitled to read them.
+        blocked_dependents = field::Empty,
+    );
+    if let Some(gts_id) = key.gts_id() {
+        record_resolved_gts_id(&span, gts_id);
+    }
+    span
+}
+
+/// The identifier a deletion's Registry Reference resolved to.
+pub fn record_resolved_gts_id(span: &Span, gts_id: &str) {
+    span.record("gts_id", gts_id);
+}
+
+/// Record how many live direct dependants refused a deletion (T20).
+pub fn record_blocked_dependents(span: &Span, blocked: usize) {
+    span.record("blocked_dependents", blocked);
+}
+
+/// Compatibility facts for the unit span. Domain types keep token mapping here.
+/// Unbounded baseline identifiers belong in spans, never metric labels (SPEC §8.6).
+#[derive(Clone, Copy, Debug)]
+pub struct CompatFacts<'a> {
+    /// Selection token: `current_revision`, `preceding_minor`, or `exempt_*`.
+    pub baseline: &'a Baseline,
+    /// The baseline's identifier, absent where no comparison was owed.
+    pub gts_id: Option<&'a str>,
+    /// The baseline's revision number, absent for the same reason.
+    pub revision: Option<i32>,
+    /// The verdict, absent where no comparison ran. An absent verdict beside a
+    /// present `baseline` token is exactly how an exemption reads.
+    pub verdict: Option<CompatibilityVerdict>,
+}
+
+/// Fill compatibility fields for admitted and refused candidates.
+pub fn record_compat_facts(span: &Span, facts: CompatFacts<'_>) {
+    span.record("baseline", facts.baseline.label());
+    if let Some(gts_id) = facts.gts_id {
+        span.record("baseline_gts_id", gts_id);
+    }
+    if let Some(revision) = facts.revision {
+        span.record("baseline_revision", revision);
+    }
+    if let Some(verdict) = facts.verdict {
+        span.record("compat_verdict", verdict.as_str());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "observability_tests.rs"]
+mod observability_tests;

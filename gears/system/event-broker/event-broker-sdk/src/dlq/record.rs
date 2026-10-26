@@ -2,21 +2,23 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use gts::{GtsInstanceId, GtsTypeId};
+
 use crate::consumer::RawEvent;
 use crate::error::ConsumerError;
 use crate::ids::{ConsumerGroupId, TopicId};
+use crate::sequence::Sequence;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeadLetterRecord {
     pub group_id: Option<ConsumerGroupId>,
     pub topic_id: Option<TopicId>,
-    pub topic: String,
-    pub event_type: String,
+    pub topic: GtsInstanceId,
+    pub event_type: GtsTypeId,
     pub subject: String,
-    pub subject_type: String,
-    pub partition_key: Option<String>,
+    pub subject_type: GtsTypeId,
     pub partition: u32,
-    pub offset: i64,
+    pub offset: Sequence,
     pub attempts: Option<u16>,
     pub reason: String,
     pub payload: serde_json::Value,
@@ -84,7 +86,6 @@ impl DeadLetterRecordBuilder {
             event_type: self.event.type_id.clone(),
             subject: self.event.subject.clone(),
             subject_type: self.event.subject_type.clone(),
-            partition_key: self.event.partition_key.clone(),
             partition: self.event.partition,
             offset: self.event.offset,
             attempts: self.attempts,

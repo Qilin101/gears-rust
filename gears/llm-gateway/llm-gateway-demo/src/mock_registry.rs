@@ -204,7 +204,7 @@ fn unsupported() -> ModelRegistryError {
 
 /// The scalar one filter field resolves to for a given model.
 ///
-/// Mirrors the real gear's column projection: the 15 fields the repository
+/// Mirrors the real gear's column projection: the 16 fields the repository
 /// binds to `models` columns, read straight off [`ModelV1`] instead.
 enum Scalar {
     Text(Option<String>),
@@ -220,6 +220,7 @@ fn project(model: &ModelV1, field: ModelFilterField) -> Scalar {
         F::CanonicalId => Scalar::Text(Some(model.canonical_id.clone())),
         F::LifecycleStatus => Scalar::Text(Some(model.lifecycle_status.as_str().to_owned())),
         F::ApprovalStatus => Scalar::Text(Some(model.approval_status.as_str().to_owned())),
+        F::ShareMode => Scalar::Text(Some(model.share_mode.as_str().to_owned())),
         F::GtsType => Scalar::Text(Some(model.info.gts_type.to_string())),
         F::SupportedApi => {
             // Sorted comma-joined shadow of the API set, as the gear stores it.

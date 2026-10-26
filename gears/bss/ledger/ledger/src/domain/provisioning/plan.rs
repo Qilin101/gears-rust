@@ -1,11 +1,12 @@
-//! Pure provisioning-plan logic: validate the fiscal-calendar fields and
-//! derive the initial `period_id`. Free functions only (no `#[domain_model]`),
-//! no infrastructure imports (DE0301).
+//! Pure provisioning-plan logic: validate the fiscal-calendar fields and the
+//! currency-scale rows, and derive the initial `period_id`. Free functions only
+//! (no `#[domain_model]`), no infrastructure imports (DE0301).
 
-use bss_ledger_sdk::{FiscalCalendarSpec, Granularity};
-use chrono::{DateTime, Utc};
+use bss_ledger_sdk::{FiscalCalendarSpec, Granularity, ProvisionCurrencyScale};
 
 use crate::domain::error::DomainError;
+use crate::domain::money::check_iso_scale;
+use time::OffsetDateTime;
 
 /// Validate a fiscal-calendar spec before any DB work: reject an empty
 /// timezone, a fiscal-year start month outside `1..=12`, and (defensively)
@@ -45,18 +46,42 @@ pub fn validate_calendar(spec: &FiscalCalendarSpec) -> Result<(), DomainError> {
     Ok(())
 }
 
+/// Validate the currency-scale rows before any DB work: the registry never overrides
+/// an ISO 4217 scale, so a row for an ISO code must carry its ISO scale. Rows for
+/// non-ISO codes are not checked here (the repository checks the 0..=28 range).
+///
+/// # Errors
+/// [`DomainError::InvalidRequest`] naming the first ISO code that has another scale
+/// and the ISO scale it must have.
+pub fn validate_currency_scales(scales: &[ProvisionCurrencyScale]) -> Result<(), DomainError> {
+    for scale in scales {
+        check_iso_scale(scale.currency.code(), scale.currency.scale())
+            .map_err(|conflict| DomainError::InvalidRequest(conflict.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Derive the initial `period_id` from a UTC instant as `"%Y%m"` (decision 4 —
 /// UTC-derived; tz-precise month boundaries are refined by the P6 automation).
 #[must_use]
-pub fn initial_period_id(now: DateTime<Utc>) -> String {
+pub fn initial_period_id(now: OffsetDateTime) -> String {
     crate::domain::period::period_id_for(now)
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use bss_ledger_sdk::CurrencySpec;
+
+    use crate::domain::instant::utc_ymd_hms;
 
     use super::*;
+
+    fn scale(code: &str, scale: u8) -> ProvisionCurrencyScale {
+        ProvisionCurrencyScale {
+            currency: CurrencySpec::try_new(code.to_owned(), scale).unwrap(),
+            source: "TENANT".to_owned(),
+        }
+    }
 
     fn spec(timezone: &str, granularity: Granularity, fy_start_month: u8) -> FiscalCalendarSpec {
         FiscalCalendarSpec {
@@ -124,8 +149,39 @@ mod tests {
     }
 
     #[test]
+    fn validate_currency_scales_accepts_iso_scales_and_non_iso_codes() {
+        let scales = [
+            scale("HUF", 2),
+            scale("USD", 2),
+            scale("JPY", 0),
+            scale("KWD", 3),
+            scale("XTS", 6),
+            scale("BTC", 8),
+        ];
+        assert!(validate_currency_scales(&scales).is_ok());
+        assert!(validate_currency_scales(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_currency_scales_refuses_an_iso_code_at_another_scale() {
+        for (code, wrong, iso) in [("HUF", 0, "2"), ("JPY", 2, "0"), ("USD", 3, "2")] {
+            // The valid row first: the check reaches every row.
+            match validate_currency_scales(&[scale("XTS", 6), scale(code, wrong)]) {
+                Err(DomainError::InvalidRequest(message)) => {
+                    assert!(message.contains(code), "the refusal names the code");
+                    assert!(
+                        message.contains(&format!("scale {iso}")),
+                        "the refusal names the ISO scale"
+                    );
+                }
+                _ => panic!("an ISO code at another scale must be an invalid request"),
+            }
+        }
+    }
+
+    #[test]
     fn initial_period_id_formats_year_month() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 19, 10, 30, 0).unwrap();
+        let now = utc_ymd_hms(2026, 6, 19, 10, 30, 0);
         assert_eq!(initial_period_id(now), "202606");
     }
 }

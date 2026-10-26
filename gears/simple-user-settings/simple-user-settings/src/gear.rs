@@ -8,9 +8,9 @@ use toolkit_db::DBProvider;
 use toolkit_db::DbError;
 use tracing::info;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 
-use simple_user_settings_sdk::SimpleUserSettingsClientV1;
+use simple_user_settings_sdk::{NamedSettingsClientV1, SimpleUserSettingsClientV1};
 
 use crate::api::rest::routes;
 use crate::config::SettingsConfig;
@@ -50,6 +50,7 @@ impl toolkit::contracts::DatabaseCapability for SettingsGear {
 impl Gear for SettingsGear {
     async fn init(&self, ctx: &GearCtx) -> anyhow::Result<()> {
         let cfg: SettingsConfig = ctx.config_or_default()?;
+        cfg.validate()?;
 
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 
@@ -59,20 +60,25 @@ impl Gear for SettingsGear {
         // Fetch AuthZ resolver from ClientHub
         let authz = ctx
             .client_hub()
-            .get::<dyn AuthZResolverClient>()
+            .get::<dyn AuthZResolverApi>()
             .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
         let policy_enforcer = PolicyEnforcer::new(authz);
 
         let service_config = ServiceConfig {
             max_field_length: cfg.max_field_length,
+            named_settings_per_user: cfg.named_settings_per_user,
+            named_value_max_bytes: cfg.named_value_max_bytes,
         };
         let service = Arc::new(Service::new(db, repo, policy_enforcer, service_config));
         self.service
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
-        let local_client: Arc<dyn SimpleUserSettingsClientV1> = Arc::new(LocalClient::new(service));
-        ctx.client_hub().register(local_client);
+        let local_client = Arc::new(LocalClient::new(service));
+        let settings_client: Arc<dyn SimpleUserSettingsClientV1> = local_client.clone();
+        ctx.client_hub().register(settings_client);
+        let named_client: Arc<dyn NamedSettingsClientV1> = local_client;
+        ctx.client_hub().register(named_client);
 
         Ok(())
     }

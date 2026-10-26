@@ -12,20 +12,26 @@ use std::sync::Arc;
 use utoipa::openapi::{
     OpenApi, OpenApiBuilder, Ref, RefOr, Required,
     content::ContentBuilder,
+    header::HeaderBuilder,
     info::InfoBuilder,
     path::{
         HttpMethod, OperationBuilder as UOperationBuilder, ParameterBuilder, ParameterIn,
         PathItemBuilder, PathsBuilder,
     },
     request_body::RequestBodyBuilder,
-    response::{ResponseBuilder, ResponsesBuilder},
+    response::{Response, ResponsesBuilder},
     schema::{ArrayBuilder, ComponentsBuilder, ObjectBuilder, Schema, SchemaFormat, SchemaType},
-    security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme},
     server::Server,
 };
 
 use crate::api::operation_builder;
 use toolkit_canonical_errors::problem;
+use toolkit_contract::StreamFraming;
+
+/// Name of the `OpenAPI` apiKey scheme for platform operations, using
+/// [`toolkit_security::constants::INTERNAL_TOKEN_HEADER`].
+pub const INTERNAL_TOKEN_SECURITY_SCHEME: &str = "internalToken";
 
 /// Type alias for schema collections used in API operations.
 type SchemaCollection = Vec<(String, RefOr<Schema>)>;
@@ -105,6 +111,75 @@ pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(
     registry.ensure_schema_raw(&root_name, collected)
 }
 
+/// Build the `x-*` vendor extensions for one operation.
+fn operation_vendor_extensions(
+    spec: &operation_builder::OperationSpec,
+) -> utoipa::openapi::extensions::Extensions {
+    let mut ext = utoipa::openapi::extensions::Extensions::default();
+
+    // Pagination
+    if let Some(pagination) = spec.vendor_extensions.x_odata_filter.as_ref()
+        && let Ok(value) = serde_json::to_value(pagination)
+    {
+        ext.insert("x-odata-filter".to_owned(), value);
+    }
+    if let Some(pagination) = spec.vendor_extensions.x_odata_orderby.as_ref()
+        && let Ok(value) = serde_json::to_value(pagination)
+    {
+        ext.insert("x-odata-orderby".to_owned(), value);
+    }
+
+    // GatewayProvider selects proxy routes via this extension (key shared with toolkit-gateway).
+    // The edge strips platform tokens, so platform routes stay unexposed.
+    if spec.exposed && spec.auth != operation_builder::RouteAuth::Platform {
+        ext.insert(
+            "x-toolkit-visibility".to_owned(),
+            serde_json::Value::String("exposed".to_owned()),
+        );
+    }
+
+    // Throttling zone bindings. The contract layer only knows zone
+    // *names*; the API gateway enriches these operations with the
+    // zones' numeric limits (`x-rate-limit-rps` / `x-rate-limit-burst`)
+    // when it builds the final document, using the zone name emitted
+    // here as the join key.
+    if let Some(throttling) = spec.throttling.as_ref() {
+        if let Some(zone) = throttling.rate_limit_zone.as_ref() {
+            ext.insert(
+                "x-throttling-rate-limit-zone".to_owned(),
+                serde_json::Value::String(zone.clone()),
+            );
+        }
+        if let Some(zone) = throttling.in_flight_limit_zone.as_ref() {
+            ext.insert(
+                "x-throttling-in-flight-limit-zone".to_owned(),
+                serde_json::Value::String(zone.clone()),
+            );
+        }
+    }
+
+    ext
+}
+
+/// Build a scalar parameter schema, preserving its format and minimum.
+///
+/// `format` is the token as the document carries it. `SchemaFormat::Custom`
+/// serializes it verbatim, which is what a `KnownFormat` serializes to as well
+/// — `"int64"` here and `SchemaFormat::KnownFormat(KnownFormat::Int64)` build
+/// the same document — so a declaration site states the token and takes no
+/// `utoipa` dependency for it.
+fn param_schema_object(
+    schema_type: SchemaType,
+    format: Option<&str>,
+    minimum: Option<f64>,
+) -> utoipa::openapi::schema::Object {
+    ObjectBuilder::new()
+        .schema_type(schema_type)
+        .format(format.map(|format| SchemaFormat::Custom(format.to_owned())))
+        .minimum(minimum)
+        .build()
+}
+
 /// Implementation of `OpenAPI` registry with lock-free data structures
 pub struct OpenApiRegistryImpl {
     /// Store operation specs keyed by "METHOD:path"
@@ -152,95 +227,14 @@ impl OpenApiRegistryImpl {
                 op = op.tag(tag.clone());
             }
 
-            // Vendor extensions
-            let mut ext = utoipa::openapi::extensions::Extensions::default();
-
-            // Rate limit
-            if let Some(rl) = spec.rate_limit.as_ref() {
-                ext.insert("x-rate-limit-rps".to_owned(), serde_json::json!(rl.rps));
-                ext.insert("x-rate-limit-burst".to_owned(), serde_json::json!(rl.burst));
-                ext.insert(
-                    "x-in-flight-limit".to_owned(),
-                    serde_json::json!(rl.in_flight),
-                );
-            }
-
-            // Pagination
-            if let Some(pagination) = spec.vendor_extensions.x_odata_filter.as_ref()
-                && let Ok(value) = serde_json::to_value(pagination)
-            {
-                ext.insert("x-odata-filter".to_owned(), value);
-            }
-            if let Some(pagination) = spec.vendor_extensions.x_odata_orderby.as_ref()
-                && let Ok(value) = serde_json::to_value(pagination)
-            {
-                ext.insert("x-odata-orderby".to_owned(), value);
-            }
-
-            // Visibility axis (`OperationSpec.exposed`): mark routes that are
-            // registered in the gateway for external access. The `GatewayProvider`
-            // reads this vendor extension to select which routes to reverse-proxy.
-            // The key is mirrored as a constant in `cf-gears-toolkit-gateway`.
-            if spec.exposed {
-                ext.insert(
-                    "x-toolkit-visibility".to_owned(),
-                    serde_json::Value::String("exposed".to_owned()),
-                );
-            }
-
+            let ext = operation_vendor_extensions(&spec);
             if !ext.is_empty() {
                 op = op.extensions(Some(ext));
             }
 
             // Parameters
             for p in &spec.params {
-                let in_ = match p.location {
-                    operation_builder::ParamLocation::Path => ParameterIn::Path,
-                    operation_builder::ParamLocation::Query => ParameterIn::Query,
-                    operation_builder::ParamLocation::Header => ParameterIn::Header,
-                    operation_builder::ParamLocation::Cookie => ParameterIn::Cookie,
-                };
-                let required =
-                    if matches!(p.location, operation_builder::ParamLocation::Path) || p.required {
-                        Required::True
-                    } else {
-                        Required::False
-                    };
-
-                let schema_type = match p.param_type.as_str() {
-                    "integer" => SchemaType::Type(utoipa::openapi::schema::Type::Integer),
-                    "number" => SchemaType::Type(utoipa::openapi::schema::Type::Number),
-                    "boolean" => SchemaType::Type(utoipa::openapi::schema::Type::Boolean),
-                    _ => SchemaType::Type(utoipa::openapi::schema::Type::String),
-                };
-                let item_object = ObjectBuilder::new().schema_type(schema_type).build();
-
-                let mut builder = ParameterBuilder::new()
-                    .name(&p.name)
-                    .parameter_in(in_)
-                    .required(required)
-                    .description(p.description.clone());
-
-                if p.array {
-                    // `style: form, explode: true` is the repeated-key encoding
-                    // (`?tag=a&tag=b`). Spelling it out matters: the OpenAPI
-                    // default for a query array is `form` with `explode: true`,
-                    // but generators differ on whether they assume it, and the
-                    // wire format has to be unambiguous for a client written
-                    // against this spec to interoperate.
-                    builder = builder
-                        .style(Some(utoipa::openapi::path::ParameterStyle::Form))
-                        .explode(Some(true))
-                        .schema(Some(Schema::Array(
-                            utoipa::openapi::schema::ArrayBuilder::new()
-                                .items(item_object)
-                                .build(),
-                        )));
-                } else {
-                    builder = builder.schema(Some(Schema::Object(item_object)));
-                }
-
-                op = op.parameter(builder.build());
+                op = op.parameter(build_parameter(p));
             }
 
             // Request body
@@ -256,52 +250,84 @@ impl OpenApiRegistryImpl {
             }
 
             // Responses
-            let mut responses = ResponsesBuilder::new();
+            let mut responses_by_status = BTreeMap::<u16, Response>::new();
             for r in &spec.responses {
+                let response = responses_by_status
+                    .entry(r.status)
+                    .or_insert_with(|| Response::new(&r.description));
+                // Preserve the historical last-declaration-wins behavior for
+                // the status-level description while merging media types.
+                response.description.clone_from(&r.description);
+
                 // Body-less response (e.g. 204 No Content) is signalled by an
                 // empty `content_type`. Emit just `description` — attaching a
                 // `content` block would make code-generators expect a body.
-                if r.content_type.is_empty() {
-                    let resp = ResponseBuilder::new().description(&r.description).build();
-                    responses = responses.response(r.status.to_string(), resp);
-                    continue;
+                if !r.content_type.is_empty() {
+                    // Streaming media types are json-like here too: their
+                    // declared schema is the *item* type, so it must render as
+                    // a `$ref` rather than as an opaque string blob. Derived
+                    // from `StreamFraming` rather than hard-coded, so a new
+                    // framing variant is covered automatically instead of
+                    // silently falling through to the opaque-string branch.
+                    let is_json_like = r.content_type == "application/json"
+                        || r.content_type == problem::APPLICATION_PROBLEM_JSON
+                        || StreamFraming::is_stream_media_type(r.content_type);
+                    let content = if is_json_like {
+                        // Manually build content to preserve the correct content type.
+                        ContentBuilder::new()
+                            .schema(Some(build_response_schema(r.schema.as_ref())))
+                            .build()
+                    } else {
+                        let schema = Schema::Object(
+                            ObjectBuilder::new()
+                                .schema_type(SchemaType::Type(
+                                    utoipa::openapi::schema::Type::String,
+                                ))
+                                .format(Some(SchemaFormat::Custom(r.content_type.into())))
+                                .build(),
+                        );
+                        ContentBuilder::new().schema(Some(schema)).build()
+                    };
+                    response.content.insert(r.content_type.to_owned(), content);
                 }
-                let is_json_like = r.content_type == "application/json"
-                    || r.content_type == problem::APPLICATION_PROBLEM_JSON
-                    || r.content_type == "text/event-stream";
-                let resp = if is_json_like {
-                    // Manually build content to preserve the correct content type
-                    let content = ContentBuilder::new()
-                        .schema(Some(build_response_schema(r.schema.as_ref())))
+
+                for header in &r.headers {
+                    let schema_type = match header.header_type {
+                        operation_builder::ResponseHeaderType::String => {
+                            SchemaType::Type(utoipa::openapi::schema::Type::String)
+                        }
+                        operation_builder::ResponseHeaderType::Integer => {
+                            SchemaType::Type(utoipa::openapi::schema::Type::Integer)
+                        }
+                        operation_builder::ResponseHeaderType::Boolean => {
+                            SchemaType::Type(utoipa::openapi::schema::Type::Boolean)
+                        }
+                    };
+                    let declared = HeaderBuilder::new()
+                        .description(header.description.clone())
+                        .schema(ObjectBuilder::new().schema_type(schema_type).build())
                         .build();
-                    ResponseBuilder::new()
-                        .description(&r.description)
-                        .content(r.content_type, content)
-                        .build()
-                } else {
-                    let schema = Schema::Object(
-                        ObjectBuilder::new()
-                            .schema_type(SchemaType::Type(utoipa::openapi::schema::Type::String))
-                            .format(Some(SchemaFormat::Custom(r.content_type.into())))
-                            .build(),
-                    );
-                    let content = ContentBuilder::new().schema(Some(schema)).build();
-                    ResponseBuilder::new()
-                        .description(&r.description)
-                        .content(r.content_type, content)
-                        .build()
-                };
-                responses = responses.response(r.status.to_string(), resp);
+                    response.headers.insert(header.name.clone(), declared);
+                }
             }
+            let responses = ResponsesBuilder::new().responses_from_iter(
+                responses_by_status
+                    .into_iter()
+                    .map(|(status, response)| (status.to_string(), response)),
+            );
             op = op.responses(responses.build());
 
-            // Add security requirement if operation requires authentication
-            if spec.authenticated {
-                let sec_req = utoipa::openapi::security::SecurityRequirement::new(
-                    "bearerAuth",
+            // Platform operations require internalToken, not bearerAuth.
+            let scheme = match spec.auth {
+                operation_builder::RouteAuth::Platform => Some(INTERNAL_TOKEN_SECURITY_SCHEME),
+                operation_builder::RouteAuth::Authenticated => Some("bearerAuth"),
+                operation_builder::RouteAuth::Anonymous => None,
+            };
+            if let Some(scheme) = scheme {
+                op = op.security(utoipa::openapi::security::SecurityRequirement::new(
+                    scheme,
                     Vec::<String>::new(),
-                );
-                op = op.security(sec_req);
+                ));
             }
 
             let method = match spec.method {
@@ -335,6 +361,15 @@ impl OpenApiRegistryImpl {
                     .bearer_format("JWT")
                     .build(),
             ),
+        );
+
+        // Platform-plane internal token, required by platform operations
+        components = components.security_scheme(
+            INTERNAL_TOKEN_SECURITY_SCHEME,
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                toolkit_security::constants::INTERNAL_TOKEN_HEADER,
+                "Platform-plane workload credential, validated by the receiving listener",
+            ))),
         );
 
         // 3) Info & final OpenAPI doc
@@ -386,6 +421,18 @@ impl Default for OpenApiRegistryImpl {
 impl OpenApiRegistry for OpenApiRegistryImpl {
     fn register_operation(&self, spec: &operation_builder::OperationSpec) {
         let operation_key = format!("{}:{}", spec.method.as_str(), spec.path);
+        // Normalize platform visibility at registration; warn once instead of on each document
+        // build.
+        let mut spec = std::borrow::Cow::Borrowed(spec);
+        if spec.exposed && spec.auth == operation_builder::RouteAuth::Platform {
+            tracing::warn!(
+                method = %spec.method,
+                path = %spec.path,
+                "a platform-authenticated operation is declared exposed; it is not exposed"
+            );
+            spec.to_mut().exposed = false;
+        }
+        let spec = spec.as_ref();
         // Surface duplicate (method, path) registrations — e.g. a generated
         // `register_<trait>_routes()` colliding with a hand-written route, or two
         // SDKs registering the same path (M-13). Silently overwriting the earlier
@@ -468,6 +515,62 @@ fn truncate_json(v: &serde_json::Value) -> String {
     } else {
         s
     }
+}
+
+/// One `ParamSpec` as the document's parameter object.
+fn build_parameter(p: &operation_builder::ParamSpec) -> utoipa::openapi::path::Parameter {
+    let in_ = match p.location {
+        operation_builder::ParamLocation::Path => ParameterIn::Path,
+        operation_builder::ParamLocation::Query => ParameterIn::Query,
+        operation_builder::ParamLocation::Header => ParameterIn::Header,
+        operation_builder::ParamLocation::Cookie => ParameterIn::Cookie,
+    };
+    let required = if matches!(p.location, operation_builder::ParamLocation::Path) || p.required {
+        Required::True
+    } else {
+        Required::False
+    };
+
+    let schema_type = match p.param_type.as_str() {
+        "integer" => SchemaType::Type(utoipa::openapi::schema::Type::Integer),
+        "number" => SchemaType::Type(utoipa::openapi::schema::Type::Number),
+        "boolean" => SchemaType::Type(utoipa::openapi::schema::Type::Boolean),
+        _ => SchemaType::Type(utoipa::openapi::schema::Type::String),
+    };
+    let mut item_object = param_schema_object(schema_type, p.format.as_deref(), p.minimum);
+    // A closed set of values stays a string in the document; the `enum` is
+    // what tells a generated client which ones it may send.
+    if !p.enum_values.is_empty() {
+        item_object = ObjectBuilder::from(item_object)
+            .enum_values(Some(p.enum_values.clone()))
+            .build();
+    }
+
+    let mut builder = ParameterBuilder::new()
+        .name(&p.name)
+        .parameter_in(in_)
+        .required(required)
+        .description(p.description.clone());
+
+    if p.array {
+        // `style: form, explode: true` is the repeated-key encoding
+        // (`?tag=a&tag=b`). Spelling it out matters: the OpenAPI default for a
+        // query array is `form` with `explode: true`, but generators differ on
+        // whether they assume it, and the wire format has to be unambiguous
+        // for a client written against this spec to interoperate.
+        builder = builder
+            .style(Some(utoipa::openapi::path::ParameterStyle::Form))
+            .explode(Some(true))
+            .schema(Some(Schema::Array(
+                utoipa::openapi::schema::ArrayBuilder::new()
+                    .items(item_object)
+                    .build(),
+            )));
+    } else {
+        builder = builder.schema(Some(Schema::Object(item_object)));
+    }
+
+    builder.build()
 }
 
 /// Build the `OpenAPI` content object for a request body schema variant.
@@ -611,7 +714,8 @@ fn collect_refs_from_json(value: &serde_json::Value, refs: &mut HashSet<String>)
 mod tests {
     use super::*;
     use crate::api::operation_builder::{
-        OperationSpec, ParamLocation, ParamSpec, ResponseSchema, ResponseSpec, VendorExtensions,
+        OperationSpec, ParamSpec, ResponseHeaderSpec, ResponseHeaderType, ResponseSchema,
+        ResponseSpec, VendorExtensions,
     };
     use http::Method;
 
@@ -635,11 +739,12 @@ mod tests {
                 content_type: "application/json",
                 description: "OK".to_owned(),
                 schema,
+                headers: vec![],
             }],
             handler_id: handler.to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: false,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -662,10 +767,90 @@ mod tests {
     }
 
     #[test]
+    fn throttling_zone_names_are_emitted_as_vendor_extensions() {
+        use crate::api::operation_builder::ThrottlingSpec;
+
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = spec_with_response("/throttled", "throttled_op", None);
+        spec.throttling = Some(ThrottlingSpec {
+            rate_limit_zone: Some("rl_zone".to_owned()),
+            in_flight_limit_zone: Some("ifl_zone".to_owned()),
+            require_security_context: false,
+            dry_run: false,
+        });
+        registry.register_operation(&spec);
+        // An operation without throttling must not carry the extensions.
+        registry.register_operation(&spec_with_response("/plain", "plain_op", None));
+
+        let doc = registry.build_openapi(&test_info()).unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+
+        let throttled = &json["paths"]["/throttled"]["get"];
+        assert_eq!(
+            throttled["x-throttling-rate-limit-zone"],
+            serde_json::json!("rl_zone")
+        );
+        assert_eq!(
+            throttled["x-throttling-in-flight-limit-zone"],
+            serde_json::json!("ifl_zone")
+        );
+
+        let plain = &json["paths"]["/plain"]["get"];
+        assert!(plain.get("x-throttling-rate-limit-zone").is_none());
+        assert!(plain.get("x-throttling-in-flight-limit-zone").is_none());
+    }
+
+    #[test]
     fn test_registry_creation() {
         let registry = OpenApiRegistryImpl::new();
         assert_eq!(registry.operation_specs.len(), 0);
         assert_eq!(registry.components_registry.load().len(), 0);
+    }
+
+    #[test]
+    fn parameter_formats_are_preserved_in_scalar_and_array_schemas() {
+        use serde_json::json;
+
+        // `int64` is a format `utoipa` knows and `resource-version` is not:
+        // both reach the document as the token the declaration spelled, which
+        // is what lets `ParamSpec::format` be a plain string.
+        for (format, param_type, expected) in [
+            (
+                Some("int64"),
+                "integer",
+                json!({"type": "integer", "format": "int64", "minimum": 1}),
+            ),
+            (
+                Some("resource-version"),
+                "integer",
+                json!({"type": "integer", "format": "resource-version", "minimum": 1}),
+            ),
+            (None, "integer", json!({"type": "integer", "minimum": 1})),
+        ] {
+            for array in [false, true] {
+                let registry = OpenApiRegistryImpl::new();
+                let mut spec = spec_with_response("/test", "get_test", None);
+                let mut param = ParamSpec::query("version")
+                    .required(true)
+                    .param_type(param_type)
+                    .array(array)
+                    .minimum(1.0);
+                if let Some(format) = format {
+                    param = param.format(format);
+                }
+                spec.params.push(param);
+                registry.register_operation(&spec);
+                let doc = registry.build_openapi(&test_info()).expect("build OpenAPI");
+                let json = serde_json::to_value(doc).expect("serialize OpenAPI");
+                let schema = &json["paths"]["/test"]["get"]["parameters"][0]["schema"];
+                let expected_schema = if array {
+                    json!({"type": "array", "items": expected})
+                } else {
+                    expected.clone()
+                };
+                assert_eq!(schema, &expected_schema, "format={format:?}, array={array}");
+            }
+        }
     }
 
     #[test]
@@ -685,11 +870,12 @@ mod tests {
                 content_type: "application/json",
                 description: "Success".to_owned(),
                 schema: None,
+                headers: vec![],
             }],
             handler_id: "get_test".to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: false,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -697,6 +883,113 @@ mod tests {
 
         registry.register_operation(&spec);
         assert_eq!(registry.operation_specs.len(), 1);
+    }
+
+    #[test]
+    fn response_headers_are_emitted_with_their_declared_types() {
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = spec_with_response("/submit", "submit", None);
+        spec.responses[0].headers = vec![
+            ResponseHeaderSpec::new(
+                "Location",
+                "Operation resource URI",
+                ResponseHeaderType::String,
+            ),
+            ResponseHeaderSpec::new(
+                "Retry-After",
+                "Retry delay in seconds",
+                ResponseHeaderType::Integer,
+            ),
+            ResponseHeaderSpec::new(
+                "Idempotency-Replayed",
+                "Whether this is a replay",
+                ResponseHeaderType::Boolean,
+            ),
+        ];
+        registry.register_operation(&spec);
+
+        let doc = registry.build_openapi(&test_info()).unwrap();
+        let json = serde_json::to_value(doc).unwrap();
+        let headers = &json["paths"]["/submit"]["get"]["responses"]["200"]["headers"];
+        assert_eq!(headers["Location"]["schema"]["type"], "string");
+        assert_eq!(headers["Location"]["description"], "Operation resource URI");
+        assert_eq!(headers["Retry-After"]["schema"]["type"], "integer");
+        assert_eq!(headers["Idempotency-Replayed"]["schema"]["type"], "boolean");
+    }
+
+    #[test]
+    fn response_content_types_with_the_same_status_are_combined() {
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = spec_with_response("/document", "document", None);
+        spec.responses[0].content_type = "text/plain";
+        spec.responses[0].description = "Plain document".to_owned();
+        spec.responses[0].headers = vec![ResponseHeaderSpec::new(
+            "X-Plain-Document",
+            "Whether plain text is available",
+            ResponseHeaderType::Boolean,
+        )];
+        spec.responses.push(
+            ResponseSpec::new(
+                http::StatusCode::OK.as_u16(),
+                "text/html",
+                "HTML document",
+                None,
+            )
+            .with_headers([ResponseHeaderSpec::new(
+                "X-HTML-Document",
+                "Whether HTML is available",
+                ResponseHeaderType::Boolean,
+            )]),
+        );
+        registry.register_operation(&spec);
+
+        let doc = registry.build_openapi(&test_info()).unwrap();
+        let json = serde_json::to_value(doc).unwrap();
+        let response = &json["paths"]["/document"]["get"]["responses"]["200"];
+        assert_eq!(response["description"], "HTML document");
+        assert_eq!(
+            response["content"]["text/plain"]["schema"]["format"],
+            "text/plain"
+        );
+        assert_eq!(
+            response["content"]["text/html"]["schema"]["format"],
+            "text/html"
+        );
+        assert_eq!(
+            response["headers"]["X-Plain-Document"]["schema"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            response["headers"]["X-HTML-Document"]["schema"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn bodyless_response_can_declare_headers_without_content() {
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = spec_with_response("/jobs", "jobs", None);
+        spec.responses[0].content_type = "";
+        spec.responses[0].schema = None;
+        spec.responses[0].headers = vec![ResponseHeaderSpec::without_description(
+            "Retry-After",
+            ResponseHeaderType::Integer,
+        )];
+        registry.register_operation(&spec);
+
+        let doc = registry.build_openapi(&test_info()).unwrap();
+        let json = serde_json::to_value(doc).unwrap();
+        let response = &json["paths"]["/jobs"]["get"]["responses"]["200"];
+        assert!(response.get("content").is_none());
+        assert_eq!(
+            response["headers"]["Retry-After"]["schema"]["type"],
+            "integer"
+        );
+        assert!(
+            response["headers"]["Retry-After"]
+                .get("description")
+                .is_none()
+        );
     }
 
     #[test]
@@ -736,25 +1029,19 @@ mod tests {
             summary: Some("Get user by ID".to_owned()),
             description: Some("Retrieves a user by their ID".to_owned()),
             tags: vec!["users".to_owned()],
-            params: vec![ParamSpec {
-                name: "id".to_owned(),
-                location: ParamLocation::Path,
-                required: true,
-                description: Some("User ID".to_owned()),
-                param_type: "string".to_owned(),
-                array: false,
-            }],
+            params: vec![ParamSpec::path("id").description("User ID")],
             request_body: None,
             responses: vec![ResponseSpec {
                 status: 200,
                 content_type: "application/json",
                 description: "User found".to_owned(),
                 schema: None,
+                headers: vec![],
             }],
             handler_id: "get_users_id".to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: false,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -810,11 +1097,12 @@ mod tests {
                 content_type: "application/json",
                 description: "Upload successful".to_owned(),
                 schema: None,
+                headers: vec![],
             }],
             handler_id: "post_upload".to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: false,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: Some(vec!["application/octet-stream"]),
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -889,11 +1177,12 @@ mod tests {
                 content_type: "application/json",
                 description: "OK".to_owned(),
                 schema: None,
+                headers: vec![],
             }],
             handler_id: "get_test".to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: false,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -927,6 +1216,59 @@ mod tests {
     }
 
     #[test]
+    fn platform_operations_require_the_internal_token_scheme() {
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = OperationSpec {
+            method: Method::POST,
+            path: "/tr/v1/entities".to_owned(),
+            operation_id: Some("register".to_owned()),
+            summary: None,
+            description: None,
+            tags: vec![],
+            params: vec![],
+            request_body: None,
+            responses: vec![ResponseSpec {
+                status: 202,
+                content_type: "application/json",
+                description: "Accepted".to_owned(),
+                schema: None,
+                headers: vec![],
+            }],
+            handler_id: "register".to_owned(),
+            auth: operation_builder::RouteAuth::Platform,
+            exposed: false,
+            throttling: None,
+            allowed_request_content_types: None,
+            vendor_extensions: VendorExtensions::default(),
+            license_requirement: None,
+        };
+        registry.register_operation(&spec);
+        spec.method = Method::GET;
+        spec.handler_id = "read".to_owned();
+        spec.operation_id = Some("read".to_owned());
+        spec.auth = operation_builder::RouteAuth::Authenticated;
+        registry.register_operation(&spec);
+
+        let json =
+            serde_json::to_value(registry.build_openapi(&OpenApiInfo::default()).unwrap()).unwrap();
+        let item = &json["paths"]["/tr/v1/entities"];
+        assert_eq!(
+            item["post"]["security"],
+            serde_json::json!([{ "internalToken": [] }]),
+            "platform"
+        );
+        assert_eq!(
+            item["get"]["security"],
+            serde_json::json!([{ "bearerAuth": [] }]),
+            "tenant-authenticated"
+        );
+        let scheme = &json["components"]["securitySchemes"]["internalToken"];
+        assert_eq!(scheme["type"], "apiKey");
+        assert_eq!(scheme["in"], "header");
+        assert_eq!(scheme["name"], "x-toolkit-internal-token");
+    }
+
+    #[test]
     fn test_public_operation_emits_visibility_extension() {
         let registry = OpenApiRegistryImpl::new();
         let public = OperationSpec {
@@ -943,11 +1285,12 @@ mod tests {
                 content_type: "application/json",
                 description: "OK".to_owned(),
                 schema: None,
+                headers: vec![],
             }],
             handler_id: "get_ping".to_owned(),
-            authenticated: false,
+            auth: operation_builder::RouteAuth::Anonymous,
             exposed: true,
-            rate_limit: None,
+            throttling: None,
             allowed_request_content_types: None,
             vendor_extensions: VendorExtensions::default(),
             license_requirement: None,
@@ -978,6 +1321,54 @@ mod tests {
         assert!(
             internal_op.get("x-toolkit-visibility").is_none(),
             "non-public operation must not carry the visibility extension"
+        );
+    }
+
+    #[test]
+    fn a_platform_operation_declared_exposed_is_not_exposed() {
+        let registry = OpenApiRegistryImpl::new();
+        let platform = OperationSpec {
+            method: Method::POST,
+            path: "/calc/v1/platform".to_owned(),
+            operation_id: Some("platform".to_owned()),
+            summary: None,
+            description: None,
+            tags: vec![],
+            params: vec![],
+            request_body: None,
+            responses: vec![ResponseSpec {
+                status: 200,
+                content_type: "application/json",
+                description: "OK".to_owned(),
+                schema: None,
+                headers: vec![],
+            }],
+            handler_id: "post_platform".to_owned(),
+            auth: operation_builder::RouteAuth::Platform,
+            exposed: true,
+            throttling: None,
+            allowed_request_content_types: None,
+            vendor_extensions: VendorExtensions::default(),
+            license_requirement: None,
+        };
+
+        registry.register_operation(&platform);
+        let doc = registry.build_openapi(&OpenApiInfo::default()).unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+        let op = &json["paths"]["/calc/v1/platform"]["post"];
+
+        assert!(
+            op.get("x-toolkit-visibility").is_none(),
+            "no host may publish a platform operation"
+        );
+        assert_eq!(op["security"], serde_json::json!([{ "internalToken": [] }]));
+        let stored = registry
+            .operation_specs
+            .get("POST:/calc/v1/platform")
+            .expect("registered");
+        assert!(
+            !stored.exposed,
+            "stored unexposed, so every host reads it so"
         );
     }
 
@@ -1110,6 +1501,42 @@ mod tests {
 
         assert_eq!(schema["$ref"], "#/components/schemas/GearDto");
         assert!(schema.get("type").is_none());
+    }
+
+    /// `OperationBuilder::multipart_json` declares the *item* schema under the
+    /// bare `multipart/mixed` media-type key: no `boundary=` parameter (that is
+    /// generated per response at runtime, so it is not a property of the
+    /// operation), and a `$ref` rather than the opaque string blob a
+    /// non-json-like media type would render as.
+    #[test]
+    fn multipart_mixed_response_emits_the_item_ref_under_a_bare_media_type() {
+        let registry = OpenApiRegistryImpl::new();
+        let mut spec = spec_with_response(
+            "/events",
+            "stream_events",
+            Some(ResponseSchema::Ref {
+                schema_name: "FrameDto".to_owned(),
+            }),
+        );
+        spec.responses[0].content_type = "multipart/mixed";
+        registry.register_operation(&spec);
+
+        let doc = serde_json::to_value(registry.build_openapi(&test_info()).unwrap()).unwrap();
+        let content = &doc["paths"]["/events"]["get"]["responses"]["200"]["content"];
+
+        assert_eq!(
+            content["multipart/mixed"]["schema"]["$ref"],
+            "#/components/schemas/FrameDto"
+        );
+        // The runtime boundary must not leak into the spec's media-type key.
+        assert_eq!(
+            content.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+            Some(vec![&"multipart/mixed".to_owned()])
+        );
+        // Not rendered as a string with a custom format — that is what a
+        // non-json-like media type would produce, and it would lose the item
+        // schema entirely.
+        assert!(content["multipart/mixed"]["schema"].get("format").is_none());
     }
 
     #[test]

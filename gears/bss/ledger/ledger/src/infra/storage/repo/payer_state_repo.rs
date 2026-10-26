@@ -1,5 +1,5 @@
 //! `PayerStateRepo` — the payer lifecycle row (`bss.ledger_payer_state`) plus the
-//! closure balance check (VHP-1852 Phase 2). Absence of a row means OPEN; closure
+//! closure balance check. Absence of a row means OPEN; closure
 //! upserts the row to `CLOSED` with the approver + the closed-with-open-balance
 //! marker. The outstanding-balance check reads the per-payer AR cache
 //! (`ledger_ar_payer_balance`); a non-zero grain means closing strands a balance,
@@ -9,7 +9,6 @@
 //! (SQL-level BOLA). The closure upsert is a single idempotent statement
 //! (`INSERT … ON CONFLICT DO UPDATE`), so it needs no explicit transaction.
 
-use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue::Set, ColumnTrait, Condition, EntityTrait};
 use toolkit_db::secure::{AccessScope, SecureEntityExt, SecureInsertExt, SecureOnConflict};
@@ -19,6 +18,7 @@ use uuid::Uuid;
 use crate::domain::error::DomainError;
 use crate::domain::status::PAYER_LIFECYCLE_CLOSED;
 use crate::infra::storage::entity::{ar_payer_balance, payer_state};
+use time::OffsetDateTime;
 
 /// SeaORM-backed payer-lifecycle repository.
 #[derive(Clone)]
@@ -83,7 +83,9 @@ impl PayerStateRepo {
                 Condition::all()
                     .add(ar_payer_balance::Column::TenantId.eq(tenant))
                     .add(ar_payer_balance::Column::PayerTenantId.eq(payer_tenant_id))
-                    .add(ar_payer_balance::Column::BalanceMinor.ne(0)),
+                    // Canonical decimal text: a zero balance is exactly `"0"`, so a
+                    // text inequality is an exact non-zero test (no numeric cast).
+                    .add(ar_payer_balance::Column::Balance.ne("0")),
             )
             .one(&conn)
             .await
@@ -109,7 +111,7 @@ impl PayerStateRepo {
             .db
             .conn()
             .map_err(|e| DomainError::Internal(format!("conn: {e}")))?;
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let am = payer_state::ActiveModel {
             tenant_id: Set(tenant),
             payer_tenant_id: Set(payer_tenant_id),
@@ -146,3 +148,7 @@ impl PayerStateRepo {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "payer_state_repo_balance_tests.rs"]
+mod balance_tests;

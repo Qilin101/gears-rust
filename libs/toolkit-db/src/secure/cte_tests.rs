@@ -53,6 +53,9 @@ mod node {
                 _ => None,
             }
         }
+        fn scope_columns() -> Vec<Column> {
+            vec![Column::TenantId, Column::Id]
+        }
     }
 }
 
@@ -95,6 +98,9 @@ mod item {
                 p if p == pep_properties::RESOURCE_ID => Some(Column::Id),
                 _ => None,
             }
+        }
+        fn scope_columns() -> Vec<Column> {
+            vec![Column::TenantId, Column::Id]
         }
     }
 }
@@ -954,5 +960,25 @@ fn cte_body_supports_aggregation_with_scope_intact() {
             1,
             "{backend:?} select_only() in the body dropped its scope: {sql}"
         );
+    }
+}
+
+#[test]
+fn scoped_row_locks_preserve_tenant_predicate_and_request_correct_postgres_lock() {
+    use crate::secure::SecureEntityExt;
+    use sea_orm::{EntityTrait, QueryTrait};
+    let tenant = uuid::Uuid::new_v4();
+    let scope = AccessScope::for_tenants(vec![tenant]);
+    for (shared, keyword) in [(true, "FOR SHARE"), (false, "FOR UPDATE")] {
+        let query = node::Entity::find().secure().scope_with(&scope);
+        let query = if shared {
+            query.lock_shared()
+        } else {
+            query.lock_exclusive()
+        };
+        let sql = query.inner.build(DbBackend::Postgres).to_string();
+        assert!(sql.contains(keyword), "{sql}");
+        assert!(sql.contains("tenant_id"), "{sql}");
+        assert!(sql.contains(&tenant.to_string()), "{sql}");
     }
 }

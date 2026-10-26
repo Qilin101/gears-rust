@@ -1,6 +1,6 @@
 //! `LedgerApprovalExecutor` — the concrete [`ApprovalExecutor`] that replays an
-//! approved [`ApprovalIntent`] against the real mutation surfaces (VHP-1852,
-//! Group E). Reverse goes through the posting engine (read-back the original →
+//! approved [`ApprovalIntent`] against the real mutation surfaces.
+//! Reverse goes through the posting engine (read-back the original →
 //! `build_reversal` → `post_reversal`); credit-grant and chargeback-loss go
 //! through the `LedgerClientV1` surfaces (which re-apply their own PEP gate +
 //! idempotency). Replay is idempotent: a re-approve short-circuits on the
@@ -19,6 +19,7 @@ use crate::domain::adjustment::manual::ManualAdjustmentRequest;
 use crate::domain::adjustment::refund::RefundRequest;
 use crate::domain::approval::intent::{ApprovalIntent, BackdatedPost};
 use crate::domain::error::DomainError;
+use crate::domain::instant::to_naive_date;
 use crate::domain::invoice::builder::PostedInvoice;
 use crate::domain::invoice::reversal::build_reversal;
 use crate::domain::payment::chargeback::DisputePhase;
@@ -30,10 +31,7 @@ use crate::infra::approval::service::ApprovalExecutor;
 use crate::infra::invoice_post::InvoicePoster;
 use crate::infra::period_close::PeriodCloseService;
 use crate::infra::storage::repo::PayerStateRepo;
-
-/// Default advisory currency scale passed on replayed commands; the ledger
-/// resolves the authoritative per-line scale from the provisioned currency config.
-const ADVISORY_SCALE: u8 = 2;
+use time::OffsetDateTime;
 
 /// Dispatches an approved intent to the real mutation surface.
 pub struct LedgerApprovalExecutor {
@@ -134,7 +132,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
                     .unwrap_or_else(|| original.period_id.clone());
                 let effective_on = i
                     .effective_at
-                    .unwrap_or_else(|| chrono::Utc::now().date_naive());
+                    .unwrap_or_else(|| to_naive_date(OffsetDateTime::now_utc()));
                 let reversal = build_reversal(
                     &original,
                     into_period,
@@ -143,7 +141,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
                     original.correlation_id,
                 )
                 .map_err(|e| DomainError::Internal(format!("build_reversal on approve: {e:?}")))?;
-                // Approved explicit reversal — announce `entry.reversed` (VHP-1837)
+                // Approved explicit reversal — announce `entry.reversed`
                 // with the intent's audit reason.
                 self.posting
                     .post_reversal(ctx, scope, reversal, Some(i.reason.clone()))
@@ -160,9 +158,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
                     tenant_id: i.tenant_id,
                     payer_tenant_id: i.payer_tenant_id,
                     credit_application_id: i.credit_application_id.clone(),
-                    currency: i.currency.clone(),
-                    scale: ADVISORY_SCALE,
-                    amount_minor: i.amount_minor,
+                    money: i.amount.clone(),
                     credit_grant_event_type: event_type,
                 });
                 self.client
@@ -183,9 +179,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
                     cycle: i.cycle,
                     phase: DisputePhase::Lost.as_str().to_owned(),
                     funds_at_open: i.funds_at_open.clone(),
-                    disputed_amount_minor: i.disputed_amount_minor,
-                    currency: i.currency.clone(),
-                    scale: ADVISORY_SCALE,
+                    disputed_amount: i.disputed_amount.clone(),
                     effective_at: None,
                 };
                 self.client
@@ -248,7 +242,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
                         segs.iter()
                             .map(|s| ChangeSegment {
                                 period_id: s.period_id.clone(),
-                                amount_minor: s.amount_minor,
+                                money: s.amount.clone(),
                             })
                             .collect()
                     }),
@@ -347,3 +341,7 @@ impl ApprovalExecutor for LedgerApprovalExecutor {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "executor_replay_tests.rs"]
+mod replay_tests;

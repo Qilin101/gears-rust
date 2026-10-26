@@ -12,13 +12,14 @@
 //! a period an in-flight entry is landing in — and it's distributed (SSI is
 //! DB-enforced across replicas), the same shape AM uses for its workers.
 
-use chrono::{DateTime, Duration, Utc};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 use toolkit_db::secure::{AccessScope, DbTx, SecureEntityExt};
 use uuid::Uuid;
 
 use crate::domain::status::PERIOD_STATUS_OPEN;
 use crate::infra::storage::entity::fiscal_period;
+use time::Duration;
+use time::OffsetDateTime;
 
 /// Warn band for clock skew between a post's `posted_at_utc` and the server
 /// wall clock (design §3.2 `FiscalPeriodGuard`): skew beyond ±15 min raises a
@@ -47,7 +48,7 @@ pub enum ClockSkewVerdict {
 /// symmetric (a future- or past-skewed clock is treated identically), so it is
 /// unit-tested without a clock.
 #[must_use]
-pub fn classify_clock_skew(posted_at_utc: DateTime<Utc>, now: DateTime<Utc>) -> ClockSkewVerdict {
+pub fn classify_clock_skew(posted_at_utc: OffsetDateTime, now: OffsetDateTime) -> ClockSkewVerdict {
     let skew = (now - posted_at_utc).abs();
     if skew > Duration::hours(CLOCK_SKEW_REJECT_HOURS) {
         ClockSkewVerdict::Reject
@@ -59,14 +60,14 @@ pub fn classify_clock_skew(posted_at_utc: DateTime<Utc>, now: DateTime<Utc>) -> 
 }
 
 /// Period-gate outcome error.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum PeriodError {
     /// The period is missing or not `OPEN` — posting is refused.
     #[error("fiscal period is closed or absent")]
     Closed,
     /// Underlying storage failure.
     #[error("fiscal period guard db error: {0}")]
-    Db(String),
+    Db(toolkit_db::DbError),
 }
 
 /// Guards posting against a closed/absent fiscal period.
@@ -105,7 +106,7 @@ impl FiscalPeriodGuard {
             .scope_with(&scope)
             .one(txn)
             .await
-            .map_err(|e| PeriodError::Db(format!("pin_open: {e}")))?;
+            .map_err(|e| PeriodError::Db(super::error_transport::scope_to_db(e)))?;
 
         match row {
             Some(p) if p.status == PERIOD_STATUS_OPEN => Ok(()),
@@ -116,13 +117,13 @@ impl FiscalPeriodGuard {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
 
     use super::{ClockSkewVerdict, classify_clock_skew};
+    use time::{Duration, OffsetDateTime};
 
     #[test]
     fn within_fifteen_minutes_is_ok() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         assert_eq!(classify_clock_skew(now, now), ClockSkewVerdict::Ok);
         assert_eq!(
             classify_clock_skew(now - Duration::minutes(14), now),
@@ -137,7 +138,7 @@ mod tests {
 
     #[test]
     fn beyond_fifteen_minutes_warns_either_direction() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         assert_eq!(
             classify_clock_skew(now - Duration::minutes(16), now),
             ClockSkewVerdict::Warn,
@@ -156,7 +157,7 @@ mod tests {
 
     #[test]
     fn beyond_twentyfour_hours_rejects_either_direction() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         assert_eq!(
             classify_clock_skew(now - Duration::hours(25), now),
             ClockSkewVerdict::Reject,

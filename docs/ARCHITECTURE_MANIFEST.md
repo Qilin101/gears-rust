@@ -106,9 +106,11 @@ Persistence follows the same separation-of-concerns model as APIs and security: 
 
 Constructor Fabric Gears does not ship ready-to-use services. It ships a set of well-integrated libraries that vendors compose into their own service binaries. Each gear is infrastructure-agnostic and deployment-agnostic, supporting three deployment shapes:
 
-- **Single-node** — all gears in one process. Suitable for edge devices, on-prem appliances, development, and testing.
-- **Multi-node** — gears distributed across processes or machines over REST API or gRPC, without container orchestration. Suitable for bare-metal on-prem or small-scale deployments.
-- **Kubernetes cluster** — gears as containerized services with full orchestration and cloud-native operations.
+- **Embedded** — all gears in one process. Suitable for edge devices, on-prem appliances, development, and testing.
+- **Self-Hosted** — gears distributed across processes or machines over REST API or gRPC, without container orchestration. Suitable for bare-metal on-prem or small-scale deployments. Its across-hosts form is the multi-node variant.
+- **K8s Native** — gears as containerized services with full orchestration and cloud-native operations.
+
+These are the three profiles named in [ADR-0001](arch/toolkit-oop/ADR/0001-cpt-cf-adr-deployment-profiles.md), and `embedded` / `self_hosted` / `kubernetes` is how a `product.gdl` spells them.
 
 Gears talk to each other through a Rust-native SDK that facades the communication interface (local vs. remote) and encapsulates internal logic. The platform provides DB-agnostic persistence (SeaORM-based) and infrastructure-agnostic cluster primitives (distributed cache, distributed locks, leader election, service discovery).
 
@@ -432,7 +434,7 @@ See more in: [arch/authorization/TENANT_MODEL.md](arch/authorization/TENANT_MODE
 Constructor Fabric Gears uses a PEP → PDP → `AccessScope` pipeline for authorization. Domain services act as the PEP: they receive `SecurityContext`, build an `AccessRequest`, and call `PolicyEnforcer`, which delegates to the AuthZ resolver client. The PDP returns a decision plus constraints, and those constraints are compiled into an `AccessScope` that the secure DB layer applies as scoped query conditions. In practice, this means gear business logic does not embed policy engines or hard-code role semantics; it consumes platform authorization results expressed as tenant, resource, owner, and type filters.
 
 - [x] `gears/system/authz-resolver/` provides a PDP client abstraction via `authz-resolver-sdk`.
-- [x] `PolicyEnforcer` wraps `AuthZResolverClient`; domain services call `policy_enforcer.access_scope_with(ctx, resource_type, action, resource_id, properties)`.
+- [x] `PolicyEnforcer` wraps `AuthZResolverApi`; domain services call `policy_enforcer.access_scope_with(ctx, resource_type, action, resource_id, properties)`.
 - [x] `AccessScope` carries four constraint dimensions: tenant, resource, owner, and type.
 - [x] `ScopableEntity` requires each DB entity to declare which column maps to each scope dimension.
 - [x] `pep_properties` defines `OWNER_TENANT_ID` and `RESOURCE_ID`, and these properties are used in current gears.
@@ -459,7 +461,7 @@ let scope = self
     .await?;
 ```
 
-> The `authz-resolver-sdk` crate defines the enforcement interface used by PEPs, including `AuthZResolverClient`, `PolicyEnforcer`, request/response models, and constraint compilation helpers. The PDP implementation is pluggable: Constructor Fabric Gears resolves it through `ClientHub` and plugin registration rather than bundling a single mandatory authorization engine in core.
+> The `authz-resolver-sdk` crate defines the enforcement interface used by PEPs, including `AuthZResolverApi`, `PolicyEnforcer`, request/response models, and constraint compilation helpers. The PDP implementation is pluggable: Constructor Fabric Gears resolves it through `ClientHub` and plugin registration rather than bundling a single mandatory authorization engine in core.
 
 See more details in: [arch/authorization/DESIGN.md](arch/authorization/DESIGN.md)
 

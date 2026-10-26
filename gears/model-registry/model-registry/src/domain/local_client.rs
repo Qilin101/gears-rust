@@ -408,18 +408,19 @@ mod tests {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Mock AuthZResolverClient — permissive
+    // Mock AuthZResolverApi — permissive
     // ═════════════════════════════════════════════════════════════════════════
 
     #[domain_model]
     struct MockPermissiveAuthZ;
 
     #[async_trait]
-    impl authz_resolver_sdk::AuthZResolverClient for MockPermissiveAuthZ {
+    impl authz_resolver_sdk::AuthZResolverApi for MockPermissiveAuthZ {
         async fn evaluate(
             &self,
+            _ctx: toolkit_security::PlatformSecurityContext,
             request: authz_resolver_sdk::EvaluationRequest,
-        ) -> Result<authz_resolver_sdk::EvaluationResponse, authz_resolver_sdk::AuthZResolverError>
+        ) -> Result<authz_resolver_sdk::EvaluationResponse, toolkit_canonical_errors::CanonicalError>
         {
             // Extract the caller's tenant ID from subject properties.
             let tenant_id = request

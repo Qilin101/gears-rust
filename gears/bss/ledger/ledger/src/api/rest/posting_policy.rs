@@ -1,4 +1,4 @@
-//! Axum handlers + router for the tenant invoice-posting policy (VHP-1853).
+//! Axum handlers + router for the tenant invoice-posting policy.
 //! `POST /bss-ledger/v1/posting-policy` appends an effective-dated version (the
 //! missing-mapping mode + the AR-aging bucket thresholds); `GET …` reads the
 //! caller tenant's effective policy. Tenant-scoped to the caller's own tenant
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::extract::{Extension, Query};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, http::StatusCode};
-use chrono::{DateTime, Utc};
+
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::api::{OpenApiRegistry, operation_builder::OperationBuilder};
 use toolkit_security::SecurityContext;
@@ -22,8 +22,10 @@ use crate::api::rest::auth_context::require_authenticated;
 use crate::api::rest::canonical_json::CanonicalJson;
 use crate::api::rest::error::authz_error_to_canonical;
 use crate::domain::error::DomainError;
+use crate::domain::instant::rfc3339;
 use crate::domain::invoice::policy::{AgingThresholds, MissingMappingMode, PostingPolicy};
 use crate::infra::storage::repo::PostingPolicyRepo;
+use time::OffsetDateTime;
 
 /// `OpenAPI` tag applied to the posting-policy operations.
 const TAG: &str = "BSS Ledger Posting Policy";
@@ -36,7 +38,7 @@ pub struct ApiState {
     pub posting_policy: PostingPolicyRepo,
 }
 
-/// A new posting-policy version to write (VHP-1853). `effective_from` defaults to
+/// A new posting-policy version to write. `effective_from` defaults to
 /// now when omitted. An unknown `missing_mapping_mode`, or empty / non-positive /
 /// non-monotone `ar_aging_thresholds`, is rejected (400), never coerced.
 #[derive(Debug, Clone)]
@@ -49,7 +51,8 @@ pub struct SetPostingPolicyRequest {
     /// (e.g. `[30, 60, 90]` → `current / 1-30 / 31-60 / 61-90 / 90+`).
     pub ar_aging_thresholds: Vec<i64>,
     /// When this version takes effect; defaults to now.
-    pub effective_from: Option<DateTime<Utc>>,
+    #[serde(default, with = "rfc3339::option")]
+    pub effective_from: Option<OffsetDateTime>,
 }
 
 /// The written posting-policy version (the minted `version` + the values it
@@ -60,7 +63,8 @@ pub struct PostingPolicyResponse {
     /// The minted version (`max + 1`, `0` for the first).
     pub version: i64,
     /// The instant this version takes effect.
-    pub effective_from: DateTime<Utc>,
+    #[serde(with = "rfc3339")]
+    pub effective_from: OffsetDateTime,
     /// `SUSPENSE` | `HARD_BLOCK`.
     pub missing_mapping_mode: String,
     /// The AR-aging bucket upper-bounds.
@@ -96,7 +100,7 @@ pub fn router(state: Arc<ApiState>, openapi: &dyn OpenApiRegistry) -> Router {
         .description(
             "Writes a new effective-dated invoice-posting policy version (the \
              missing-mapping mode + the AR-aging bucket thresholds) for the \
-             caller's tenant (VHP-1853). Append-only: a new version supersedes; \
+             caller's tenant. Append-only: a new version supersedes; \
              the orchestrator / aging read pick the latest effective_from (highest \
              version on a tie). An unknown mode or empty / non-positive / \
              non-monotone thresholds are rejected (400), never coerced. Requires \
@@ -183,7 +187,7 @@ async fn set_policy(
         missing_mapping_mode,
         aging_thresholds,
     };
-    let effective_from = body.effective_from.unwrap_or_else(Utc::now);
+    let effective_from = body.effective_from.unwrap_or_else(OffsetDateTime::now_utc);
     let version = state
         .posting_policy
         .write_version(&scope, tenant_id, &policy, effective_from)
@@ -228,7 +232,7 @@ async fn get_policy(
     .map_err(authz_error_to_canonical)?;
     let effective = state
         .posting_policy
-        .read_effective_policy(&scope, tenant_id, Utc::now())
+        .read_effective_policy(&scope, tenant_id, OffsetDateTime::now_utc())
         .await
         .map_err(|e| {
             CanonicalError::from(DomainError::Internal(format!("read posting policy: {e}")))

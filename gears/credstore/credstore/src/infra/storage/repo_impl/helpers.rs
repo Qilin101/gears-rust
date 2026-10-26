@@ -18,6 +18,7 @@ pub type CredstoreDbProvider = DBProvider<DomainError>;
 /// `SeaORM` repository adapter for
 /// [`SecretRepo`](crate::domain::secret::repo::SecretRepo).
 pub struct SecretRepoImpl {
+    /// Database provider used to open connections and transactions for secret queries.
     pub(crate) db: Arc<CredstoreDbProvider>,
 }
 
@@ -88,6 +89,13 @@ pub(super) fn map_scope_err(err: ScopeError) -> DomainError {
         ScopeError::TenantNotInScope { .. } => DomainError::AccessDenied { cause: None },
         ScopeError::Denied(msg) => DomainError::Internal {
             diagnostic: format!("unexpected access denied in credstore repo: {msg}"),
+            cause: None,
+        },
+        // `ScopeError` is `#[non_exhaustive]`: variants this gear has no
+        // specific answer for (today the graph-query refusals, which it can
+        // never trigger) map to an internal error, like `Invalid`.
+        other => DomainError::Internal {
+            diagnostic: format!("scope invalid: {other}"),
             cause: None,
         },
     }

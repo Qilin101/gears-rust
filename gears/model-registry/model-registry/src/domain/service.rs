@@ -812,9 +812,7 @@ mod tests {
 
     use async_trait::async_trait;
     use authz_resolver_sdk::pep::PolicyEnforcer;
-    use authz_resolver_sdk::{
-        AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
-    };
+    use authz_resolver_sdk::{AuthZResolverApi, EvaluationRequest, EvaluationResponse};
     use model_registry_sdk::models::{
         ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, DisabledMediaCapability,
         DisabledReasoningCapability, DisabledWebSearchCapability, MediaCapability,
@@ -827,11 +825,12 @@ mod tests {
         GetTenantsOptions, IsAncestorOptions, TenantId, TenantRef, TenantResolverClient,
         TenantResolverError, TenantStatus,
     };
+    use toolkit_canonical_errors::CanonicalError;
     use toolkit_db::migration_runner::run_migrations_for_testing;
     use toolkit_db::secure::DBRunner;
     use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
     use toolkit_odata::ODataQuery;
-    use toolkit_security::{AccessScope, SecurityContext};
+    use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext};
     use uuid::Uuid;
 
     use super::*;
@@ -841,18 +840,19 @@ mod tests {
     use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Mock AuthZResolverClient — always returns permissive responses
+    // Mock AuthZResolverApi — always returns permissive responses
     // ═════════════════════════════════════════════════════════════════════════
 
     #[domain_model]
     struct MockAuthZ;
 
     #[async_trait]
-    impl AuthZResolverClient for MockAuthZ {
+    impl AuthZResolverApi for MockAuthZ {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             // Extract the caller's tenant ID from the subject properties (set by
             // PolicyEnforcer). Default to a nil UUID if somehow absent.
             let tenant_id = request
@@ -894,11 +894,12 @@ mod tests {
     struct MockAuthZTenants(Vec<Uuid>);
 
     #[async_trait]
-    impl AuthZResolverClient for MockAuthZTenants {
+    impl AuthZResolverApi for MockAuthZTenants {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             _request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             Ok(EvaluationResponse {
                 decision: true,
                 context: authz_resolver_sdk::EvaluationResponseContext {
@@ -927,11 +928,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl AuthZResolverClient for MockAuthZRowScoped {
+    impl AuthZResolverApi for MockAuthZRowScoped {
         async fn evaluate(
             &self,
+            _ctx: PlatformSecurityContext,
             _request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, AuthZResolverError> {
+        ) -> Result<EvaluationResponse, CanonicalError> {
             Ok(EvaluationResponse {
                 decision: true,
                 context: authz_resolver_sdk::EvaluationResponseContext {
@@ -1491,11 +1493,11 @@ mod tests {
         }
     }
 
-    /// Build a `Service` whose PDP is an arbitrary `AuthZResolverClient`, for
+    /// Build a `Service` whose PDP is an arbitrary `AuthZResolverApi`, for
     /// tests that need a scope wider than the caller's own tenant.
     fn build_service_with_authz<
         R: TenantResolverClient + Send + Sync + 'static,
-        A: AuthZResolverClient + Send + Sync + 'static,
+        A: AuthZResolverApi + Send + Sync + 'static,
     >(
         db: DBProvider<DbError>,
         tenant_resolver: R,

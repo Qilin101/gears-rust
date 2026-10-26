@@ -208,9 +208,13 @@ pub(crate) mod usage_type {
     /// `UsageType` action vocabulary. Renaming any of these is a contract
     /// change against the PDP policy bundle.
     pub mod actions {
+        /// Create a usage type.
         pub const CREATE: &str = "create";
+        /// Read a single usage type.
         pub const GET: &str = "get";
+        /// List usage types.
         pub const LIST: &str = "list";
+        /// Delete a usage type.
         pub const DELETE: &str = "delete";
     }
 }
@@ -256,9 +260,13 @@ pub(crate) mod usage_record {
     /// `UsageRecord` action vocabulary. Renaming any of these is a contract
     /// change against the PDP policy bundle.
     pub mod actions {
+        /// Ingest a usage record.
         pub const CREATE: &str = "create";
+        /// Deactivate a usage record.
         pub const DEACTIVATE: &str = "deactivate";
+        /// Read a single usage record.
         pub const GET: &str = "get";
+        /// List usage records.
         pub const LIST: &str = "list";
     }
 }
@@ -591,9 +599,10 @@ fn evaluate_filter(filter: &ScopeFilter, key: &AttributionTupleKey) -> FilterOut
                 .iter()
                 .any(|v| value_matches(value, field.kind, v))
         }
-        ScopeFilter::InGroup(_)
-        | ScopeFilter::InGroupSubtree(_)
-        | ScopeFilter::InTenantSubtree(_) => {
+        // Tree predicates, and any variant added later: a predicate this build
+        // cannot evaluate is a restriction it cannot honour, so it must reject
+        // rather than skip.
+        _ => {
             tracing::warn!(
                 target: "authz",
                 property = %filter.property(),
@@ -896,9 +905,9 @@ fn is_owner_tenant_filter(filter: &ScopeFilter) -> bool {
     match filter {
         ScopeFilter::Eq(eq) => eq.property() == pep_properties::OWNER_TENANT_ID,
         ScopeFilter::In(in_filter) => in_filter.property() == pep_properties::OWNER_TENANT_ID,
-        ScopeFilter::InGroup(_)
-        | ScopeFilter::InGroupSubtree(_)
-        | ScopeFilter::InTenantSubtree(_) => false,
+        // Only a flat predicate on `owner_tenant_id` counts as tenant
+        // narrowing; a tree predicate, or one from a newer build, does not.
+        _ => false,
     }
 }
 
@@ -926,9 +935,10 @@ fn scope_filter_to_expr(filter: &ScopeFilter) -> Result<ast::Expr, DomainError> 
                 values,
             ))
         }
-        ScopeFilter::InGroup(_)
-        | ScopeFilter::InGroupSubtree(_)
-        | ScopeFilter::InTenantSubtree(_) => {
+        // Tree predicates, and any variant added later: the projection cannot
+        // express the restriction, so it denies instead of emitting a filter
+        // that leaves the restriction out.
+        _ => {
             tracing::warn!(
                 target: "authz",
                 property = %filter.property(),

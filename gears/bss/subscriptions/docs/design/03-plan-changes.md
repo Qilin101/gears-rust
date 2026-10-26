@@ -1,3 +1,6 @@
+Created:  2026-08-24 by Virtuozzo International GmbH
+Updated:  2026-08-24 by Virtuozzo International GmbH
+
 <!-- CONFLUENCE_TITLE: [BSS]: Subscriptions — Plan & Quantity Changes (Design) -->
 <!-- Related: ../PRD.md, ../DESIGN.md, ../SEAMS.md | Upstream: Pricing (plan-change classification), Contracts (ramps), Registry (overlap key) | Downstream: Rating (proration math + usage slicing), Billing (proration artifacts) | Owners: BSS Subscriptions team -->
 
@@ -212,7 +215,7 @@ charge-coverage reconciliation is the backstop.
 
 ### 3.7 Database Schemas and Tables
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-storage-plan-change-chg`
+- [ ] `p2` - **ID**: `cpt-cf-bss-subscriptions-datastore-plan-change-chg`
 
 No new owned store beyond the Foundation's `scheduled_intent` (ramps + deferred changes) and the
 slice-02 interval tables — the committed quantity history lives in slice 02's `quantity_interval`

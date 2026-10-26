@@ -106,41 +106,46 @@ gears:
         description: "CF/Gears Server API Documentation"
       defaults:
         body_limit_bytes: 64000000
-        rate_limit:
-          rps: 1000
-          burst: 200
-          in_flight: 64
 
       # Authentication Configuration
       auth_disabled: false
       require_auth_by_default: true
 
+      # Throttling zones referenced by the mini-chat create_chat route
+      # (ThrottlingSpec in gears/mini-chat/.../api/rest/routes/chats.rs).
+      # These must be defined or gateway startup fails validation.
+      rate_limit_zones:
+        rl_mini_chat_chat:
+          rate_limit: 10/s
+          burst_limit: 10
+          response_status_code: 429
+          response_retry_after: auto
+          key:
+            type: ip
+          max_keys: 10000
+      in_flight_limit_zones:
+        ifl_mini_chat_chat:
+          in_flight_limit: 100
+          backlog_limit: 0
+          backlog_timeout: 0s
+          response_status_code: 429
+          key:
+            type: ip
+          max_keys: 10000
+
   # --- Tenant Resolver example (gateway + plugins) ---
   types-registry:
+    database:
+      server: "sqlite_users"
+      file: "types_registry.db"
     config:
-      # The AM envelope type schemas (`gts.cf.core.am.tenant_type.v1~`
-      # and `gts.cf.core.am.tenant_metadata.v1~`) are auto-seeded at
-      # link time via `inventory::submit!` declarations in the AM SDK
-      # (see `account-management-sdk/src/gts_envelopes.rs`). The only
-      # per-deployment seed left is the concrete platform-root tenant
-      # type below, because its identity is operator-controlled.
+      # AM registers the platform-root tenant type through the process-local
+      # Types Registry client during startup. This customer type remains
+      # deployment-owned E2E data used by the AM suite for children under the
+      # platform root. It allows nesting under either the platform root or
+      # another customer so the suite can build multi-level hierarchies for
+      # metadata-inheritance tests.
       entities:
-        - $id: "gts://gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
-          # JSON Schema dialect (NOT the parent type — derivation is encoded
-          # by the `~`-chain in `$id`). gts 0.10.0 trait validation compiles
-          # `x-gts-traits` under this dialect, so it must be a real meta-schema;
-          # the base envelope is authored in draft-07.
-          $schema: "http://json-schema.org/draft-07/schema#"
-          description: "Platform-root tenant type (no parents)."
-          type: "object"
-          x-gts-traits:
-            allowed_parent_types: []
-            idp_provisioning: false
-        # Customer tenant type used by the AM E2E suite for child
-        # tenants under the platform root. Allows nesting under either
-        # the platform root or another customer so the suite can build
-        # multi-level hierarchies (parent + child + grandchild for the
-        # metadata-inheritance walk-up test).
         - $id: "gts://gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"
           # JSON Schema dialect (NOT the parent type — derivation is encoded
           # by the `~`-chain in `$id`). gts 0.10.0 trait validation compiles
@@ -149,11 +154,22 @@ gears:
           $schema: "http://json-schema.org/draft-07/schema#"
           description: "Customer tenant under the platform root (E2E)."
           type: "object"
+          allOf:
+            - $ref: "gts://gts.cf.core.am.tenant_type.v1~"
           x-gts-traits:
             allowed_parent_types:
               - "gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
               - "gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"
             idp_provisioning: false
+      # Types-registry suite settings, kept here rather than in its manifest so
+      # the shared `make e2e-local` server has them too. Force lets TR-REG-903
+      # waive a compatibility failure; the suite's `force-disabled` profile
+      # turns it off for TR-REG-902. Vendor `acme` is open only in the suite's
+      # own namespace (TR-REG-904); every other region stays closed.
+      allow_compatibility_force: true
+      registration_policy:
+        "gts.acme.e2e.*":
+          allowed_vendors: [acme]
 
   static-tr-plugin:
     config:
@@ -195,6 +211,16 @@ gears:
   tenant-resolver:
     config:
       vendor: "constructorfabric"
+
+  settings-service:
+    database:
+      server: "sqlite_users"
+      file: "settings-service.db"
+    # The empty section is deliberate and required. The gear reads its
+    # configuration fail-closed, so an absent `config:` key aborts startup
+    # rather than defaulting: bootstrap values are deployment-owned and are
+    # never themselves managed settings, so there is nothing to fall back to.
+    config: {}
 
   credstore:
     database:
@@ -339,6 +365,21 @@ gears:
       vendor: "constructorfabric"
       priority: 100
 
+  license-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  # Requires --features static-license.
+  static-license-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      # Deny by default: no rule, no grant. Rules are left empty because no gear
+      # gates on a licence yet -- a rule must name registered Subject/Resource
+      # contract types, and the resolver rejects a check against an unregistered
+      # one. See the plugin README for a worked rule set.
+      grants: []
+
   mini-chat:
     # Gear-specific database configuration
     database:
@@ -368,6 +409,9 @@ gears:
       server: "sqlite_users"
       file: "account_management.db"
     config:
+      root_tenant_type:
+        gts_id: "gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
+        idp_provisioning: false
       bootstrap:
         # Matches static-tr-plugin's `e2e-root` so AM's tenants table
         # ends up holding the same root id the platform middleware
@@ -375,7 +419,6 @@ gears:
         # under it without a separate seeding step.
         root_id: "00000000-df51-5b42-9538-d2b56b7ee953"
         root_name: "e2e-root"
-        root_tenant_type: "gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
         idp_wait_timeout: "5m"
         idp_retry_backoff_initial: "2s"
         idp_retry_backoff_max: "30s"
@@ -433,36 +476,51 @@ gears:
   #
   bss-ledger:
     # Gear-specific database (SQLite for E2E, like the other user gears; the
-    # gear ships dual PG/SQLite migrations). No config block needed — the
-    # defaults (events_enabled=false, seller_tenant_types=partner+platform)
-    # are correct for E2E. `fx.provider_vendor` also defaults to "cf.bss", the
-    # same default the core `bss-rate-provider` gear advertises as its `vendor`,
-    # so the commented FX example above lines up without further edits.
+    # gear ships dual PG/SQLite migrations). The defaults
+    # (events_enabled=false) are correct for E2E; the seller types are not (see
+    # below), and the recon lifecycle knob is overridden too.
+    # `fx.provider_vendor` also defaults to "cf.bss", the same default the core
+    # `bss-rate-provider` gear advertises as its `vendor`, so the commented FX
+    # example above lines up without further edits.
     database:
       server: "sqlite_users"
       file: "bss_ledger.db"
+    config:
+      # The ledger-owner tenant types. The defaults name other vendors' partner and platform
+      # types; the E2E AM root (`account-management` `root_tenant_type`) is the platform type
+      # below, and the suite provisions and posts as that root.
+      seller_tenant_types:
+        - "gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
+      recon:
+        # E2E binds `static-tr-plugin`, which knows only its fixed tenants, so
+        # tenants created at runtime through AM are absent from the resolver's
+        # answer. Keep reconciling them rather than reading the omission as
+        # "hard-deleted" (see bss_ledger::config::UnregisteredTenants).
+        unregistered_tenants: reconcile
+
+  bss-products:
+    # Linked by the bss-pricing feature: pricing reserves SKU references in
+    # products in-process. Config defaults suffice; the gear needs its own
+    # database for the SKU registry, approvals and the outbox.
+    database:
+      server: "sqlite_users"
+      file: "bss_products.db"
 
   bss-pricing:
-    # Gear-specific database (SQLite for E2E, like the other user gears; the
-    # gear ships dual PG/SQLite migrations). No config block needed — the
-    # defaults are correct for E2E, including the in-repository path of the
-    # joint conformance-fixture registry. That registry's nine rows all carry
-    # `oracle = true` and `publish = true`, so the gate is OPEN for every model
-    # kind here — pricing's validator has earned the corpus's `publish` half.
-    # (This comment said the opposite until 2026-08-03; it had been stale since
-    # the registry was regenerated.) Since Slice 5 the publish endpoint exists
-    # and the open gate is load-bearing here: the e2e walk's pre-check passes
-    # rather than refusing FIXTURE_MISSING per model kind.
-    #
-    # The publish still cannot COMPLETE in this deployment, and the reason is a
-    # different one: there is no CatalogVersion registry gear in this
-    # repository, so the module boots with UnconfiguredCatalogVersionRegistryV1
-    # and the commit's version request fails closed (503). There is deliberately
-    # no config key that would supply a registry — a locally invented version
-    # would make this gear a second incrementer.
+    # The PriceBook skeleton reserves /bss-pricing/v1 with no operations.
+    # Runtime migrations retain the shared coordination table; config defaults
+    # suffice until the pricing model is rebuilt.
     database:
       server: "sqlite_users"
       file: "bss_pricing.db"
+
+  bss-approvals:
+    # The approvals inbox: one list, count, card and vote over the approval units
+    # of the gears named in `sources`, each read and voted on through that gear's
+    # own door as the caller. No database: the units stay in their gears. Without
+    # a `config` object the gear does not serve.
+    config:
+      sources: ["pricing", "products"]
 
   simple-user-settings:
     # Gear-specific database configuration
@@ -470,6 +528,13 @@ gears:
       server: "sqlite_users"
       file: "settings.db"
     config: {}
+
+  github-mirror:
+    database:
+      server: "sqlite_users"
+      file: "github_mirror.db"
+    config:
+      api_base_url: "https://api.github.com"
 
   file-parser:
     config:
@@ -490,12 +555,15 @@ gears:
       # Value is a 32-byte base64url-encoded seed (43 chars without padding).
       # SHARED with the sidecar via FS_SIDECAR_PUBLIC_KEY (lifecycle conftest).
       signing_key_seed: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-      # Shared-server e2e run — no non-deterministic background activity.
-      enable_background_sweep: false
+      # dev only
+      finalize_internal_secret: "dev-file-storage-internal-secret"
 
   oagw:
     config:
       proxy_timeout_secs: 2
+      # Below the api-gateway body_limit_bytes (64 MB) so OAGW's own 413 is
+      # reachable (scenario 8.1); the gateway limit is tested separately.
+      max_body_size_bytes: 1048576
       allow_http_upstream: true # Only for testing - do not enable in production without proper security controls
       ssrf_policy:
         enabled: false # Disabled for e2e tests (mock upstreams use 127.0.0.1)
@@ -542,10 +610,13 @@ opentelemetry:
     # HTTP-specific options
     http:
       inject_request_id_header: "x-request-id"
-      # WARNING: "authorization" sends bearer tokens to the trace collector — dev/test only
-      record_headers: [ "user-agent", "x-forwarded-for", "authorization" ]
+      # Credential-bearing headers ("authorization", "cookie", …) must never
+      # be listed here: whatever is recorded reaches the trace collector.
+      record_headers: [ "user-agent", "x-forwarded-for" ]
 
-    # Log correlation (future feature)
+    # Add top-level trace_id / span_id to JSON log records so a backend can
+    # link a log line to its span. On by default (it costs a context lookup
+    # per event); set to false to opt out.
     logs_correlation:
       inject_trace_ids_into_logs: true
 

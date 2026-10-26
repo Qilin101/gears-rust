@@ -6,7 +6,7 @@
 //! `cargo test -p cf-gears-bss-ledger --test postgres_payment_concurrency -- --ignored`.
 //!
 //! Covers: (1) N concurrent `allocate`s of the SAME payment never push
-//! `allocated_minor` past `settled_minor` — the per-payment cap CHECK is the
+//! `allocated` past `settled` — the per-payment cap CHECK is the
 //! authority even though the shared unallocated pool is positive (every loser
 //! is `MoneyOutCapExceeded`); (2) an `allocate` and a concurrent fresh
 //! invoice-post for the SAME payer serialize without deadlock and BOTH effects
@@ -33,8 +33,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use bss_ledger::domain::error::DomainError;
+use bss_ledger::domain::instant::to_naive_date;
 use bss_ledger::domain::model::{AccountRow, CurrencyScaleRow, NewEntry, NewLine};
-use bss_ledger::domain::money::DEFAULT_PLAUSIBLE_MAX_MAJOR;
 use bss_ledger::domain::payment::settlement::SettlementInput;
 use bss_ledger::domain::payment::settlement_return::SettlementReturnInput;
 use bss_ledger::domain::ports::metrics::NoopLedgerMetrics;
@@ -47,12 +47,16 @@ use bss_ledger::infra::payment::settlement_return::SettlementReturnService;
 use bss_ledger::infra::posting::service::PostingService;
 use bss_ledger::infra::storage::migrations::Migrator;
 use bss_ledger::infra::storage::repo::{PaymentRepo, ReferenceRepo};
-use bss_ledger_sdk::{AccountClass, MappingStatus, Side, SourceDocType};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use bss_ledger_sdk::{
+    AccountClass, CurrencySpec, MappingStatus, PostedMoney, Side, SourceDocType, canonical_decimal,
+};
+use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, Database, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_security::SecurityContext;
@@ -60,6 +64,21 @@ use uuid::Uuid;
 
 fn pg(sql: impl Into<String>) -> Statement {
     Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.into())
+}
+
+/// The USD@2 currency spec every fixture here posts in.
+fn usd_spec() -> CurrencySpec {
+    CurrencySpec::try_new("USD".to_owned(), 2).unwrap()
+}
+
+/// A USD scale-2 posting from a cent count (`1234` ⇒ `12.34`).
+fn usd(cents: i64) -> PostedMoney {
+    PostedMoney::try_new(Decimal::new(cents, 2), usd_spec()).unwrap()
+}
+
+/// The canonical stored text of a USD cent count (`970` ⇒ `"9.7"`).
+fn text(cents: i64) -> String {
+    canonical_decimal(Decimal::new(cents, 2))
 }
 
 /// Boot a container, migrate on a raw connection, and return a
@@ -112,7 +131,7 @@ fn account(tenant: Uuid, id: Uuid, class: AccountClass, normal: Side) -> Account
 /// UNALLOCATED credit, PSP_FEE_EXPENSE debit, AR debit). Mirrors
 /// `postgres_payments::setup_seller`.
 async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<DbError>) -> Seller {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let s = Seller {
         tenant: Uuid::now_v7(),
         payer: Uuid::now_v7(),
@@ -120,7 +139,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         unallocated: Uuid::now_v7(),
         psp_fee: Uuid::now_v7(),
         ar: Uuid::now_v7(),
-        period_id: format!("{:04}{:02}", now.year(), now.month()),
+        period_id: bss_ledger::domain::instant::yyyymm(now),
     };
 
     let reference = ReferenceRepo::new(provider.clone());
@@ -128,8 +147,7 @@ async fn setup_seller(raw: &sea_orm::DatabaseConnection, provider: &DBProvider<D
         .upsert_currency_scale(CurrencyScaleRow {
             tenant_id: s.tenant,
             currency: "USD".to_owned(),
-            minor_units: 2,
-            plausible_max_major: DEFAULT_PLAUSIBLE_MAX_MAJOR,
+            currency_scale: 2,
             source: "iso".to_owned(),
         })
         .await
@@ -192,9 +210,9 @@ fn settlement_input(s: &Seller, payment_id: &str, gross: i64, fee: i64) -> Settl
         tenant_id: s.tenant,
         payer_tenant_id: s.payer,
         payment_id: payment_id.to_owned(),
-        gross_minor: gross,
-        fee_minor: fee,
-        currency: "USD".to_owned(),
+        gross: usd(gross),
+
+        fee: usd(fee),
         effective_at: None,
     }
 }
@@ -203,15 +221,15 @@ async fn ar_invoice_balance(
     raw: &sea_orm::DatabaseConnection,
     s: &Seller,
     invoice_id: &str,
-) -> Option<i64> {
+) -> Option<String> {
     raw.query_one_raw(pg(format!(
-        "SELECT balance_minor FROM bss.ledger_ar_invoice_balance \
+        "SELECT balance FROM bss.ledger_ar_invoice_balance \
          WHERE tenant_id='{}' AND invoice_id='{}'",
         s.tenant, invoice_id
     )))
     .await
     .unwrap()
-    .map(|r| r.try_get_by_index::<i64>(0).unwrap())
+    .map(|r| r.try_get_by_index::<String>(0).unwrap())
 }
 
 async fn count_allocations(raw: &sea_orm::DatabaseConnection, s: &Seller, payment_id: &str) -> i64 {
@@ -258,7 +276,7 @@ async fn seed_ar_invoice(
     s: &Seller,
     invoice_id: &str,
     amount: i64,
-    posted_at: DateTime<Utc>,
+    posted_at: OffsetDateTime,
 ) {
     let posting = PostingService::new(provider.clone(), Arc::new(LedgerEventPublisher::noop()));
     let ctx = SecurityContext::anonymous();
@@ -275,7 +293,7 @@ async fn seed_ar_invoice(
         reverses_entry_id: None,
         reverses_period_id: None,
         posted_at_utc: posted_at,
-        effective_at: posted_at.date_naive(),
+        effective_at: to_naive_date(posted_at),
         origin: "SYSTEM".to_owned(),
         posted_by_actor_id: s.tenant,
         correlation_id: Uuid::now_v7(),
@@ -299,15 +317,12 @@ fn ar_line(s: &Seller, invoice_id: &str, amount: i64) -> NewLine {
         account_class: AccountClass::Ar,
         gl_code: None,
         side: Side::Debit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd(amount),
         invoice_id: Some(invoice_id.to_owned()),
         due_date: Some(NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()),
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -332,15 +347,12 @@ fn psp_credit_line(s: &Seller, amount: i64) -> NewLine {
         account_class: AccountClass::PspFeeExpense,
         gl_code: None,
         side: Side::Credit,
-        amount_minor: amount,
-        currency: "USD".to_owned(),
-        currency_scale: 2,
+        money: usd(amount),
         invoice_id: None,
         due_date: None,
         revenue_stream: None,
         mapping_status: MappingStatus::Resolved,
-        functional_amount_minor: None,
-        functional_currency: None,
+        functional_money: None,
         tax_jurisdiction: None,
         tax_filing_period: None,
         tax_rate_ref: None,
@@ -360,7 +372,7 @@ fn psp_credit_line(s: &Seller, amount: i64) -> NewLine {
 /// 100 / fee 3 (settled=100, fee=3); two returns of 50 race, barrier-started for
 /// maximum overlap. Pre-fix both read the SAME `(settled 100, fee 3)` snapshot
 /// out-of-txn, both size `fee_share = 3×50/100 = 1`, and the second to commit
-/// trips the `fee_minor <= settled_minor` CHECK (settled → 0 while fee still 1) —
+/// trips the `fee <= settled` CHECK (settled → 0 while fee still 1) —
 /// a FALSE `SettlementReturnOverAllocated`. With the recompute-on-conflict loop
 /// the loser re-reads `(settled 50, fee 2)`, re-sizes `fee_share = 2`, and
 /// commits: the settlement drains fully (settled 0, fee 0), the fee reversed
@@ -404,8 +416,7 @@ async fn concurrent_partial_returns_both_commit_and_drain_fee() {
                         payer_tenant_id: s.payer,
                         payment_id: "PAY-CR".to_owned(),
                         psp_return_id: psp_return_id.to_owned(),
-                        amount_minor: amount,
-                        currency: "USD".to_owned(),
+                        amount: usd(amount),
                         effective_at: None,
                     },
                 )
@@ -429,20 +440,20 @@ async fn concurrent_partial_returns_both_commit_and_drain_fee() {
         .await
         .unwrap()
         .expect("settlement row present");
-    assert_eq!(row.settled_minor, 0, "both returns drained settled to 0");
-    assert_eq!(row.fee_minor, 0, "the fee was fully reversed (1 + 2 = 3)");
+    assert_eq!(row.settled, usd(0), "both returns drained settled to 0");
+    assert_eq!(row.fee, usd(0), "the fee was fully reversed (1 + 2 = 3)");
 }
 
 /// Financial #G2-1: N concurrent allocates of the SAME payment racing its
 /// per-payment money-out cap. The shared UNALLOCATED pool is funded ABOVE the
 /// capped payment's settled amount by a SECOND payment (PAY-OTHER @ 500), so the
 /// no-negative pool guard is NOT what trips — the per-payment cap CHECK
-/// (`allocated_minor <= settled_minor`) is the sole authority. Four allocates of
+/// (`allocated <= settled`) is the sole authority. Four allocates of
 /// lump=100 each race against PAY-CAP's settled=100: AT MOST one may commit, and
-/// `allocated_minor` must NEVER exceed 100. Every loser is `MoneyOutCapExceeded`
+/// `allocated` must NEVER exceed 1.00. Every loser is `MoneyOutCapExceeded`
 /// — the client retries the projector-level serialization conflict (decision O
 /// defers recompute-on-retry to the caller), so once the rows serialize a loser
-/// re-reads `allocated_minor == 100` and surfaces the cap CHECK. Mirrors
+/// re-reads `allocated == 1.00` and surfaces the cap CHECK. Mirrors
 /// `postgres_posting::concurrent_overdraw_of_guarded_account_stays_non_negative`,
 /// scaled to a barrier-started N=4 fan-out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -475,7 +486,7 @@ async fn concurrent_allocate_respects_per_payment_cap() {
             &s,
             invoice,
             100,
-            Utc::now() - chrono::Duration::hours(4 - i64::try_from(i).unwrap()),
+            OffsetDateTime::now_utc() - time::Duration::hours(4 - i64::try_from(i).unwrap()),
         )
         .await;
     }
@@ -507,8 +518,7 @@ async fn concurrent_allocate_respects_per_payment_cap() {
                         payer_tenant_id: s.payer,
                         payment_id: "PAY-CAP".to_owned(),
                         allocation_id,
-                        lump_minor: 100,
-                        currency: "USD".to_owned(),
+                        lump: usd(100),
                         hint_invoice_id: None,
                         caller_splits: None,
                     },
@@ -531,7 +541,7 @@ async fn concurrent_allocate_respects_per_payment_cap() {
     }
 
     // INVARIANT: at least one allocate won, and the per-payment cap was never
-    // exceeded — `allocated_minor` lands at EXACTLY the settled 100.
+    // exceeded — `allocated` lands at EXACTLY the settled 1.00.
     assert!(oks >= 1, "at least one concurrent allocate must win");
     let repo = PaymentRepo::new(provider.clone());
     let row = repo
@@ -540,14 +550,15 @@ async fn concurrent_allocate_respects_per_payment_cap() {
         .unwrap()
         .expect("settlement row present");
     assert_eq!(
-        row.allocated_minor, 100,
-        "the per-payment cap is never exceeded: allocated_minor == settled 100"
+        row.allocated,
+        usd(100),
+        "the per-payment cap is never exceeded: allocated == settled 1.00"
     );
     assert!(
-        row.allocated_minor <= row.settled_minor,
-        "allocated_minor ({}) must never exceed settled_minor ({})",
-        row.allocated_minor,
-        row.settled_minor
+        row.allocated.amount() <= row.settled.amount(),
+        "allocated ({}) must never exceed settled ({})",
+        row.allocated.amount(),
+        row.settled.amount()
     );
 
     // Exactly one allocation's worth of rows persisted (the winner applied 100 to
@@ -584,7 +595,7 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
         &s,
         "INV-A",
         300,
-        Utc::now() - chrono::Duration::hours(1),
+        OffsetDateTime::now_utc() - time::Duration::hours(1),
     )
     .await;
 
@@ -620,8 +631,7 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
                     payer_tenant_id: s.payer,
                     payment_id: "PAY".to_owned(),
                     allocation_id,
-                    lump_minor: 300,
-                    currency: "USD".to_owned(),
+                    lump: usd(300),
                     hint_invoice_id: None,
                     caller_splits: None,
                 },
@@ -636,7 +646,7 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
         );
         let ctx = SecurityContext::anonymous();
         let scope = AccessScope::for_tenant(s_post.tenant);
-        let posted_at = Utc::now() - chrono::Duration::minutes(30);
+        let posted_at = OffsetDateTime::now_utc() - time::Duration::minutes(30);
         // The concurrent invoice-post serializes against the allocate at the
         // shared payer/AR grain; the same client retry lands it.
         retry_on_serialization(|| {
@@ -651,7 +661,7 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
                 reverses_entry_id: None,
                 reverses_period_id: None,
                 posted_at_utc: posted_at,
-                effective_at: posted_at.date_naive(),
+                effective_at: to_naive_date(posted_at),
                 origin: "SYSTEM".to_owned(),
                 posted_by_actor_id: s_post.tenant,
                 correlation_id: Uuid::now_v7(),
@@ -679,12 +689,12 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
     // invoice-post left an INV-B AR row at 500.
     assert_eq!(
         ar_invoice_balance(&raw, &s, "INV-A").await,
-        Some(0),
+        Some(text(0)),
         "allocate drained INV-A to zero"
     );
     assert_eq!(
         ar_invoice_balance(&raw, &s, "INV-B").await,
-        Some(500),
+        Some(text(500)),
         "the concurrent invoice-post landed INV-B at 500"
     );
 }
@@ -698,7 +708,7 @@ async fn allocate_and_invoice_post_serialize_without_deadlock() {
 /// the ceiling, so the guard fires before `build_allocation_entry`. Asserts the
 /// error is `AllocationTooLarge` and that NO `payment_allocation` rows were
 /// written (the guard precedes the post, so nothing is applied and
-/// `allocated_minor` stays 0). Contrast `large_backlog_small_lump_allocates`,
+/// `allocated` stays 0). Contrast `large_backlog_small_lump_allocates`,
 /// which shows the same 501-invoice backlog allocates fine when the lump reaches
 /// only a few of them — the bound is on invoices touched, not on the backlog.
 #[tokio::test]
@@ -719,15 +729,15 @@ async fn allocate_too_large_is_rejected() {
 
     // Bulk-seed 501 open AR invoices for (tenant, payer, ar, USD) in ONE
     // multi-row INSERT. Each row carries a DISTINCT invoice_id (the 4th PK
-    // column), a positive balance_minor (satisfies chk_ar_invoice_balance_no
-    // _negative AND the `balance_minor > 0` candidate filter), and the seller's
+    // column), a positive balance (satisfies chk_ar_invoice_balance_no
+    // _negative AND the `balance > 0` candidate filter), and the seller's
     // AR account_id / payer / USD that `list_open_ar_invoices` filters on. Only
     // the NOT-NULL-without-default columns are supplied; original_posted_at /
     // due_date / last_entry_seq are nullable, version/ balance default-eligible
     // but balance is set explicitly.
     let mut sql = String::from(
         "INSERT INTO bss.ledger_ar_invoice_balance \
-         (tenant_id, payer_tenant_id, account_id, invoice_id, currency, balance_minor) VALUES ",
+         (tenant_id, payer_tenant_id, account_id, invoice_id, currency, currency_scale, balance) VALUES ",
     );
     // One over the ceiling — kept in lockstep with the source constant so the
     // test tracks any future change to the candidate cap.
@@ -738,7 +748,7 @@ async fn allocate_too_large_is_rejected() {
         }
         write!(
             sql,
-            "('{}','{}','{}','INV-{:04}','USD',100)",
+            "('{}','{}','{}','INV-{:04}','USD',2,'1')",
             s.tenant, s.payer, s.ar, i
         )
         .unwrap();
@@ -752,7 +762,7 @@ async fn allocate_too_large_is_rejected() {
         .query_one_raw(pg(format!(
             "SELECT COUNT(*) FROM bss.ledger_ar_invoice_balance \
              WHERE tenant_id='{}' AND payer_tenant_id='{}' AND currency='USD' \
-             AND balance_minor > 0",
+             AND balance::numeric > 0",
             s.tenant, s.payer
         )))
         .await
@@ -775,8 +785,7 @@ async fn allocate_too_large_is_rejected() {
                 payer_tenant_id: s.payer,
                 payment_id: "PAY".to_owned(),
                 allocation_id: Uuid::now_v7(),
-                lump_minor: 50_100,
-                currency: "USD".to_owned(),
+                lump: usd(50_100),
                 hint_invoice_id: None,
                 caller_splits: None,
             },
@@ -788,7 +797,7 @@ async fn allocate_too_large_is_rejected() {
         "expected AllocationTooLarge, got {err:?}"
     );
 
-    // The guard fired BEFORE the post: no allocation rows, allocated_minor still 0.
+    // The guard fired BEFORE the post: no allocation rows, allocated still 0.
     assert_eq!(
         count_allocations(&raw, &s, "PAY").await,
         0,
@@ -801,7 +810,8 @@ async fn allocate_too_large_is_rejected() {
         .unwrap()
         .expect("settlement row present");
     assert_eq!(
-        row.allocated_minor, 0,
+        row.allocated,
+        usd(0),
         "nothing was applied (the post never ran)"
     );
 }
@@ -828,7 +838,7 @@ async fn large_backlog_small_lump_allocates() {
     // Bulk-seed 501 open AR invoices (a large backlog), each balance 100.
     let mut sql = String::from(
         "INSERT INTO bss.ledger_ar_invoice_balance \
-         (tenant_id, payer_tenant_id, account_id, invoice_id, currency, balance_minor) VALUES ",
+         (tenant_id, payer_tenant_id, account_id, invoice_id, currency, currency_scale, balance) VALUES ",
     );
     let count = MAX_INVOICES_PER_ALLOCATION + 1;
     for i in 0..count {
@@ -837,7 +847,7 @@ async fn large_backlog_small_lump_allocates() {
         }
         write!(
             sql,
-            "('{}','{}','{}','INV-{:04}','USD',100)",
+            "('{}','{}','{}','INV-{:04}','USD',2,'1')",
             s.tenant, s.payer, s.ar, i
         )
         .unwrap();
@@ -850,19 +860,19 @@ async fn large_backlog_small_lump_allocates() {
     // posting also maintains the AR account-level and per-payer aggregates, both
     // guarded no-negative. Seed them to the backlog total (501 × 100) so the
     // CR AR relief has headroom at every guarded grain, not just the invoice one.
-    let ar_total = i64::try_from(count).unwrap() * 100;
+    let ar_total = text(i64::try_from(count).unwrap() * 100);
     raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_account_balance \
-            (tenant_id, account_id, currency, account_class, normal_side, balance_minor) \
-         VALUES ('{}','{}','USD','AR','DR',{ar_total})",
+            (tenant_id, account_id, currency, currency_scale, account_class, normal_side, balance) \
+         VALUES ('{}','{}','USD',2,'AR','DR','{ar_total}')",
         s.tenant, s.ar
     )))
     .await
     .expect("seed AR account_balance aggregate");
     raw.execute_raw(pg(format!(
         "INSERT INTO bss.ledger_ar_payer_balance \
-            (tenant_id, payer_tenant_id, account_id, currency, balance_minor) \
-         VALUES ('{}','{}','{}','USD',{ar_total})",
+            (tenant_id, payer_tenant_id, account_id, currency, currency_scale, balance) \
+         VALUES ('{}','{}','{}','USD',2,'{ar_total}')",
         s.tenant, s.payer, s.ar
     )))
     .await
@@ -879,8 +889,7 @@ async fn large_backlog_small_lump_allocates() {
                 payer_tenant_id: s.payer,
                 payment_id: "PAY".to_owned(),
                 allocation_id: Uuid::now_v7(),
-                lump_minor: 300,
-                currency: "USD".to_owned(),
+                lump: usd(300),
                 hint_invoice_id: None,
                 caller_splits: None,
             },
@@ -899,5 +908,5 @@ async fn large_backlog_small_lump_allocates() {
         .await
         .unwrap()
         .expect("settlement row present");
-    assert_eq!(row.allocated_minor, 300, "three invoices × 100 allocated");
+    assert_eq!(row.allocated, usd(300), "three invoices × 1.00 allocated");
 }

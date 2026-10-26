@@ -13,7 +13,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
 use bss_ledger_sdk::{ProviderRate, RateProviderError};
-use chrono::DateTime;
+use time::OffsetDateTime;
 use toolkit_http::HttpClient;
 
 use super::fetch_and_parse;
@@ -112,8 +112,8 @@ fn parse_ok(n: usize) -> impl FnOnce(&[u8]) -> ParseResult {
             .map(|i| ProviderRate {
                 base: "EUR".to_owned(),
                 quote: format!("Q{i}"),
-                rate_micro: 1_000_000,
-                as_of: DateTime::from_timestamp(AS_OF_UNIX, 0).unwrap(),
+                rate: bss_ledger_sdk::parse_decimal("1").unwrap(),
+                as_of: OffsetDateTime::from_unix_timestamp(AS_OF_UNIX).unwrap(),
                 provider: PROVIDER.to_owned(),
             })
             .collect();

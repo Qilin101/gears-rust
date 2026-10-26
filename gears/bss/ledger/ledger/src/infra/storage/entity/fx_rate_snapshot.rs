@@ -1,8 +1,8 @@
 //! `SeaORM` entity for `bss.ledger_fx_rate_snapshot` (immutable per-lock FX
 //! rate, frozen on a journal line via `journal_line.rate_snapshot_ref`).
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -15,9 +15,11 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub rate_id: Uuid,
     pub base_currency: String,
+    pub base_currency_scale: i16,
     pub quote_currency: String,
-    pub rate_micro: i64,
-    pub as_of: DateTime<Utc>,
+    pub quote_currency_scale: i16,
+    pub rate: String,
+    pub as_of: OffsetDateTime,
     pub provider: String,
     pub stale: bool,
     pub fallback_order: i32,

@@ -1,0 +1,578 @@
+// Created: 2026-08-26 by Virtuozzo International GmbH
+//! Persistence for declarations.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, ExprTrait, QueryFilter, QuerySelect};
+use toolkit_db::odata::LimitCfg;
+use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureUpdateExt};
+use toolkit_odata::{ODataQuery, SortDir};
+use toolkit_security::AccessScope;
+use uuid::Uuid;
+
+use crate::domain::access::TenantAccess;
+use crate::domain::category::visibility::DomainVisibility;
+use crate::domain::declaration::{
+    CategoryTally, Declaration, DeclarationDraft, DeclarationMetadata, DeclarationRepository,
+};
+use crate::domain::error::DomainError;
+use crate::domain::odata::Listing;
+use crate::domain::precondition;
+use crate::infra::storage::clock::{now, stamp_after};
+use crate::infra::storage::declaration_odata_mapper::DeclarationODataMapper;
+use crate::infra::storage::entity::declaration::{self, Entity as DeclarationEntity};
+use crate::infra::storage::entity::tenant_permission;
+use crate::infra::storage::listing::list_counted;
+use crate::infra::storage::value_repo;
+use settings_service_sdk::odata::DeclarationFilterField;
+
+/// Page bounds for declaration listings.
+///
+/// Larger than categories: a category holds tens of declarations and an
+/// administrator browsing one expects to see it whole, where the category list
+/// itself is short by nature.
+const DECLARATION_LIMIT_CFG: LimitCfg = LimitCfg {
+    default: 50,
+    max: 200,
+};
+
+/// Persistence for declarations.
+pub struct DeclarationRepo;
+
+/// Converts a stored declaration row to the domain type.
+pub(crate) fn to_domain(model: declaration::Model) -> Declaration {
+    Declaration {
+        id: model.id,
+        key: model.key,
+        leaf_slug: model.leaf_slug,
+        value_type_id: model.value_type_id,
+        category_id: model.category_id,
+        scope_class: model.scope_class,
+        mode: model.mode,
+        status: model.status,
+        domain_affinity: model.domain_affinity,
+        licence_feature: model.licence_feature,
+        owner_module: model.owner_module,
+        display_name: model.display_name,
+        description: model.description,
+        default_value: model.default_value,
+        has_secret_trait: model.has_secret_trait,
+        data_classification: model.data_classification,
+        requires_step_up: model.requires_step_up,
+        anonymous_exposable: model.anonymous_exposable,
+        source: model.source,
+        last_change_at: model.last_change_at,
+        updated_at: model.updated_at,
+    }
+}
+
+/// Narrow an update to the row version the caller compared its tag against.
+///
+/// With a version, the update matches only the row still at it: a writer whose
+/// read went stale changes nothing and is told so. Without one — a caller that
+/// holds no tag and works under its own transaction — the update stands alone.
+fn at_version(
+    update: sea_orm::UpdateMany<DeclarationEntity>,
+    expected: Option<time::OffsetDateTime>,
+) -> sea_orm::UpdateMany<DeclarationEntity> {
+    match expected {
+        Some(expected) => update.filter(declaration::Column::UpdatedAt.eq(expected)),
+        None => update,
+    }
+}
+
+fn map_write_error(err: &toolkit_db::secure::ScopeError) -> DomainError {
+    if err.is_unique_violation() {
+        DomainError::Conflict {
+            detail:
+                "a declaration with this key, or this leaf name in this category, already exists"
+                    .to_owned(),
+        }
+    } else {
+        DomainError::Internal {
+            diagnostic: err.to_string(),
+        }
+    }
+}
+
+fn db_error(err: impl std::fmt::Display) -> DomainError {
+    DomainError::Internal {
+        diagnostic: err.to_string(),
+    }
+}
+
+/// The domain-affinity arm of the visibility rule, as a query predicate.
+///
+/// The null arm is what keeps an undomained declaration universally visible;
+/// without it every declaration with no domain vanishes for every scoped
+/// administrator.
+pub(crate) fn apply_visibility(
+    select: sea_orm::Select<DeclarationEntity>,
+    visibility: &DomainVisibility,
+) -> sea_orm::Select<DeclarationEntity> {
+    match visibility {
+        DomainVisibility::Unrestricted => select,
+        DomainVisibility::Restricted(domains) => select.filter(
+            declaration::Column::DomainAffinity
+                .is_null()
+                .or(declaration::Column::DomainAffinity.is_in(domains.clone())),
+        ),
+    }
+}
+
+/// Leave out every declaration `hidden` for a caller whose root-to-self chain
+/// is `chain`.
+///
+/// A setting is hidden for a tenant exactly when a `hidden` restriction sits
+/// on any tenant of its chain — `hidden` is the strictest access, so one row
+/// decides — which is this one predicate. Applied to the page query itself,
+/// so the page is cut and counted after the exclusion and comes back full;
+/// a post-filter would shorten it and let the gap tell the caller something
+/// sits there. An empty chain excludes nothing.
+pub(crate) fn exclude_hidden_for(
+    select: sea_orm::Select<DeclarationEntity>,
+    chain: &[Uuid],
+) -> sea_orm::Select<DeclarationEntity> {
+    if chain.is_empty() {
+        return select;
+    }
+    let hidden = Query::select()
+        .column(tenant_permission::Column::DeclarationId)
+        .from(tenant_permission::Entity)
+        .and_where(tenant_permission::Column::TenantId.is_in(chain.iter().copied()))
+        .and_where(tenant_permission::Column::Access.eq(TenantAccess::Hidden.as_str()))
+        .to_owned();
+    select.filter(declaration::Column::Id.not_in_subquery(hidden))
+}
+
+#[async_trait]
+impl DeclarationRepository for DeclarationRepo {
+    async fn find_by_key<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        key: &str,
+    ) -> Result<Option<Declaration>, DomainError> {
+        let found = DeclarationEntity::find()
+            .filter(declaration::Column::Key.eq(key))
+            .secure()
+            .scope_with(scope)
+            .one(conn)
+            .await
+            .map_err(db_error)?;
+        Ok(found.map(to_domain))
+    }
+
+    async fn find_by_key_prefix<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        key_prefix: &str,
+    ) -> Result<Vec<Declaration>, DomainError> {
+        // `_` and `%` in the prefix are LIKE wildcards; a setting path may
+        // carry `_`, so the caller re-checks the stripped path exactly. The
+        // pattern still narrows the scan to the right neighbourhood.
+        let rows = DeclarationEntity::find()
+            .filter(declaration::Column::Key.like(format!("{key_prefix}%")))
+            .secure()
+            .scope_with(scope)
+            .all(conn)
+            .await
+            .map_err(db_error)?;
+        Ok(rows.into_iter().map(to_domain).collect())
+    }
+
+    async fn insert<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        draft: DeclarationDraft,
+    ) -> Result<Declaration, DomainError> {
+        let at = now();
+        let active = declaration::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            key: Set(draft.key),
+            leaf_slug: Set(draft.leaf_slug),
+            value_type_id: Set(draft.value_type_id),
+            category_id: Set(draft.category_id),
+            default_value: Set(draft.default_value),
+            scope_class: Set(draft.scope_class),
+            mode: Set(draft.mode),
+            requires_step_up: Set(draft.requires_step_up),
+            anonymous_exposable: Set(draft.anonymous_exposable),
+            domain_affinity: Set(draft.domain_affinity),
+            has_secret_trait: Set(draft.has_secret_trait),
+            data_classification: Set(draft.data_classification),
+            source: Set(draft.source),
+            owner_module: Set(draft.owner_module),
+            licence_feature: Set(draft.licence_feature),
+            status: Set("active".to_owned()),
+            display_name: Set(draft.display_name),
+            description: Set(draft.description),
+            last_change_at: Set(at),
+            created_at: Set(at),
+            updated_at: Set(at),
+            created_by: Set(draft.created_by),
+        };
+        let model = toolkit_db::secure::secure_insert::<DeclarationEntity>(active, scope, conn)
+            .await
+            .map_err(|err| map_write_error(&err))?;
+        Ok(to_domain(model))
+    }
+
+    async fn update_metadata<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        metadata: DeclarationMetadata,
+        expected: Option<time::OffsetDateTime>,
+        redefines: bool,
+    ) -> Result<(), DomainError> {
+        // `last_change_at` is the definition arm of the effective recency: it
+        // moves when the change alters what a reader is served, which the
+        // caller decided from the row it holds; a description moves the tag
+        // alone.
+        let at = stamp_after(expected);
+        let mut update = DeclarationEntity::update_many()
+            .col_expr(declaration::Column::Mode, Expr::value(metadata.mode))
+            .col_expr(
+                declaration::Column::Description,
+                Expr::value(metadata.description),
+            )
+            .col_expr(
+                declaration::Column::DisplayName,
+                Expr::value(metadata.display_name),
+            )
+            .col_expr(
+                declaration::Column::DomainAffinity,
+                Expr::value(metadata.domain_affinity),
+            )
+            .col_expr(
+                declaration::Column::LicenceFeature,
+                Expr::value(metadata.licence_feature),
+            )
+            .col_expr(
+                declaration::Column::DataClassification,
+                Expr::value(metadata.data_classification),
+            )
+            .col_expr(
+                declaration::Column::RequiresStepUp,
+                Expr::value(metadata.requires_step_up),
+            )
+            .col_expr(
+                declaration::Column::AnonymousExposable,
+                Expr::value(metadata.anonymous_exposable),
+            )
+            .col_expr(declaration::Column::UpdatedAt, Expr::value(at))
+            .filter(declaration::Column::Id.eq(id));
+        if redefines {
+            update = update.col_expr(declaration::Column::LastChangeAt, Expr::value(at));
+        }
+        let outcome = at_version(update, expected)
+            .secure()
+            .scope_with(scope)
+            .exec(conn)
+            .await
+            .map_err(|err| map_write_error(&err))?;
+        if expected.is_some() && outcome.rows_affected == 0 {
+            return Err(precondition::stale());
+        }
+        Ok(())
+    }
+
+    async fn set_status<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        status: &str,
+        expected: Option<time::OffsetDateTime>,
+    ) -> Result<(), DomainError> {
+        let at = stamp_after(expected);
+        let update = DeclarationEntity::update_many()
+            .col_expr(declaration::Column::Status, Expr::value(status.to_owned()))
+            .col_expr(declaration::Column::LastChangeAt, Expr::value(at))
+            .col_expr(declaration::Column::UpdatedAt, Expr::value(at))
+            .filter(declaration::Column::Id.eq(id));
+        let outcome = at_version(update, expected)
+            .secure()
+            .scope_with(scope)
+            .exec(conn)
+            .await
+            .map_err(|err| map_write_error(&err))?;
+        if expected.is_some() && outcome.rows_affected == 0 {
+            return Err(precondition::stale());
+        }
+        Ok(())
+    }
+
+    async fn find_locked<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<Declaration>, DomainError> {
+        // `FOR SHARE`: concurrent writes to the same setting share the row,
+        // while a status change — an `UPDATE`, which takes the row for update —
+        // has to wait for them and they for it. SQLite renders no lock clause
+        // and serializes writers itself.
+        let found = DeclarationEntity::find()
+            .filter(declaration::Column::Id.eq(id))
+            .lock_shared()
+            .secure()
+            .scope_with(scope)
+            .one(conn)
+            .await
+            .map_err(db_error)?;
+        Ok(found.map(to_domain))
+    }
+
+    async fn lock_for_update<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<(), DomainError> {
+        // `FOR UPDATE` against the writes' `FOR SHARE`: the two conflict, so a
+        // restriction change and a value write on one setting take turns.
+        DeclarationEntity::find()
+            .filter(declaration::Column::Id.eq(id))
+            .lock_exclusive()
+            .secure()
+            .scope_with(scope)
+            .one(conn)
+            .await
+            .map_err(db_error)?
+            .ok_or(DomainError::NotFound {
+                resource: "declaration",
+            })?;
+        Ok(())
+    }
+
+    async fn set_default<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        default_value: &serde_json::Value,
+    ) -> Result<(), DomainError> {
+        let at = now();
+        DeclarationEntity::update_many()
+            .col_expr(
+                declaration::Column::DefaultValue,
+                Expr::value(default_value.clone()),
+            )
+            .col_expr(declaration::Column::LastChangeAt, Expr::value(at))
+            .col_expr(declaration::Column::UpdatedAt, Expr::value(at))
+            .filter(declaration::Column::Id.eq(id))
+            .secure()
+            .scope_with(scope)
+            .exec(conn)
+            .await
+            .map_err(|err| map_write_error(&err))?;
+        Ok(())
+    }
+
+    async fn find<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        visibility: &DomainVisibility,
+        id: Uuid,
+    ) -> Result<Option<Declaration>, DomainError> {
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-read:p1:inst-decl-read-6
+        // The visibility predicate rides in the query even for a single row.
+        // Fetching first and filtering after would make "not visible" and "not
+        // present" two code paths, and only one of them is guaranteed to answer
+        // the same way.
+        let found = apply_visibility(DeclarationEntity::find(), visibility)
+            .filter(declaration::Column::Id.eq(id))
+            .secure()
+            .scope_with(scope)
+            .one(conn)
+            .await
+            .map_err(|err| DomainError::Internal {
+                diagnostic: err.to_string(),
+            })?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-read:p1:inst-decl-read-6
+        Ok(found.map(to_domain))
+    }
+
+    async fn find_by_category<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        category_id: Uuid,
+    ) -> Result<Vec<Declaration>, DomainError> {
+        let rows = DeclarationEntity::find()
+            .filter(declaration::Column::CategoryId.eq(category_id))
+            .secure()
+            .scope_with(scope)
+            .all(conn)
+            .await
+            .map_err(db_error)?;
+        Ok(rows.into_iter().map(to_domain).collect())
+    }
+
+    async fn list<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        visibility: &DomainVisibility,
+        hidden_for: &[Uuid],
+        flagged_at: Option<Uuid>,
+        query: &ODataQuery,
+    ) -> Result<Listing<Declaration>, DomainError> {
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-read:p1:inst-decl-read-6
+        let mut base = exclude_hidden_for(
+            apply_visibility(DeclarationEntity::find(), visibility),
+            hidden_for,
+        );
+        // @cpt-begin:cpt-cf-settings-service-flow-value-resolution-admin-browse:p1:inst-vr-browse-7
+        // `needs_review eq true` on the browse: only declarations whose own
+        // override at that tenant is flagged — in the page query, so the page
+        // is cut and counted over the narrowed set, never narrowed after.
+        if let Some(tenant) = flagged_at {
+            base = base.filter(
+                declaration::Column::Id.in_subquery(value_repo::flagged_declarations_at(tenant)),
+            );
+        }
+        // @cpt-end:cpt-cf-settings-service-flow-value-resolution-admin-browse:p1:inst-vr-browse-7
+
+        // Tiebreaker is `key`, which `uq_declaration_key` makes unique, so a
+        // page boundary can neither repeat nor skip a row. The total beside
+        // the page is counted under the same base and the same `$filter`.
+        let page = list_counted::<DeclarationFilterField, DeclarationODataMapper, _, _, _, _>(
+            base,
+            scope,
+            conn,
+            query,
+            ("key", SortDir::Asc),
+            DECLARATION_LIMIT_CFG,
+            |m: declaration::Model| m,
+        )
+        .await
+        .map_err(|err| DomainError::Validation {
+            field: "query".to_owned(),
+            code: crate::field::ODATA_QUERY,
+            message: err.to_string(),
+        })?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-read:p1:inst-decl-read-6
+
+        Ok(Listing {
+            items: page.items.into_iter().map(to_domain).collect(),
+            page_info: page.page_info,
+            total_count: page.total_count,
+        })
+    }
+
+    async fn visible_keys<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        visibility: &DomainVisibility,
+        hidden_for: &[Uuid],
+        keys: &[String],
+    ) -> Result<Vec<String>, DomainError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // @cpt-begin:cpt-cf-settings-service-flow-value-resolution-admin-browse:p1:inst-vr-browse-9
+        let rows = exclude_hidden_for(
+            apply_visibility(DeclarationEntity::find(), visibility),
+            hidden_for,
+        )
+        .filter(declaration::Column::Key.is_in(keys.iter().cloned()))
+        .secure()
+        .scope_with(scope)
+        .all(conn)
+        .await
+        .map_err(db_error)?;
+        // @cpt-end:cpt-cf-settings-service-flow-value-resolution-admin-browse:p1:inst-vr-browse-9
+        Ok(rows.into_iter().map(|m| m.key).collect())
+    }
+
+    async fn find_by_ids<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        ids: &[Uuid],
+    ) -> Result<Vec<Declaration>, DomainError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = DeclarationEntity::find()
+            .filter(declaration::Column::Id.is_in(ids.iter().copied()))
+            .secure()
+            .scope_with(scope)
+            .all(conn)
+            .await
+            .map_err(db_error)?;
+        Ok(rows.into_iter().map(to_domain).collect())
+    }
+
+    async fn tally_by_category<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        visibility: &DomainVisibility,
+        hidden_for: &[Uuid],
+        category_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, CategoryTally>, DomainError> {
+        if category_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // The same base as `list`, so a category's count is the length of
+        // the browse of it: the caller's scope, its domain visibility and the
+        // settings hidden from it, all in the query. One statement for the
+        // whole page of categories, grouped by what the tally splits on — at
+        // most four rows per category, folded here — rather than a count per
+        // category per facet.
+        let rows = exclude_hidden_for(
+            apply_visibility(DeclarationEntity::find(), visibility),
+            hidden_for,
+        )
+        .filter(declaration::Column::CategoryId.is_in(category_ids.iter().copied()))
+        .secure()
+        .scope_with(scope)
+        .project_all(conn, |q| {
+            q.select_only()
+                .column(declaration::Column::CategoryId)
+                .column(declaration::Column::Mode)
+                .column(declaration::Column::Status)
+                .column_as(Expr::col(declaration::Column::Id).count(), "n")
+                .group_by(declaration::Column::CategoryId)
+                .group_by(declaration::Column::Mode)
+                .group_by(declaration::Column::Status)
+                .into_model::<TallyRow>()
+        })
+        .await
+        .map_err(db_error)?;
+        let mut tallies: HashMap<Uuid, CategoryTally> = HashMap::new();
+        for row in rows {
+            let n = u64::try_from(row.n).unwrap_or_default();
+            let tally = tallies.entry(row.category_id).or_default();
+            tally.settings += n;
+            if row.mode == "advanced" {
+                tally.advanced += n;
+            }
+            if row.status == "retired" {
+                tally.retired += n;
+            }
+        }
+        Ok(tallies)
+    }
+}
+
+/// One group of the tally: the declarations of a category sharing a mode and
+/// a status, and how many there are.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct TallyRow {
+    category_id: Uuid,
+    mode: String,
+    status: String,
+    n: i64,
+}

@@ -946,6 +946,154 @@ async fn update_tenant_accepts_oversized_name_when_gts_schema_unregistered() {
     assert_eq!(info.name.chars().count(), 256);
 }
 
+// ---- Tenant name whitespace policy -----------------------------
+//
+// An all-whitespace name passes the schema's `minLength: 1` and the
+// DB `CHECK (length(name) BETWEEN 1 AND 255)`, so the AM-side
+// trim + empty check in `verify_tenant_name` is the only gate.
+// `ConstantTypesRegistry` reports the tenant schema as unregistered,
+// which pins that the rule holds without the GTS schema.
+
+#[tokio::test]
+async fn create_tenant_rejects_all_whitespace_name_before_any_side_effect() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0x7A1);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    let svc = TenantService::new(
+        repo.clone(),
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(Arc::new(ConstantTypesRegistry));
+
+    for name in ["", "   ", "\t\n "] {
+        let mut input = child_input(child, root);
+        input.name = name.to_owned();
+        let err = svc
+            .create_tenant(&ctx_for(root), input)
+            .await
+            .expect_err("empty / all-whitespace name MUST reject");
+        match err {
+            DomainError::Validation { detail } => assert!(
+                detail.contains("create_tenant") && detail.contains("all-whitespace"),
+                "Validation must name the rule; got: {detail}"
+            ),
+            other => panic!("expected Validation for {name:?}, got {other:?}"),
+        }
+    }
+    assert!(
+        repo.find_by_id(&AccessScope::allow_all(), child)
+            .await
+            .expect("repo")
+            .is_none(),
+        "rejected name MUST NOT leave a provisioning row"
+    );
+    assert_eq!(
+        idp.calls.lock().expect("lock").len(),
+        0,
+        "rejected name MUST short-circuit BEFORE the IdP round-trip"
+    );
+}
+
+#[tokio::test]
+async fn create_tenant_persists_trimmed_name() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0x7A2);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+    let mut input = child_input(child, root);
+    input.name = "  acme\t".to_owned();
+
+    let created = svc
+        .create_tenant(&ctx_for(root), input)
+        .await
+        .expect("padded name is accepted");
+
+    assert_eq!(created.name, "acme");
+    let row = repo
+        .find_by_id(&AccessScope::allow_all(), child)
+        .await
+        .expect("repo")
+        .expect("child row present");
+    assert_eq!(row.name, "acme", "stored name MUST be the trimmed value");
+}
+
+#[tokio::test]
+async fn update_tenant_rejects_all_whitespace_name_and_keeps_row() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0x7A3);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+    svc.create_tenant(&ctx_for(root), child_input(child, root))
+        .await
+        .expect("create");
+
+    let err = svc
+        .update_tenant(
+            &ctx_for(root),
+            child,
+            UpdateTenantRequest::new().with_name("   "),
+        )
+        .await
+        .expect_err("all-whitespace rename MUST reject");
+    match err {
+        DomainError::Validation { detail } => assert!(
+            detail.contains("update_tenant") && detail.contains("all-whitespace"),
+            "Validation must name the rule; got: {detail}"
+        ),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+
+    let row = repo
+        .find_by_id(&AccessScope::allow_all(), child)
+        .await
+        .expect("repo")
+        .expect("child row present");
+    assert_eq!(row.name, "child", "rejected rename MUST NOT touch the row");
+}
+
+#[tokio::test]
+async fn update_tenant_padded_current_name_is_idempotent_no_op() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0x7A4);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+    svc.create_tenant(&ctx_for(root), child_input(child, root))
+        .await
+        .expect("create");
+    let before = repo
+        .find_by_id(&AccessScope::allow_all(), child)
+        .await
+        .expect("repo")
+        .expect("child row present");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+    let info = svc
+        .update_tenant(
+            &ctx_for(root),
+            child,
+            UpdateTenantRequest::new().with_name(" child "),
+        )
+        .await
+        .expect("padded current name is accepted");
+
+    assert_eq!(info.name, "child");
+    let after = repo
+        .find_by_id(&AccessScope::allow_all(), child)
+        .await
+        .expect("repo")
+        .expect("child row present");
+    assert_eq!(
+        after.updated_at, before.updated_at,
+        "padded current name MUST trim to a no-op: no DB write, no `updated_at` bump"
+    );
+}
+
 // ---- Closure invariant end-to-end ------------------------------
 
 #[tokio::test]
@@ -4525,4 +4673,198 @@ async fn create_tenant_accepts_metadata_at_cap_boundary() {
         .create_tenant(&ctx_for(root), input)
         .await
         .expect("metadata just under the cap MUST pass");
+}
+
+// -----------------------------------------------------------------
+// list_descendants (recursive children listing)
+// -----------------------------------------------------------------
+
+fn raw_tenant(
+    id: Uuid,
+    parent: Option<Uuid>,
+    name: &str,
+    self_managed: bool,
+    depth: u32,
+) -> crate::domain::tenant::model::TenantModel {
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("epoch");
+    crate::domain::tenant::model::TenantModel {
+        id,
+        parent_id: parent,
+        name: name.to_owned(),
+        status: crate::domain::tenant::model::TenantStatus::Active,
+        self_managed,
+        tenant_type_uuid: Uuid::from_u128(0xAA),
+        depth,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    }
+}
+
+/// Hand-wire the barrier topology from the design spec into the fake:
+/// `root ─ x ─ {y (self-managed) ─ yc, xc}`, `root ─ s (self-managed) ─ sc`.
+/// Returns `(root, x, xc, s, sc, y, yc)`.
+fn seed_barrier_topology_in_fake(
+    repo: &FakeTenantRepo,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
+    use crate::domain::tenant::model::TenantStatus as S;
+    let root = Uuid::from_u128(0x100);
+    let (x, xc, s, sc, y, yc) = (
+        Uuid::from_u128(0x701),
+        Uuid::from_u128(0x702),
+        Uuid::from_u128(0x703),
+        Uuid::from_u128(0x704),
+        Uuid::from_u128(0x705),
+        Uuid::from_u128(0x706),
+    );
+    repo.insert_tenant_raw(raw_tenant(x, Some(root), "x", false, 1));
+    repo.seed_closure(x, x, 0, S::Active);
+    repo.seed_closure(root, x, 0, S::Active);
+    repo.insert_tenant_raw(raw_tenant(s, Some(root), "s", true, 1));
+    repo.seed_closure(s, s, 0, S::Active);
+    repo.seed_closure(root, s, 1, S::Active);
+    repo.insert_tenant_raw(raw_tenant(xc, Some(x), "xc", false, 2));
+    repo.seed_closure(xc, xc, 0, S::Active);
+    repo.seed_closure(x, xc, 0, S::Active);
+    repo.seed_closure(root, xc, 0, S::Active);
+    repo.insert_tenant_raw(raw_tenant(sc, Some(s), "sc", false, 2));
+    repo.seed_closure(sc, sc, 0, S::Active);
+    repo.seed_closure(s, sc, 0, S::Active);
+    repo.seed_closure(root, sc, 1, S::Active);
+    repo.insert_tenant_raw(raw_tenant(y, Some(x), "y", true, 2));
+    repo.seed_closure(y, y, 0, S::Active);
+    repo.seed_closure(x, y, 1, S::Active);
+    repo.seed_closure(root, y, 1, S::Active);
+    repo.insert_tenant_raw(raw_tenant(yc, Some(y), "yc", false, 3));
+    repo.seed_closure(yc, yc, 0, S::Active);
+    repo.seed_closure(y, yc, 0, S::Active);
+    repo.seed_closure(x, yc, 1, S::Active);
+    repo.seed_closure(root, yc, 1, S::Active);
+    (root, x, xc, s, sc, y, yc)
+}
+
+#[tokio::test]
+async fn list_descendants_returns_visible_subtree_with_ancestor_chains() {
+    let repo = Arc::new(FakeTenantRepo::with_root(Uuid::from_u128(0x100)));
+    let (root, x, xc, s, _sc, y, _yc) = seed_barrier_topology_in_fake(&repo);
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+
+    let page = svc
+        .list_descendants(&ctx_for(root), root, &ODataQuery::default())
+        .await
+        .expect("list");
+
+    let mut ids: Vec<Uuid> = page.items.iter().map(|n| n.tenant.id.0).collect();
+    ids.sort();
+    let mut expected = vec![x, xc, s, y];
+    expected.sort();
+    assert_eq!(ids, expected, "yc and sc sit past a barrier");
+
+    let by_id: std::collections::HashMap<Uuid, &account_management_sdk::TenantNode> =
+        page.items.iter().map(|n| (n.tenant.id.0, n)).collect();
+    assert!(by_id[&x].ancestors.is_empty());
+    assert!(by_id[&s].ancestors.is_empty());
+    let xc_chain: Vec<Uuid> = by_id[&xc].ancestors.iter().map(|a| a.id.0).collect();
+    assert_eq!(xc_chain, vec![x]);
+    assert_eq!(by_id[&xc].ancestors[0].name, "x");
+    let y_chain: Vec<Uuid> = by_id[&y].ancestors.iter().map(|a| a.id.0).collect();
+    assert_eq!(y_chain, vec![x]);
+}
+
+#[tokio::test]
+async fn list_descendants_direct_children_count_rides_on_the_existing_lowering() {
+    let repo = Arc::new(FakeTenantRepo::with_root(Uuid::from_u128(0x100)));
+    let (root, x, _xc, _s, _sc, _y, _yc) = seed_barrier_topology_in_fake(&repo);
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+
+    let page = svc
+        .list_descendants(&ctx_for(root), root, &ODataQuery::default())
+        .await
+        .expect("list");
+    let x_node = page
+        .items
+        .iter()
+        .find(|n| n.tenant.id.0 == x)
+        .expect("x listed");
+    // The fake counts every direct child (xc, y); the barrier gating of
+    // the count is pinned on the real DB in list_descendants_integration.
+    assert_eq!(x_node.tenant.child_count, 2);
+}
+
+#[tokio::test]
+async fn list_descendants_past_barrier_root_is_not_found() {
+    let repo = Arc::new(FakeTenantRepo::with_root(Uuid::from_u128(0x100)));
+    let (root, _x, _xc, s, _sc, _y, _yc) = seed_barrier_topology_in_fake(&repo);
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+
+    let err = svc
+        .list_descendants(&ctx_for(root), s, &ODataQuery::default())
+        .await
+        .expect_err("s is past root's barrier");
+    assert_eq!(err.code(), "not_found");
+}
+
+#[tokio::test]
+async fn list_descendants_of_a_leaf_is_an_empty_page() {
+    let repo = Arc::new(FakeTenantRepo::with_root(Uuid::from_u128(0x100)));
+    let (root, _x, xc, ..) = seed_barrier_topology_in_fake(&repo);
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+
+    let page = svc
+        .list_descendants(&ctx_for(root), xc, &ODataQuery::default())
+        .await
+        .expect("xc is Respect-visible from root and has no children");
+    assert!(page.items.is_empty());
+    assert!(page.page_info.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn list_descendants_honours_limit() {
+    let repo = Arc::new(FakeTenantRepo::with_root(Uuid::from_u128(0x100)));
+    let (root, ..) = seed_barrier_topology_in_fake(&repo);
+    let svc = make_service(repo.clone(), FakeOutcome::Ok);
+
+    let page = svc
+        .list_descendants(&ctx_for(root), root, &ODataQuery::default().with_limit(2))
+        .await
+        .expect("list");
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.page_info.limit, 2);
+}
+
+fn ancestor_at(depth: u32) -> crate::domain::tenant::model::TenantAncestorRow {
+    crate::domain::tenant::model::TenantAncestorRow {
+        id: Uuid::from_u128(0x900 + u128::from(depth)),
+        name: format!("a{depth}"),
+        tenant_type_uuid: Uuid::from_u128(0xAA),
+        depth,
+    }
+}
+
+#[test]
+fn chain_is_complete_accepts_a_direct_child_with_no_chain() {
+    assert!(chain_is_complete(1, 2, None));
+    assert!(chain_is_complete(1, 2, Some(&[])));
+}
+
+#[test]
+fn chain_is_complete_accepts_one_ancestor_per_intermediate_depth() {
+    let chain = [ancestor_at(2), ancestor_at(3)];
+    assert!(chain_is_complete(1, 4, Some(&chain)));
+}
+
+#[test]
+fn chain_is_complete_rejects_a_hole() {
+    // Depth-2 ancestor not visible under the caller's scope (a
+    // status-constrained scope, or a barrier that appeared between the
+    // page read and the chain read): iteration could not reach the row.
+    let chain = [ancestor_at(3)];
+    assert!(!chain_is_complete(1, 4, Some(&chain)));
+    assert!(!chain_is_complete(1, 4, None));
+}
+
+#[test]
+fn chain_is_complete_rejects_a_chain_on_a_direct_child() {
+    let chain = [ancestor_at(2)];
+    assert!(!chain_is_complete(1, 2, Some(&chain)));
 }

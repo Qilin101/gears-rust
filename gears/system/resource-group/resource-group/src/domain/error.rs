@@ -3,7 +3,7 @@
 // @cpt-dod:cpt-cf-resource-group-dod-testing-error-conversions:p2
 //! Domain error types for the resource-group gear.
 
-use authz_resolver_sdk::pep::EnforcerError;
+use authz_resolver_sdk::pep::{ConstraintCompileError, EnforcerError};
 use thiserror::Error;
 
 /// Domain-specific errors for the resource-group gear.
@@ -27,6 +27,9 @@ pub enum DomainError {
 
     #[error("Group not found: {id}")]
     GroupNotFound { id: uuid::Uuid },
+
+    #[error("Tenant not found: {tenant_id}")]
+    TenantNotFound { tenant_id: uuid::Uuid },
 
     #[error("Group already exists: {id}")]
     GroupAlreadyExists { id: uuid::Uuid },
@@ -150,6 +153,11 @@ impl DomainError {
         Self::GroupAlreadyExists { id }
     }
 
+    #[must_use]
+    pub fn tenant_not_found(tenant_id: uuid::Uuid) -> Self {
+        Self::TenantNotFound { tenant_id }
+    }
+
     pub fn membership_not_found(key: impl Into<String>) -> Self {
         Self::MembershipNotFound { key: key.into() }
     }
@@ -251,11 +259,80 @@ impl From<EnforcerError> for DomainError {
                     |reason| format!("access denied by PDP: {reason:?}"),
                 ),
             },
-            // PDP RPC or constraint compilation failures are infrastructure problems,
-            // not authorization denials — surface as internal errors.
+            // A PDP that emits a native predicate whose capability this gear
+            // never advertised (e.g. `in_tenant_subtree` — RG has no
+            // `tenant_closure` projection) violates the capability
+            // negotiation contract. The PEP fails compilation closed; surface
+            // it as a denial rather than a 500 so callers keep a clean,
+            // non-probeable error shape.
+            EnforcerError::CompileFailed(ConstraintCompileError::UnadvertisedCapabilities {
+                predicate,
+                missing,
+            }) => DomainError::AccessDenied {
+                message: format!(
+                    "access denied: PDP returned {predicate} predicate requiring \
+                     unadvertised capabilities ({})",
+                    missing.join(", ")
+                ),
+            },
+            // PDP RPC or other constraint compilation failures are
+            // infrastructure problems, not authorization denials — surface as
+            // internal errors.
             EnforcerError::EvaluationFailed(_) | EnforcerError::CompileFailed(_) => {
                 DomainError::InternalError
             }
         }
     }
 }
+
+/// Classify an `OData` pagination/filter failure (`toolkit_odata::Error`,
+/// surfaced by `paginate_odata`) as caller-caused (-> `Validation`, HTTP
+/// 400) or a genuine backend failure (-> `Database`, HTTP 500).
+///
+/// Mirrors the split `toolkit_odata::problem_mapping`'s
+/// `From<Error> for CanonicalError` already applies to the `OData`-native
+/// error surface: every variant except `Db`/`ParsingUnavailable` originates
+/// from a client-supplied `$filter` / `$orderby` / cursor and is never a
+/// backend fault, so it must map to `Validation`, not `Database`.
+///
+/// Used by every list repository of this gear — `list_memberships`
+/// , `list_groups` and `list_types` (ML-7391) — so a malformed
+/// `$filter` (unknown field, type mismatch, bad `$orderby` field, stale
+/// cursor) surfaces as 400 instead of being folded into a blanket 500
+/// alongside actual DB failures.
+// TODO(DE1302): both arms collapse the typed `toolkit_odata::Error` into a
+// `String` via `.to_string()`, dropping the source chain. `DomainError` has
+// no variant able to carry a source for this case. Removing this allow needs
+// either such a variant or the toolkit-side classification API that hands
+// back the typed error (see ML-6207), after which the arms can wrap instead
+// of stringify.
+#[allow(unknown_lints, de1302_error_from_to_string)]
+impl From<toolkit_odata::Error> for DomainError {
+    fn from(e: toolkit_odata::Error) -> Self {
+        use toolkit_odata::Error as OE;
+        // Both arms are spelled out on purpose: no wildcard. A variant added
+        // to `toolkit_odata::Error` must break this build and force an
+        // explicit 400/500 decision, rather than default into `Validation`
+        // and quietly report an infrastructure failure as the caller's fault.
+        match &e {
+            OE::Db(_) | OE::ParsingUnavailable(_) => DomainError::database(e.to_string()),
+            OE::InvalidFilter(_)
+            | OE::InvalidOrderByField(_)
+            | OE::OrderMismatch
+            | OE::FilterMismatch
+            | OE::InvalidCursor
+            | OE::InvalidLimit
+            | OE::OrderWithCursor
+            | OE::CursorInvalidBase64
+            | OE::CursorInvalidJson
+            | OE::CursorInvalidVersion
+            | OE::CursorInvalidKeys
+            | OE::CursorInvalidFields
+            | OE::CursorInvalidDirection => DomainError::validation(e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

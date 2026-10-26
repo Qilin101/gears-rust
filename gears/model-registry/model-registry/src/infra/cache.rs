@@ -64,7 +64,7 @@ impl ClusterResolutionCache {
     ///
     /// Returns `None` when no backend is bound for the profile or the scope
     /// prefix is rejected, having logged the reason once.
-    fn facade(&self) -> Option<&ClusterCacheV1> {
+    async fn facade(&self) -> Option<&ClusterCacheV1> {
         if let Some(facade) = self.facade.get() {
             return Some(facade);
         }
@@ -73,6 +73,7 @@ impl ClusterResolutionCache {
             // No `CacheCapability` is required: any registered backend serves.
             .profile(ModelRegistryProfile)
             .resolve()
+            .await
             .and_then(|facade| facade.scoped(CACHE_SCOPE));
 
         match resolved {
@@ -101,7 +102,7 @@ fn chain_key(tenant_id: Uuid) -> String {
 #[async_trait]
 impl ResolutionCache for ClusterResolutionCache {
     async fn get_chain(&self, tenant_id: Uuid) -> Option<Vec<Uuid>> {
-        let facade = self.facade()?;
+        let facade = self.facade().await?;
         let key = chain_key(tenant_id);
 
         match facade.get(&key).await {
@@ -121,7 +122,7 @@ impl ResolutionCache for ClusterResolutionCache {
     }
 
     async fn put_chain(&self, tenant_id: Uuid, chain: &[Uuid]) {
-        let Some(facade) = self.facade() else {
+        let Some(facade) = self.facade().await else {
             return;
         };
         let Ok(value) = serde_json::to_vec(chain) else {

@@ -34,7 +34,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bss_ledger_sdk::{RecognitionRunOutcome, RecognitionRunQueued, RecognitionRunRef};
-use chrono::Utc;
 use coord::{CoordError, LeaseGuard, LeaseManager};
 use futures::FutureExt as _;
 use toolkit_db::secure::AccessScope;
@@ -46,7 +45,8 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::metrics::LedgerMetricsPort;
 use crate::infra::events::publisher::LedgerEventPublisher;
 use crate::infra::recognition::runner::RecognitionRunner;
-use crate::infra::storage::repo::RecognitionRepo;
+use crate::infra::storage::repo::recognition_repo::RecognitionRepo;
+use time::OffsetDateTime;
 
 /// Lease TTL for a recognition run. Comfortably longer than the renewal period
 /// so one missed heartbeat (a transient DB blip) does not drop the lease, yet
@@ -70,7 +70,7 @@ pub struct RecognitionRunService {
     /// repos. See [`coord`] + the module-level note.
     lease: LeaseManager,
     /// Metrics sink: the run-duration histogram is emitted here (it brackets the
-    /// whole pass); the per-segment recognized-minor / over-recognition /
+    /// whole pass); the per-segment release-count / over-recognition /
     /// double-credit / queue-depth metrics are emitted inside the runner.
     metrics: Arc<dyn LedgerMetricsPort>,
 }
@@ -191,7 +191,7 @@ impl RecognitionRunService {
         run_id: Uuid,
     ) -> Result<RecognitionRunOutcome, DomainError> {
         self.recognition
-            .insert_run(scope, tenant, run_id, period_id, Utc::now())
+            .insert_run(scope, tenant, run_id, period_id, OffsetDateTime::now_utc())
             .await
             .map_err(|e| DomainError::Internal(format!("insert recognition_run: {e}")))?;
 
@@ -303,3 +303,7 @@ impl RecognitionRunService {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "run_service_tests.rs"]
+mod tests;

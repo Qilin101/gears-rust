@@ -1,8 +1,8 @@
 //! `SeaORM` entity for `bss.ledger_payment_allocation` (one row per
 //! `(payment, invoice)` allocation split).
 
-use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+use time::OffsetDateTime;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
@@ -23,10 +23,11 @@ pub struct Model {
     pub invoice_id: String,
     pub payer_tenant_id: Uuid,
     pub payment_id: String,
-    pub amount_minor: i64,
+    pub amount: String,
     pub currency: String,
+    pub currency_scale: i16,
     pub precedence_policy_ref: String,
-    pub allocated_at_utc: DateTime<Utc>,
+    pub allocated_at_utc: OffsetDateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

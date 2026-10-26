@@ -1,5 +1,5 @@
 //! Postgres-only repo/service-level tests for the dual-control approval engine
-//! (`ApprovalRepo` + `ApprovalService`, VHP-1852). Ignored by default; run with
+//! (`ApprovalRepo` + `ApprovalService`). Ignored by default; run with
 //! `cargo test -p cf-gears-bss-ledger --test postgres_dual_control -- --ignored`.
 //!
 //! These are the FAST (testcontainers) counterpart to the cluster-gated e2e
@@ -47,25 +47,55 @@ use bss_ledger::domain::approval::ApprovalKind;
 use bss_ledger::domain::approval::intent::{ApprovalIntent, CreditGrantIntent, ReverseIntent};
 use bss_ledger::domain::approval::policy::{OperationFacts, resolve_policy};
 use bss_ledger::domain::error::DomainError;
-use bss_ledger::domain::model::RepoError;
+use bss_ledger::domain::instant::format_rfc3339;
 use bss_ledger::domain::ports::metrics::NoopLedgerMetrics;
 use bss_ledger::infra::approval::service::{ApprovalExecutor, ApprovalService};
+use bss_ledger::infra::approval::stored_intent::encode_intent;
 use bss_ledger::infra::storage::migrations::Migrator;
 use bss_ledger::infra::storage::repo::{ApprovalRepo, NewPendingApproval};
-use chrono::{DateTime, Duration, Utc};
+use bss_ledger_sdk::{CurrencySpec, PostedMoney};
+use rust_decimal::Decimal;
 use sea_orm::{Database, DbErr};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use time::Duration;
+use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_gts::gts_id;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
+/// The USD@2 currency spec every amount here is valued in.
+fn usd_spec() -> CurrencySpec {
+    CurrencySpec::try_new("USD".to_owned(), 2).unwrap()
+}
+
+/// A USD scale-2 amount from a cent count (`120_000` ⇒ `1200.00`).
+fn usd(cents: i64) -> PostedMoney {
+    PostedMoney::try_new(Decimal::new(cents, 2), usd_spec()).unwrap()
+}
+
+/// A valid stored threshold snapshot (the shape `validate_threshold_snapshot`
+/// accepts on approve): ratified defaults, the USD D2 resolved at $1000.
+fn threshold_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "d2_default": "per_currency_platform_default",
+        "d2_thresholds": [],
+        "d2_threshold": { "amount": "1000", "currency": "USD", "currency_scale": 2 },
+        "policy_version": null,
+        "policy_effective_from": null,
+        "basis": "transaction_gate",
+        "a6_backdating_biz_days": 5,
+        "pending_ttl_seconds": 604_800,
+        "resolved_at": format_rfc3339(OffsetDateTime::now_utc()),
+    })
+}
+
 /// Lift a component `RepoError` into a `DbError` so a repo write can be the
 /// transaction's typed success value (mirrors `postgres_payments.rs`).
-fn lift(e: RepoError) -> DbError {
+fn lift(e: impl std::fmt::Display) -> DbError {
     DbError::Sea(DbErr::Custom(e.to_string()))
 }
 
@@ -135,7 +165,7 @@ async fn seed_pending(
     scope: &AccessScope,
     tenant: Uuid,
     prepared_by: Uuid,
-    expires_at: DateTime<Utc>,
+    expires_at: OffsetDateTime,
 ) -> (Uuid, ApprovalIntent) {
     let approval_id = Uuid::now_v7();
     let intent = ApprovalIntent::Reverse(ReverseIntent {
@@ -149,12 +179,12 @@ async fn seed_pending(
         tenant,
         kind: intent.kind().as_str().to_owned(),
         business_key: intent.business_key(),
-        intent: serde_json::to_value(&intent).expect("serialize approval intent"),
-        amount_usd_eq_minor: Some(120_000),
-        threshold_snapshot: serde_json::json!({ "d2_threshold_minor": 100_000 }),
+        intent: encode_intent(&intent).expect("encode approval intent"),
+        amount: Some(usd(120_000)),
+        threshold_snapshot: threshold_snapshot(),
         reason_code: "unit-test".to_owned(),
         prepared_by,
-        prepared_at: Utc::now(),
+        prepared_at: OffsetDateTime::now_utc(),
         correlation_id: Uuid::now_v7(),
         expires_at,
     };
@@ -195,7 +225,7 @@ async fn seed_comment(
                     0,
                     author,
                     "thread note".to_owned(),
-                    Utc::now(),
+                    OffsetDateTime::now_utc(),
                 )
                 .await
                 .map_err(lift)
@@ -205,8 +235,8 @@ async fn seed_comment(
         .expect("seed approval comment");
 }
 
-fn in_one_hour() -> DateTime<Utc> {
-    Utc::now() + Duration::hours(1)
+fn in_one_hour() -> OffsetDateTime {
+    OffsetDateTime::now_utc() + Duration::hours(1)
 }
 
 /// SQL-level BOLA on the approval queue: an approval (and its comment thread)
@@ -282,7 +312,7 @@ async fn approvals_are_invisible_to_a_foreign_tenant_scope() {
             tenant_a,
             intent.kind().as_str(),
             &intent.business_key(),
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         )
         .await
         .expect("read_active foreign")
@@ -486,7 +516,7 @@ async fn an_expired_pending_is_not_actionable() {
         &scope,
         tenant,
         preparer,
-        Utc::now() - Duration::hours(1),
+        OffsetDateTime::now_utc() - Duration::hours(1),
     )
     .await;
 
@@ -512,15 +542,14 @@ async fn an_expired_pending_is_not_actionable() {
 
 // ─── service lifecycle: gate / list / request-changes / resubmit / cancel / comments ───
 
-/// A `CreditGrant` intent keyed by `app_id`, sized at `amount` minor (the
+/// A `CreditGrant` intent keyed by `app_id`, sized at `amount` cents (the
 /// amount-gated kind the `gate` threshold check reads).
 fn credit_grant_intent(app_id: &str, amount: i64) -> ApprovalIntent {
     ApprovalIntent::CreditGrant(CreditGrantIntent {
         tenant_id: Uuid::now_v7(),
         payer_tenant_id: Uuid::now_v7(),
         credit_application_id: app_id.to_owned(),
-        currency: "USD".to_owned(),
-        amount_minor: amount,
+        amount: usd(amount),
         credit_grant_event_type: Some("promo".to_owned()),
     })
 }
@@ -563,7 +592,7 @@ async fn gate_over_threshold_creates_pending_and_is_idempotent() {
     let intent = credit_grant_intent("CA-DC13", 120_000);
     let facts = OperationFacts {
         kind: ApprovalKind::CreditGrant,
-        amount_usd_eq_minor: Some(120_000),
+        amount: Some(usd(120_000)),
         effective_at: None,
         has_outstanding_balance: false,
     };
@@ -572,7 +601,7 @@ async fn gate_over_threshold_creates_pending_and_is_idempotent() {
             &ctx,
             &scope,
             intent.clone(),
-            facts,
+            facts.clone(),
             "credit-grant".to_owned(),
         )
         .await
@@ -614,7 +643,7 @@ async fn gate_below_threshold_creates_no_approval() {
             credit_grant_intent("CA-SMALL", 50_000),
             OperationFacts {
                 kind: ApprovalKind::CreditGrant,
-                amount_usd_eq_minor: Some(50_000),
+                amount: Some(usd(50_000)),
                 effective_at: None,
                 has_outstanding_balance: false,
             },
@@ -973,10 +1002,10 @@ async fn set_policy_persists_and_resolves() {
         .set_policy(
             &ctx_for(admin, tenant),
             &scope,
-            250_000,
+            vec![usd(250_000)],
             10,
             3600,
-            Utc::now() - Duration::hours(1),
+            OffsetDateTime::now_utc() - Duration::hours(1),
         )
         .await
         .expect("set policy");
@@ -986,23 +1015,24 @@ async fn set_policy_persists_and_resolves() {
         .read_policy_versions(&scope, tenant)
         .await
         .expect("read");
-    let policy = resolve_policy(&versions, Utc::now());
+    let policy = resolve_policy(&versions, OffsetDateTime::now_utc());
     assert_eq!(
-        policy.d2_threshold_minor, 250_000,
+        policy.d2_threshold(&usd_spec()).expect("USD threshold"),
+        usd(250_000),
         "resolver picks the written threshold"
     );
-    assert_eq!(policy.a6_backdating_biz_days, 10);
-    assert_eq!(policy.pending_ttl_seconds, 3600);
+    assert_eq!(policy.a6_backdating_biz_days(), 10);
+    assert_eq!(policy.pending_ttl_seconds(), 3600);
 
     // A second write supersedes (version increments; resolver picks the latest).
     let v1 = svc
         .set_policy(
             &ctx_for(admin, tenant),
             &scope,
-            500_000,
+            vec![usd(500_000)],
             5,
             7200,
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         )
         .await
         .expect("set policy 2");
@@ -1012,8 +1042,10 @@ async fn set_policy_persists_and_resolves() {
         .await
         .expect("read");
     assert_eq!(
-        resolve_policy(&versions, Utc::now()).d2_threshold_minor,
-        500_000
+        resolve_policy(&versions, OffsetDateTime::now_utc())
+            .d2_threshold(&usd_spec())
+            .expect("USD threshold"),
+        usd(500_000)
     );
 }
 
@@ -1029,7 +1061,14 @@ async fn set_policy_rejects_out_of_range() {
 
     // d2 below the floor (10_000 minor = 100 USD) → rejected.
     let err = svc
-        .set_policy(&ctx_for(admin, tenant), &scope, 5_000, 5, 7200, Utc::now())
+        .set_policy(
+            &ctx_for(admin, tenant),
+            &scope,
+            vec![usd(5_000)],
+            5,
+            7200,
+            OffsetDateTime::now_utc(),
+        )
         .await
         .unwrap_err();
     assert!(

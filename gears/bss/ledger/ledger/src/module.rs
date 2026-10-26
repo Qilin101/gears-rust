@@ -32,6 +32,7 @@ use crate::domain::ports::metrics::LedgerMetricsPort;
 use crate::infra::events::publisher::LedgerEventPublisher;
 use crate::infra::metrics::LedgerMetricsMeter;
 use crate::infra::storage::migrations::Migrator;
+use time::OffsetDateTime;
 
 /// Typed bundle of the per-process state that `init()` builds and the
 /// lifecycle reads: `register_rest()` reads `provisioning`; `serve()` reads
@@ -61,13 +62,13 @@ pub(crate) struct LedgerRuntime {
     /// orchestrators + the adjustment repo behind `POST /credit-notes`,
     /// `POST /debit-notes`, and `GET /invoices/{id}/exposure`.
     pub adjustments: Arc<crate::api::rest::adjustments::ApiState>,
-    /// REST dual-control approval-queue state (VHP-1852): the `ApprovalService`
+    /// REST dual-control approval-queue state: the `ApprovalService`
     /// lifecycle engine behind the approve / reject / rework / comment surface.
     pub approvals: Arc<crate::api::rest::approvals::ApiState>,
-    /// REST tenant invoice-posting-policy state (VHP-1853): the missing-mapping
+    /// REST tenant invoice-posting-policy state: the missing-mapping
     /// mode + AR-aging bucket thresholds write / read surface.
     pub posting_policy: Arc<crate::api::rest::posting_policy::ApiState>,
-    /// REST per-tenant FX revaluation-mode state (VHP-1986): the Mode A/B
+    /// REST per-tenant FX revaluation-mode state: the Mode A/B
     /// write / read config surface.
     pub fx_revaluation_mode: Arc<crate::api::rest::fx_revaluation_mode::ApiState>,
     /// The dual-control engine itself (Group G): threaded into the queue-applier
@@ -78,7 +79,7 @@ pub(crate) struct LedgerRuntime {
     /// credit-note handler) + the adjustment repo behind `POST /refunds`,
     /// `POST /refund-with-credit-note`, and `GET /refunds/{refundId}`.
     pub refunds: Arc<crate::api::rest::refunds::ApiState>,
-    /// REST payer-closure state (VHP-1852 Phase 2): the dual-control engine + the
+    /// REST payer-closure state: the dual-control engine + the
     /// payer lifecycle repo behind `POST /payers/{id}/close`.
     pub payers: Arc<crate::api::rest::payers::ApiState>,
     /// REST fiscal-period-closure state (Slice 7 Group C): the in-process client
@@ -124,7 +125,7 @@ pub(crate) struct LedgerRuntime {
     /// Tie-out tick cadence.
     pub tie_out_tick: Duration,
     /// How often the daily tie-out folds the full all-time history instead of the
-    /// incremental (baseline + open-period) path — every `N`th tick (VHP-1843).
+    /// incremental (baseline + open-period) path — every `N`th tick.
     pub tie_out_full_every_n: u64,
     /// Fiscal-period-open tick cadence.
     pub period_open_tick: Duration,
@@ -174,7 +175,7 @@ pub(crate) struct LedgerRuntime {
 // discovers it lazily from the types-registry each tick (see `resolve_rate_provider`),
 // so a late-registered adapter self-heals and the ledger stays decoupled from
 // (and schedulable without) the external `bss-rate-provider` gear.
-#[toolkit::gear(name = "bss-ledger", capabilities = [db, rest, stateful], deps = [types_registry, authz_resolver, account_management], lifecycle(entry = "serve", stop_timeout = "30s"))]
+#[toolkit::gear(name = "bss-ledger", capabilities = [db, rest, stateful], deps = [types_registry, authz_resolver, account_management, tenant_resolver], lifecycle(entry = "serve", stop_timeout = "30s"))]
 pub struct BssLedgerGear {
     /// Typed runtime built inside [`Gear::init`] and consumed by
     /// [`RestApiCapability::register_rest`] and [`BssLedgerGear::serve`].
@@ -443,6 +444,7 @@ impl BssLedgerGear {
         clippy::too_many_lines,
         reason = "the serve loop declares one ticker + one select arm per background job (tie-out, period-open, queue-applier, aged-alarm, recognition-run, rate-sync, revaluation-run, reconciliation, chain-verify); the per-job wiring is flat by design"
     )]
+    /// Runs the gear's background jobs (tie-out, period-open, queue-applier, aged-alarm, recognition, rate-sync, revaluation, reconciliation, chain-verify) until `cancel` fires; idles if the runtime is not configured.
     pub(crate) async fn serve(self: Arc<Self>, cancel: CancellationToken) -> anyhow::Result<()> {
         let Some(rt) = self.runtime.load_full() else {
             info!("bss-ledger: serve() with no runtime (unconfigured); idling until cancelled");
@@ -463,7 +465,7 @@ impl BssLedgerGear {
             tokio::spawn(async move {
                 let mut iv = tokio::time::interval(rt.tie_out_tick);
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                // VHP-1843: most ticks take the incremental tie-out (baseline + open
+                // Most ticks take the incremental tie-out (baseline + open
                 // fold); every Nth tick (and the first after startup) folds the full
                 // all-time history as a drift backstop. `N <= 1` → always full.
                 let full_every_n = rt.tie_out_full_every_n;
@@ -570,7 +572,7 @@ impl BssLedgerGear {
                             if let Err(e) = job.run().await {
                                 tracing::error!(error = %e, "bss-ledger: aged-alarm job tick failed");
                             }
-                            // Dual-control maintenance (VHP-1852), on the aged-alarm
+                            // Dual-control maintenance, on the aged-alarm
                             // cadence: the DC12 TTL sweep + the Z8-1 stuck-APPROVING
                             // probe. Best-effort — faults are logged inside, never
                             // fatal to the tick.
@@ -844,7 +846,7 @@ impl BssLedgerGear {
     }
 }
 
-/// One dual-control maintenance tick (VHP-1852), run on the aged-alarm cadence:
+/// One dual-control maintenance tick, run on the aged-alarm cadence:
 /// the DC12 TTL sweep (flip stale `PENDING`/`NEEDS_REWORK` approvals past their
 /// `expires_at` to `EXPIRED`, cross-tenant `allow_all`, complementing the lazy
 /// expire-on-read in `create_pending`) plus the Z8-1 stuck-`APPROVING` probe
@@ -855,7 +857,7 @@ async fn dual_control_maintenance_tick(
     metrics: &Arc<dyn LedgerMetricsPort>,
 ) {
     let approvals = crate::infra::storage::repo::ApprovalRepo::new(db);
-    match approvals.expire_due_all(chrono::Utc::now()).await {
+    match approvals.expire_due_all(OffsetDateTime::now_utc()).await {
         Ok(n) if n > 0 => tracing::info!(
             expired = n,
             "bss-ledger: dual-control TTL sweep expired stale approvals"
@@ -948,13 +950,13 @@ impl Gear for BssLedgerGear {
 
         // Platform PEP. Unlike events (graceful no-op), authz is
         // security-critical: a ledger must not run unauthorized, so a missing
-        // `AuthZResolverClient` fails init loudly. No `with_capabilities` —
+        // `AuthZResolverApi` fails init loudly. No `with_capabilities` —
         // the PDP degrades subtree predicates to a flat `In` (decision A).
         let authz_client = ctx
             .client_hub()
-            .get::<dyn authz_resolver_sdk::AuthZResolverClient>()
+            .get::<dyn authz_resolver_sdk::AuthZResolverApi>()
             .context(
-                "bss-ledger: AuthZResolverClient absent from ClientHub; \
+                "bss-ledger: AuthZResolverApi absent from ClientHub; \
                  authz-resolver module must be registered",
             )?;
         let enforcer = Arc::new(authz_resolver_sdk::PolicyEnforcer::new(authz_client));
@@ -1198,6 +1200,29 @@ impl Gear for BssLedgerGear {
             cfg.seller_tenant_types.clone(),
         ));
 
+        // The platform tenant registry, as the lifecycle gate on the
+        // reconciliation tick's tenant enumeration. Required, not optional:
+        // the tick enumerates from `journal_entry`, which is append-only and
+        // never cleaned, so a silently-absent registry means the tick
+        // reconciles every tenant that ever posted an entry — including the
+        // deleted ones — and appends a row per tenant per tick to a table with
+        // no delete path. That grew `ledger_reconciliation_run` to 29 GB / 61M
+        // rows on stage1, 99.9% of it for tenants that no longer exist, so a
+        // missing registry fails init loudly (like the AM client + enforcer)
+        // rather than degrading to unbounded growth. (A plugin that binds but
+        // answers badly is caught per tick — see `plan_lifecycle`.)
+        let tenant_lifecycle: Arc<dyn crate::infra::tenant_lifecycle::TenantLifecycleReader> =
+            Arc::new(
+                crate::infra::tenant_lifecycle::ResolverTenantLifecycleReader::new(
+                    ctx.client_hub()
+                        .get::<dyn tenant_resolver_sdk::TenantResolverClient>()
+                        .context(
+                            "bss-ledger: TenantResolverClient absent from ClientHub; \
+                             tenant-resolver module must be registered",
+                        )?,
+                ),
+            );
+
         // Slice 5 Phase 3: the Mode-B revaluation runner (the REST trigger's
         // handle) — built BEFORE `db`/`publisher` are moved into the local client.
         let revaluation_run = Arc::new(
@@ -1225,7 +1250,7 @@ impl Gear for BssLedgerGear {
         ctx.client_hub()
             .register::<dyn LedgerClientV1>(Arc::clone(&client));
 
-        // Dual-control (VHP-1852): the approval lifecycle engine + its executor,
+        // Dual-control: the approval lifecycle engine + its executor,
         // which replays an approved mutation through the same client / posting
         // surfaces the inline path uses (idempotent execute-then-mark).
         let approval_poster: Arc<dyn crate::infra::invoice_post::InvoicePoster> =
@@ -1237,7 +1262,7 @@ impl Gear for BssLedgerGear {
         // wires a SEPARATE gated handler (`.with_approval(...)`) onto the refund REST
         // surface for the inline preparer path.
         // The secured-audit sink for the `unknown_final` disposition (Group F /
-        // Slice 6 seam). NO-OP until Slice 6 (VHP-1858) merges — it logs the
+        // Slice 6 seam). NO-OP until Slice 6 merges — it logs the
         // would-be `secured_audit_record` + bumps a metric, persisting nothing
         // durable; the real `SecuredAuditStore` binds here at merge with no
         // call-site change. Also feeds `with_metrics` so the disposition's §9
@@ -1469,7 +1494,7 @@ impl Gear for BssLedgerGear {
             ),
             fleet_revaluation_enabled: cfg.fx.revaluation_enabled,
         });
-        // VHP-1986: the per-tenant FX revaluation-mode config REST surface (its own
+        // The per-tenant FX revaluation-mode config REST surface (its own
         // repo clone; mirrors the posting-policy config surface).
         let fx_revaluation_mode = Arc::new(crate::api::rest::fx_revaluation_mode::ApiState {
             fx_revaluation_mode: crate::infra::storage::repo::FxRevaluationModeRepo::new(
@@ -1478,9 +1503,9 @@ impl Gear for BssLedgerGear {
         });
         // Slice 7 Phase 3: the reconciliation framework (AR↔derived / Payments↔PSP /
         // invoice-completeness) over its own db/publisher clones + the shared metrics +
-        // exception router + the resolved control feeds + the recon config. Driven by the
-        // `ReconciliationJob` ticker (serve loop, via `reconciliation.framework`) + the
-        // `reconciliation-runs` REST trigger.
+        // exception router + the resolved control feeds + the tenant-registry lifecycle
+        // gate + the recon config. Driven by the `ReconciliationJob` ticker (serve loop,
+        // via `reconciliation.framework`) + the `reconciliation-runs` REST trigger.
         let reconciliation_framework =
             Arc::new(crate::infra::reconciliation::ReconciliationFramework::new(
                 recon_db,
@@ -1489,6 +1514,7 @@ impl Gear for BssLedgerGear {
                 Arc::clone(&exception_router),
                 Arc::clone(&manifest_feed),
                 Arc::clone(&psp_feed),
+                tenant_lifecycle,
                 cfg.recon.clone(),
             ));
         let reconciliation = Arc::new(crate::api::rest::reconciliation::ApiState {
