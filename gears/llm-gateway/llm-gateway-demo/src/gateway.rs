@@ -2,8 +2,8 @@
 //!
 //! `create_response` performs the core orchestration the design calls for:
 //! resolve the model via Model Registry, select the provider plugin by the
-//! model's `gts_type`, build a [`ProviderCallCtx`], and delegate. Streaming and
-//! embeddings are out of scope for this demo.
+//! model's provider type (`info.gts_type`), build a [`ProviderCallCtx`], and
+//! delegate. Streaming and embeddings are out of scope for this demo.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,14 +16,15 @@ use llm_gateway_sdk::{
     LlmGatewayProviderPluginClientV1, ResponseEventStream, ResponseResource,
 };
 use model_registry_sdk::{ModelRegistryClientV1, ModelRegistryError};
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 
-/// Demo gateway holding its dependencies as SDK trait objects -- exactly how the
+/// Demo gateway holding its dependencies as SDK trait objects, exactly how the
 /// real gear would resolve them from `ClientHub`.
 pub struct DemoGateway {
     registry: Arc<dyn ModelRegistryClientV1>,
-    /// Provider plugins keyed by the Model Registry provider `gts_type` each
-    /// one declares it serves.
+    /// Provider plugins keyed by the provider type each one declares it
+    /// serves.
     plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClientV1>>,
 }
 
@@ -43,14 +44,15 @@ impl LlmGatewayClientV1 for DemoGateway {
         ctx: &SecurityContext,
         body: CreateResponseBody,
     ) -> Result<ResponseResource, LlmGatewayError> {
-        // 1. Resolve the model from Model Registry.
+        // 1. Resolve the model for evaluation: visible, provider enabled,
+        //    approved, and permitted for this caller.
         let model = self
             .registry
-            .get_tenant_model(ctx, &body.model)
+            .resolve_model(ctx, &body.model)
             .await
-            .map_err(map_registry_err)?;
+            .map_err(|e| map_registry_err(&body.model, e))?;
 
-        // 2. Select the provider plugin by the model's provider identity.
+        // 2. Select the provider plugin by the model's provider type.
         let provider_type = model.info.gts_type.clone();
         let plugin = self.plugins.get(&provider_type).ok_or_else(|| {
             LlmGatewayError::provider_error(format!(
@@ -61,7 +63,7 @@ impl LlmGatewayClientV1 for DemoGateway {
 
         // 3. Build the per-call context from the resolved model.
         let call = ProviderCallCtx {
-            model_info: model.info.clone(),
+            model_info: model.info,
             request_id: "resp_demo_0001".to_owned(),
         };
 
@@ -90,13 +92,20 @@ impl LlmGatewayClientV1 for DemoGateway {
     }
 }
 
-fn map_registry_err(err: ModelRegistryError) -> LlmGatewayError {
-    match err {
-        ModelRegistryError::ModelNotFound { canonical_id } => {
-            LlmGatewayError::model_not_found(canonical_id)
+/// The registry's canonical error, projected through the SDK's typed view and
+/// mapped to the gateway's own outcomes.
+fn map_registry_err(model: &str, err: CanonicalError) -> LlmGatewayError {
+    match ModelRegistryError::from(err) {
+        ModelRegistryError::ModelNotFound { .. } => LlmGatewayError::model_not_found(model),
+        ModelRegistryError::ModelNotApproved { .. } => LlmGatewayError::model_not_approved(model),
+        ModelRegistryError::ProviderDisabled { .. } => {
+            LlmGatewayError::provider_error(format!("provider of {model} is disabled"))
         }
-        ModelRegistryError::ModelNotApproved { canonical_id } => {
-            LlmGatewayError::model_not_approved(canonical_id)
+        ModelRegistryError::NotPermitted { detail } => {
+            LlmGatewayError::request_blocked(format!("not permitted to evaluate {model}: {detail}"))
+        }
+        ModelRegistryError::DependencyUnavailable { detail } => {
+            LlmGatewayError::internal(format!("model resolution unavailable: {detail}"))
         }
         other => LlmGatewayError::internal(other.to_string()),
     }

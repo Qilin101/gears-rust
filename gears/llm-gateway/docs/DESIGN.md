@@ -238,7 +238,7 @@ The gear follows the platform gear layout (`llm-gateway-sdk` plus `llm-gateway` 
 | Tool (`cpt-cf-llm-gateway-entity-tool-v1`) | Tool definition family: `function` (inline JSON schema), `reference` (GTS schema id), `inline_gts`, the Gateway tool `cf_gears:web_search`, and provider tools `<provider>:<tool>` kept as `Extension` | [tools.rs](../llm-gateway-sdk/src/models/tools.rs), [extension.rs](../llm-gateway-sdk/src/models/extension.rs) |
 | Usage (`cpt-cf-llm-gateway-entity-usage-v1`) | Generic token usage (input, output, cached, reasoning), cost in AI credits, provider raw usage (opaque), completeness flag, estimate label | [core.rs](../llm-gateway-sdk/src/models/core.rs) (`Usage`) |
 | ProviderCallContext (`cpt-cf-llm-gateway-entity-provider-call-context-v1`) | Per-call input to a plugin: resolved `ModelInfoV1` as received from Model Registry (including the OAGW upstream alias), response `id`, optional provider API key (secret, not serialized), effective parameter decisions, cancellation token | [plugin.rs](../llm-gateway-sdk/src/models/plugin.rs) (`ProviderCallCtx`) |
-| ProviderPluginSpec (`cpt-cf-llm-gateway-entity-provider-plugin-spec-v1`) | GTS plugin instance (`gts.cf.toolkit.plugins.plugin.v1~cf.llmgw.provider.plugin.v1~…`): `provider_type` (model-info `gts_type` served), provider tool namespace, priority | [gts.rs](../llm-gateway-sdk/src/gts.rs) (`LlmGatewayProviderPluginSpecV1`) |
+| ProviderPluginSpec (`cpt-cf-llm-gateway-entity-provider-plugin-spec-v1`) | GTS plugin instance (`gts.cf.toolkit.plugins.plugin.v1~cf.llmgw.provider.plugin.v1~…`): `provider_type` (the provider type served, derived from `gts.cf.genai.model.provider.v1~`), provider tool namespace, priority | [gts.rs](../llm-gateway-sdk/src/gts.rs) (`LlmGatewayProviderPluginSpecV1`) |
 | NormalizedError (`cpt-cf-llm-gateway-entity-normalized-error-v1`) | Gateway error code (pre-dispatch codes and provider categories), message, `param`, provider code and message, `provider_request_id`, `retry_after`, response `id` | [errors.rs](../llm-gateway-sdk/src/errors.rs) (`LlmGatewayError`) |
 | UsageRecord (`cpt-cf-llm-gateway-entity-usage-record-v1`) | Outbound record to Usage Collector: tenant and user as explicit attribution, model, AI credit quantity, time window, idempotency key = response `id`, metadata (completeness, estimate flag, `provider_request_id`, provider type) | Usage Collector SDK `CreateUsageRecord` |
 
@@ -344,7 +344,7 @@ Model identity, tenant availability, OAGW upstream alias, secret reference, capa
 
 ##### Responsibility scope
 
-Calls `ModelRegistryClientV1::get_tenant_model` with the caller's `SecurityContext` on every request. Maps "unknown" and "not available for tenant" to `model_not_found` without telling them apart, and Model Registry unavailability to `model_resolution_unavailable`. Returns `ModelInfoV1` unchanged for the plugin.
+Calls `ModelRegistryClientV1::resolve_model` with the caller's `SecurityContext` on every request. Maps "unknown" and "not available for tenant" to `model_not_found` without telling them apart, and Model Registry unavailability to `model_resolution_unavailable`. Returns `ModelInfoV1` unchanged for the plugin.
 
 ##### Responsibility boundaries
 
@@ -682,7 +682,7 @@ All calls go through SDK clients resolved from ClientHub. Request-path calls car
 
 | Dependency Gear | Interface Used | Purpose |
 |-------------------|----------------|----------|
-| Model Registry | `ModelRegistryClientV1::get_tenant_model` | Resolve model info per tenant on every request. Model info carries the provider `gts_type`, provider model id, the OAGW upstream alias (`provider_settings.oagw_alias`), the secret reference of the provider API key, capabilities, `default_parameters`, `allow_parameter_override`, `allow_extra_params`, and provider settings with pricing; provider settings are validated against the schemas that plugins publish in Type Registry |
+| Model Registry | `ModelRegistryClientV1::resolve_model` | Resolve model info per tenant on every request. Model info carries the provider `gts_type`, provider model id, the OAGW upstream alias (`provider_settings.oagw_alias`), the secret reference of the provider API key, capabilities, `default_parameters`, `allow_parameter_override`, `allow_extra_params`, and provider settings with pricing; provider settings are validated against the schemas that plugins publish in Type Registry |
 | Type Registry | `PlatformTypesRegistryApi` with `PlatformSecurityContext`; `TypesRegistryApi` | `PlatformTypesRegistryApi`: register the plugin spec schema (core) and plugin instances and settings schemas (plugins), and list plugin instances. `TypesRegistryApi`: resolve tool GTS schemas at request time under the caller's context |
 | OAGW | `ServiceGatewayClientV1` (`proxy_request`) | Only egress path for provider calls (to the model's upstream alias) and external media fetches; circuit breaking |
 | CredStore | `CredStoreClientV1::get` | Fetch the provider API key by the secret reference in the model info |
@@ -751,7 +751,7 @@ sequenceDiagram
     P->>AZ: access check (ctx, create_response)
     AZ-->>P: permitted
     P->>P: acquire in-flight slot, reject item_reference inputs
-    P->>MR: get_tenant_model(ctx, model)
+    P->>MR: resolve_model(ctx, model)
     MR-->>P: model info
     P->>PD: select plugin by gts_type
     PD-->>P: plugin client and capabilities

@@ -1,29 +1,28 @@
-//! End-to-end demo of the LLM Gateway SDK traits.
+//! End-to-end demo of the LLM Gateway SDK traits against the Model Registry
+//! contract.
 //!
-//! Wires three mock SDK implementations together and drives two requests:
+//! Wires three mock SDK implementations together and drives the contract:
 //!
 //! ```text
+//! 0. plugin publishes its provider type (derived from gts.cf.genai.model.provider.v1~)
+//!    → the registry validates each model's provider_settings against it
+//!
 //! main → LlmGatewayClientV1::create_response  (openai::gpt-4o)
-//!          → ModelRegistryClientV1::get_tenant_model
-//!          → LlmGatewayProviderPluginClientV1::create_response
+//!          → ModelRegistryClientV1::resolve_model
+//!          → plugin selected by info.gts_type, settings narrowed to the plugin type
 //!          → ResponseResource (success)
 //!
-//! main → LlmGatewayClientV1::create_response  (anthropic::claude-sonnet-4)
-//!          → ModelRegistryClientV1::get_tenant_model
-//!          → no provider plugin registered → LlmGatewayError (expected)
+//! main → create_response (openai::gpt-4o-mini) → registry: MODEL_NOT_APPROVED
+//! main → create_response (anthropic::claude-sonnet-4) → no provider plugin registered
 //!
-//! main → ModelRegistryClientV1::list_tenant_models
-//!          → QueryBuilder<ModelSchema> + typed FieldRefs (no $filter text)
-//!          → Page<ModelV1> (filter evaluated in the mock)
-//!
-//! main → ModelRegistryClientV1::list_tenant_models
-//!          → the same listing as raw $filter text, for comparison
+//! main → ModelRegistryClientV1::list_available_models
+//!          → QueryBuilder<ModelSchema> + typed FieldRefs, then the same as $filter text
 //! ```
 //!
 //! Run with: `cargo run -p cf-gears-llm-gateway-demo`
 //!
-//! Pass `--openai-settings-schema` to instead print the JSON schema for the
-//! `OpenAiSettingsV1` provider-settings GTS type and exit.
+//! Pass `--provider-type-schema` to print the JSON schema of the provider base
+//! type and of the demo plugin's derived provider type, then exit.
 
 // Demo binary: `{:?}` is the natural way to print SDK enums/values here,
 // and unicode arrows (`→`, `←`) make terminal output readable.
@@ -42,51 +41,128 @@ use llm_gateway_sdk::models::core::ResponseInput;
 use llm_gateway_sdk::models::items::OutputItem;
 use llm_gateway_sdk::{CreateResponseBody, LlmGatewayClientV1, LlmGatewayProviderPluginClientV1};
 use model_registry_sdk::odata::{
-    MODEL_CANONICAL_ID, MODEL_GTS_TYPE, MODEL_LIFECYCLE_STATUS, MODEL_STREAMING, ModelFilterField,
+    MODEL_API_COMPLETION, MODEL_CANONICAL_ID, MODEL_GTS_TYPE, MODEL_STREAMING, ModelFilterField,
     ModelSchema, QueryBuilder, SortDir,
 };
-use model_registry_sdk::{LifecycleStatus, ModelInfoV1, ModelRegistryClientV1, OpenAiSettingsV1};
+use model_registry_sdk::{ModelRegistryClientV1, ModelV1, ProviderTypeV1};
 use toolkit_odata::filter::FilterField as _;
 use toolkit_odata::pagination::short_filter_hash;
 use toolkit_odata::{ODataQuery, parse_filter_string};
 use toolkit_security::SecurityContext;
 
 use gateway::DemoGateway;
-use mock_plugin::MockOpenAiPlugin;
+use mock_plugin::{MockOpenAiPlugin, OpenAiProviderSettingsV1};
 use mock_registry::{ANTHROPIC_PROVIDER_TYPE, MockModelRegistry, OPENAI_PROVIDER_TYPE};
 
-/// Print the JSON schema for the `OpenAiSettingsV1` provider-settings GTS type
-/// and the base `ModelInfoV1` envelope it derives from.
-fn print_openai_settings_schema() -> Result<(), Box<dyn std::error::Error>> {
-    println!("GTS type id: {}", <ModelInfoV1>::TYPE_ID);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&<ModelInfoV1>::gts_schema())?
-    );
+type DemoResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-    println!("\nGTS type id: {}", OpenAiSettingsV1::TYPE_ID);
+/// The derived provider type's schema with the base type inlined, the shape
+/// Types Registry hands back as the effective schema. The derived schema
+/// composes as `allOf: [$ref base, overlay]`; the registry cannot resolve a
+/// `gts://` reference by itself, so the base is substituted here.
+fn effective_provider_type_schema() -> serde_json::Value {
+    let base = <ProviderTypeV1>::gts_schema();
+    let mut derived = OpenAiProviderSettingsV1::gts_schema();
+    if let Some(branches) = derived.get_mut("allOf").and_then(|v| v.as_array_mut()) {
+        for branch in branches.iter_mut() {
+            if branch.get("$ref").is_some() {
+                *branch = base.clone();
+            }
+        }
+    }
+    derived
+}
+
+/// Print the JSON schema of the provider base type and of the demo plugin's
+/// derived provider type, then exit.
+fn print_provider_type_schema() -> DemoResult {
+    println!("GTS type id: {}", <ProviderTypeV1>::TYPE_ID);
     println!(
         "{}",
-        serde_json::to_string_pretty(&OpenAiSettingsV1::gts_schema())?
+        serde_json::to_string_pretty(&<ProviderTypeV1>::gts_schema())?
+    );
+    println!("\nGTS type id: {}", OpenAiProviderSettingsV1::TYPE_ID);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&OpenAiProviderSettingsV1::gts_schema())?
     );
     Ok(())
 }
 
+/// What Model Registry does on every model write: validate `provider_settings`
+/// against the `properties.provider_settings` subschemas of the provider
+/// type's effective schema.
+fn validate_settings_like_the_registry(models: &[&ModelV1]) -> DemoResult {
+    println!("\n─── Step 0: provider type schema check (what Model Registry does on write) ───");
+    let effective = effective_provider_type_schema();
+    let mut subschemas = Vec::new();
+    for branch in effective["allOf"].as_array().into_iter().flatten() {
+        if let Some(sub) = branch.pointer("/properties/provider_settings") {
+            subschemas.push(sub.clone());
+        }
+    }
+    // Nested types are referenced through the root `definitions`, which the
+    // registry carries along with the subschemas.
+    let mut combined = serde_json::json!({ "allOf": subschemas });
+    if let Some(defs) = effective.get("definitions") {
+        combined["definitions"] = defs.clone();
+    }
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft7)
+        .build(&combined)?;
+    println!(
+        "→ {} narrows provider_settings with {} subschema(s)",
+        OpenAiProviderSettingsV1::TYPE_ID,
+        combined["allOf"].as_array().map_or(0, Vec::len)
+    );
+    for model in models {
+        if model.info.gts_type.as_ref() != OpenAiProviderSettingsV1::TYPE_ID {
+            println!("←   {}: other provider type, skipped", model.canonical_id);
+            continue;
+        }
+        let errors: Vec<String> = validator
+            .iter_errors(&model.info.provider_settings)
+            .map(|e| format!("{}: {e}", e.instance_path()))
+            .collect();
+        if errors.is_empty() {
+            println!("←   {}: provider_settings valid", model.canonical_id);
+        } else {
+            println!("←   {}: SCHEMA_MISMATCH {errors:?}", model.canonical_id);
+        }
+    }
+    let bad = serde_json::json!({ "cost": { "input_per_1k_micro": "free" } });
+    let errors: Vec<String> = validator
+        .iter_errors(&bad)
+        .map(|e| format!("provider_settings{}: {e}", e.instance_path()))
+        .collect();
+    println!("←   a settings document without oagw_alias and a string cost: {errors:?}");
+    Ok(())
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().any(|a| a == "--openai-settings-schema") {
-        return print_openai_settings_schema();
+async fn main() -> DemoResult {
+    if std::env::args().any(|a| a == "--provider-type-schema") {
+        return print_provider_type_schema();
     }
 
     // --- Wire the mock dependencies as SDK trait objects. ---
-    let registry: Arc<dyn ModelRegistryClientV1> = Arc::new(MockModelRegistry::new()?);
+    let mock_registry = MockModelRegistry::new()?;
+    let fixtures: Vec<&ModelV1> = mock_registry.models().collect();
+    validate_settings_like_the_registry(&fixtures)?;
+    drop(fixtures);
+    let registry: Arc<dyn ModelRegistryClientV1> = Arc::new(mock_registry);
 
     let plugin: Arc<dyn LlmGatewayProviderPluginClientV1> = Arc::new(MockOpenAiPlugin);
     println!(
-        "→ registered plugin for {} (streaming={item}, media={md:?})",
+        "\n→ registered plugin for {} (streaming={item}, media={md:?})",
         OPENAI_PROVIDER_TYPE,
         item = plugin.capabilities().streaming_transport,
         md = plugin.capabilities().media_input,
+    );
+    assert_eq!(
+        OpenAiProviderSettingsV1::TYPE_ID,
+        OPENAI_PROVIDER_TYPE,
+        "the plugin's settings type is its provider type"
     );
 
     let mut plugins: HashMap<GtsTypeId, Arc<dyn LlmGatewayProviderPluginClientV1>> = HashMap::new();
@@ -95,8 +171,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gateway = DemoGateway::new(Arc::clone(&registry), plugins);
     let ctx = SecurityContext::anonymous();
 
-    // --- 1. OpenAI model -- existing plugin → success. ---
-    println!("\n─── Request 1: openai::gpt-4o (plugin exists) ───");
+    // --- 1. OpenAI model, plugin exists → success. ---
+    println!("\n─── Request 1: openai::gpt-4o (approved, plugin exists) ───");
     let request = CreateResponseBody {
         model: "openai::gpt-4o".to_owned(),
         input: Some(ResponseInput::Text("Hello, gateway!".to_owned())),
@@ -122,8 +198,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --- 2. Anthropic model -- no plugin → clean error. ---
-    println!("\n─── Request 2: anthropic::claude-sonnet-4 (no plugin) ───");
+    // --- 2. Revoked model → the registry's approval gate. ---
+    println!("\n─── Request 2: openai::gpt-4o-mini (revoked) ───");
+    let request = CreateResponseBody {
+        model: "openai::gpt-4o-mini".to_owned(),
+        input: Some(ResponseInput::Text("Still there?".to_owned())),
+        ..Default::default()
+    };
+    println!("→ create_response(model = {})", request.model);
+    match gateway.create_response(&ctx, request).await {
+        Err(e) => println!("← error     : {e}"),
+        Ok(_) => println!("← UNEXPECTED: a revoked model resolved"),
+    }
+
+    // --- 3. Anthropic model, no plugin → clean error. ---
+    println!("\n─── Request 3: anthropic::claude-sonnet-4 (no plugin) ───");
     let request = CreateResponseBody {
         model: "anthropic::claude-sonnet-4".to_owned(),
         input: Some(ResponseInput::Text("Translate this".to_owned())),
@@ -137,7 +226,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
-    // --- 3/4. List models through the OData surface the SDK publishes. ---
+    // --- 4. Unknown model → model not found. ---
+    println!("\n─── Request 4: openai::nope (unknown) ───");
+    match gateway
+        .create_response(
+            &ctx,
+            CreateResponseBody {
+                model: "openai::nope".to_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Err(e) => println!("← error     : {e}"),
+        Ok(_) => println!("← UNEXPECTED: an unknown model resolved"),
+    }
+
+    // --- 5/6. List the available models through the OData surface. ---
     list_models_with_builder(registry.as_ref(), &ctx).await?;
     list_models_with_filter_text(registry.as_ref(), &ctx).await?;
 
@@ -152,18 +257,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn list_models_with_builder(
     registry: &dyn ModelRegistryClientV1,
     ctx: &SecurityContext,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n─── Request 3: list_tenant_models via the typed QueryBuilder ───");
+) -> DemoResult {
+    println!("\n─── Request 5: list_available_models via the typed QueryBuilder ───");
 
-    // The question a gateway actually asks: which production models can I route
-    // to the OpenAI plugin, streaming? `MODEL_LIFECYCLE_STATUS.eq(..)` takes the
-    // SDK enum, so a misspelled status is a compile error.
+    // The question a gateway asks: which available models can I route to the
+    // OpenAI plugin, streaming, over the completion API?
     let query = QueryBuilder::<ModelSchema>::new()
         .filter(
             MODEL_GTS_TYPE
                 .eq(OPENAI_PROVIDER_TYPE)
                 .and(MODEL_STREAMING.eq(true))
-                .and(MODEL_LIFECYCLE_STATUS.eq(LifecycleStatus::Production)),
+                .and(MODEL_API_COMPLETION.eq(true)),
         )
         .order_by(MODEL_CANONICAL_ID, SortDir::Asc)
         .page_size(10)
@@ -173,35 +277,33 @@ async fn list_models_with_builder(
         query.filter_hash, query.limit
     );
 
-    let page = registry.list_tenant_models(ctx, &query).await?;
+    let page = registry.list_available_models(ctx, &query).await?;
     println!(
-        "← matched  : {} of 2 fixtures (limit={})",
+        "← matched  : {} of 3 fixtures (the revoked one is never listed; limit={})",
         page.items.len(),
         page.page_info.limit
     );
     for model in &page.items {
         println!(
-            "←   {} — streaming={}, vision={}",
+            "←   {} — approval={}, streaming={}, vision={}, base_url={:?}",
             model.canonical_id,
+            model.approval.state.as_str(),
             model.info.capabilities.streaming,
             model.info.capabilities.vision.enabled,
+            model.info.base_url,
         );
     }
 
     Ok(())
 }
 
-/// Same listing expressed as raw `$filter` text — the shape that arrives over
-/// HTTP, and the fallback when a filter is assembled at runtime.
-///
-/// Field names still come from [`ModelFilterField`] rather than string
-/// literals, but the values are interpolated into the query text, so this form
-/// has to worry about quoting in a way the builder does not.
+/// Same listing expressed as raw `$filter` text, the shape that arrives over
+/// HTTP.
 async fn list_models_with_filter_text(
     registry: &dyn ModelRegistryClientV1,
     ctx: &SecurityContext,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n─── Request 4: the same listing as raw $filter text ───");
+) -> DemoResult {
+    println!("\n─── Request 6: the same listing as raw $filter text ───");
 
     let filter = format!(
         "{gts_type} eq '{OPENAI_PROVIDER_TYPE}' and {streaming} eq true",
@@ -212,18 +314,22 @@ async fn list_models_with_filter_text(
 
     let parsed = parse_filter_string(&filter)?;
     let mut query = ODataQuery::default().with_limit(10);
-    // The builder does this step for you.
     if let Some(hash) = short_filter_hash(Some(parsed.as_expr())) {
         query = query.with_filter_hash(hash);
     }
     let query = query.with_filter(parsed.into_expr());
 
-    let page = registry.list_tenant_models(ctx, &query).await?;
-    println!("← matched  : {} of 2 fixtures", page.items.len());
+    let page = registry.list_available_models(ctx, &query).await?;
+    println!("← matched  : {} of 3 fixtures", page.items.len());
 
     // Field names outside the allowlist never reach the backend: the SDK enum
     // is the same gate the real repository applies before touching a column.
-    for name in ["vision", "info.capabilities.vision", "cost"] {
+    for name in [
+        "vision",
+        "info.capabilities.vision",
+        "cost",
+        "approval_state",
+    ] {
         println!(
             "→ filterable(`{name}`) : {}",
             ModelFilterField::from_name(name).is_some()

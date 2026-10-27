@@ -21,9 +21,15 @@ llm-gateway-sdk = { package = "cf-gears-llm-gateway-sdk", path = "../llm-gateway
 model-registry-sdk = { package = "cf-gears-model-registry-sdk", path = "../../model-registry/model-registry-sdk" }
 toolkit-security = { workspace = true }
 toolkit-odata = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+toolkit-gts = { workspace = true }
 gts = { workspace = true }
+jsonschema = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }

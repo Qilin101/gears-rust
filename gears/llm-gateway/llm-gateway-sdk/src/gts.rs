@@ -6,10 +6,13 @@
 //! plugin at runtime.
 //!
 //! Selection keys on **provider identity**: the instance's `provider_type`
-//! carries the Model Registry model-info `gts_type` the plugin serves
-//! (e.g. `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`). The gateway
-//! resolves the model, reads its `gts_type`, and picks the plugin whose
-//! `provider_type` matches (ties broken on `PluginV1.priority`).
+//! carries the Model Registry provider type the plugin serves, a GTS type
+//! derived from `gts.cf.genai.model.provider.v1~` (e.g.
+//! `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`). The gateway
+//! resolves the model, reads `ModelInfoV1.gts_type`, and picks the plugin
+//! whose `provider_type` matches (ties broken on `PluginV1.priority`). The
+//! plugin also publishes that provider type's schema, which narrows
+//! `provider_settings`; Model Registry validates model settings against it.
 
 use gts::GtsTypeId;
 use toolkit::gts::PluginV1;
@@ -35,7 +38,7 @@ use toolkit_gts::gts_type_schema;
 ///     vendor: "constructorfabric".to_owned(),
 ///     priority: 100,
 ///     properties: LlmGatewayProviderPluginSpecV1 {
-///         provider_type: GtsTypeId::new("gts.cf.genai.model.info.v1~cf.genai._.openai.v1~"),
+///         provider_type: GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
 ///     },
 /// };
 ///
@@ -49,8 +52,9 @@ use toolkit_gts::gts_type_schema;
     properties = "provider_type",
 )]
 pub struct LlmGatewayProviderPluginSpecV1 {
-    /// Model Registry provider identity this plugin serves — the model-info
-    /// `gts_type` (e.g. `gts.cf.genai.model.info.v1~cf.genai._.openai.v1~`).
-    /// Matched against `ModelInfoV1.gts_type` during plugin resolution.
+    /// Model Registry provider type this plugin serves: a GTS type derived
+    /// from `gts.cf.genai.model.provider.v1~` (e.g.
+    /// `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`). Matched
+    /// against `ModelInfoV1.gts_type` during plugin resolution.
     pub provider_type: GtsTypeId,
 }

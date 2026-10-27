@@ -1,6 +1,12 @@
 //! Mock [`LlmGatewayProviderPluginClientV1`] standing in for an `OpenAI` provider
-//! integration. It does not call any network -- it narrows the settings from
-//! [`ProviderCallCtx`] and echoes a canned response so the wiring is visible.
+//! integration. It does not call any network: it narrows `provider_settings`
+//! from [`ProviderCallCtx`] to its own settings type and echoes a canned
+//! response so the wiring is visible.
+//!
+//! The settings type is the plugin's provider type: a GTS type derived from
+//! Model Registry's provider base type (`ProviderTypeV1`). Its schema is what
+//! the plugin publishes in Types Registry and what Model Registry validates
+//! every model's `provider_settings` against.
 
 use async_trait::async_trait;
 use llm_gateway_sdk::models::content::{OutputContentPart, OutputText};
@@ -18,7 +24,33 @@ use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
     LlmGatewayProviderPluginClientV1, ResponseEventStream,
 };
-use model_registry_sdk::OpenAiSettingsV1;
+use model_registry_sdk::ProviderTypeV1;
+use serde::{Deserialize, Serialize};
+use toolkit_gts::gts_type_schema;
+
+/// Cost table of the demo `OpenAI` provider type, in micro-credits per 1k
+/// tokens. Provider-specific by design: Model Registry stores it opaquely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OpenAiCost {
+    pub input_per_1k_micro: Option<u64>,
+    pub output_per_1k_micro: Option<u64>,
+}
+
+/// The demo `OpenAI` provider type: the shape of `provider_settings` for every
+/// model whose provider has this `gts_type`.
+#[derive(Debug)]
+#[gts_type_schema(
+    dir_path = "schemas",
+    base = ProviderTypeV1,
+    type_id = gts_id!("cf.genai.model.provider.v1~cf.genai._.openai.v1~"),
+    description = "Demo OpenAI provider settings: the OAGW upstream alias and the cost table",
+    properties = "oagw_alias,cost"
+)]
+pub struct OpenAiProviderSettingsV1 {
+    /// The OAGW upstream alias the plugin sends provider calls through.
+    pub oagw_alias: String,
+    pub cost: OpenAiCost,
+}
 
 /// A mock `OpenAI` provider plugin.
 pub struct MockOpenAiPlugin;
@@ -38,13 +70,15 @@ impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
         call: &ProviderCallCtx,
         body: CreateResponseBody,
     ) -> Result<ResponseResource, LlmGatewayError> {
-        // Narrow the GTS model-info envelope to the provider's own typed view
-        // via the registry SDK cast utility. This validates `gts_type` against
-        // `OpenAiSettingsV1`'s GTS id and gives typed field access -- the real
-        // OpenAI adapter would read connection routing this way.
-        let info = call.typed_info::<OpenAiSettingsV1>().map_err(|e| {
-            LlmGatewayError::internal(format!("failed to narrow OpenAI model info: {e}"))
-        })?;
+        // Narrow the opaque settings document to this plugin's typed view. This
+        // checks `gts_type` against the plugin's provider type id and gives
+        // typed field access; the real adapter reads its routing from here.
+        let settings = call
+            .typed_settings::<OpenAiProviderSettingsV1>()
+            .map_err(|e| {
+                LlmGatewayError::internal(format!("failed to narrow OpenAI settings: {e}"))
+            })?;
+        let info = &call.model_info;
 
         let prompt = match body.input {
             Some(ResponseInput::Text(t)) => t,
@@ -53,8 +87,11 @@ impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
         };
 
         let reply = format!(
-            "echo from provider_model_id={} via oagw_alias={}: {prompt}",
-            info.provider_model_id, info.provider_settings.oagw_alias,
+            "echo from provider_model_id={} via oagw_alias={} base_url={} secret_ref={}: {prompt}",
+            info.provider_model_id,
+            settings.oagw_alias,
+            info.base_url.as_deref().unwrap_or("<plugin default>"),
+            info.secret_ref.as_deref().unwrap_or("<none>"),
         );
 
         Ok(mock_response(&reply, &body.model))
