@@ -1,225 +1,183 @@
 #!/usr/bin/env bash
-# Walks all 12 model-registry P1 endpoints against a running server.
-#
-# Two zones: /model-registry/v1 is the eval-facing read surface, keyed by
-# canonical_id; /model-registry/v1/admin is the management surface, keyed by
-# UUID. `::` percent-encoding therefore appears on exactly one call — the eval
-# read at step 7.
+# Walks the twelve model-registry endpoints against a running server.
 #
 # Requires: curl, jq
 # Server must be started with --features model-registry,static-authn,static-authz,static-tenants,static-credstore
 # and config/quickstart.yaml (auth_disabled: true, prefix_path: /cf).
 #
-# Override the base URL by exporting BASE_URL before running.
+# Override the server prefix by exporting BASE_URL before running.
 
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://127.0.0.1:8087/cf/model-registry/v1}"
-ADMIN_URL="${BASE_URL}/admin"
+BASE_URL="${BASE_URL:-http://127.0.0.1:8087/cf}"
+MR="${BASE_URL}/model-registry/v1"
+TR="${BASE_URL}/types-registry/v1"
 
+PROVIDER_TYPE="gts.cf.genai.model.provider.v1~cf.genai._.demo.v1~"
 PROVIDER_SLUG="demo-openai"
 PROVIDER_MODEL_ID="gpt-4o-mini"
-PROVIDER_NAME="Demo OpenAI"
 
 step() {
     printf '\n\033[1;36m== %s ==\033[0m\n' "$1"
 }
 
-# ── 1. POST /admin/providers ────────────────────────────────────────────────
-step "POST /admin/providers — create provider"
+# ── 0. Register a demo provider type (what an LLM Gateway plugin does) ──────
+step "POST /types-registry/v1/entities — register the demo provider type"
 
-PROVIDER_PAYLOAD=$(cat <<JSON
+TYPE_SCHEMA=$(cat <<JSON
 {
-  "slug": "${PROVIDER_SLUG}",
-  "name": "${PROVIDER_NAME}",
-  "gts_type": "gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~",
-  "managed": false,
-  "metadata": { "region": "us-east-1" },
-  "discovery_enabled": false
+  "\$id": "gts://${PROVIDER_TYPE}",
+  "\$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Demo provider type: provider_settings carries an OAGW alias and a cost table",
+  "allOf": [
+    { "\$ref": "gts://gts.cf.genai.model.provider.v1~" },
+    {
+      "type": "object",
+      "properties": {
+        "provider_settings": {
+          "type": "object",
+          "required": ["oagw_alias"],
+          "properties": {
+            "oagw_alias": { "type": "string" },
+            "cost": {
+              "type": "object",
+              "properties": { "input_per_1k_micro": { "type": "integer" }, "output_per_1k_micro": { "type": "integer" } }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
 JSON
 )
-
-PROVIDER_JSON=$(curl -fsS -X POST "${ADMIN_URL}/providers" \
+curl -fsS -X POST "${TR}/entities" \
     -H 'Content-Type: application/json' \
-    -d "${PROVIDER_PAYLOAD}")
-echo "${PROVIDER_JSON}" | jq .
+    -d "$(jq -n --argjson s "${TYPE_SCHEMA}" '{ entities: [$s] }')" | jq .
 
+# ── 1. POST /providers ──────────────────────────────────────────────────────
+step "POST /providers — create a shared provider"
+
+PROVIDER_JSON=$(curl -fsS -X POST "${MR}/providers" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg slug "${PROVIDER_SLUG}" --arg t "${PROVIDER_TYPE}" \
+        '{ slug: $slug, name: "Demo OpenAI", gts_type: $t, sharing_mode: "shared", metadata: { region: "us-east-1" } }')")
+echo "${PROVIDER_JSON}" | jq .
 PROVIDER_ID=$(echo "${PROVIDER_JSON}" | jq -r .id)
 
-# ── 2. GET /admin/providers — list with OData filter ───────────────────────
-step "GET /admin/providers — list with OData filter"
+# ── 2. GET /providers ───────────────────────────────────────────────────────
+step "GET /providers — list with OData filter and \$select"
 
-curl -fsS --get "${ADMIN_URL}/providers" \
+curl -fsS --get "${MR}/providers" \
     --data-urlencode "\$filter=slug eq '${PROVIDER_SLUG}'" \
-    --data-urlencode "\$limit=10" | jq .
+    --data-urlencode "\$select=id,slug,enabled,inherited,shadowed,available_for_eval" \
+    --data-urlencode "limit=10" | jq .
 
-# ── 3. GET /admin/providers/{id} ────────────────────────────────────────────
-step "GET /admin/providers/{id} — fetch by id"
+# ── 3. GET /providers/{id} ──────────────────────────────────────────────────
+step "GET /providers/{id}"
 
-curl -fsS "${ADMIN_URL}/providers/${PROVIDER_ID}" | jq .
+curl -fsS "${MR}/providers/${PROVIDER_ID}" | jq .
 
-# ── 4. PATCH /admin/providers/{id} ──────────────────────────────────────────
-step "PATCH /admin/providers/{id} — change name + clear metadata"
+# ── 4. PATCH /providers/{id} ────────────────────────────────────────────────
+step "PATCH /providers/{id} — rename and clear metadata"
 
-curl -fsS -X PATCH "${ADMIN_URL}/providers/${PROVIDER_ID}" \
+curl -fsS -X PATCH "${MR}/providers/${PROVIDER_ID}" \
     -H 'Content-Type: application/json' \
     -d '{ "name": "Demo OpenAI (renamed)", "metadata": null }' | jq .
 
-# ── 5. POST /admin/models ───────────────────────────────────────────────────
-step "POST /admin/models — create model (provider addressed by id)"
+# ── 5. POST /models ─────────────────────────────────────────────────────────
+step "POST /models — settings that violate the provider type schema (expect 400 SCHEMA_MISMATCH)"
 
-# Full ModelInfoV1 envelope — mirrors the SDK schema and the integration test
-# fixture at gears/model-registry/model-registry/tests/integration.rs.
-MODEL_INFO=$(cat <<JSON
-{
-  "gts_type": "gts.cf.genai.model.info.v1~",
-  "display_name": "Demo GPT-4o mini",
-  "description": null,
-  "family": "gpt-4o",
-  "vendor": "OpenAI",
-  "managed": false,
-  "architecture": "transformer",
-  "size_bytes": null,
-  "format": "api-only",
-  "region": "us-east-1",
-  "hosted_by": "OpenAI",
-  "last_release_at": null,
-  "reasoning_level": null,
-  "version": "2024-07-18",
-  "sort_order": 0,
-  "icon": null,
-  "multiplier_display": "1x",
-  "performance": { "response_latency_ms": null, "tokens_per_second": null },
-  "additional_info": {},
-  "supported_api": ["completion"],
-  "provider_model_id": "${PROVIDER_MODEL_ID}",
-  "capabilities": {
-    "vision": { "enabled": true, "supported_mime_types": ["image/jpeg", "image/png"] },
-    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-    "function_calling": true,
-    "response_schema": true,
-    "streaming": true,
-    "file_input": { "enabled": false, "supported_mime_types": [] },
-    "image_generation": { "enabled": false, "supported_mime_types": [] },
-    "audio_input": { "enabled": false, "supported_mime_types": [] },
-    "audio_output": { "enabled": false, "supported_mime_types": [] },
-    "code_interpreter": false,
-    "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false }
-  },
-  "disabled_capabilities": {
-    "vision": { "disabled": false, "disabled_mime_types": [] },
-    "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-    "function_calling": false,
-    "response_schema": false,
-    "streaming": false,
-    "file_input": { "disabled": false, "disabled_mime_types": [] },
-    "image_generation": { "disabled": false, "disabled_mime_types": [] },
-    "audio_input": { "disabled": false, "disabled_mime_types": [] },
-    "audio_output": { "disabled": false, "disabled_mime_types": [] },
-    "code_interpreter": false,
-    "web_search": { "disabled": false, "allowed_domains": false, "excluded_domains": false }
-  },
-  "context_window": { "max_input_tokens": 128000, "max_output_tokens": 16384 },
-  "default_parameters": {
-    "temperature": 0.7,
-    "top_p": null,
-    "max_output_tokens": null,
-    "max_tool_calls": null,
-    "presence_penalty": null,
-    "frequency_penalty": null,
-    "top_logprobs": null,
-    "truncation": null,
-    "service_tier": null,
-    "parallel_tool_calls": null,
-    "text": null,
-    "reasoning": null,
-    "tool_choice": null,
-    "store": null
-  },
-  "allow_parameter_override": false,
-  "allow_extra_params": [],
-  "provider_settings": {}
-}
-JSON
-)
-
-MODEL_PAYLOAD=$(jq -n \
-    --arg pid "${PROVIDER_ID}" \
-    --argjson info "${MODEL_INFO}" \
-    '{ provider_id: $pid, lifecycle_status: "production", approval_status: "pending", info: $info }')
-
-MODEL_JSON=$(curl -fsS -X POST "${ADMIN_URL}/models" \
+BAD_HTTP=$(curl -sS -o /tmp/mr_bad_resp.json -w '%{http_code}' -X POST "${MR}/models" \
     -H 'Content-Type: application/json' \
-    -d "${MODEL_PAYLOAD}")
-echo "${MODEL_JSON}" | jq .
+    -d "$(jq -n --arg pid "${PROVIDER_ID}" --arg pmid "${PROVIDER_MODEL_ID}" \
+        '{ provider_id: $pid, provider_model_id: $pmid, display_name: "Demo", context_window: { max_input_tokens: 128000 }, provider_settings: { cost: { input_per_1k_micro: "free" } } }')" || true)
+echo "HTTP ${BAD_HTTP}"
+jq . /tmp/mr_bad_resp.json
+[ "${BAD_HTTP}" = "400" ] || { echo "expected 400" >&2; exit 1; }
 
-# The server derives canonical_id from the provider's slug; the id is the handle
-# every management call below uses.
+step "POST /models — create the model"
+
+MODEL_JSON=$(curl -fsS -X POST "${MR}/models" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg pid "${PROVIDER_ID}" --arg pmid "${PROVIDER_MODEL_ID}" '{
+        provider_id: $pid,
+        provider_model_id: $pmid,
+        display_name: "Demo GPT-4o mini",
+        sharing_mode: "shared",
+        vendor: "OpenAI",
+        family: "gpt-4o",
+        base_url: "https://api.openai.com/v1",
+        secret_ref: "demo-openai-key",
+        supported_api: ["completion"],
+        capabilities: {
+          vision: { enabled: true, supported_mime_types: ["image/jpeg", "image/png"] },
+          reasoning: { effort: false, toggle: false, resume: false, budget: false },
+          function_calling: true, response_schema: true, streaming: true,
+          file_input: { enabled: false, supported_mime_types: [] },
+          image_generation: { enabled: false, supported_mime_types: [] },
+          audio_input: { enabled: false, supported_mime_types: [] },
+          audio_output: { enabled: false, supported_mime_types: [] },
+          code_interpreter: false,
+          web_search: { enabled: false, allowed_domains: false, excluded_domains: false }
+        },
+        context_window: { max_input_tokens: 128000, max_output_tokens: 16384 },
+        default_parameters: { temperature: 0.7 },
+        provider_settings: { oagw_alias: "demo-openai", cost: { input_per_1k_micro: 150, output_per_1k_micro: 600 } }
+    }')")
+echo "${MODEL_JSON}" | jq .
 MODEL_ID=$(echo "${MODEL_JSON}" | jq -r .id)
 CANONICAL_ID=$(echo "${MODEL_JSON}" | jq -r .canonical_id)
 CANONICAL_ID_ENC=$(jq -rn --arg v "${CANONICAL_ID}" '$v|@uri')
 
-# ── 6. GET /models — list with OData filter on canonical_id ─────────────────
-step "GET /models — list with OData filter"
+# ── 6. GET /models ──────────────────────────────────────────────────────────
+step "GET /models — admin list with flags"
 
-curl -fsS --get "${BASE_URL}/models" \
-    --data-urlencode "\$filter=canonical_id eq '${CANONICAL_ID}'" \
-    --data-urlencode "\$limit=10" | jq .
+curl -fsS --get "${MR}/models" \
+    --data-urlencode "\$filter=vendor eq 'OpenAI' and streaming eq true" \
+    --data-urlencode "\$orderby=canonical_id desc" \
+    --data-urlencode "limit=10" | jq .
 
-# ── 7. GET /models/{canonical_id} — the one slug-keyed path ─────────────────
-# Eval-facing and gated: the model is still `pending` here, so this returns 403
-# `model_not_approved`. Step 9 reads the same row by id with no gates.
-step "GET /models/{canonical_id} — eval read (:: url-encoded; expect 403 pending)"
+# ── 7. GET /models/{id} ─────────────────────────────────────────────────────
+step "GET /models/{id}"
+
+curl -fsS "${MR}/models/${MODEL_ID}" | jq .
+
+# ── 8. GET /available-models/{canonical_id} ─────────────────────────────────
+step "GET /available-models/{canonical_id} — resolve (:: url-encoded)"
+
+curl -fsS "${MR}/available-models/${CANONICAL_ID_ENC}" | jq .
+
+# ── 9. GET /available-models ────────────────────────────────────────────────
+step "GET /available-models — exactly the resolvable models"
+
+curl -fsS --get "${MR}/available-models" \
+    --data-urlencode "\$select=canonical_id,info.gts_type,info.base_url,info.provider_settings" | jq .
+
+# ── 10. PATCH /models/{id} ──────────────────────────────────────────────────
+step "PATCH /models/{id} — revoke approval"
+
+curl -fsS -X PATCH "${MR}/models/${MODEL_ID}" \
+    -H 'Content-Type: application/json' \
+    -d '{ "approval_state": "revoked" }' | jq .
+
+step "GET /available-models/{canonical_id} — after revoke (expect 403 MODEL_NOT_APPROVED)"
 
 EVAL_HTTP=$(curl -sS -o /tmp/mr_eval_resp.json -w '%{http_code}' \
-    "${BASE_URL}/models/${CANONICAL_ID_ENC}" || true)
+    "${MR}/available-models/${CANONICAL_ID_ENC}" || true)
 echo "HTTP ${EVAL_HTTP}"
-if [ -s /tmp/mr_eval_resp.json ]; then jq . /tmp/mr_eval_resp.json; fi
+jq . /tmp/mr_eval_resp.json
+[ "${EVAL_HTTP}" = "403" ] || { echo "expected 403" >&2; exit 1; }
 
-# ── 8. GET /admin/models — management listing ───────────────────────────────
-step "GET /admin/models — management listing with visibility flags"
+# ── 11. DELETE /models/{id} ─────────────────────────────────────────────────
+step "DELETE /models/{id} (expect 204)"
 
-curl -fsS --get "${ADMIN_URL}/models" \
-    --data-urlencode "\$filter=canonical_id eq '${CANONICAL_ID}'" \
-    --data-urlencode "\$limit=10" | jq .
+curl -fsS -X DELETE -o /dev/null -w 'HTTP %{http_code}\n' "${MR}/models/${MODEL_ID}"
 
-# ── 9. GET /admin/models/{id} — management read ─────────────────────────────
-# Ungated: the model created above is still `pending`, so the eval read at
-# step 7 refuses it while this one returns it.
-step "GET /admin/models/{id} — fetch by id (no eval gates)"
+# ── 12. DELETE /providers/{id} ──────────────────────────────────────────────
+step "DELETE /providers/{id} (expect 204)"
 
-curl -fsS "${ADMIN_URL}/models/${MODEL_ID}" | jq .
+curl -fsS -X DELETE -o /dev/null -w 'HTTP %{http_code}\n' "${MR}/providers/${PROVIDER_ID}"
 
-# ── 10. PATCH /admin/models/{id} — change approval + lifecycle ──────────────
-step "PATCH /admin/models/{id} — approve + activate"
-
-curl -fsS -X PATCH "${ADMIN_URL}/models/${MODEL_ID}" \
-    -H 'Content-Type: application/json' \
-    -d '{ "approval_status": "approved", "lifecycle_status": "production" }' | jq .
-
-# ── 11. DELETE /admin/models/{id} — soft delete ─────────────────────────────
-step "DELETE /admin/models/{id} — soft delete (expect 204)"
-
-curl -fsS -X DELETE -o /dev/null -w 'HTTP %{http_code}\n' \
-    "${ADMIN_URL}/models/${MODEL_ID}"
-
-# ── 12. DELETE /admin/providers/{id} ────────────────────────────────────────
-# Soft-delete on the model retains the FK row, so the provider delete may
-# either succeed (if you hard-delete the model first) or return 400
-# `failed_precondition` because the (soft-deleted) model still references it.
-# Both are valid outcomes — the demo just demonstrates the call lands on the
-# route.
-step "DELETE /admin/providers/{id} — expect 204 or 400 (model still references it)"
-
-DEL_HTTP=$(curl -sS -o /tmp/mr_delete_resp.json -w '%{http_code}' \
-    -X DELETE "${ADMIN_URL}/providers/${PROVIDER_ID}" || true)
-echo "HTTP ${DEL_HTTP}"
-if [ -s /tmp/mr_delete_resp.json ]; then jq . /tmp/mr_delete_resp.json; fi
-
-if [ "${DEL_HTTP}" != "204" ] && [ "${DEL_HTTP}" != "400" ]; then
-    echo "expected 204 or 400, got ${DEL_HTTP}" >&2
-    exit 1
-fi
-
-printf '\n\033[1;32mAll 12 endpoints hit successfully.\033[0m\n'
+printf '\n\033[1;32mAll twelve endpoints hit successfully.\033[0m\n'

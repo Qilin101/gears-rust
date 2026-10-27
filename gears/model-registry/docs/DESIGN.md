@@ -760,7 +760,7 @@ The flags `inherited`, `shadowed`, `provider_enabled`, and `available_for_eval` 
 
 REST conventions:
 
-- Every route is registered with `OperationBuilder`, `.authenticated()`, the platform license check with no gear-specific feature, `.standard_errors()`, and operation id `model_registry.<sdk_method>`. List routes add `.with_odata_filter`, `.with_odata_orderby`, and `.with_odata_select` for their field enums.
+- Every route is registered with `OperationBuilder`, `.authenticated()`, the platform license check with no gear-specific feature, `.standard_errors()` plus the 503 response, and operation id `model_registry.<sdk_method>`. List routes add `.with_odata_filter`, `.with_odata_orderby`, and `.with_odata_select` for their field enums.
 - JSON field names are snake_case. REST DTOs flatten the entry types: provider or model fields plus the flags at the top level.
 - REST update DTOs reject the immutable fields of `cpt-cf-model-registry-constraint-immutable-identity`, `canonical_id`, and audit fields with `invalid_argument` and field reason `IMMUTABLE_FIELD`.
 - Errors are canonical Problem documents (RFC 9457) produced by `toolkit-canonical-errors`. The wire carries category, title, detail, resource type and name, and the category context (reason, field violations). Internal diagnostics, SQL text, stored JSON documents, and the ids of rows the caller cannot see are never put on the wire. The error table is in §4 Error Handling.
@@ -794,7 +794,7 @@ What LLM Gateway and its provider plugins rely on:
 |-------------------|----------------|----------|
 | `tenant-resolver` | `TenantResolverClient::get_ancestors` via ClientHub, `GetAncestorsOptions { barrier_mode: BarrierMode::Ignore }` | Ancestor chain of the acting tenant for inheritance and shadowing |
 | `authz-resolver` | `AuthZResolverClient` wrapped in `PolicyEnforcer` (`authz-resolver-sdk`) | PDP decisions for every operation |
-| `types-registry` | `TypesRegistryApi` (resolved schema reads under the caller's context); platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
+| `types-registry` | `TypesRegistryClient::get_type_schema` (the effective schema, parent chain inlined) under the caller's context; platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
 | `llm-gateway` (consumer) | Calls `ModelRegistryClientV1` | Resolves models on every inference request; its provider plugins publish provider types derived from `gts.cf.genai.model.provider.v1~` (§3.3 Consumer Contract) |
 
 The gear declares `deps = [tenant_resolver, authz_resolver, types_registry]` and `capabilities = [db, rest]`. The CredStore reference format is a data contract only; the gear does not call CredStore.
@@ -824,9 +824,9 @@ The gear uses the parent-first, root-last order that Tenant Resolver returns, as
 
 | Dependency Gear | Interface Used | Purpose |
 |-------------------|---------------|---------|
-| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryApiExt::get_type_schema` with the resolved-schema projection | Source of the JSON Schema for `provider_settings` of each provider type |
+| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryClient::get_type_schema`, taking the effective schema (the type's schema with its parent chain inlined) | Source of the JSON Schema for `provider_settings` of each provider type |
 
-Schema reads pass `ReadOptions` with the resolved-schema projection (the type's schema merged with its parents) and `fresh` set, so a write validates against the current schema and not a client-cached copy. The read runs under the caller's context, which needs the Types Registry read grant.
+Schema reads go through the Types Registry client registered in ClientHub and take the effective schema, the type's schema with its parent chain inlined. That client serves schemas from its in-process cache, so a write validates against a schema that may lag a plugin's re-registration by the client cache TTL (§4 Deviations). The read runs under the caller's context, which needs the Types Registry read grant.
 
 #### Platform Database
 
@@ -1307,7 +1307,7 @@ On provider create:
 
 1. `gts_type` parses as a GTS type id (schema id ending with `~`). Failure: `invalid_argument`, field `gts_type`, reason `INVALID_GTS_TYPE`.
 2. The chain starts with the base type `gts.cf.genai.model.provider.v1~` and has at least one derived segment. Failure: reason `NOT_A_PROVIDER_TYPE`.
-3. Types Registry returns an active type schema for the id (`TypesRegistryApiExt::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Types Registry failure: dependency unavailable.
+3. Types Registry returns an active type schema for the id (`TypesRegistryClient::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Types Registry failure: dependency unavailable.
 
 On model create, and on model update when the request carries `provider_settings`:
 
@@ -1492,6 +1492,7 @@ Platform baselines apply ([ARCHITECTURE_MANIFEST.md](../../../docs/ARCHITECTURE_
 | The ancestor chain is read with `BarrierMode::Ignore`: a self-managed tenant inherits its ancestors' shared providers and models, and ancestors' changes to those entries apply to it. Ancestors never read the self-managed subtree's rows. Validated by a hierarchy test with a self-managed tenant. | Tenant Resolver default `BarrierMode::Respect` | Same rule as CredStore shared secrets: data crosses the barrier, authority does not | Model Registry team |
 | Update replaces present top-level fields as a whole, including nested objects; it does not merge nested objects. | [REST guideline](../../../guidelines/DNA/REST/API.md): PATCH with JSON Merge Patch | Gives SDK and REST identical update semantics and makes "settings changed" a simple presence check for re-validation | Model Registry team |
 | No `ETag` / `If-Match` optimistic locking. Each update locks the row it changes, so concurrent updates are serialized: only fields present in a request change, and the last write to the same field wins. | [REST guideline](../../../guidelines/DNA/REST/API.md): representations carry `ETag` | Catalog writes are rare and made by the owning tenant's administrators | Model Registry team |
+| Provider type schemas are read through `TypesRegistryClient`, whose local client serves them from an in-process cache, so a write may validate against a schema up to that cache TTL old. | §3.5: a resolved-schema read that bypasses client caches | Only `TypesRegistryClient` is registered in ClientHub; plugins keep schemas backward compatible with stored settings, so a brief lag cannot invalidate a write | Model Registry team |
 | `gts_type` is stored as text on both tables, not as the GTS UUID. | [GTS guideline](../../../guidelines/GTS.md) §5.1: GTS types stored as UUIDs | The value is an OData filter field and a PDP property in its string form and is passed to Types Registry by id; no join or foreign key uses it | Model Registry team |
 | Providers carry `managed` and `metadata` in addition to the PRD provider attributes. | `cpt-cf-model-registry-fr-provider-management` attribute list | Approved scope addition; informational, no behavior attached | Model Registry team |
 | `cpt-cf-model-registry-fr-change-audit` (p2) is covered by per-row audit columns only; deletes and change history are not recorded. | `cpt-cf-model-registry-fr-change-audit` | p2 scope; the change log is designed with the p2 scope (§4 Change Audit Follow-up) | Model Registry team |
