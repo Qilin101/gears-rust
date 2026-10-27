@@ -97,7 +97,15 @@ pub fn validate_settings(
     if subschemas.is_empty() {
         return Ok(());
     }
-    let combined = serde_json::json!({ "allOf": subschemas });
+    // The subschemas reference nested types through `#/definitions/...` and
+    // `#/$defs/...` of the resolved document, so those sections travel with
+    // them.
+    let mut combined = serde_json::json!({ "allOf": subschemas });
+    for section in ["definitions", "$defs"] {
+        if let Some(defs) = resolved_schema.get(section) {
+            combined[section] = defs.clone();
+        }
+    }
     // The draft is pinned: a GTS chain id in `$schema` is not a registered
     // meta-schema, so autodetection would fail the compile.
     let validator = jsonschema::options()
@@ -210,6 +218,23 @@ mod tests {
             "{r:?}"
         );
         assert!(r.iter().any(|(f, _)| f == "provider_settings"), "{r:?}");
+    }
+
+    /// A derived type with a nested struct references it through the root
+    /// `definitions`; the subschema extraction must keep those resolvable.
+    #[test]
+    fn nested_definitions_stay_resolvable() {
+        let mut schema = derived_schema(&json!({
+            "type": "object",
+            "required": ["cost"],
+            "properties": { "cost": { "$ref": "#/definitions/Cost" } }
+        }));
+        schema["definitions"] = json!({
+            "Cost": { "type": "object", "properties": { "input": { "type": "integer" } }, "additionalProperties": false }
+        });
+        validate_settings(&schema, &json!({ "cost": { "input": 3 } })).unwrap();
+        let err = validate_settings(&schema, &json!({ "cost": { "input": "free" } })).unwrap_err();
+        assert_eq!(reasons(&err)[0].0, "provider_settings/cost/input");
     }
 
     #[test]
