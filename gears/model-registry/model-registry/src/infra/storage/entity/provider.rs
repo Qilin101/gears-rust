@@ -1,39 +1,36 @@
+//! `providers` table (DESIGN §3.7).
+
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use toolkit_db_macros::Scopable;
 use uuid::Uuid;
 
-/// `SeaORM` entity for the `providers` table.
-///
-/// Stores provider configuration per tenant. Each provider has a unique slug
-/// within the tenant namespace.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
 #[sea_orm(table_name = "providers")]
-#[secure(tenant_col = "tenant_id", resource_col = "id", no_owner, no_type)]
+#[secure(
+    tenant_col = "tenant_id",
+    resource_col = "id",
+    no_owner,
+    no_type,
+    pep_prop(gts_type = "gts_type")
+)]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub tenant_id: Uuid,
-    /// Human-readable identifier (immutable after creation).
-    /// Format: 1-64 chars, lowercase alphanumeric + hyphen.
     pub slug: String,
     pub name: String,
-    /// GTS type identifier string (e.g. `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`).
     pub gts_type: String,
-    /// Operational status: `active` or `disabled`.
-    pub status: String,
-    /// How far below the owning tenant this provider is offered on the eval
-    /// reads: `private`, `children`, or `subtree`.
-    pub share_mode: String,
-    /// Whether the platform can manage this provider (e.g. install/unload models).
+    pub enabled: bool,
+    /// `tenant` or `shared`.
+    pub sharing_mode: String,
     pub managed: bool,
-    /// Provider-specific metadata, JSONB (JSON on `SQLite`).
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub metadata: Option<serde_json::Value>,
-    pub discovery_enabled: bool,
-    pub discovery_interval_seconds: Option<i64>,
     pub created_at: DateTime<Utc>,
+    pub created_by: Uuid,
     pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
