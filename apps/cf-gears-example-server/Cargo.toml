@@ -22,8 +22,7 @@ nodes-registry = ["dep:nodes_registry"]
 resource-group = ["dep:resource_group"]
 grpc-hub = ["dep:grpc_hub"]
 # The cluster gear: binds the coordination primitives (cache, lock, leader
-# election) an operator configures per profile. Implied by `model-registry`,
-# which degrades to an uncached ancestor-chain resolution without it.
+# election) an operator configures per profile.
 cluster = ["dep:cluster"]
 oagw = ["dep:api_egress"]
 credstore = ["dep:credstore"]
@@ -58,7 +57,7 @@ bss-rate-provider = [
     "dep:bss_rate_provider_http_json_plugin",
 ]
 bss-ledger = ["dep:bss_ledger"]
-model-registry = ["dep:model_registry", "cluster"]
+model-registry = ["dep:model_registry"]
 usage-collector = ["dep:usage_collector"]
 timescaledb-usage-collector = ["dep:timescaledb_usage_collector_plugin"]
 clickhouse-usage-collector = ["dep:clickhouse_usage_collector_plugin"]

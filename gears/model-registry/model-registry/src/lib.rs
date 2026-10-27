@@ -1,11 +1,13 @@
-//! Model Registry Gear Implementation
+//! Model Registry gear.
 //!
-//! The public API is defined in `model-registry-sdk` and re-exported here.
+//! The public contract lives in `cf-gears-model-registry-sdk` and is
+//! re-exported here. The gear implements [`ModelRegistryClientV1`], registers
+//! it in `ClientHub`, and exposes the REST API of DESIGN §3.3.
 
 pub use model_registry_sdk::{
-    ApprovalStatus, CreateModelRequestV1, CreateProviderRequestV1, LifecycleStatus,
-    ModelManagementV1, ModelRegistryClientV1, ModelRegistryError, ModelV1, ProviderStatus,
-    ProviderV1, ShareMode, UpdateModelRequestV1, UpdateProviderRequestV1,
+    ApprovalState, ApprovalV1, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
+    ModelInfoV1, ModelRegistryClientV1, ModelRegistryError, ModelV1, ProviderEntryV1, ProviderV1,
+    SharingMode, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 pub mod gear;
@@ -18,4 +20,8 @@ pub mod config;
 #[doc(hidden)]
 pub mod domain;
 #[doc(hidden)]
+pub mod gts;
+#[doc(hidden)]
 pub mod infra;
+#[doc(hidden)]
+pub mod testing;

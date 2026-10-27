@@ -326,7 +326,7 @@ gears:
 
   # Cluster coordination primitives. `ClusterConfig::profiles` defaults to an
   # empty map, so an unconfigured cluster gear binds no backend at all — the
-  # `default` profile below is what model-registry's chain cache resolves to.
+  # `default` profile below is what the cluster-backed gears resolve to.
   cluster:
     config:
       profiles:
