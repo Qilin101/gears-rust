@@ -125,9 +125,8 @@ pub enum LlmGatewayError {
     /// match the requested JSON schema; `message` carries the validation
     /// details (paths and failed keywords, no content values). Unlike
     /// `validation_error`, the request was valid and the provider was called,
-    /// so retrying the same request may succeed. The PRD names this
-    /// `validation_error`; the distinct code is a recorded deviation
-    /// (DESIGN § 4.9).
+    /// so retrying the same request may succeed
+    /// (`cpt-cf-llm-gateway-fr-structured-output-v1`).
     #[error("output validation error: {message}")]
     #[non_exhaustive]
     OutputValidation { message: String },

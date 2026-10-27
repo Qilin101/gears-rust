@@ -31,8 +31,7 @@ pub enum Tool {
     /// The provider-agnostic Gateway web search tool. The provider plugin maps
     /// it to the provider's native web search; the Gateway never runs searches
     /// itself (`cpt-cf-llm-gateway-fr-web-search-v1`). Named under the
-    /// Gateway-owned `cf_gears:` prefix (ADR 0001); the PRD's `cf:web_search`
-    /// is a recorded deviation (DESIGN § 4.9).
+    /// Gateway-owned `cf_gears:` prefix (ADR 0001).
     #[serde(rename = "cf_gears:web_search")]
     WebSearch(WebSearchTool),
     /// The built-in image-generation tool (Gears extension).
