@@ -1,36 +1,18 @@
-//! REST DTOs for the Model Registry gear.
-//!
-//! These are the only types that derive `utoipa::ToSchema` — SDK domain types
-//! in `model_registry_sdk::models` stay transport-agnostic. Each DTO mirrors
-//! the wire shape defined by the SDK trait contract.
-//!
-//! ## Construction from SDK types
-//!
-//! SDK types (`ProviderV1`, `ModelV1`) are converted to their DTO counterparts
-//! via `impl From<…> for …Dto` (see [`From<ProviderV1> for ProviderDto`] and
-//! [`From<ModelV1> for ModelDto`]). Handlers call `.into()` (or
-//! `Type::from(value)`) on the SDK return value to obtain the DTO — no
-//! `from_value(to_value(...))` round-tripping is involved. The `ModelDto::info`
-//! field does call `serde_json::to_value` once (see [`model_info_to_json`]) to
-//! re-serialize the SDK's `ModelInfoV1<P>` into the wire-shape `JsonValue`.
+//! REST DTOs (DESIGN §3.3 REST Endpoints). Entry DTOs flatten the SDK
+//! entries: the provider or model fields plus the flags at the top level.
+//! The nested Model Info objects travel as JSON and are parsed into the SDK
+//! types by `parse`.
 
-use model_registry_sdk::models::{ModelInfoV1, ModelManagementV1, ModelV1, ProviderV1};
+use chrono::{DateTime, Utc};
+use model_registry_sdk::{
+    ApprovalV1, ModelEntryV1, ModelInfoV1, ModelV1, ProviderEntryV1, ProviderV1,
+};
 use serde_json::Value as JsonValue;
 use toolkit_macros::api_dto;
 use uuid::Uuid;
 
-/// Serde deserialization helper for `Option<Option<T>>` PATCH fields.
-///
-/// Distinguishes:
-/// - **Absent** → `None` (field not provided — leave unchanged)
-/// - **`null`** → `Some(None)` (explicitly clear a nullable field)
-/// - **value** → `Some(Some(v))` (set to value)
-///
-/// `#[serde(default)]` on its own cannot distinguish absent from `null` for
-/// `Option<Option<T>>`, so this helper replaces `default` on nullable fields
-/// while keeping the absent→`None` fallback. Pairs with
-/// `#[serde(skip_serializing_if = "Option::is_none")]` so only the
-/// "explicit null" and "value" cases reach the wire.
+/// Deserializes `Option<Option<T>>` so that an absent key is `None`, an
+/// explicit `null` is `Some(None)`, and a value is `Some(Some(v))`.
 #[allow(clippy::option_option)]
 pub(crate) mod nullable_opt {
     use serde::Deserialize;
@@ -40,61 +22,92 @@ pub(crate) mod nullable_opt {
         T: Deserialize<'de>,
         D: serde::Deserializer<'de>,
     {
-        match Option::<T>::deserialize(d) {
-            Ok(Some(v)) => Ok(Some(Some(v))),
-            Ok(None) => Ok(Some(None)),
-            Err(e) => Err(e),
-        }
+        Option::<T>::deserialize(d).map(Some)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Provider DTOs
+// Providers
 // ---------------------------------------------------------------------------
 
-/// Wire projection of [`ProviderV1`].
-#[api_dto(request, response)]
+/// `ProviderEntryV1`, flattened.
+#[allow(clippy::struct_excessive_bools)]
+#[api_dto(response)]
 #[derive(Debug, Clone)]
-pub struct ProviderDto {
+pub struct ProviderEntryDto {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub slug: String,
     pub name: String,
     pub gts_type: String,
-    pub status: String,
-    /// How far below this tenant the provider is offered on the eval reads:
-    /// `private`, `children`, or `subtree`.
-    pub share_mode: String,
+    pub enabled: bool,
+    pub sharing_mode: String,
     pub managed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<JsonValue>,
-    pub discovery_enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_interval_seconds: Option<u32>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
+    pub inherited: bool,
+    pub shadowed: bool,
+    pub available_for_eval: bool,
 }
 
-/// Request body for `POST /model-registry/v1/admin/providers`.
+impl From<ProviderEntryV1> for ProviderEntryDto {
+    fn from(e: ProviderEntryV1) -> Self {
+        let ProviderV1 {
+            id,
+            tenant_id,
+            slug,
+            name,
+            gts_type,
+            enabled,
+            sharing_mode,
+            managed,
+            metadata,
+            created_at,
+            created_by,
+            updated_at,
+            updated_by,
+        } = e.provider;
+        Self {
+            id,
+            tenant_id,
+            slug,
+            name,
+            gts_type: gts_type.to_string(),
+            enabled,
+            sharing_mode: sharing_mode.as_str().to_owned(),
+            managed,
+            metadata,
+            created_at,
+            created_by,
+            updated_at,
+            updated_by,
+            inherited: e.inherited,
+            shadowed: e.shadowed,
+            available_for_eval: e.available_for_eval,
+        }
+    }
+}
+
 #[api_dto(request)]
 #[derive(Debug, Clone)]
 pub struct CreateProviderRequestDto {
     pub slug: String,
     pub name: String,
     pub gts_type: String,
-    /// Defaults to `subtree` (inherit-everything) when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_mode: Option<String>,
-    #[serde(default)]
-    pub managed: bool,
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<JsonValue>,
-    #[serde(default)]
-    pub discovery_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery_interval_seconds: Option<u32>,
 }
 
-/// Request body for `PATCH /model-registry/v1/admin/providers/{id}`.
 #[api_dto(request)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
@@ -102,132 +115,317 @@ pub struct UpdateProviderRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_mode: Option<String>,
+    pub sharing_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed: Option<bool>,
+    /// `null` clears the metadata.
     #[serde(
         default,
         deserialize_with = "nullable_opt::deserialize",
         skip_serializing_if = "Option::is_none"
     )]
     pub metadata: Option<Option<JsonValue>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery_enabled: Option<bool>,
-    #[serde(
-        default,
-        deserialize_with = "nullable_opt::deserialize",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub discovery_interval_seconds: Option<Option<u32>>,
 }
 
-/// Cursor-paginated list envelope for `GET /model-registry/v1/admin/providers`.
-#[api_dto(request, response)]
+#[api_dto(response)]
 #[derive(Debug, Clone)]
-pub struct ProviderListDto {
-    pub items: Vec<ProviderDto>,
+pub struct ProviderEntryPageDto {
+    pub items: Vec<ProviderEntryDto>,
     pub page_info: PageInfoDto,
 }
 
-impl From<ProviderV1> for ProviderDto {
-    fn from(source: ProviderV1) -> Self {
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+#[api_dto(response)]
+#[derive(Debug, Clone)]
+pub struct ApprovalDto {
+    pub state: String,
+    pub decided_by: Uuid,
+    pub decided_at: DateTime<Utc>,
+}
+
+impl From<ApprovalV1> for ApprovalDto {
+    fn from(a: ApprovalV1) -> Self {
         Self {
-            id: source.id,
-            slug: source.slug,
-            name: source.name,
-            gts_type: source.gts_type.to_string(),
-            status: source.status.as_str().to_owned(),
-            share_mode: source.share_mode.as_str().to_owned(),
-            managed: source.managed,
-            metadata: source.metadata,
-            discovery_enabled: source.discovery_enabled,
-            discovery_interval_seconds: source.discovery_interval_seconds,
-            created_at: source.created_at.to_rfc3339(),
-            updated_at: source.updated_at.to_rfc3339(),
+            state: a.state.as_str().to_owned(),
+            decided_by: a.decided_by,
+            decided_at: a.decided_at,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Model DTOs
-// ---------------------------------------------------------------------------
+/// `ModelInfoV1` on the wire. Nested objects keep the SDK JSON shape.
+#[api_dto(response)]
+#[derive(Debug, Clone)]
+pub struct ModelInfoDto {
+    pub gts_type: String,
+    pub provider_model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<String>,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    pub managed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosted_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_release_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplier_display: Option<String>,
+    pub performance: JsonValue,
+    pub additional_info: JsonValue,
+    pub supported_api: Vec<String>,
+    pub capabilities: JsonValue,
+    pub disabled_capabilities: JsonValue,
+    pub context_window: JsonValue,
+    pub default_parameters: JsonValue,
+    pub allow_parameter_override: bool,
+    pub allow_extra_params: Vec<String>,
+    pub provider_settings: JsonValue,
+}
 
-/// Wire projection of [`ModelV1`].
-#[api_dto(request, response)]
+fn to_json<T: serde::Serialize>(value: &T) -> JsonValue {
+    serde_json::to_value(value).unwrap_or(JsonValue::Null)
+}
+
+impl From<ModelInfoV1> for ModelInfoDto {
+    fn from(i: ModelInfoV1) -> Self {
+        let mut supported_api: Vec<String> = i
+            .supported_api
+            .iter()
+            .map(|a| a.as_str().to_owned())
+            .collect();
+        supported_api.sort();
+        Self {
+            gts_type: i.gts_type.to_string(),
+            provider_model_id: i.provider_model_id,
+            base_url: i.base_url,
+            secret_ref: i.secret_ref,
+            display_name: i.display_name,
+            description: i.description,
+            family: i.family,
+            vendor: i.vendor,
+            managed: i.managed,
+            architecture: i.architecture,
+            size_bytes: i.size_bytes,
+            format: i.format,
+            region: i.region,
+            hosted_by: i.hosted_by,
+            last_release_at: i.last_release_at,
+            reasoning_level: i.reasoning_level,
+            version: i.version,
+            sort_order: i.sort_order,
+            icon: i.icon,
+            multiplier_display: i.multiplier_display,
+            performance: to_json(&i.performance),
+            additional_info: to_json(&i.additional_info),
+            supported_api,
+            capabilities: to_json(&i.capabilities),
+            disabled_capabilities: to_json(&i.disabled_capabilities),
+            context_window: to_json(&i.context_window),
+            default_parameters: to_json(&i.default_parameters),
+            allow_parameter_override: i.allow_parameter_override,
+            allow_extra_params: i.allow_extra_params,
+            provider_settings: i.provider_settings,
+        }
+    }
+}
+
+/// `ModelV1` on the wire (resolution responses).
+#[api_dto(response)]
 #[derive(Debug, Clone)]
 pub struct ModelDto {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub provider_id: Uuid,
     pub canonical_id: String,
-    pub lifecycle_status: String,
-    pub approval_status: String,
-    /// How far below the owning tenant the model is offered on the eval reads.
-    pub share_mode: String,
-    pub info: JsonValue,
+    pub sharing_mode: String,
+    pub approval: ApprovalDto,
+    pub info: ModelInfoDto,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
 }
 
-/// Re-serialize `ModelInfoV1<P>` into the `JsonValue` shape carried by
-/// `ModelDto::info`.
-///
-/// The `Serialize` impl on `ModelInfoV1` is generated by the
-/// `#[struct_to_gts_schema]` macro on the SDK side, so this is a pure
-/// passthrough — the only failure mode is a serialization bug (programming
-/// error). Falling back to `JsonValue::Null` keeps the `From` impl total
-/// without surfacing an error path that cannot actually occur at runtime.
-#[must_use]
-pub fn model_info_to_json<P>(info: &ModelInfoV1<P>) -> JsonValue
-where
-    P: gts::GtsSchema + gts::GtsSerialize,
-{
-    serde_json::to_value(info).unwrap_or(JsonValue::Null)
-}
-
-impl<P> From<ModelV1<P>> for ModelDto
-where
-    P: gts::GtsSchema + gts::GtsSerialize,
-{
-    fn from(source: ModelV1<P>) -> Self {
+impl From<ModelV1> for ModelDto {
+    fn from(m: ModelV1) -> Self {
         Self {
-            id: source.id,
-            provider_id: source.provider_id,
-            canonical_id: source.canonical_id,
-            lifecycle_status: source.lifecycle_status.as_str().to_owned(),
-            approval_status: source.approval_status.as_str().to_owned(),
-            share_mode: source.share_mode.as_str().to_owned(),
-            info: model_info_to_json(&source.info),
+            id: m.id,
+            tenant_id: m.tenant_id,
+            provider_id: m.provider_id,
+            canonical_id: m.canonical_id,
+            sharing_mode: m.sharing_mode.as_str().to_owned(),
+            approval: m.approval.into(),
+            info: m.info.into(),
+            created_at: m.created_at,
+            created_by: m.created_by,
+            updated_at: m.updated_at,
+            updated_by: m.updated_by,
         }
     }
 }
 
-/// Request body for `POST /model-registry/v1/admin/models`.
+/// `ModelEntryV1`, flattened.
+#[allow(clippy::struct_excessive_bools)]
+#[api_dto(response)]
+#[derive(Debug, Clone)]
+pub struct ModelEntryDto {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub provider_id: Uuid,
+    pub canonical_id: String,
+    pub sharing_mode: String,
+    pub approval: ApprovalDto,
+    pub info: ModelInfoDto,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
+    pub inherited: bool,
+    pub shadowed: bool,
+    pub provider_enabled: bool,
+    pub available_for_eval: bool,
+}
+
+impl From<ModelEntryV1> for ModelEntryDto {
+    fn from(e: ModelEntryV1) -> Self {
+        let m = ModelDto::from(e.model);
+        Self {
+            id: m.id,
+            tenant_id: m.tenant_id,
+            provider_id: m.provider_id,
+            canonical_id: m.canonical_id,
+            sharing_mode: m.sharing_mode,
+            approval: m.approval,
+            info: m.info,
+            created_at: m.created_at,
+            created_by: m.created_by,
+            updated_at: m.updated_at,
+            updated_by: m.updated_by,
+            inherited: e.inherited,
+            shadowed: e.shadowed,
+            provider_enabled: e.provider_enabled,
+            available_for_eval: e.available_for_eval,
+        }
+    }
+}
+
+/// `CreateModelRequestV1` on the wire: every Model Info field except
+/// `gts_type`, plus `provider_id`, `sharing_mode`, and `approval_state`.
 #[api_dto(request)]
 #[derive(Debug, Clone)]
 pub struct CreateModelRequestDto {
-    /// Provider that will own this model. Must belong to the caller's own
-    /// tenant; the server derives `canonical_id` from its slug.
     pub provider_id: Uuid,
-    pub lifecycle_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_status: Option<String>,
-    /// Defaults to `subtree` when omitted.
+    pub sharing_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_mode: Option<String>,
-    pub info: JsonValue,
+    pub approval_state: Option<String>,
+    pub provider_model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<String>,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_release_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier_display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_info: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_api: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_capabilities: Option<JsonValue>,
+    pub context_window: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_parameters: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_parameter_override: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_extra_params: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_settings: Option<JsonValue>,
 }
 
-/// Request body for `PATCH /model-registry/v1/admin/models/{id}`.
+/// `UpdateModelRequestV1` on the wire. Nullable fields accept `null` to
+/// clear.
 #[api_dto(request)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
 pub struct UpdateModelRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_status: Option<String>,
+    pub sharing_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifecycle_status: Option<String>,
+    pub approval_state: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_opt::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_url: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_opt::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_ref: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(
@@ -285,6 +483,12 @@ pub struct UpdateModelRequestDto {
         deserialize_with = "nullable_opt::deserialize",
         skip_serializing_if = "Option::is_none"
     )]
+    pub last_release_at: Option<Option<DateTime<Utc>>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_opt::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reasoning_level: Option<Option<String>>,
     #[serde(
         default,
@@ -313,6 +517,10 @@ pub struct UpdateModelRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performance: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_info: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_api: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_capabilities: Option<JsonValue>,
@@ -328,79 +536,41 @@ pub struct UpdateModelRequestDto {
     pub provider_settings: Option<JsonValue>,
 }
 
-/// Cursor-paginated list envelope for `GET /model-registry/v1/models`.
-#[api_dto(request, response)]
+#[api_dto(response)]
 #[derive(Debug, Clone)]
-pub struct ModelListDto {
+pub struct ModelPageDto {
     pub items: Vec<ModelDto>,
     pub page_info: PageInfoDto,
 }
 
-// ---------------------------------------------------------------------------
-// Management DTOs
-// ---------------------------------------------------------------------------
-
-/// Wire projection of [`ModelManagementV1`] — a model row annotated with
-/// provider-visibility flags for the admin endpoint.
-///
-/// Both bools are response-only (§3.3); they are **not** `OData` filterable
-/// fields and must not be added to `ModelFilterField`.
 #[api_dto(response)]
 #[derive(Debug, Clone)]
-pub struct ModelManagementDto {
-    pub id: Uuid,
-    pub provider_id: Uuid,
-    pub canonical_id: String,
-    pub lifecycle_status: String,
-    pub approval_status: String,
-    pub info: JsonValue,
-    /// The provider is disabled.
-    pub provider_disabled: bool,
-    /// The model passes every eval predicate except provider shadowing.
-    pub available_for_eval: bool,
-}
-
-/// Cursor-paginated list envelope for `GET /model-registry/v1/admin/models`.
-#[api_dto(response)]
-#[derive(Debug, Clone)]
-pub struct ModelManagementListDto {
-    pub items: Vec<ModelManagementDto>,
+pub struct ModelEntryPageDto {
+    pub items: Vec<ModelEntryDto>,
     pub page_info: PageInfoDto,
 }
 
-// Forwarding conversion: SDK `ModelManagementV1` → REST `ModelManagementDto`.
-//
-// Like `From<ModelV1> for ModelDto`, this drops the SDK's `model` wrapper
-// and flattens the management bools alongside the model's scalar fields.
-impl<P> From<ModelManagementV1<P>> for ModelManagementDto
-where
-    P: gts::GtsSchema + gts::GtsSerialize,
-{
-    fn from(source: ModelManagementV1<P>) -> Self {
-        Self {
-            id: source.model.id,
-            provider_id: source.model.provider_id,
-            canonical_id: source.model.canonical_id,
-            lifecycle_status: source.model.lifecycle_status.as_str().to_owned(),
-            approval_status: source.model.approval_status.as_str().to_owned(),
-            info: model_info_to_json(&source.model.info),
-            provider_disabled: source.provider_disabled,
-            available_for_eval: source.available_for_eval,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Shared DTOs
+// Shared
 // ---------------------------------------------------------------------------
 
-/// Pagination metadata, mirroring [`toolkit_odata::PageInfo`].
-#[api_dto(request, response)]
+/// Mirrors `toolkit_odata::PageInfo`.
+#[api_dto(response)]
 #[derive(Debug, Clone)]
 pub struct PageInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_cursor: Option<String>,
-    pub limit: u32,
+    pub limit: u64,
+}
+
+impl From<toolkit_odata::PageInfo> for PageInfoDto {
+    fn from(p: toolkit_odata::PageInfo) -> Self {
+        Self {
+            next_cursor: p.next_cursor,
+            prev_cursor: p.prev_cursor,
+            limit: p.limit,
+        }
+    }
 }

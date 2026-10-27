@@ -1,383 +1,190 @@
-//! REST handlers for the Model Registry gear.
-//!
-//! Each handler corresponds to an endpoint defined by
-//! `ModelRegistryClientV1`. Handlers extract axum request parts, delegate to
-//! the service layer, and map to the `ApiResult` / `CanonicalError` pattern.
+//! REST handlers: one catalog-service call each, plus `$select` projection
+//! on the serialized response (DESIGN §3.2 REST API).
 
 use std::sync::Arc;
 
-use axum::extract::{Extension, Path, Query};
+use axum::extract::{Extension, Path};
+use axum::http::Uri;
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::select::page_to_projected_json;
+use toolkit_odata::Page;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::dto::{
-    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelListDto, ModelManagementDto,
-    ModelManagementListDto, ProviderDto, ProviderListDto, UpdateModelRequestDto,
-    UpdateProviderRequestDto,
+    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelEntryDto, PageInfoDto,
+    ProviderEntryDto, UpdateModelRequestDto, UpdateProviderRequestDto,
 };
-use super::error::ModelRegistryResourceError;
 use super::parse;
 use crate::domain::service::Service;
-use crate::infra::storage::model_repo::ModelRepositoryImpl;
-use crate::infra::storage::provider_repo::ProviderRepositoryImpl;
 
-/// Concrete service type used by all handlers.
-type ConcreteService = Service<ProviderRepositoryImpl, ModelRepositoryImpl>;
+type Svc = Extension<Arc<Service>>;
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Provider handlers
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// `GET /model-registry/v1/admin/providers/{id}`
-pub async fn get_provider(
-    Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    Path(id): Path<Uuid>,
-) -> ApiResult<JsonBody<ProviderDto>> {
-    let provider = svc.get_provider(&ctx, id).await?;
-    Ok(Json(ProviderDto::from(provider)))
+/// A page of DTOs with `$select` applied to every item.
+fn projected<T: serde::Serialize, U: Into<T>>(
+    page: Page<U>,
+    query: &OData,
+) -> Json<Page<serde_json::Value>> {
+    let dto_page = Page {
+        items: page.items.into_iter().map(Into::into).collect::<Vec<T>>(),
+        page_info: page.page_info,
+    };
+    Json(page_to_projected_json(&dto_page, query.selected_fields()))
 }
 
-/// `GET /model-registry/v1/admin/providers`
-pub async fn list_providers(
+fn selected<T: serde::Serialize>(value: T, query: Option<&OData>) -> Json<serde_json::Value> {
+    Json(apply_select(value, query.and_then(|q| q.selected_fields())))
+}
+
+// ==================== Resolution ====================
+
+/// `GET /model-registry/v1/available-models/{canonical_id}`
+pub async fn resolve_model(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
+    Path(canonical_id): Path<String>,
+) -> ApiResult<JsonBody<ModelDto>> {
+    let model = svc.resolve_model(&ctx, &canonical_id).await?;
+    Ok(Json(ModelDto::from(model)))
+}
+
+/// `GET /model-registry/v1/available-models`
+pub async fn list_available_models(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Svc,
     OData(query): OData,
-) -> ApiResult<JsonBody<ProviderListDto>> {
-    parse::reject_select(&query)?;
-    let page = svc.list_providers(&ctx, &query).await?;
-
-    let items: Vec<ProviderDto> = page.items.into_iter().map(ProviderDto::from).collect();
-
-    Ok(Json(ProviderListDto {
-        items,
-        page_info: super::dto::PageInfoDto {
-            next_cursor: page.page_info.next_cursor,
-            prev_cursor: page.page_info.prev_cursor,
-            limit: u32::try_from(page.page_info.limit)
-                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
-        },
-    }))
+) -> ApiResult<JsonBody<Page<serde_json::Value>>> {
+    let page = svc.list_available_models(&ctx, &query).await?;
+    Ok(projected::<ModelDto, _>(page, &OData(query)))
 }
 
-/// `POST /model-registry/v1/admin/providers`
+// ==================== Providers ====================
+
+/// `POST /model-registry/v1/providers`
 pub async fn create_provider(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
+    uri: Uri,
     Json(dto): Json<CreateProviderRequestDto>,
-) -> ApiResult<(StatusCode, JsonBody<ProviderDto>)> {
-    // Parse GTS type
-    let gts_type = gts::GtsTypeId::new(&dto.gts_type);
-
-    // Build SDK request via builder
-    let req = crate::CreateProviderRequestV1::builder(&dto.slug, &dto.name, gts_type)
-        .managed(dto.managed)
-        .discovery_enabled(dto.discovery_enabled);
-
-    let req = if let Some(metadata) = dto.metadata {
-        req.metadata(metadata)
-    } else {
-        req
-    };
-
-    let req = if let Some(interval) = dto.discovery_interval_seconds {
-        req.discovery_interval_seconds(interval)
-    } else {
-        req
-    };
-
-    let req = if let Some(raw) = dto.share_mode.as_deref() {
-        req.share_mode(parse::share_mode(raw)?)
-    } else {
-        req
-    };
-
-    let provider = svc.create_provider(&ctx, &req.build()).await?;
-    let dto: ProviderDto = provider.into();
-    Ok((StatusCode::CREATED, Json(dto)))
+) -> ApiResult<impl IntoResponse> {
+    let req = parse::create_provider(dto)?;
+    let entry = svc.create_provider(&ctx, req).await?;
+    let id = entry.provider.id.to_string();
+    Ok(created_json(ProviderEntryDto::from(entry), &uri, &id))
 }
 
-/// `PATCH /model-registry/v1/admin/providers/{id}`
+/// `GET /model-registry/v1/providers/{id}`
+pub async fn get_provider(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Svc,
+    Path(id): Path<Uuid>,
+) -> ApiResult<JsonBody<ProviderEntryDto>> {
+    let entry = svc.get_provider(&ctx, id).await?;
+    Ok(Json(ProviderEntryDto::from(entry)))
+}
+
+/// `GET /model-registry/v1/providers`
+pub async fn list_providers(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Svc,
+    OData(query): OData,
+) -> ApiResult<JsonBody<Page<serde_json::Value>>> {
+    let page = svc.list_providers(&ctx, &query).await?;
+    Ok(projected::<ProviderEntryDto, _>(page, &OData(query)))
+}
+
+/// `PATCH /model-registry/v1/providers/{id}`
 pub async fn update_provider(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
     Path(id): Path<Uuid>,
-    Json(dto): Json<UpdateProviderRequestDto>,
-) -> ApiResult<JsonBody<ProviderDto>> {
-    let status = dto
-        .status
-        .as_deref()
-        .map(parse::provider_status)
-        .transpose()?;
-
-    let share_mode = dto
-        .share_mode
-        .as_deref()
-        .map(parse::share_mode)
-        .transpose()?;
-
-    let sdk_req = crate::UpdateProviderRequestV1 {
-        name: dto.name,
-        status,
-        share_mode,
-        managed: dto.managed,
-        metadata: dto.metadata,
-        discovery_enabled: dto.discovery_enabled,
-        discovery_interval_seconds: dto.discovery_interval_seconds,
-    };
-
-    let provider = svc.update_provider(&ctx, id, &sdk_req).await?;
-    let dto: ProviderDto = provider.into();
-    Ok(Json(dto))
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<JsonBody<ProviderEntryDto>> {
+    parse::reject_immutable(&body, parse::PROVIDER_IMMUTABLE_FIELDS)?;
+    let dto: UpdateProviderRequestDto = parse::body(body)?;
+    let entry = svc
+        .update_provider(&ctx, id, parse::update_provider(dto)?)
+        .await?;
+    Ok(Json(ProviderEntryDto::from(entry)))
 }
 
-/// `DELETE /model-registry/v1/admin/providers/{id}`
+/// `DELETE /model-registry/v1/providers/{id}`
 pub async fn delete_provider(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
     Path(id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
     svc.delete_provider(&ctx, id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(no_content())
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Model handlers
-// ═════════════════════════════════════════════════════════════════════════════
+// ==================== Models ====================
 
-/// `GET /model-registry/v1/models/{canonical_id}` — eval read.
-pub async fn get_tenant_model(
-    Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    Path(canonical_id): Path<String>,
-) -> ApiResult<JsonBody<ModelDto>> {
-    let model = svc.get_tenant_model(&ctx, &canonical_id).await?;
-    Ok(Json(ModelDto::from(model)))
-}
-
-/// `GET /model-registry/v1/admin/models/{id}` — management read.
-pub async fn get_model(
-    Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    Path(id): Path<Uuid>,
-) -> ApiResult<JsonBody<ModelDto>> {
-    let model = svc.get_model(&ctx, id).await?;
-    Ok(Json(ModelDto::from(model)))
-}
-
-/// `GET /model-registry/v1/models` — eval listing.
-pub async fn list_models(
-    Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    OData(query): OData,
-) -> ApiResult<JsonBody<ModelListDto>> {
-    parse::reject_select(&query)?;
-    let page = svc.list_tenant_models(&ctx, &query).await?;
-
-    let items: Vec<ModelDto> = page.items.into_iter().map(ModelDto::from).collect();
-
-    Ok(Json(ModelListDto {
-        items,
-        page_info: super::dto::PageInfoDto {
-            next_cursor: page.page_info.next_cursor,
-            prev_cursor: page.page_info.prev_cursor,
-            limit: u32::try_from(page.page_info.limit)
-                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
-        },
-    }))
-}
-
-/// `POST /model-registry/v1/admin/models`
+/// `POST /model-registry/v1/models`
 pub async fn create_model(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
+    uri: Uri,
     Json(dto): Json<CreateModelRequestDto>,
-) -> ApiResult<(StatusCode, JsonBody<ModelDto>)> {
-    let lifecycle_status = parse::lifecycle_status(&dto.lifecycle_status)?;
-    let approval_status = dto
-        .approval_status
-        .as_deref()
-        .map(parse::approval_status)
-        .transpose()?;
-    let share_mode = dto
-        .share_mode
-        .as_deref()
-        .map(parse::share_mode)
-        .transpose()?;
-
-    // Parse info JSON into ModelInfoV1
-    let info: model_registry_sdk::models::ModelInfoV1<serde_json::Value> =
-        serde_json::from_value(dto.info).map_err(|e| {
-            ModelRegistryResourceError::invalid_argument()
-                .with_field_violation("info", e.to_string(), "INVALID_MODEL_INFO")
-                .create()
-        })?;
-
-    let req = crate::CreateModelRequestV1 {
-        provider_id: dto.provider_id,
-        lifecycle_status,
-        approval_status,
-        share_mode,
-        info,
-    };
-
-    let model = svc.create_model(&ctx, &req).await?;
-    let dto: ModelDto = model.into();
-    Ok((StatusCode::CREATED, Json(dto)))
+) -> ApiResult<impl IntoResponse> {
+    let req = parse::create_model(dto)?;
+    let entry = svc.create_model(&ctx, req).await?;
+    let id = entry.model.id.to_string();
+    Ok(created_json(ModelEntryDto::from(entry), &uri, &id))
 }
 
-/// `PATCH /model-registry/v1/admin/models/{id}`
+/// `GET /model-registry/v1/models/{id}`
+pub async fn get_model(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Svc,
+    Path(id): Path<Uuid>,
+) -> ApiResult<JsonBody<ModelEntryDto>> {
+    let entry = svc.get_model(&ctx, id).await?;
+    Ok(Json(ModelEntryDto::from(entry)))
+}
+
+/// `GET /model-registry/v1/models`
+pub async fn list_models(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Svc,
+    OData(query): OData,
+) -> ApiResult<JsonBody<Page<serde_json::Value>>> {
+    let page = svc.list_models(&ctx, &query).await?;
+    Ok(projected::<ModelEntryDto, _>(page, &OData(query)))
+}
+
+/// `PATCH /model-registry/v1/models/{id}`
 pub async fn update_model(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
     Path(id): Path<Uuid>,
-    Json(dto): Json<UpdateModelRequestDto>,
-) -> ApiResult<JsonBody<ModelDto>> {
-    let approval_status = dto
-        .approval_status
-        .as_deref()
-        .map(parse::approval_status)
-        .transpose()?;
-    let lifecycle_status = dto
-        .lifecycle_status
-        .as_deref()
-        .map(parse::lifecycle_status)
-        .transpose()?;
-
-    let share_mode = dto
-        .share_mode
-        .as_deref()
-        .map(parse::share_mode)
-        .transpose()?;
-
-    // Build SDK request from DTO fields
-    let sdk_req = crate::UpdateModelRequestV1 {
-        approval_status,
-        lifecycle_status,
-        share_mode,
-        display_name: dto.display_name,
-        description: dto.description,
-        family: dto.family,
-        vendor: dto.vendor,
-        managed: dto.managed,
-        architecture: dto.architecture,
-        size_bytes: dto.size_bytes,
-        format: dto.format,
-        region: dto.region,
-        hosted_by: dto.hosted_by,
-        reasoning_level: dto.reasoning_level,
-        version: dto.version,
-        sort_order: dto.sort_order,
-        icon: dto.icon,
-        multiplier_display: dto.multiplier_display,
-        performance: dto
-            .performance
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation("performance", e.to_string(), "INVALID_PERFORMANCE")
-                        .create()
-                })
-            })
-            .transpose()?,
-        capabilities: dto
-            .capabilities
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation("capabilities", e.to_string(), "INVALID_CAPABILITIES")
-                        .create()
-                })
-            })
-            .transpose()?,
-        disabled_capabilities: dto
-            .disabled_capabilities
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "disabled_capabilities",
-                            e.to_string(),
-                            "INVALID_DISABLED_CAPABILITIES",
-                        )
-                        .create()
-                })
-            })
-            .transpose()?,
-        context_window: dto
-            .context_window
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "context_window",
-                            e.to_string(),
-                            "INVALID_CONTEXT_WINDOW",
-                        )
-                        .create()
-                })
-            })
-            .transpose()?,
-        default_parameters: dto
-            .default_parameters
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| {
-                    ModelRegistryResourceError::invalid_argument()
-                        .with_field_violation(
-                            "default_parameters",
-                            e.to_string(),
-                            "INVALID_DEFAULT_PARAMETERS",
-                        )
-                        .create()
-                })
-            })
-            .transpose()?,
-        allow_parameter_override: dto.allow_parameter_override,
-        allow_extra_params: dto.allow_extra_params,
-        provider_settings: dto.provider_settings,
-    };
-
-    let model = svc.update_model(&ctx, id, &sdk_req).await?;
-    let dto: ModelDto = model.into();
-    Ok(Json(dto))
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<JsonBody<ModelEntryDto>> {
+    parse::reject_immutable(&body, parse::MODEL_IMMUTABLE_FIELDS)?;
+    let dto: UpdateModelRequestDto = parse::body(body)?;
+    let entry = svc
+        .update_model(&ctx, id, parse::update_model(dto)?)
+        .await?;
+    Ok(Json(ModelEntryDto::from(entry)))
 }
 
-/// `DELETE /model-registry/v1/admin/models/{id}`
+/// `DELETE /model-registry/v1/models/{id}`
 pub async fn delete_model(
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
+    Extension(svc): Svc,
     Path(id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
     svc.delete_model(&ctx, id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(no_content())
 }
 
-/// `GET /model-registry/v1/admin/models` — management listing.
-pub(super) async fn list_management_models(
-    Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    OData(query): OData,
-    Query(params): Query<super::parse::AdminModelsQuery>,
-) -> ApiResult<JsonBody<ModelManagementListDto>> {
-    super::parse::reject_select(&query)?;
-    let page = svc
-        .list_tenant_models_management(&ctx, &query, params.include_deprecated)
-        .await?;
+// Keep the page-info DTO reachable for the OpenAPI schema of the list routes.
+#[allow(dead_code)]
+fn _page_info(p: toolkit_odata::PageInfo) -> PageInfoDto {
+    p.into()
+}
 
-    let items: Vec<ModelManagementDto> = page
-        .items
-        .into_iter()
-        .map(ModelManagementDto::from)
-        .collect();
-
-    Ok(Json(ModelManagementListDto {
-        items,
-        page_info: super::dto::PageInfoDto {
-            next_cursor: page.page_info.next_cursor,
-            prev_cursor: page.page_info.prev_cursor,
-            limit: u32::try_from(page.page_info.limit)
-                .map_err(|_| CanonicalError::internal("page limit exceeds u32 range").create())?,
-        },
-    }))
+#[allow(dead_code)]
+fn _selected_example(v: serde_json::Value) -> Json<serde_json::Value> {
+    selected(v, None)
 }
