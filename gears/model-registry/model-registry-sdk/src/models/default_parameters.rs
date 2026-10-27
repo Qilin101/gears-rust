@@ -1,4 +1,5 @@
 // Created: 2026-05-07 by Constructor Tech
+// Updated: 2026-10-26 by Constructor Tech
 //! User-facing default inference parameters for a model.
 //!
 //! [`DefaultInferenceParametersV1`] mirrors the inference-knob subset of the
@@ -6,9 +7,9 @@
 //! so the LLM Gateway has a uniform input contract regardless of the
 //! underlying provider. The provider-wire defaults that ride alongside this
 //! shape (different naming, mutually-exclusive variants, provider-only knobs)
-//! live on the per-provider settings payload (one typed struct per provider,
-//! versioned independently from the envelope) and are intentionally kept
-//! distinct: field names that look universal (`temperature`, `top_p`,
+//! live in `provider_settings`, whose shape the provider type schema of the
+//! LLM Gateway plugin defines, and are intentionally kept distinct: field
+//! names that look universal (`temperature`, `top_p`,
 //! `max_output_tokens`) are duplicated on the two surfaces because they are
 //! rarely 1:1 with provider-wire parameters in practice.
 //!
@@ -56,8 +57,8 @@ pub struct DefaultInferenceParametersV1 {
     pub truncation: Option<TruncationStrategy>,
     /// Service tier in the unified two-variant shape (`Auto | Default`).
     /// Provider-specific tiers (e.g. `OpenAI` `flex`/`priority`) are expressed
-    /// at request time via the override-extras allowlist and live on the
-    /// per-provider settings as `OpenAiServiceTier`.
+    /// at request time via the override-extras allowlist and live in
+    /// `provider_settings`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
     /// Whether the model may issue multiple tool calls in parallel.

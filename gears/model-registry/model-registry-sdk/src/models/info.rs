@@ -1,202 +1,103 @@
 // Created: 2026-05-06 by Constructor Tech
-// Updated: 2026-05-07 by Constructor Tech
-//! [`ModelInfoV1<P>`] — provider-independent fields, the user-facing
-//! [`DefaultInferenceParametersV1`], the flat per-model override fields
-//! (`allow_parameter_override`, `allow_extra_params`), and the typed
-//! `provider_settings: P` payload.
-//!
-//! Declared as the GTS base schema via [`gts_type_schema`]; concrete
-//! provider-settings types (e.g. `OpenAiSettingsV1`, shipped in
-//! [`crate::models::providers`]) declare themselves as GTS leaves with
-//! `base = ModelInfoV1`. The set of provider leaves is open-ended.
-//!
-//! `P` defaults to `serde_json::Value` (which implements `gts::GtsSchema`
-//! upstream) so heterogeneous lists carry an opaque JSON blob; consumers
-//! route on [`ModelInfoV1::gts_type`] and narrow to a typed view via
-//! [`crate::models::ModelV1::try_into_typed`].
+// Updated: 2026-10-26 by Constructor Tech
+//! [`ModelInfoV1`] — the record LLM Gateway uses to evaluate a model
+//! (DESIGN §3.1 Model Info).
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use toolkit_gts::gts_type_schema;
 
 use crate::models::{
     ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, ModelCapabilities,
     ModelPerformance, SupportedApi,
 };
 
-/// Complete model information: provider-independent metadata, capabilities,
-/// the context window, performance, the user-facing default inference
-/// parameters, the flat per-model override fields, and the
-/// provider-specific `provider_settings` payload.
+/// Model info: general settings, user-facing information, capabilities, the
+/// context window, default parameters with their override policy, and the
+/// opaque `provider_settings` document.
 ///
-/// `P` defaults to `serde_json::Value` (which implements `gts::GtsSchema`
-/// upstream) so heterogeneous lists (e.g. `list_tenant_models`) carry an
-/// opaque JSON blob; consumers route on [`ModelInfoV1::gts_type`] and narrow
-/// to a typed view via [`crate::models::ModelV1::try_into_typed`].
-///
-/// # GTS schema
-///
-/// - **`schema_id`**: `gts_id!("cf.genai.model.info.v1~")`
-/// - **base**: yes (root envelope; provider-specific leaves chain off it)
-#[gts_type_schema(
-    dir_path = "schemas",
-    base = true,
-    type_id = gts_id!("cf.genai.model.info.v1~"),
-    description = "Generic model info envelope: provider-independent metadata + provider_settings JSON payload",
-    properties = "gts_type,display_name,family,vendor,managed,architecture,format,supported_api,provider_model_id,capabilities,context_window,default_parameters"
-)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct ModelInfoV1<P: gts::GtsSchema = serde_json::Value> {
-    // ── GTS schema identity ───────────────────────────────────────────
-    /// Full GTS schema chain identifying this model's settings shape. Mirrors
-    /// `ProviderV1.gts_type` and is the canonical key for resolving the
-    /// concrete shape of `provider_settings` (which is a raw JSON blob —
-    /// `serde_json::Value` — by default).
-    ///
-    /// **This field is the authoritative source of truth for provider identity
-    /// at runtime.** The generic parameter `P` on `ModelInfoV1<P>` /
-    /// `ModelV1<P>` is only a compile-time view of the payload. Any code that
-    /// dispatches on the provider — routing, storage, serialization — must read
-    /// `gts_type`, never infer the provider from `P`.
+/// Not a GTS type. `gts_type` names the provider type, derived from
+/// [`PROVIDER_BASE_TYPE`](crate::gts::PROVIDER_BASE_TYPE), whose schema fixes
+/// the shape of `provider_settings`. The registry validates the document
+/// against that schema on write and returns it unchanged; LLM Gateway selects
+/// the plugin whose provider type equals `gts_type` and narrows
+/// `provider_settings` to the plugin's typed view.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ModelInfoV1 {
+    /// Provider GTS type, copied from the model's provider on create.
+    /// Read-only: never part of a create or update request.
     pub gts_type: gts::GtsTypeId,
-
-    // ── Display / discovery ────────────────────────────────────────────
-    /// Display name shown in UI.
+    /// The provider's own model identifier, sent to the provider. 1–255
+    /// characters without whitespace or control characters. Immutable; the
+    /// right part of `canonical_id`.
+    pub provider_model_id: String,
+    /// Absolute `http` or `https` URL the plugin calls for this model, up to
+    /// 2,048 characters, without user information. When absent, the plugin
+    /// uses its provider's default URL; the registry stores no default.
+    pub base_url: Option<String>,
+    /// `CredStore` secret reference for the provider credential: 1–255
+    /// characters from `[a-zA-Z0-9_-]`, the `SecretRef` format of
+    /// `credstore-sdk`. A name only: the registry stores no secret material
+    /// and does not check that the reference exists.
+    pub secret_ref: Option<String>,
+    /// Name shown to users, 1–255 characters.
     pub display_name: String,
+    /// Free-text description, up to 4,096 characters.
     pub description: Option<String>,
-    /// Model family (e.g. `"gpt-4"`, `"claude"`, `"llama"`).
+    /// Model family label, for example `gpt-4` or `llama`.
     pub family: Option<String>,
-    /// Model vendor — the organization that produced the model weights
-    /// (e.g. `"OpenAI"`, `"Meta"`). Free-form string; independent of which
-    /// provider serves the model.
+    /// Organization that produced the model weights. Independent of the
+    /// provider that serves the model.
     pub vendor: Option<String>,
-    /// Infrastructure field (for local/managed LLMs): whether Gears can
-    /// load/unload **this model** (e.g. install/pull/unload weights on a local
-    /// runtime such as Ollama or LM Studio). This is a **per-model** flag and
-    /// is distinct from the **per-provider** [`crate::models::ProviderV1::managed`] flag, which
-    /// records whether Gears can manage the *provider* at all; a model can only
-    /// be `managed` when its provider is also managed. Defaults to `false`
-    /// (e.g. for API-only models).
+    /// Whether the platform can load and unload this model on a managed
+    /// runtime. Informational. Default false.
     pub managed: bool,
-    /// Infrastructure field (for local/managed LLMs): model architecture
-    /// classifier (e.g. `"qwen"`, `"llama"`, `"mistral"`, `"gpt"`). Distinct
-    /// from the free-form `family`/`vendor` labels, which are descriptive
-    /// marketing/origin labels rather than an architecture taxonomy.
+    /// Architecture class, for example `llama` or `mistral`.
     pub architecture: Option<String>,
-    /// Infrastructure field (for local/managed LLMs): on-disk model size in
-    /// bytes, used for capacity planning of local/managed weights. `None` for
-    /// models whose weights are not locally hosted (e.g. API-only).
+    /// On-disk size of locally hosted weights, at most 2^63 − 1.
     pub size_bytes: Option<u64>,
-    /// Infrastructure field (for local/managed LLMs): model weight/serving
-    /// format (e.g. `"gguf"`, `"mlx"`, `"safetensors"`, `"api-only"`).
+    /// Weight or serving format, for example `gguf` or `safetensors`.
     pub format: Option<String>,
-    /// Deployment region (e.g. `"us-east-1"`, `"eu-west-1"`).
+    /// Deployment region, for example `eu-west-1`.
     pub region: Option<String>,
-    /// Infrastructure host (e.g. `"Azure"`, `"AWS Bedrock"`, `"self-hosted"`).
+    /// Infrastructure host, for example `Azure` or `self-hosted`.
     pub hosted_by: Option<String>,
-    /// When the model version was last released by the vendor.
+    /// When the vendor last released this model version.
     pub last_release_at: Option<DateTime<Utc>>,
-    /// Informational reasoning level label (e.g. `"high"`, `"medium"`).
-    /// Display-only — not used for routing or parameter selection.
+    /// Display-only reasoning level label.
     pub reasoning_level: Option<String>,
     /// Model version string.
     pub version: Option<String>,
-    /// Display order in model picker / lists.
+    /// Position in model pickers; lower first.
     pub sort_order: Option<i32>,
-    /// URL to model icon.
+    /// Absolute `http` or `https` URL of the model icon, up to 2,048
+    /// characters.
     pub icon: Option<String>,
-    /// Human-readable cost multiplier label (e.g. `"1x"`, `"3x"`).
+    /// Display label for the relative cost, for example `3x`.
     pub multiplier_display: Option<String>,
-    /// Estimated performance characteristics.
+    /// Expected performance.
     pub performance: ModelPerformance,
-    /// Last-resort escape hatch for deployment-specific metadata; typed
-    /// fields on `provider_settings` are preferred.
+    /// Deployment-specific metadata. Default empty.
     pub additional_info: HashMap<String, serde_json::Value>,
-
-    // ── Common API-resolution fields ──────────────────────────────────
-    /// Which API kinds this model exposes (completion, embedding).
-    /// Top-level so consumers can filter on completion vs embedding
-    /// without unwrapping provider settings.
+    /// API kinds the model serves.
     pub supported_api: HashSet<SupportedApi>,
-    /// Provider's model identifier — used both in `canonical_id`
-    /// (`{provider_slug}::{provider_model_id}`) and sent to the provider in
-    /// API requests. Top-level so the catalog UI / alias logic doesn't have
-    /// to reach into `provider_settings`.
-    pub provider_model_id: String,
-
-    // ── Capabilities ───────────────────────────────────────────────────
     /// What the model can do.
     pub capabilities: ModelCapabilities,
-    /// Capabilities that are administratively disabled.
+    /// Capabilities an administrator turned off for this model. The
+    /// effective capability is the declared capability minus the disabled
+    /// one.
     pub disabled_capabilities: DisabledCapabilities,
     /// Token limits.
     pub context_window: ContextWindow,
-
-    // ── User-facing defaults & override policy ────────────────────────
-    /// User-facing default inference parameters; mirrors the inference-knob
-    /// subset of the Open Responses request schema
-    /// (`gts.cf.llmgw.core.create_response_body.v1~`). Distinct from any
-    /// provider-wire defaults living on `provider_settings`.
+    /// Provider-independent inference defaults.
     pub default_parameters: DefaultInferenceParametersV1,
-    /// Whether callers may override `default_parameters` per-request. Flat
-    /// field on the envelope (no wrapper struct).
+    /// Whether callers may override `default_parameters` per request.
+    /// Default false.
     pub allow_parameter_override: bool,
-    /// Which extra (non-default) parameter names callers may pass alongside
-    /// the request. Flat field on the envelope.
+    /// Names of extra request parameters callers may pass to the provider,
+    /// up to 64 names of up to 128 characters. Default empty.
     pub allow_extra_params: Vec<String>,
-
-    // ── Provider-specific payload ──────────────────────────────────────
-    /// Provider-specific connection routing, provider-wire default
-    /// parameters, and token pricing.
-    pub provider_settings: P,
-}
-
-impl ModelInfoV1<serde_json::Value> {
-    /// Narrow a raw-JSON-payload model info to a typed view by validating
-    /// `gts_type` against `Q::TYPE_ID` and deserializing `provider_settings`
-    /// into `Q`. Common fields are preserved.
-    ///
-    /// # Errors
-    ///
-    /// - [`gts::NarrowError::SchemaId`] when `gts_type` doesn't match `Q::TYPE_ID`.
-    /// - [`gts::NarrowError::Deserialize`] when the payload can't be deserialized into `Q`.
-    pub fn try_into_typed<Q>(self) -> Result<ModelInfoV1<Q>, gts::NarrowError>
-    where
-        Q: gts::GtsSchema,
-        for<'de> Q: gts::GtsDeserialize<'de>,
-    {
-        let provider_settings =
-            gts::try_narrow::<Q>(self.gts_type.as_ref(), self.provider_settings)?;
-        Ok(ModelInfoV1 {
-            gts_type: self.gts_type,
-            display_name: self.display_name,
-            description: self.description,
-            family: self.family,
-            vendor: self.vendor,
-            managed: self.managed,
-            architecture: self.architecture,
-            size_bytes: self.size_bytes,
-            format: self.format,
-            region: self.region,
-            hosted_by: self.hosted_by,
-            last_release_at: self.last_release_at,
-            reasoning_level: self.reasoning_level,
-            version: self.version,
-            sort_order: self.sort_order,
-            icon: self.icon,
-            multiplier_display: self.multiplier_display,
-            performance: self.performance,
-            additional_info: self.additional_info,
-            supported_api: self.supported_api,
-            provider_model_id: self.provider_model_id,
-            capabilities: self.capabilities,
-            disabled_capabilities: self.disabled_capabilities,
-            context_window: self.context_window,
-            default_parameters: self.default_parameters,
-            allow_parameter_override: self.allow_parameter_override,
-            allow_extra_params: self.allow_extra_params,
-            provider_settings,
-        })
-    }
+    /// Provider-specific settings, including cost. Shape defined by the
+    /// provider type schema; opaque to the registry beyond validation.
+    pub provider_settings: serde_json::Value,
 }

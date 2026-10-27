@@ -1,36 +1,42 @@
 // Created: 2026-05-06 by Constructor Tech
-//! Transport-agnostic request DTOs for the Model Registry SDK.
+// Updated: 2026-10-26 by Constructor Tech
+//! Transport-agnostic request types of the Model Registry SDK (DESIGN §3.3
+//! Request contents).
 //!
-//! These are NOT REST DTOs — they sit on the SDK trait (`ModelRegistryClientV1`)
-//! and are serialized into transport (REST/gRPC) by the module crate.
+//! These are not REST DTOs: they sit on [`crate::ModelRegistryClientV1`] and
+//! the gear's REST layer converts its DTOs into them.
 
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    ApprovalStatus, ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities,
-    LifecycleStatus, ModelCapabilities, ModelInfoV1, ModelPerformance, ProviderStatus, ShareMode,
+    ApprovalState, ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities,
+    ModelCapabilities, ModelPerformance, SharingMode, SupportedApi,
 };
 
 // ---------------------------------------------------------------------------
 // CreateProviderRequestV1 (builder pattern)
 // ---------------------------------------------------------------------------
 
-/// Request for registering a new provider. Construct via
+/// Request for creating a provider in the acting tenant. Construct via
 /// [`CreateProviderRequestV1::builder`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateProviderRequestV1 {
     slug: String,
     name: String,
     gts_type: gts::GtsTypeId,
-    share_mode: ShareMode,
+    enabled: bool,
+    sharing_mode: SharingMode,
     managed: bool,
     metadata: Option<serde_json::Value>,
-    discovery_enabled: bool,
-    discovery_interval_seconds: Option<u32>,
 }
 
 impl CreateProviderRequestV1 {
-    /// Start building a new request. All three fields are required.
+    /// Start building a request. The three arguments are the required
+    /// fields; `enabled` defaults to true, `sharing_mode` to
+    /// [`SharingMode::Tenant`], `managed` to false, `metadata` to absent.
     #[must_use]
     pub fn builder(
         slug: impl Into<String>,
@@ -41,34 +47,40 @@ impl CreateProviderRequestV1 {
             slug: slug.into(),
             name: name.into(),
             gts_type,
-            share_mode: ShareMode::Subtree,
+            enabled: true,
+            sharing_mode: SharingMode::Tenant,
             managed: false,
             metadata: None,
-            discovery_enabled: false,
-            discovery_interval_seconds: None,
         }
     }
 
+    /// 1–64 characters: lowercase letters, digits, hyphen. Immutable.
     #[must_use]
     pub fn slug(&self) -> &str {
         &self.slug
     }
 
+    /// Display name, 1–255 characters.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Provider GTS type, derived from
+    /// [`PROVIDER_BASE_TYPE`](crate::gts::PROVIDER_BASE_TYPE). Immutable.
     #[must_use]
     pub fn gts_type(&self) -> &gts::GtsTypeId {
         &self.gts_type
     }
 
-    /// How far below this tenant the provider is offered. Defaults to
-    /// [`ShareMode::Subtree`].
     #[must_use]
-    pub fn share_mode(&self) -> ShareMode {
-        self.share_mode
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn sharing_mode(&self) -> SharingMode {
+        self.sharing_mode
     }
 
     #[must_use]
@@ -80,16 +92,6 @@ impl CreateProviderRequestV1 {
     pub fn metadata(&self) -> Option<&serde_json::Value> {
         self.metadata.as_ref()
     }
-
-    #[must_use]
-    pub fn discovery_enabled(&self) -> bool {
-        self.discovery_enabled
-    }
-
-    #[must_use]
-    pub fn discovery_interval_seconds(&self) -> Option<u32> {
-        self.discovery_interval_seconds
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -97,17 +99,22 @@ pub struct CreateProviderRequestV1Builder {
     slug: String,
     name: String,
     gts_type: gts::GtsTypeId,
-    share_mode: ShareMode,
+    enabled: bool,
+    sharing_mode: SharingMode,
     managed: bool,
     metadata: Option<serde_json::Value>,
-    discovery_enabled: bool,
-    discovery_interval_seconds: Option<u32>,
 }
 
 impl CreateProviderRequestV1Builder {
     #[must_use]
-    pub fn share_mode(mut self, share_mode: ShareMode) -> Self {
-        self.share_mode = share_mode;
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn sharing_mode(mut self, sharing_mode: SharingMode) -> Self {
+        self.sharing_mode = sharing_mode;
         self
     }
 
@@ -124,181 +131,186 @@ impl CreateProviderRequestV1Builder {
     }
 
     #[must_use]
-    pub fn discovery_enabled(mut self, enabled: bool) -> Self {
-        self.discovery_enabled = enabled;
-        self
-    }
-
-    #[must_use]
-    pub fn discovery_interval_seconds(mut self, seconds: u32) -> Self {
-        self.discovery_interval_seconds = Some(seconds);
-        self
-    }
-
-    #[must_use]
     pub fn build(self) -> CreateProviderRequestV1 {
         CreateProviderRequestV1 {
             slug: self.slug,
             name: self.name,
             gts_type: self.gts_type,
-            share_mode: self.share_mode,
+            enabled: self.enabled,
+            sharing_mode: self.sharing_mode,
             managed: self.managed,
             metadata: self.metadata,
-            discovery_enabled: self.discovery_enabled,
-            discovery_interval_seconds: self.discovery_interval_seconds,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// UpdateProviderRequestV1 (PATCH semantics)
+// UpdateProviderRequestV1
 // ---------------------------------------------------------------------------
 
-/// Request for updating a provider (PATCH semantics). Only non-`None` fields
-/// are applied.
+/// Request for updating an own provider. A present field replaces the stored
+/// value as a whole; absent fields stay unchanged.
 ///
-/// Nullable columns use tri-state `Option<Option<T>>` to distinguish "field
-/// omitted — leave unchanged" (`None`) from "explicitly clear to null"
-/// (`Some(None)`) and "set to a value" (`Some(Some(v))`). Non-nullable columns
-/// stay `Option<T>` (`None` = unchanged, `Some(v)` = set).
+/// `slug`, `gts_type`, and `tenant_id` are immutable and absent here. The
+/// nullable `metadata` uses `Option<Option<T>>`: `None` leaves it unchanged,
+/// `Some(None)` clears it, `Some(Some(v))` sets it.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[allow(clippy::option_option)]
 pub struct UpdateProviderRequestV1 {
     pub name: Option<String>,
-    pub status: Option<ProviderStatus>,
-    /// How far below the owning tenant the provider is offered.
-    pub share_mode: Option<ShareMode>,
+    pub enabled: Option<bool>,
+    pub sharing_mode: Option<SharingMode>,
     pub managed: Option<bool>,
-    /// Nullable — `Some(None)` clears stored metadata.
     pub metadata: Option<Option<serde_json::Value>>,
-    pub discovery_enabled: Option<bool>,
-    /// Nullable — `Some(None)` clears the discovery interval.
-    pub discovery_interval_seconds: Option<Option<u32>>,
 }
 
 // ---------------------------------------------------------------------------
-// CreateModelRequestV1 (P1 — manual model management)
+// CreateModelRequestV1
 // ---------------------------------------------------------------------------
 
-/// Request for manually creating a model in the catalog (P1 manual model
-/// management; `cpt-cf-model-registry-fr-manual-model-management`).
+/// Request for creating a model under an own provider.
 ///
-/// The provider is addressed by its `Uuid` — the slug is never supplied by the
-/// caller. The model is owned by the resolved provider's tenant.
-///
-/// The server derives `canonical_id` as `{provider.slug}::{info.provider_model_id}`
-/// from the resolved provider; it is immutable after creation.
-///
-/// The optional `approval_status` defaults to [`ApprovalStatus::Pending`];
-/// admins can pass [`ApprovalStatus::Approved`] to approve in the same call
-/// as a convenience.
+/// Carries every [`ModelInfoV1`](crate::models::ModelInfoV1) field except
+/// `gts_type`, which the gear copies from the provider. The gear also builds
+/// `canonical_id` as `provider_slug::provider_model_id`. Field semantics and
+/// limits are those of `ModelInfoV1`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateModelRequestV1 {
-    /// Provider that will own this model; the created model takes its tenant.
-    /// The provider's slug forms the left half of the derived `canonical_id`.
+    /// Provider that serves the model. Must be owned by the acting tenant.
     pub provider_id: Uuid,
-    /// Lifecycle status (Production / Preview / Experimental / …).
-    pub lifecycle_status: LifecycleStatus,
-    /// Optional initial approval status. `None` ⇒ defaults to
-    /// [`ApprovalStatus::Pending`].
-    pub approval_status: Option<ApprovalStatus>,
-    /// Optional initial share mode. `None` ⇒ defaults to
-    /// [`ShareMode::Subtree`]. Capped at read time by the owning provider's
-    /// own `share_mode`.
-    pub share_mode: Option<ShareMode>,
-    /// Model info — display, capabilities, limits, default parameters, and
-    /// the provider-specific settings payload (raw JSON typed by
-    /// `info.gts_type`).
-    pub info: ModelInfoV1<serde_json::Value>,
+    /// Default [`SharingMode::Tenant`].
+    pub sharing_mode: Option<SharingMode>,
+    /// Default [`ApprovalState::Approved`], decided by the acting subject at
+    /// creation time.
+    pub approval_state: Option<ApprovalState>,
+
+    pub provider_model_id: String,
+    pub base_url: Option<String>,
+    pub secret_ref: Option<String>,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub family: Option<String>,
+    pub vendor: Option<String>,
+    pub managed: bool,
+    pub architecture: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub format: Option<String>,
+    pub region: Option<String>,
+    pub hosted_by: Option<String>,
+    pub last_release_at: Option<DateTime<Utc>>,
+    pub reasoning_level: Option<String>,
+    pub version: Option<String>,
+    pub sort_order: Option<i32>,
+    pub icon: Option<String>,
+    pub multiplier_display: Option<String>,
+    pub performance: ModelPerformance,
+    pub additional_info: HashMap<String, serde_json::Value>,
+    pub supported_api: HashSet<SupportedApi>,
+    pub capabilities: ModelCapabilities,
+    pub disabled_capabilities: DisabledCapabilities,
+    pub context_window: ContextWindow,
+    pub default_parameters: DefaultInferenceParametersV1,
+    pub allow_parameter_override: bool,
+    pub allow_extra_params: Vec<String>,
+    /// Validated by the gear against the provider type schema.
+    pub provider_settings: serde_json::Value,
+}
+
+impl CreateModelRequestV1 {
+    /// A request with the required fields set and every other field at its
+    /// default: optional fields absent, flags false, collections empty,
+    /// `provider_settings` an empty object.
+    #[must_use]
+    pub fn new(
+        provider_id: Uuid,
+        provider_model_id: impl Into<String>,
+        display_name: impl Into<String>,
+        context_window: ContextWindow,
+    ) -> Self {
+        Self {
+            provider_id,
+            sharing_mode: None,
+            approval_state: None,
+            provider_model_id: provider_model_id.into(),
+            base_url: None,
+            secret_ref: None,
+            display_name: display_name.into(),
+            description: None,
+            family: None,
+            vendor: None,
+            managed: false,
+            architecture: None,
+            size_bytes: None,
+            format: None,
+            region: None,
+            hosted_by: None,
+            last_release_at: None,
+            reasoning_level: None,
+            version: None,
+            sort_order: None,
+            icon: None,
+            multiplier_display: None,
+            performance: ModelPerformance::default(),
+            additional_info: HashMap::new(),
+            supported_api: HashSet::new(),
+            capabilities: ModelCapabilities::default(),
+            disabled_capabilities: DisabledCapabilities::none(),
+            context_window,
+            default_parameters: DefaultInferenceParametersV1::default(),
+            allow_parameter_override: false,
+            allow_extra_params: Vec::new(),
+            provider_settings: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// UpdateModelRequestV1 (P1 — manual model management; PATCH semantics)
+// UpdateModelRequestV1
 // ---------------------------------------------------------------------------
 
-/// Request for updating an existing model. Only non-`None` fields are applied.
+/// Request for updating an own model. A present field replaces the stored
+/// value as a whole, nested objects included; absent fields stay unchanged.
 ///
-/// **Immutable after creation** — these fields are NOT in this struct:
-/// `canonical_id`, `provider_id`, `info.provider_model_id`, `info.gts_type`.
-/// To switch a model's provider settings shape, soft-delete and recreate.
-///
-/// **Approval status changes** also flow through this PATCH endpoint (see
-/// `cpt-cf-model-registry-fr-manual-model-management` in DESIGN §1.2):
-/// setting `approval_status` updates `models.approval_status`.
-///
-/// Nullable columns use tri-state `Option<Option<T>>` to distinguish "field
-/// omitted — leave unchanged" (`None`) from "explicitly clear to null"
-/// (`Some(None)`) and "set to a value" (`Some(Some(v))`). Non-nullable columns
-/// and wholesale-replacement fields stay `Option<T>` (`None` = unchanged,
-/// `Some(v)` = set/replace).
+/// The immutable fields `provider_id`, `provider_model_id`, `gts_type`,
+/// `canonical_id`, and `tenant_id` are absent here. A present
+/// `approval_state` records a decision by the acting subject even when the
+/// state does not change. Nullable fields use `Option<Option<T>>`: `None`
+/// leaves the field unchanged, `Some(None)` clears it, `Some(Some(v))` sets
+/// it.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[allow(clippy::option_option)]
 pub struct UpdateModelRequestV1 {
-    // ── Status ────────────────────────────────────────────────────────
-    /// Approval status (`approved` / `rejected` / `revoked` / `pending`).
-    pub approval_status: Option<ApprovalStatus>,
-    /// How far below the owning tenant this model is offered on the eval
-    /// reads. Non-nullable — `None` leaves it unchanged.
-    pub share_mode: Option<ShareMode>,
-    /// Lifecycle status (e.g. promote `Experimental` → `Production`, or mark
-    /// `Sunset`). Setting to `Deprecated` here is equivalent to the soft-delete
-    /// path; prefer [`crate::api::ModelRegistryClientV1::delete_model`].
-    pub lifecycle_status: Option<LifecycleStatus>,
+    pub sharing_mode: Option<SharingMode>,
+    pub approval_state: Option<ApprovalState>,
 
-    // ── Display / discovery ───────────────────────────────────────────
-    /// Non-nullable — `Some(v)` sets the display name.
+    pub base_url: Option<Option<String>>,
+    pub secret_ref: Option<Option<String>>,
     pub display_name: Option<String>,
-    /// Nullable — `Some(None)` clears the description.
     pub description: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the family label.
     pub family: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the vendor label.
     pub vendor: Option<Option<String>>,
-    /// Per-model infrastructure flag for local/managed LLMs (distinct from the
-    /// per-provider `managed` flag). Non-nullable — `None` leaves it unchanged.
     pub managed: Option<bool>,
-    /// Infrastructure field (for local/managed LLMs): model architecture
-    /// classifier (e.g. `"qwen"`, `"llama"`). Nullable — `Some(None)` clears it.
     pub architecture: Option<Option<String>>,
-    /// Infrastructure field (for local/managed LLMs): on-disk model size in
-    /// bytes. Nullable — `Some(None)` clears it.
     pub size_bytes: Option<Option<u64>>,
-    /// Infrastructure field (for local/managed LLMs): model weight/serving
-    /// format (e.g. `"gguf"`, `"safetensors"`). Nullable — `Some(None)` clears it.
     pub format: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the region.
     pub region: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the host label.
     pub hosted_by: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the reasoning-level label.
+    pub last_release_at: Option<Option<DateTime<Utc>>>,
     pub reasoning_level: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the version string.
     pub version: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the sort order.
     pub sort_order: Option<Option<i32>>,
-    /// Nullable — `Some(None)` clears the icon URL.
     pub icon: Option<Option<String>>,
-    /// Nullable — `Some(None)` clears the multiplier label.
     pub multiplier_display: Option<Option<String>>,
     pub performance: Option<ModelPerformance>,
-
-    // ── Capabilities & limits (full replacement) ──────────────────────
-    /// Replace `info.capabilities` wholesale.
+    pub additional_info: Option<HashMap<String, serde_json::Value>>,
+    pub supported_api: Option<HashSet<SupportedApi>>,
     pub capabilities: Option<ModelCapabilities>,
-    /// Replace `info.disabled_capabilities` wholesale.
     pub disabled_capabilities: Option<DisabledCapabilities>,
-    /// Replace `info.context_window` wholesale.
     pub context_window: Option<ContextWindow>,
-
-    // ── Defaults & override policy ────────────────────────────────────
-    /// Replace `info.default_parameters` wholesale.
     pub default_parameters: Option<DefaultInferenceParametersV1>,
     pub allow_parameter_override: Option<bool>,
     pub allow_extra_params: Option<Vec<String>>,
-
-    // ── Provider-specific payload ─────────────────────────────────────
-    /// Replace `info.provider_settings` wholesale. The shape MUST validate
-    /// against the model's existing `info.gts_type` (which is immutable).
+    /// Validated by the gear against the model's provider type schema.
     pub provider_settings: Option<serde_json::Value>,
 }
 
@@ -312,27 +324,50 @@ mod tests {
     use toolkit_gts::gts_id;
 
     #[test]
-    fn provider_builder_threads_required_fields_and_applies_overrides() {
+    fn provider_builder_applies_defaults_and_overrides() {
         let gts = gts::GtsTypeId::new(gts_id!("cf.genai.model.provider.v1~cf.genai._.openai.v1~"));
 
         let full = CreateProviderRequestV1::builder("openai", "OpenAI", gts.clone())
+            .enabled(false)
+            .sharing_mode(SharingMode::Shared)
             .managed(true)
             .metadata(serde_json::json!({"k": "v"}))
-            .discovery_enabled(true)
-            .discovery_interval_seconds(3600)
             .build();
         assert_eq!(full.slug(), "openai");
         assert_eq!(full.name(), "OpenAI");
         assert_eq!(full.gts_type(), &gts);
+        assert!(!full.enabled());
+        assert_eq!(full.sharing_mode(), SharingMode::Shared);
         assert!(full.managed());
         assert_eq!(full.metadata(), Some(&serde_json::json!({"k": "v"})));
-        assert!(full.discovery_enabled());
-        assert_eq!(full.discovery_interval_seconds(), Some(3600));
 
         let bare = CreateProviderRequestV1::builder("openai", "OpenAI", gts).build();
+        assert!(bare.enabled());
+        assert_eq!(bare.sharing_mode(), SharingMode::Tenant);
         assert!(!bare.managed());
         assert!(bare.metadata().is_none());
-        assert!(!bare.discovery_enabled());
-        assert_eq!(bare.discovery_interval_seconds(), None);
+    }
+
+    #[test]
+    fn create_model_request_new_sets_required_fields_only() {
+        let req = CreateModelRequestV1::new(
+            Uuid::nil(),
+            "gpt-4o",
+            "GPT-4o",
+            ContextWindow {
+                max_input_tokens: 128_000,
+                max_output_tokens: Some(16_384),
+                output_vector_size: None,
+            },
+        );
+        assert_eq!(req.provider_model_id, "gpt-4o");
+        assert_eq!(req.display_name, "GPT-4o");
+        assert_eq!(req.context_window.max_input_tokens, 128_000);
+        assert_eq!(req.sharing_mode, None);
+        assert_eq!(req.approval_state, None);
+        assert_eq!(req.base_url, None);
+        assert_eq!(req.secret_ref, None);
+        assert_eq!(req.provider_settings, serde_json::json!({}));
+        assert!(req.supported_api.is_empty());
     }
 }

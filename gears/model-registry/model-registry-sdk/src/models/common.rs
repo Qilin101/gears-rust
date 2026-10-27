@@ -1,56 +1,56 @@
 // Created: 2026-05-06 by Constructor Tech
-// Updated: 2026-05-07 by Constructor Tech
+// Updated: 2026-10-26 by Constructor Tech
 //! Provider-independent model types — enums, capability flags, the context
 //! window, and performance characteristics.
 //!
-//! These types live on `ModelInfo<P>` directly (not on the per-provider
-//! settings) because their shape is meaningful for every provider. The
-//! per-model override policy is expressed as flat fields
-//! (`allow_parameter_override`, `allow_extra_params`) on
-//! [`crate::models::ModelInfoV1`].
+//! These types live on [`crate::models::ModelInfoV1`] directly because their
+//! shape is meaningful for every provider. The per-model override policy is
+//! expressed as flat fields (`allow_parameter_override`, `allow_extra_params`)
+//! on [`crate::models::ModelInfoV1`].
 
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
-/// Lifecycle status of a model in the catalog.
+/// Sharing mode of a provider or model (DESIGN §3.1).
 ///
-/// Wire format is lowercase to match `DESIGN.md §3.1` and so `OData` filters
-/// over `lifecycle_status` (per `DESIGN.md §3.3`) compare against the same
-/// strings the JSONB column stores.
+/// `Tenant` entries are visible to the owning tenant only; `Shared` entries
+/// are visible to the owner and all descendant tenants. A model reaches a
+/// descendant only when both the model and its provider are `Shared`.
+///
+/// Wire format is lowercase (`"tenant" | "shared"`) and matches the
+/// `sharing_mode` columns and the `OData` field of the same name.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum LifecycleStatus {
-    Production,
-    Preview,
-    Experimental,
-    Deprecated,
-    Sunset,
+pub enum SharingMode {
+    /// Owner only. The default.
+    #[default]
+    Tenant,
+    /// Owner and all descendant tenants.
+    Shared,
 }
 
-impl LifecycleStatus {
-    /// Every variant, in declaration order. Lets callers render the accepted
-    /// domain (e.g. in a validation error) without restating it.
-    pub const ALL: &[Self] = &[
-        Self::Production,
-        Self::Preview,
-        Self::Experimental,
-        Self::Deprecated,
-        Self::Sunset,
-    ];
+impl SharingMode {
+    /// Every variant, in declaration order.
+    pub const ALL: &[Self] = &[Self::Tenant, Self::Shared];
 
     /// Lowercase wire/storage string — identical to the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Production => "production",
-            Self::Preview => "preview",
-            Self::Experimental => "experimental",
-            Self::Deprecated => "deprecated",
-            Self::Sunset => "sunset",
+            Self::Tenant => "tenant",
+            Self::Shared => "shared",
         }
     }
 
@@ -59,33 +59,34 @@ impl LifecycleStatus {
     #[must_use]
     pub fn from_wire(s: &str) -> Option<Self> {
         match s {
-            "production" => Some(Self::Production),
-            "preview" => Some(Self::Preview),
-            "experimental" => Some(Self::Experimental),
-            "deprecated" => Some(Self::Deprecated),
-            "sunset" => Some(Self::Sunset),
+            "tenant" => Some(Self::Tenant),
+            "shared" => Some(Self::Shared),
             _ => None,
         }
     }
 }
 
-/// Approval status of a model for a tenant.
+/// Approval state of a model, set by the owning tenant (DESIGN §3.1
+/// Approval).
 ///
-/// Wire format is lowercase to match `DESIGN.md §3.1` and `OData` filters
-/// over `approval_status`.
+/// Only `Approved` models resolve or appear in the available list. Any state
+/// may follow any other state.
+///
+/// Wire format is lowercase and matches the `approval_state` column and
+/// `OData` field.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum ApprovalStatus {
+pub enum ApprovalState {
     Pending,
     Approved,
     Rejected,
     Revoked,
 }
 
-impl ApprovalStatus {
+impl ApprovalState {
     /// Every variant, in declaration order.
     pub const ALL: &[Self] = &[Self::Pending, Self::Approved, Self::Rejected, Self::Revoked];
 
@@ -114,117 +115,14 @@ impl ApprovalStatus {
     }
 }
 
-/// Operational status of a provider.
-///
-/// Wire format is lowercase to match `DESIGN.md §3.1`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum ProviderStatus {
-    Active,
-    Disabled,
-}
-
-impl ProviderStatus {
-    /// Every variant, in declaration order.
-    pub const ALL: &[Self] = &[Self::Active, Self::Disabled];
-
-    /// Lowercase wire/storage string — identical to the serde representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Disabled => "disabled",
-        }
-    }
-
-    /// Parse from the lowercase wire/storage string. `None` for any value
-    /// outside the documented domain.
-    #[must_use]
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "active" => Some(Self::Active),
-            "disabled" => Some(Self::Disabled),
-            _ => None,
-        }
-    }
-}
-
-/// How far down the tenant hierarchy an owner shares a provider or model.
-///
-/// The owner-side counterpart to consumer-side provider shadowing: shadowing
-/// lets a descendant hide what it inherited, `ShareMode` lets the owner decide
-/// what is offered in the first place. Applies to the eval reads only — an
-/// owner always sees its own rows on the admin surface regardless.
-///
-/// Wire format is lowercase to match `DESIGN.md §3.1`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum ShareMode {
-    /// Visible to the owning tenant only.
-    Private,
-    /// Visible to the owning tenant and its direct children.
-    Children,
-    /// Visible to the owning tenant and its whole subtree. The default.
-    Subtree,
-}
-
-impl ShareMode {
-    /// Every variant, in declaration order — widening.
-    pub const ALL: &[Self] = &[Self::Private, Self::Children, Self::Subtree];
-
-    /// Lowercase wire/storage string — identical to the serde representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::Children => "children",
-            Self::Subtree => "subtree",
-        }
-    }
-
-    /// Parse from the lowercase wire/storage string. `None` for any value
-    /// outside the documented domain.
-    #[must_use]
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "private" => Some(Self::Private),
-            "children" => Some(Self::Children),
-            "subtree" => Some(Self::Subtree),
-            _ => None,
-        }
-    }
-
-    /// Whether a row carrying this mode reaches a requester `distance` hops
-    /// below its owner. `0` is the owner itself, `1` a direct child.
-    ///
-    /// The single definition of the depth rule. The eval listing encodes the
-    /// same table as a SQL predicate because it cannot call this; the two are
-    /// held together by a drift test rather than by shared code.
-    #[must_use]
-    pub const fn reaches(self, distance: usize) -> bool {
-        match self {
-            Self::Private => distance == 0,
-            Self::Children => distance <= 1,
-            Self::Subtree => true,
-        }
-    }
-}
-
 /// API kind that a model exposes.
 ///
 /// A model may expose multiple API surfaces (e.g. `[Completion, Batch]` for
 /// a chat model that's also reachable via the asynchronous batch API). Each
 /// variant corresponds to a distinct LLM Gateway endpoint family.
 ///
-/// Wire format is lowercase to match `DESIGN.md §3.1` and so `OData` filters
-/// on `info.supported_api` (per `DESIGN.md §3.3`) compare against the same
-/// strings stored in the JSONB `info` column.
+/// Wire format is lowercase to match `DESIGN.md §3.1`. A closed set owned by
+/// the registry; adding a value is a non-breaking change within `v1`.
 #[derive(
     Debug,
     Clone,
@@ -243,8 +141,8 @@ pub enum SupportedApi {
     Completion,
     /// Embedding APIs.
     Embedding,
-    /// Asynchronous batch API (see `gts.cf.llmgw.async.batch.v1~`). May
-    /// coexist with `Completion` / `Embedding` on the same model.
+    /// Asynchronous batch API. May coexist with `Completion` / `Embedding`
+    /// on the same model.
     Batch,
 }
 
@@ -277,11 +175,8 @@ impl SupportedApi {
 
 /// Unified reasoning effort level used by `default_parameters.reasoning.effort`.
 ///
-/// This enum is **neutral** — it exposes the levels every provider
-/// understands. Provider-specific reasoning levels (e.g. `OpenAI`'s
-/// `Minimal`, added with gpt-5) live on the per-provider settings as a
-/// distinct enum (see `OpenAiReasoningEffort`), so adding an OpenAI-only
-/// level doesn't perturb the shared enum.
+/// Provider-specific reasoning levels live in the provider settings schema
+/// published by the LLM Gateway provider plugin, not here.
 ///
 /// Wire format is lowercase (`"none" | "low" | "medium" | "high" | "xhigh"`)
 /// to match `gts.cf.llmgw.core.reasoning_config.v1~`.
@@ -301,9 +196,8 @@ pub enum ReasoningEffort {
 /// Service tier in the unified two-variant shape used by `default_parameters`
 /// (matches the Open Responses request schema).
 ///
-/// Provider-specific tiers (e.g. `OpenAI`'s full `auto | default | flex |
-/// priority` set) live on the per-provider settings as a separate enum (see
-/// `OpenAiServiceTier`).
+/// Provider-specific tiers live in the provider settings schema published
+/// by the LLM Gateway provider plugin, not here.
 ///
 /// Wire format is lowercase (`"auto" | "default"`) to match
 /// `gts.cf.llmgw.core.create_response_body.v1~`.
@@ -609,63 +503,34 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_status_wire_domain() {
+    fn sharing_mode_wire_domain() {
         assert_wire_domain(
-            LifecycleStatus::ALL,
+            SharingMode::ALL,
             &[
-                (LifecycleStatus::Production, "production"),
-                (LifecycleStatus::Preview, "preview"),
-                (LifecycleStatus::Experimental, "experimental"),
-                (LifecycleStatus::Deprecated, "deprecated"),
-                (LifecycleStatus::Sunset, "sunset"),
+                (SharingMode::Tenant, "tenant"),
+                (SharingMode::Shared, "shared"),
             ],
-            LifecycleStatus::as_str,
-            LifecycleStatus::from_wire,
+            SharingMode::as_str,
+            SharingMode::from_wire,
         );
         // Casing is significant: OData filters compare against the lowercase
-        // strings the JSONB column stores.
-        assert_eq!(LifecycleStatus::from_wire("Production"), None);
+        // strings the column stores.
+        assert_eq!(SharingMode::from_wire("Tenant"), None);
+        assert_eq!(SharingMode::default(), SharingMode::Tenant);
     }
 
     #[test]
-    fn approval_status_wire_domain() {
+    fn approval_state_wire_domain() {
         assert_wire_domain(
-            ApprovalStatus::ALL,
+            ApprovalState::ALL,
             &[
-                (ApprovalStatus::Pending, "pending"),
-                (ApprovalStatus::Approved, "approved"),
-                (ApprovalStatus::Rejected, "rejected"),
-                (ApprovalStatus::Revoked, "revoked"),
+                (ApprovalState::Pending, "pending"),
+                (ApprovalState::Approved, "approved"),
+                (ApprovalState::Rejected, "rejected"),
+                (ApprovalState::Revoked, "revoked"),
             ],
-            ApprovalStatus::as_str,
-            ApprovalStatus::from_wire,
-        );
-    }
-
-    #[test]
-    fn provider_status_wire_domain() {
-        assert_wire_domain(
-            ProviderStatus::ALL,
-            &[
-                (ProviderStatus::Active, "active"),
-                (ProviderStatus::Disabled, "disabled"),
-            ],
-            ProviderStatus::as_str,
-            ProviderStatus::from_wire,
-        );
-    }
-
-    #[test]
-    fn share_mode_wire_domain() {
-        assert_wire_domain(
-            ShareMode::ALL,
-            &[
-                (ShareMode::Private, "private"),
-                (ShareMode::Children, "children"),
-                (ShareMode::Subtree, "subtree"),
-            ],
-            ShareMode::as_str,
-            ShareMode::from_wire,
+            ApprovalState::as_str,
+            ApprovalState::from_wire,
         );
     }
 
@@ -681,41 +546,5 @@ mod tests {
             SupportedApi::as_str,
             SupportedApi::from_wire,
         );
-    }
-
-    /// The depth rule, pinned. `reaches` is the single Rust definition; the
-    /// eval listing re-encodes it as SQL, and an integration drift test holds
-    /// the two together.
-    #[test]
-    fn share_mode_reaches_by_distance() {
-        // (mode, reachable distances out of 0..=3)
-        let cases = [
-            (ShareMode::Private, [true, false, false, false]),
-            (ShareMode::Children, [true, true, false, false]),
-            (ShareMode::Subtree, [true, true, true, true]),
-        ];
-        for (mode, expected) in cases {
-            for (distance, want) in expected.iter().enumerate() {
-                assert_eq!(
-                    mode.reaches(distance),
-                    *want,
-                    "{mode:?} at distance {distance}"
-                );
-            }
-        }
-    }
-
-    /// Sharing is monotone in the variant order, which is what lets the
-    /// provider and model stages be evaluated independently and `AND`-ed instead
-    /// of computing an explicit `min()` (DESIGN §3.5).
-    #[test]
-    fn share_mode_reach_widens_monotonically() {
-        for distance in 0..4 {
-            let reach: Vec<bool> = ShareMode::ALL.iter().map(|m| m.reaches(distance)).collect();
-            assert!(
-                reach.windows(2).all(|w| !w[0] || w[1]),
-                "reach must never narrow as the mode widens, at distance {distance}: {reach:?}"
-            );
-        }
     }
 }
