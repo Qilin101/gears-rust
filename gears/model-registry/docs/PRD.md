@@ -178,6 +178,8 @@ The Customer tenant defines its own `Shared` provider with the slug `openai`, wh
 - Automatic discovery or synchronization of models from provider APIs.
 - Provider health or latency monitoring.
 - Usage metering and billing. The registry only stores cost settings.
+- Provider-independent cost settings. Cost stays inside the provider-specific settings.
+- Per-tenant approval overrides of inherited models. A descendant tenant excludes an inherited model only by shadowing its provider.
 - Multi-step approval workflows with external approvers. The registry records the owning tenant's approval decision.
 - Per-user or per-group model entitlements beyond the policy decisions of the PDP.
 
@@ -191,7 +193,7 @@ The Customer tenant defines its own `Shared` provider with the slug `openai`, wh
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-provider-management`
 
-The system **MUST** let a Tenant Administrator create, read, update, and delete providers in their own tenant. A provider has a name, a slug unique among the providers the tenant owns, a provider GTS type, an enabled flag, and a sharing mode. A provider belongs to exactly one tenant and is managed only by that tenant. The slug and the provider GTS type are immutable after creation. Deleting a provider deletes its models, and the change takes effect for later resolutions. When the deleted provider shadowed an inherited one, the inherited provider and its models become visible again.
+The system **MUST** let a Tenant Administrator create, read, update, and delete providers in their own tenant. A provider has a name, a slug unique among the providers the tenant owns, a provider GTS type, an enabled flag, a sharing mode, an informational flag saying whether the platform manages the provider runtime, and optional opaque metadata. A provider belongs to exactly one tenant and is managed only by that tenant. The slug and the provider GTS type are immutable after creation. Deleting a provider deletes its models, and the change takes effect for later resolutions. When the deleted provider shadowed an inherited one, the inherited provider and its models become visible again.
 
 - **Rationale**: Tenants need to describe where their models come from and keep control of that description.
 - **Actors**: `cpt-cf-model-registry-actor-tenant-admin`
@@ -305,7 +307,7 @@ The system **MUST**, given a canonical id and the calling tenant, return the ful
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-list-available-models`
 
-The system **MUST** list, for the calling tenant, exactly the models that would resolve successfully under `cpt-cf-model-registry-fr-resolve-model`. The list **MUST** support OData filtering, ordering, selection, and paging on the model's general fields: identity, approval, capabilities, and user-facing fields.
+The system **MUST** list, for the calling tenant, exactly the models that would resolve successfully under `cpt-cf-model-registry-fr-resolve-model`. Listed models **MUST NOT** carry provider-specific settings, `base_url`, or the secret reference. The list **MUST** support OData filtering, ordering, selection, and paging on the model's general fields: identity, approval, capabilities, and user-facing fields.
 
 - **Rationale**: Users and consumer gears need to pick from models they can actually use.
 - **Actors**: `cpt-cf-model-registry-actor-consumer-gear`, `cpt-cf-model-registry-actor-llm-gateway`
@@ -527,7 +529,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 2. The consumer gear adds a capability filter, for example models that support vision.
 3. The registry builds the tenant's effective catalog.
 4. The registry keeps only models that would resolve successfully and match the filter.
-5. The registry returns a page of results.
+5. The registry returns a page of results without provider-specific settings, `base_url`, or the secret reference.
 
 **Postconditions**:
 - The consumer gear can show the user models that are certain to resolve.
@@ -580,10 +582,8 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 ## 13. Open Questions
 
 - Confirm the resolution latency budget and load conditions (`cpt-cf-model-registry-nfr-resolution-latency`) and the availability and recovery targets (`cpt-cf-model-registry-nfr-availability`). (Owner: LLM Gateway team and Model Registry team, Resolve by: before P1 implementation begins)
-- Will descendant tenants need per-tenant approval overrides of inherited models? This is currently excluded by design. (Owner: Model Registry team, Resolve by: before DESIGN is approved)
 - Will multi-step approval through an external approval service be required later? (Owner: Platform Architecture, Resolve by: before P2 planning)
 - How will auto-discovery of provider models work? Discovered models would start as Pending and wait for an administrator's approval. (Owner: Model Registry team, Resolve by: before P2 planning)
-- Must cost settings be exposed in a provider-independent form for consumers other than LLM Gateway? (Owner: Model Registry team, Resolve by: before DESIGN is approved)
 
 ## 14. Traceability
 
