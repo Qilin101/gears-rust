@@ -164,7 +164,7 @@ graph TB
 | Domain | Local client; catalog service (operation flow, authorization calls, validation order, transactions, audit columns); effective-catalog algorithm, approval and sharing rules, PDP scope gate, GTS type and settings checks | Rust in `domain/` (local client in `domain/local_client.rs`), `#[domain_model]` types, toolkit `PolicyEnforcer` (`cpt-cf-model-registry-tech-toolkit-gear`); settings validated with the workspace JSON Schema validator (`jsonschema`) against schemas from Types Registry (`cpt-cf-model-registry-tech-json-schema-validation`) |
 | Infrastructure | SeaORM entities with `Scopable`, repositories over `DBRunner`, migrations, OData field-to-column mapping, chain cache | SeaORM through `toolkit-db` `SecureConn`; PostgreSQL in production, SQLite in dev/test (`cpt-cf-model-registry-tech-relational-storage`) |
 
-Domain components call dependency SDK traits (`TenantResolverClient`, `AuthZResolverClient` through `PolicyEnforcer`, `TypesRegistryApi`) obtained from ClientHub, and storage through repository traits. These traits are the seams where tests inject mocks.
+Domain components call dependency SDK traits (`TenantResolverClient`, `AuthZResolverClient` through `PolicyEnforcer`, `TypesRegistryClient`) obtained from ClientHub, and storage through repository traits. These traits are the seams where tests inject mocks.
 
 Layer rules follow the [platform gear layout](../../../docs/toolkit_unified_system/02_gear_layout_and_sdk_pattern.md): serde and `ToSchema` derives appear only in `api/rest/` DTOs and in SDK models; domain types carry `#[domain_model]`; all endpoints are versioned. `unsafe` is forbidden and `unwrap`/`expect` are denied in non-test code.
 
@@ -761,7 +761,7 @@ The flags `inherited`, `shadowed`, `provider_enabled`, and `available_for_eval` 
 
 REST conventions:
 
-- Every route is registered with `OperationBuilder`, `.authenticated()`, the platform license check with no gear-specific feature, `.standard_errors()`, and operation id `model_registry.<sdk_method>`. List routes add `.with_odata_filter`, `.with_odata_orderby`, and `.with_odata_select` for their field enums.
+- Every route is registered with `OperationBuilder`, `.authenticated()`, the platform license check with no gear-specific feature, `.standard_errors()` plus the 503 response, and operation id `model_registry.<sdk_method>`. List routes add `.with_odata_filter`, `.with_odata_orderby`, and `.with_odata_select` for their field enums.
 - JSON field names are snake_case. REST DTOs flatten the entry types: provider or model fields plus the flags at the top level.
 - REST update DTOs reject the immutable fields of `cpt-cf-model-registry-constraint-immutable-identity`, `canonical_id`, and audit fields with `invalid_argument` and field reason `IMMUTABLE_FIELD`.
 - Errors are canonical Problem documents (RFC 9457) produced by `toolkit-canonical-errors`. The wire carries category, title, detail, resource type and name, and the category context (reason, field violations). Internal diagnostics, SQL text, stored JSON documents, and the ids of rows the caller cannot see are never put on the wire. The error table is in §4 Error Handling.
@@ -795,7 +795,7 @@ What LLM Gateway and its provider plugins rely on:
 |-------------------|----------------|----------|
 | `tenant-resolver` | `TenantResolverClient::get_ancestors` via ClientHub, `GetAncestorsOptions { barrier_mode: BarrierMode::Ignore }` | Ancestor chain of the acting tenant for inheritance and shadowing |
 | `authz-resolver` | `AuthZResolverClient` wrapped in `PolicyEnforcer` (`authz-resolver-sdk`) | PDP decisions for every operation |
-| `types-registry` | `TypesRegistryApi` (resolved schema reads under the caller's context); platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
+| `types-registry` | `TypesRegistryClient::get_type_schema` (the effective schema, parent chain inlined) under the caller's context; platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
 | `llm-gateway` (consumer) | Calls `ModelRegistryClientV1` | Resolves models on every inference request; its provider plugins publish provider types derived from `gts.cf.genai.model.provider.v1~` (§3.3 Consumer Contract) |
 
 The gear declares `deps = [tenant_resolver, authz_resolver, types_registry]` and `capabilities = [db, rest]`. The CredStore reference format is a data contract only; the gear does not call CredStore.
@@ -825,9 +825,9 @@ The gear uses the parent-first, root-last order that Tenant Resolver returns, as
 
 | Dependency Gear | Interface Used | Purpose |
 |-------------------|---------------|---------|
-| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryApiExt::get_type_schema` with the resolved-schema projection | Source of the JSON Schema for `provider_settings` of each provider type |
+| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryClient::get_type_schema`, taking the effective schema (the type's schema with its parent chain inlined) | Source of the JSON Schema for `provider_settings` of each provider type |
 
-Schema reads pass `ReadOptions` with the resolved-schema projection (the type's schema merged with its parents) and `fresh` set, so a write validates against the current schema and not a client-cached copy. The read runs under the caller's context, which needs the Types Registry read grant.
+Schema reads go through the Types Registry client registered in ClientHub and take the effective schema, the type's schema with its parent chain inlined. The read runs under the caller's context, which needs the Types Registry read grant.
 
 #### Platform Database
 
@@ -1310,7 +1310,7 @@ On provider create:
 
 1. `gts_type` parses as a GTS type id (schema id ending with `~`). Failure: `invalid_argument`, field `gts_type`, reason `INVALID_GTS_TYPE`.
 2. The chain starts with the base type `gts.cf.genai.model.provider.v1~` and has at least one derived segment. Failure: reason `NOT_A_PROVIDER_TYPE`.
-3. Types Registry returns an active type schema for the id (`TypesRegistryApiExt::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Read denied: `NOT_PERMITTED`. Types Registry failure: dependency unavailable.
+3. Types Registry returns an active type schema for the id (`TypesRegistryClient::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Read denied: `NOT_PERMITTED`. Types Registry failure: dependency unavailable.
 
 On model create, and on model update when the request carries `provider_settings`:
 
