@@ -289,7 +289,7 @@ Type notation in the field tables: `?` marks an optional field; `uuid`, `string`
 | `gts_type` | string | Provider GTS type: a type derived from `gts.cf.genai.model.provider.v1~`, for example `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`. Names the LLM Gateway plugin family that evaluates the provider's models. Immutable. |
 | `enabled` | bool | When false, no model of this provider can be evaluated by the owner or any inheriting tenant. Default true. |
 | `sharing_mode` | enum | `tenant` (owner only) or `shared` (owner and all descendants). Default `tenant`. |
-| `managed` | bool | Whether the platform can manage the provider runtime itself, for example a local runtime. Informational; the gear does not act on it. Default false. |
+| `managed` | bool | Whether the platform manages the provider runtime, for example a local runtime. Informational; the gear does not act on it. Default false. |
 | `metadata` | json? | Optional provider metadata. Opaque; stored and returned unchanged. |
 | `created_at`, `created_by` | timestamp, uuid | When and by which subject the provider was created. |
 | `updated_at`, `updated_by` | timestamp, uuid | When and by which subject the provider was last changed. |
