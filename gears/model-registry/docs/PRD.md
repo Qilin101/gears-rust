@@ -365,6 +365,7 @@ The system **MUST** record who made each change to a provider or model and when,
 The system **MUST** resolve a canonical id for a tenant within 10 ms at the 99th percentile inside the gear, excluding network time.
 
 - **Threshold**: p99 at or below 10 ms per resolution, measured inside the gear and excluding time spent waiting on the PDP and Tenant Resolver; sustained load of 1,000 resolutions per second with peaks of 5,000 per second platform-wide; catalog of 10,000 models platform-wide across all tenants; tenant hierarchies up to 10 levels deep.
+- **Dependency cost**: Each resolution also waits for one PDP decision, and for a Tenant Resolver call when the tenant hierarchy is not cached. A caller's resolution time is the in-gear time plus these waits.
 - **Rationale**: Resolution runs on every LLM request, and LLM Gateway budgets 50 ms of total overhead.
 - **Verification Method**: Automated benchmark at the stated load, catalog size, and hierarchy depth.
 - **Architecture Allocation**: See [DESIGN](./DESIGN.md) §1.2 NFR Allocation.
@@ -581,7 +582,6 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 
 ## 13. Open Questions
 
-- Confirm the resolution latency budget and load conditions (`cpt-cf-model-registry-nfr-resolution-latency`) and the availability and recovery targets (`cpt-cf-model-registry-nfr-availability`). (Owner: LLM Gateway team and Model Registry team, Resolve by: before P1 implementation begins)
 - Will multi-step approval through an external approval service be required later? (Owner: Platform Architecture, Resolve by: before P2 planning)
 - How will auto-discovery of provider models work? Discovered models would start as Pending and wait for an administrator's approval. (Owner: Model Registry team, Resolve by: before P2 planning)
 
