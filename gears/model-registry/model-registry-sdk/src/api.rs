@@ -10,8 +10,8 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use crate::models::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1, ModelV1, ProviderEntryV1,
-    UpdateModelRequestV1, UpdateProviderRequestV1,
+    AvailableModelV1, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1, ModelV1,
+    ProviderEntryV1, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 
 /// Model Registry client, version 1. Registered in `ClientHub` by the gear:
@@ -26,8 +26,9 @@ use crate::models::{
 /// typed view is [`ModelRegistryError`](crate::ModelRegistryError), and the
 /// reason and field codes are in [`crate::reason`] and [`crate::field`].
 ///
-/// The resolution methods (`resolve_model`, `list_available_models`) return
-/// [`ModelV1`]. The management methods return [`ProviderEntryV1`] /
+/// `resolve_model` returns the full [`ModelV1`]; `list_available_models`
+/// returns [`AvailableModelV1`], which omits `provider_settings`, `base_url`,
+/// and `secret_ref`. The management methods return [`ProviderEntryV1`] /
 /// [`ModelEntryV1`], which add the `inherited`, `shadowed`, and
 /// eval-availability flags. Management operations address entities by id;
 /// writes succeed only on entries the acting tenant owns (inherited entries
@@ -62,7 +63,7 @@ pub trait ModelRegistryClientV1: Send + Sync {
     ) -> Result<ModelV1, CanonicalError>;
 
     /// List exactly the models `resolve_model` would return for the caller,
-    /// each as the same full record.
+    /// without `provider_settings`, `base_url`, and `secret_ref`.
     ///
     /// Requires the model `list_available` permission (`NOT_PERMITTED`
     /// otherwise); an `evaluate` denial yields an empty page.
@@ -70,7 +71,7 @@ pub trait ModelRegistryClientV1: Send + Sync {
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
-    ) -> Result<Page<ModelV1>, CanonicalError>;
+    ) -> Result<Page<AvailableModelV1>, CanonicalError>;
 
     // ==================== Providers ====================
 

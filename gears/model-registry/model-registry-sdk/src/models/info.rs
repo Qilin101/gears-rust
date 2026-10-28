@@ -68,8 +68,8 @@ pub struct ModelInfoV1 {
     pub reasoning_level: Option<String>,
     /// Model version string.
     pub version: Option<String>,
-    /// Position in model pickers; lower first.
-    pub sort_order: Option<i32>,
+    /// Position in model pickers; lower first. Default 0.
+    pub sort_order: i32,
     /// Absolute `http` or `https` URL of the model icon, up to 2,048
     /// characters.
     pub icon: Option<String>,

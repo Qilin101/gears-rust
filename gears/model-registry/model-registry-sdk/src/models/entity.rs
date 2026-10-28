@@ -137,18 +137,20 @@ pub struct ModelEntryV1 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use std::collections::{HashMap, HashSet};
 
+    use chrono::{DateTime, Utc};
     use toolkit_gts::gts_id;
+    use uuid::Uuid;
 
     use crate::models::{
-        ContextWindow, DefaultInferenceParametersV1, DisabledCapabilities, ModelCapabilities,
-        ModelPerformance, SupportedApi,
+        ApprovalState, ApprovalV1, ContextWindow, DefaultInferenceParametersV1,
+        DisabledCapabilities, ModelCapabilities, ModelInfoV1, ModelPerformance, ModelV1,
+        SharingMode, SupportedApi,
     };
 
-    fn sample_model() -> ModelV1 {
+    pub fn sample_model() -> ModelV1 {
         let now = DateTime::parse_from_rfc3339("2026-10-26T12:00:00Z")
             .expect("valid timestamp")
             .with_timezone(&Utc);
@@ -183,7 +185,7 @@ mod tests {
                 last_release_at: None,
                 reasoning_level: None,
                 version: None,
-                sort_order: None,
+                sort_order: 0,
                 icon: None,
                 multiplier_display: None,
                 performance: ModelPerformance::default(),
@@ -207,6 +209,12 @@ mod tests {
             updated_by: Uuid::nil(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::sample_model;
+    use super::*;
 
     #[test]
     fn model_round_trips_through_json_with_design_wire_names() {

@@ -14,8 +14,8 @@ All paths are versioned under `/model-registry/v1/` and map one-to-one to the SD
 
 | Method | Path | SDK method |
 |--------|------|------------|
-| `GET` | `/available-models/{canonical_id}` | `resolve_model` |
-| `GET` | `/available-models` | `list_available_models` |
+| `GET` | `/available-models/{canonical_id}` | `resolve_model`; returns `AvailableModelV1` (no `provider_settings`, `base_url`, `secret_ref`) |
+| `GET` | `/available-models` | `list_available_models`; a page of `AvailableModelV1` |
 | `POST` | `/providers` | `create_provider` |
 | `GET` | `/providers/{id}` | `get_provider` |
 | `GET` | `/providers` | `list_providers` |

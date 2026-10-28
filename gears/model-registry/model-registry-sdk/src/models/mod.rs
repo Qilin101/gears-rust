@@ -10,9 +10,12 @@
 //! - [`info`] — [`ModelInfoV1`].
 //! - [`entity`] — [`ProviderV1`], [`ModelV1`], [`ApprovalV1`], and the
 //!   management entries [`ProviderEntryV1`] / [`ModelEntryV1`].
+//! - [`available`] — [`AvailableModelV1`] / [`AvailableModelInfoV1`], the
+//!   redacted record of the available-models list.
 //! - [`provider_type`] — [`ProviderTypeV1`], the provider base GTS type.
 //! - [`request`] — create and update requests.
 
+pub mod available;
 pub mod common;
 pub mod default_parameters;
 pub mod entity;
@@ -31,6 +34,8 @@ pub use default_parameters::{
     DefaultInferenceParametersV1, NamedToolChoice, ReasoningConfig, ReasoningSummary, TextFormat,
     TextFormatKind, TextVerbosity, ToolChoice, ToolChoiceMode, TruncationStrategy,
 };
+
+pub use available::{AvailableModelInfoV1, AvailableModelV1};
 
 pub use entity::{ApprovalV1, ModelEntryV1, ModelV1, ProviderEntryV1, ProviderV1};
 

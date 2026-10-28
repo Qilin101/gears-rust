@@ -6,7 +6,8 @@
 //! - [`ModelRegistryClientV1`] — the client trait, obtained from `ClientHub`;
 //!   every method returns [`toolkit_canonical_errors::CanonicalError`]
 //! - Models: [`ProviderV1`], [`ModelV1`], [`ModelInfoV1`], [`ApprovalV1`],
-//!   the management entries [`ProviderEntryV1`] / [`ModelEntryV1`], and the
+//!   the management entries [`ProviderEntryV1`] / [`ModelEntryV1`], the
+//!   redacted [`AvailableModelV1`] of the available-models list, and the
 //!   create / update requests
 //! - [`ProviderTypeV1`] — the provider base GTS type
 //!   `gts.cf.genai.model.provider.v1~` that LLM Gateway provider plugins
@@ -49,6 +50,8 @@ pub use gts::{MODEL_RESOURCE_TYPE, PROVIDER_BASE_TYPE, PROVIDER_RESOURCE_TYPE};
 pub use models::{
     ApprovalState,
     ApprovalV1,
+    AvailableModelInfoV1,
+    AvailableModelV1,
     ContextWindow,
     CreateModelRequestV1,
     CreateProviderRequestV1,

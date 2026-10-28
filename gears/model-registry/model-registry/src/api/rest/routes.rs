@@ -37,13 +37,14 @@ pub fn register_routes(
         .description(
             "Resolve a canonical id (`provider_slug::provider_model_id`, percent-encoded as one path \
              segment) in the caller's effective catalog. Succeeds only when the model is visible, its \
-             provider is enabled, it is approved, and the caller may evaluate it.",
+             provider is enabled, it is approved, and the caller may evaluate it. The record omits \
+             `provider_settings`, `base_url`, and `secret_ref`.",
         )
         .tag("Model Registry")
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::resolve_model)
-        .json_response_with_schema::<dto::ModelDto>(openapi, StatusCode::OK, "The model")
+        .json_response_with_schema::<dto::AvailableModelDto>(openapi, StatusCode::OK, "The model")
         .standard_errors(openapi)
         .error_503(openapi)
         .register(router, openapi);
@@ -51,12 +52,19 @@ pub fn register_routes(
     router = OperationBuilder::get("/model-registry/v1/available-models")
         .operation_id("model_registry.list_available_models")
         .summary("List the models available for evaluation")
-        .description("Exactly the models the caller could resolve, as full records.")
+        .description(
+            "Exactly the models the caller could resolve, without `provider_settings`, `base_url`, \
+             and `secret_ref`.",
+        )
         .tag("Model Registry")
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::list_available_models)
-        .json_response_with_schema::<dto::ModelPageDto>(openapi, StatusCode::OK, "A page of models")
+        .json_response_with_schema::<dto::AvailableModelPageDto>(
+            openapi,
+            StatusCode::OK,
+            "A page of models",
+        )
         .with_odata_filter::<ModelFilterField>()
         .with_odata_orderby::<ModelFilterField>()
         .with_odata_select()

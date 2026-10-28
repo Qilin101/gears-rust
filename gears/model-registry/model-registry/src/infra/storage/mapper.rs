@@ -465,7 +465,7 @@ mod tests {
                 last_release_at: Some(now),
                 reasoning_level: Some("high".into()),
                 version: Some("2026-01".into()),
-                sort_order: Some(3),
+                sort_order: 3,
                 icon: Some("https://x/i.png".into()),
                 multiplier_display: Some("3x".into()),
                 performance: model_registry_sdk::ModelPerformance {

@@ -124,7 +124,6 @@ pub const MODEL_FILTER_ONLY_FIELDS: &[ModelFilterField] = &[
     ModelFilterField::Version,
     ModelFilterField::Architecture,
     ModelFilterField::Format,
-    ModelFilterField::SortOrder,
     ModelFilterField::LastReleaseAt,
     ModelFilterField::MaxOutputTokens,
 ];

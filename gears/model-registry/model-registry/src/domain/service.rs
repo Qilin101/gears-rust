@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use model_registry_sdk::{
-    ApprovalState, ApprovalV1, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
-    ModelInfoV1, ModelV1, ProviderEntryV1, ProviderV1, SharingMode, UpdateModelRequestV1,
-    UpdateProviderRequestV1,
+    ApprovalState, ApprovalV1, AvailableModelV1, CreateModelRequestV1, CreateProviderRequestV1,
+    ModelEntryV1, ModelInfoV1, ModelV1, ProviderEntryV1, ProviderV1, SharingMode,
+    UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 use toolkit_db::DBProvider;
 use toolkit_db::secure::DBRunner;
@@ -252,7 +252,7 @@ impl Service {
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
-    ) -> Result<Page<ModelV1>, DomainError> {
+    ) -> Result<Page<AvailableModelV1>, DomainError> {
         const OP: &str = "list_available_models";
         let t0 = ctx.subject_tenant_id();
         let chain = self.chain(ctx).await?;
@@ -293,14 +293,19 @@ impl Service {
             return Ok(empty_page(self.page_limits, query));
         }
         let conn = self.db.conn()?;
-        self.models
+        let page = self
+            .models
             .list(
                 &conn,
                 &decision.scope(&chain),
                 ModelRepo::available_condition(t0, &allow_list),
                 query,
             )
-            .await
+            .await?;
+        Ok(Page {
+            items: page.items.into_iter().map(AvailableModelV1::from).collect(),
+            page_info: page.page_info,
+        })
     }
 
     // ==================== Providers ====================

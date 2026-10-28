@@ -48,7 +48,7 @@ pub struct Model {
     pub last_release_at: Option<DateTime<Utc>>,
     pub reasoning_level: Option<String>,
     pub version: Option<String>,
-    pub sort_order: Option<i32>,
+    pub sort_order: i32,
     pub icon: Option<String>,
     pub multiplier_display: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]

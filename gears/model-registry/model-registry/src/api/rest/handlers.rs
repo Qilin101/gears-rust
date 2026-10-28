@@ -11,8 +11,10 @@ use toolkit_odata::Page;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
+use model_registry_sdk::AvailableModelV1;
+
 use super::dto::{
-    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelEntryDto, PageInfoDto,
+    AvailableModelDto, CreateModelRequestDto, CreateProviderRequestDto, ModelEntryDto, PageInfoDto,
     ProviderEntryDto, UpdateModelRequestDto, UpdateProviderRequestDto,
 };
 use super::parse;
@@ -38,14 +40,15 @@ fn selected<T: serde::Serialize>(value: T, query: Option<&OData>) -> Json<serde_
 
 // ==================== Resolution ====================
 
-/// `GET /model-registry/v1/available-models/{canonical_id}`
+/// `GET /model-registry/v1/available-models/{canonical_id}`. The full
+/// `ModelV1` is returned only through the SDK.
 pub async fn resolve_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Svc,
     Path(canonical_id): Path<String>,
-) -> ApiResult<JsonBody<ModelDto>> {
+) -> ApiResult<JsonBody<AvailableModelDto>> {
     let model = svc.resolve_model(&ctx, &canonical_id).await?;
-    Ok(Json(ModelDto::from(model)))
+    Ok(Json(AvailableModelDto::from(AvailableModelV1::from(model))))
 }
 
 /// `GET /model-registry/v1/available-models`
@@ -55,7 +58,7 @@ pub async fn list_available_models(
     OData(query): OData,
 ) -> ApiResult<JsonBody<Page<serde_json::Value>>> {
     let page = svc.list_available_models(&ctx, &query).await?;
-    Ok(projected::<ModelDto, _>(page, &OData(query)))
+    Ok(projected::<AvailableModelDto, _>(page, &OData(query)))
 }
 
 // ==================== Providers ====================

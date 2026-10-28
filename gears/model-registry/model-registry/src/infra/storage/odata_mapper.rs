@@ -115,7 +115,7 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
             F::Managed => m.managed.into(),
             F::Architecture => m.architecture.clone().into(),
             F::Format => m.format.clone().into(),
-            F::SortOrder => m.sort_order.map(i64::from).into(),
+            F::SortOrder => i64::from(m.sort_order).into(),
             F::LastReleaseAt => m.last_release_at.into(),
             F::MaxInputTokens => m.ctx_max_input_tokens.into(),
             F::MaxOutputTokens => m.ctx_max_output_tokens.into(),

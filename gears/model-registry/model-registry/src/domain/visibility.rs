@@ -352,7 +352,7 @@ mod tests {
                 last_release_at: None,
                 reasoning_level: None,
                 version: None,
-                sort_order: None,
+                sort_order: 0,
                 icon: None,
                 multiplier_display: None,
                 performance: model_registry_sdk::ModelPerformance::default(),

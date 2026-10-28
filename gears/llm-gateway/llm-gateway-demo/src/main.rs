@@ -285,12 +285,12 @@ async fn list_models_with_builder(
     );
     for model in &page.items {
         println!(
-            "←   {} — approval={}, streaming={}, vision={}, base_url={:?}",
+            "←   {} — approval={}, streaming={}, vision={}, sort_order={}",
             model.canonical_id,
             model.approval.state.as_str(),
             model.info.capabilities.streaming,
             model.info.capabilities.vision.enabled,
-            model.info.base_url,
+            model.info.sort_order,
         );
     }
 

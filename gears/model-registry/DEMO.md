@@ -43,8 +43,8 @@ All routes are prefixed by `/cf` (the `prefix_path` in `config/quickstart.yaml`)
 | 5 | `POST` | `/cf/model-registry/v1/models` | Body has `provider_id`, `provider_model_id`, `display_name`, `context_window`, optional `sharing_mode`, `approval_state` (default `approved`), and the other Model Info fields. `canonical_id` and `gts_type` are set by the gear; `provider_settings` is validated against the provider type schema. |
 | 6 | `GET` | `/cf/model-registry/v1/models` | Admin list: own and inherited models in every state, with flags. |
 | 7 | `GET` | `/cf/model-registry/v1/models/{id}` | |
-| 8 | `GET` | `/cf/model-registry/v1/available-models/{canonical_id}` | Resolve for evaluation: visible, provider enabled, approved, permitted. `::` is encoded as `%3A%3A`. |
-| 9 | `GET` | `/cf/model-registry/v1/available-models` | Exactly the models that resolve. |
+| 8 | `GET` | `/cf/model-registry/v1/available-models/{canonical_id}` | Resolve for evaluation: visible, provider enabled, approved, permitted. `::` is encoded as `%3A%3A`. The response omits `provider_settings`, `base_url`, and `secret_ref`. |
+| 9 | `GET` | `/cf/model-registry/v1/available-models` | Exactly the models that resolve, in the same redacted shape. |
 | 10 | `PATCH` | `/cf/model-registry/v1/models/{id}` | Any mutable Model Info field, `sharing_mode`, or `approval_state` (`pending`/`approved`/`rejected`/`revoked`). |
 | 11 | `DELETE` | `/cf/model-registry/v1/models/{id}` | Hard delete, 204. |
 | 12 | `DELETE` | `/cf/model-registry/v1/providers/{id}` | Deletes the provider and its models, 204. |

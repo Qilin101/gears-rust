@@ -5,11 +5,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 use types_registry_sdk::{TypesRegistryClient, TypesRegistryError};
 
 use crate::domain::error::{Dependency, DomainError};
 use crate::domain::gts_validator::SchemaSource;
+
+/// Operation name reported when Types Registry denies the schema read.
+pub const SCHEMA_READ_OPERATION: &str = "types_registry.get_type_schema";
 
 pub struct TypesRegistrySchemaSource {
     client: Arc<dyn TypesRegistryClient>,
@@ -20,6 +24,34 @@ impl TypesRegistrySchemaSource {
     #[must_use]
     pub fn new(client: Arc<dyn TypesRegistryClient>, deadline: Duration) -> Self {
         Self { client, deadline }
+    }
+}
+
+/// Types Registry outcome mapping of DESIGN §4 Error Handling: not found is
+/// `None`, a denied read is `NOT_PERMITTED`, everything else is dependency
+/// unavailable.
+fn map_result(
+    result: Result<serde_json::Value, TypesRegistryError>,
+    type_id: &gts::GtsTypeId,
+) -> Result<Option<serde_json::Value>, DomainError> {
+    match result {
+        Ok(schema) => Ok(Some(schema)),
+        Err(TypesRegistryError::NotFound { .. } | TypesRegistryError::Validation { .. }) => {
+            Ok(None)
+        }
+        Err(TypesRegistryError::Other { canonical })
+            if matches!(canonical, CanonicalError::PermissionDenied { .. }) =>
+        {
+            tracing::warn!(
+                %type_id,
+                error = %canonical,
+                "types-registry refused the schema read: the caller lacks the Types Registry read grant"
+            );
+            Err(DomainError::NotPermitted {
+                operation: SCHEMA_READ_OPERATION,
+            })
+        }
+        Err(other) => Err(DomainError::unavailable(Dependency::TypesRegistry, other)),
     }
 }
 
@@ -40,24 +72,56 @@ impl SchemaSource for TypesRegistrySchemaSource {
                 ));
             }
         };
-        match result {
-            Ok(schema) => Ok(Some(schema.effective_schema())),
-            Err(err) => match TypesRegistryError::from(err) {
-                TypesRegistryError::NotFound { .. } | TypesRegistryError::Validation { .. } => {
-                    Ok(None)
-                }
-                TypesRegistryError::Other { canonical }
-                    if matches!(
-                        canonical,
-                        toolkit_canonical_errors::CanonicalError::PermissionDenied { .. }
-                    ) =>
-                {
-                    Err(DomainError::internal(format!(
-                        "types-registry refused the schema read of {type_id}: the gear's caller lacks the Types Registry read grant: {canonical}"
-                    )))
-                }
-                other => Err(DomainError::unavailable(Dependency::TypesRegistry, other)),
-            },
-        }
+        map_result(
+            result
+                .map(|schema| schema.effective_schema())
+                .map_err(TypesRegistryError::from),
+            type_id,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn type_id() -> gts::GtsTypeId {
+        gts::GtsTypeId::new("gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~")
+    }
+
+    #[test]
+    fn denied_read_is_not_permitted() {
+        let err = TypesRegistryError::Other {
+            canonical: crate::domain::error::ModelScope::permission_denied()
+                .with_reason("NO_READ_GRANT")
+                .create(),
+        };
+        assert!(matches!(
+            map_result(Err(err), &type_id()),
+            Err(DomainError::NotPermitted {
+                operation: SCHEMA_READ_OPERATION
+            })
+        ));
+    }
+
+    #[test]
+    fn not_found_is_none_and_failures_are_unavailable() {
+        let not_found = TypesRegistryError::NotFound {
+            resource_type: "type".into(),
+            name: "x".into(),
+            detail: String::new(),
+        };
+        assert!(matches!(map_result(Err(not_found), &type_id()), Ok(None)));
+
+        let down = TypesRegistryError::Other {
+            canonical: CanonicalError::service_unavailable().create(),
+        };
+        assert!(matches!(
+            map_result(Err(down), &type_id()),
+            Err(DomainError::DependencyUnavailable {
+                dependency: Dependency::TypesRegistry,
+                ..
+            })
+        ));
     }
 }

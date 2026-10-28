@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS models (
     last_release_at           {timestamp},
     reasoning_level           VARCHAR(64),
     version                   VARCHAR(64),
-    sort_order                INTEGER,
+    sort_order                INTEGER NOT NULL DEFAULT 0,
     icon                      VARCHAR(2048),
     multiplier_display        VARCHAR(32),
     performance               {json} NOT NULL,

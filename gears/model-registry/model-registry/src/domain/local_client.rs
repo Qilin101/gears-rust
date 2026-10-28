@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use model_registry_sdk::{
-    CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1, ModelRegistryClientV1, ModelV1,
-    ProviderEntryV1, UpdateModelRequestV1, UpdateProviderRequestV1,
+    AvailableModelV1, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
+    ModelRegistryClientV1, ModelV1, ProviderEntryV1, UpdateModelRequestV1, UpdateProviderRequestV1,
 };
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_odata::{ODataQuery, Page};
@@ -43,7 +43,7 @@ impl ModelRegistryClientV1 for LocalClient {
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
-    ) -> Result<Page<ModelV1>, CanonicalError> {
+    ) -> Result<Page<AvailableModelV1>, CanonicalError> {
         self.service
             .list_available_models(ctx, query)
             .await

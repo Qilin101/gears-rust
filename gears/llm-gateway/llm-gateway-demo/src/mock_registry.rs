@@ -7,7 +7,8 @@
 //!
 //! `resolve_model` applies the registry's approval gate and reports the same
 //! canonical errors the gear does; `list_available_models` evaluates the
-//! caller's `$filter` AST in memory over the approved fixtures, resolving each
+//! caller's `$filter` AST in memory over the approved fixtures and returns
+//! them as `AvailableModelV1`, resolving each
 //! identifier through [`ModelFilterField::from_name`], the same allowlist the
 //! real gear applies before mapping a field to a column. The management
 //! methods are not part of the demo.
@@ -18,7 +19,7 @@ use async_trait::async_trait;
 use model_registry_sdk::odata::ModelFilterField;
 use model_registry_sdk::reason::permission;
 use model_registry_sdk::{
-    ApprovalState, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
+    ApprovalState, AvailableModelV1, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
     ModelRegistryClientV1, ModelV1, ProviderEntryV1, SupportedApi, UpdateModelRequestV1,
     UpdateProviderRequestV1,
 };
@@ -95,7 +96,7 @@ impl ModelRegistryClientV1 for MockModelRegistry {
         &self,
         _ctx: &SecurityContext,
         query: &ODataQuery,
-    ) -> Result<Page<ModelV1>, CanonicalError> {
+    ) -> Result<Page<AvailableModelV1>, CanonicalError> {
         // Sorted by `canonical_id`, the default order of the real gear.
         let mut candidates: Vec<&ModelV1> = self
             .by_id
@@ -111,7 +112,7 @@ impl ModelRegistryClientV1 for MockModelRegistry {
                 None => true,
             };
             if keep {
-                items.push(model.clone());
+                items.push(AvailableModelV1::from(model.clone()));
             }
         }
 
@@ -275,7 +276,7 @@ fn project(model: &ModelV1, field: ModelFilterField) -> Scalar {
         F::Managed => Scalar::Flag(info.managed),
         F::Architecture => Scalar::Text(info.architecture.clone()),
         F::Format => Scalar::Text(info.format.clone()),
-        F::SortOrder => Scalar::Int(info.sort_order.map(i64::from)),
+        F::SortOrder => Scalar::Int(Some(i64::from(info.sort_order))),
         F::LastReleaseAt => Scalar::Text(info.last_release_at.map(|t| t.to_rfc3339())),
         F::MaxInputTokens => Scalar::Int(Some(i64::from(info.context_window.max_input_tokens))),
         F::MaxOutputTokens => Scalar::Int(info.context_window.max_output_tokens.map(i64::from)),

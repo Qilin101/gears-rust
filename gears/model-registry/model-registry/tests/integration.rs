@@ -30,7 +30,8 @@ use model_registry::testing::{
     permit_with, security_context, security_context_for, subject_tenant,
 };
 use model_registry_sdk::odata::{
-    MODEL_APPROVAL_STATE, MODEL_CANONICAL_ID, MODEL_VENDOR, ModelSchema, QueryBuilder, SortDir,
+    MODEL_APPROVAL_STATE, MODEL_CANONICAL_ID, MODEL_SORT_ORDER, MODEL_VENDOR, ModelSchema,
+    QueryBuilder, SortDir,
 };
 use model_registry_sdk::{
     ApprovalState, ContextWindow, CreateModelRequestV1, CreateProviderRequestV1, ModelEntryV1,
@@ -1353,13 +1354,14 @@ async fn filters_only_narrow_and_orderby_follows_the_field_rules() {
     let p = h
         .provider(t.root, "openai", SharingMode::Shared, true)
         .await;
-    for (pmid, state, vendor) in [
-        ("a", ApprovalState::Approved, "OpenAI"),
-        ("b", ApprovalState::Pending, "OpenAI"),
-        ("c", ApprovalState::Approved, "Other"),
+    for (pmid, state, vendor, sort_order) in [
+        ("a", ApprovalState::Approved, "OpenAI", 2),
+        ("b", ApprovalState::Pending, "OpenAI", 1),
+        ("c", ApprovalState::Approved, "Other", 0),
     ] {
         let mut req = model_req(p, pmid, SharingMode::Shared, state);
         req.vendor = Some(vendor.into());
+        req.sort_order = sort_order;
         h.service.create_model(&ctx(t.root), req).await.unwrap();
     }
     let c = ctx(t.other);
@@ -1404,6 +1406,18 @@ async fn filters_only_narrow_and_orderby_follows_the_field_rules() {
             .map(|m| m.canonical_id.as_str())
             .collect::<Vec<_>>(),
         vec!["openai::c", "openai::a"]
+    );
+    // `sort_order` is non-nullable and therefore orderable.
+    let q = QueryBuilder::<ModelSchema>::new()
+        .order_by(MODEL_SORT_ORDER, SortDir::Asc)
+        .build();
+    let items = h.service.list_available_models(&c, &q).await.unwrap().items;
+    assert_eq!(
+        items
+            .iter()
+            .map(|m| (m.canonical_id.as_str(), m.info.sort_order))
+            .collect::<Vec<_>>(),
+        vec![("openai::c", 0), ("openai::a", 2)]
     );
 
     // Keyset paging in the default order with the id tie-breaker.
@@ -1621,15 +1635,13 @@ async fn model_update_replaces_whole_values_and_keeps_promoted_columns_in_sync()
     let q = QueryBuilder::<ModelSchema>::new()
         .filter(model_registry_sdk::odata::MODEL_STREAMING.eq(true))
         .build();
-    assert_eq!(
-        h.service
-            .list_available_models(&c, &q)
-            .await
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
+    let listed = h.service.list_available_models(&c, &q).await.unwrap().items;
+    assert_eq!(listed.len(), 1);
+    let listed = serde_json::to_value(&listed[0]).unwrap();
+    for key in ["base_url", "secret_ref", "provider_settings"] {
+        assert!(listed["info"].get(key).is_none(), "{key} is redacted");
+    }
+    assert_eq!(listed["canonical_id"], "openai::gpt-4o");
     let resolved = h.resolve(t.other, "openai::gpt-4o").await.unwrap();
     assert_eq!(
         resolved.info.base_url.as_deref(),
