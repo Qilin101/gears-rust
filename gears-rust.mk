@@ -374,16 +374,14 @@ test-graph-storage: install-tools
 	$(call print_target_banner)
 	cargo nextest run -p cf-gears-graph-storage -p cf-gears-graph-storage-sdk
 
-## Run the graph-storage gear's PostgreSQL 19 lane (Docker required)
-## The same conformance suite against the built-in store, plus the SQL/PGQ cases that only a real
-## server can answer. It needs an image carrying PostgreSQL 19 **and**
-## pgvector — `test_containers::postgres_graph()` pins a stock 19beta
-## alpine, which has only the former — so point GEARS_TEST_PG_GRAPH_IMAGE at
-## one until the platform pin carries both. GEARS_TEST_PG_GRAPH_REQUIRED=1
+## Run the graph-storage gear's PostgreSQL lane (Docker required)
+## The same conformance suite against the built-in store, plus the cases only a real
+## server can answer. It needs PostgreSQL 16+ with pgvector: point
+## GEARS_TEST_PG_GRAPH_IMAGE at one (CI uses pgvector/pgvector:0.8.7-pg18). GEARS_TEST_PG_GRAPH_REQUIRED=1
 ## turns "no such image, skipping" into a failure, so CI cannot go green by
 ## running nothing; that is the default here, because a target whose whole
 ## purpose is the database has no business passing without one.
-## Every case in this lane gets its own PostgreSQL instance (two of them are
+## Every case in this lane gets its own PostgreSQL instance (some of them are
 ## operator surgery on server-wide state), and more than a handful at once is
 ## more than Docker and PostgreSQL will take: the pools time out and a
 ## different case fails on each run. nextest runs each case in its own
@@ -419,14 +417,9 @@ lane_post_toolkit-db-sqlite = cargo build -p cf-gears-toolkit-db --examples --fe
 ## toolkit-db on PostgreSQL.
 lane_args_toolkit-db-pg = -p cf-gears-toolkit-db --features pg,integration
 
-## The SQL/PGQ lane: toolkit-db's unit suites under the `pgq` feature (the
-## secure graph builder and its tests compile only there), the PostgreSQL 19
-## integration suite (tests/pg, Docker required; a testcontainers PG19) and the
-## trybuild guards. `pgq` implies `pg`, so without the filter this would re-run
-## every PG18 Docker suite the toolkit-db-pg lane just ran; the filter keeps only
-## what this lane adds. The PG19 suite skips itself while the pre-GA image is
-## unavailable; CI sets GEARS_TEST_PG_GRAPH_REQUIRED=1 so there the skip is a
-## failure — do the same locally once the image is expected to be present.
+## The SQL/PGQ lane: toolkit-db's unit, integration (tests/pg) and trybuild
+## suites under the `pgq` feature. `pgq` implies `pg`, so the filter keeps only
+## what this lane adds to the toolkit-db-pg lane.
 lane_args_toolkit-db-pgq = -p cf-gears-toolkit-db --features pgq,integration -E 'kind(lib) | binary(mod) | binary(ui)'
 
 ## toolkit-db on MySQL.
