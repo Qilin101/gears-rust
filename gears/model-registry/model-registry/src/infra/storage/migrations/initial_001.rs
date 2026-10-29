@@ -61,8 +61,8 @@ const MODEL_INDEXED: &[&str] = &[
     "approval_decided_at",
     "cap_vision",
     "cap_reasoning_effort",
-    "cap_function_calling",
-    "cap_response_schema",
+    "cap_tools",
+    "cap_json_schema",
     "cap_streaming",
     "cap_file_input",
     "cap_image_generation",
@@ -180,8 +180,8 @@ CREATE TABLE IF NOT EXISTS models (
     disabled_capabilities     {json} NOT NULL,
     cap_vision                BOOLEAN NOT NULL,
     cap_reasoning_effort      BOOLEAN NOT NULL,
-    cap_function_calling      BOOLEAN NOT NULL,
-    cap_response_schema       BOOLEAN NOT NULL,
+    cap_tools      BOOLEAN NOT NULL,
+    cap_json_schema       BOOLEAN NOT NULL,
     cap_streaming             BOOLEAN NOT NULL,
     cap_file_input            BOOLEAN NOT NULL,
     cap_image_generation      BOOLEAN NOT NULL,
@@ -255,7 +255,7 @@ mod tests {
 
     fn model(id: &str, provider: &str, tenant: &str) -> String {
         format!(
-            "INSERT INTO models (id, tenant_id, provider_id, provider_model_id, canonical_id, gts_type, sharing_mode, approval_state, approval_decided_by, approval_decided_at, display_name, managed, performance, additional_info, supported_api, api_completion, api_embedding, api_batch, capabilities, disabled_capabilities, cap_vision, cap_reasoning_effort, cap_function_calling, cap_response_schema, cap_streaming, cap_file_input, cap_image_generation, cap_audio_input, cap_audio_output, cap_code_interpreter, cap_web_search, ctx_max_input_tokens, default_parameters, allow_parameter_override, allow_extra_params, provider_settings, created_at, created_by, updated_at, updated_by) VALUES ('{id}', '{tenant}', '{provider}', 'gpt', 'openai::gpt', 'gts.x~', 'tenant', 'approved', 's', 'now', 'GPT', 0, '{{}}', '{{}}', '[]', 0, 0, 0, '{{}}', '{{}}', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, '{{}}', 0, '[]', '{{}}', 'now', 's', 'now', 's')"
+            "INSERT INTO models (id, tenant_id, provider_id, provider_model_id, canonical_id, gts_type, sharing_mode, approval_state, approval_decided_by, approval_decided_at, display_name, managed, performance, additional_info, supported_api, api_completion, api_embedding, api_batch, capabilities, disabled_capabilities, cap_vision, cap_reasoning_effort, cap_tools, cap_json_schema, cap_streaming, cap_file_input, cap_image_generation, cap_audio_input, cap_audio_output, cap_code_interpreter, cap_web_search, ctx_max_input_tokens, default_parameters, allow_parameter_override, allow_extra_params, provider_settings, created_at, created_by, updated_at, updated_by) VALUES ('{id}', '{tenant}', '{provider}', 'gpt', 'openai::gpt', 'gts.x~', 'tenant', 'approved', 's', 'now', 'GPT', 0, '{{}}', '{{}}', '[]', 0, 0, 0, '{{}}', '{{}}', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, '{{}}', 0, '[]', '{{}}', 'now', 's', 'now', 's')"
         )
     }
 

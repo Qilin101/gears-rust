@@ -25,9 +25,10 @@ pub mod request;
 
 pub use common::{
     ApprovalState, ContextWindow, DisabledCapabilities, DisabledMediaCapability,
-    DisabledReasoningCapability, DisabledWebSearchCapability, MediaCapability, ModelCapabilities,
-    ModelPerformance, ReasoningCapability, ReasoningEffort, ServiceTier, SharingMode, SupportedApi,
-    WebSearchCapability,
+    DisabledOutputCapability, DisabledReasoningCapability, DisabledSamplingCapability,
+    DisabledToolsCapability, DisabledWebSearchCapability, MediaCapability, ModelCapabilities,
+    ModelPerformance, OutputCapability, ReasoningCapability, ReasoningEffort, SamplingCapability,
+    ServiceTier, SharingMode, SupportedApi, ToolsCapability, WebSearchCapability,
 };
 
 pub use default_parameters::{

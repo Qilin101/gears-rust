@@ -114,7 +114,7 @@ MODEL_JSON=$(curl -fsS -X POST "${MR}/models" \
         capabilities: {
           vision: { enabled: true, supported_mime_types: ["image/jpeg", "image/png"] },
           reasoning: { effort: false, toggle: false, resume: false, budget: false },
-          function_calling: true, response_schema: true, streaming: true,
+          tools: { enabled: true }, output: { json_schema: true }, streaming: true,
           file_input: { enabled: false, supported_mime_types: [] },
           image_generation: { enabled: false, supported_mime_types: [] },
           audio_input: { enabled: false, supported_mime_types: [] },

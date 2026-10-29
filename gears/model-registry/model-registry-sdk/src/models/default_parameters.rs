@@ -73,9 +73,6 @@ pub struct DefaultInferenceParametersV1 {
     /// Tool-choice policy in the unified shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
-    /// Whether to store the response for later retrieval.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------

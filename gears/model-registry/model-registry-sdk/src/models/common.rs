@@ -215,8 +215,7 @@ pub enum ServiceTier {
 // Capabilities
 // ---------------------------------------------------------------------------
 
-/// Reasoning sub-capabilities indicating which reasoning controls the model
-/// accepts.
+/// Reasoning controls the model accepts.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
     Debug,
@@ -229,15 +228,18 @@ pub enum ServiceTier {
     serde::Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct ReasoningCapability {
-    /// Supports `reasoning_effort` parameter (low/medium/high).
+    /// Accepts `reasoning.effort`.
     pub effort: bool,
-    /// Supports toggling reasoning on/off.
+    /// Reasoning can be switched off (`effort = none`).
     pub toggle: bool,
-    /// Supports resuming/continuing a reasoning chain.
+    /// Accepts reasoning items from a previous turn (encrypted content).
     pub resume: bool,
-    /// Supports explicit reasoning token budget.
+    /// Accepts `reasoning.budget_tokens`.
     pub budget: bool,
+    /// Accepts `reasoning.summary`.
+    pub summary: bool,
 }
 
 /// Web search capability flags.
@@ -253,6 +255,7 @@ pub struct ReasoningCapability {
     serde::Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct WebSearchCapability {
     /// Whether web search is available.
     pub enabled: bool,
@@ -262,6 +265,89 @@ pub struct WebSearchCapability {
     /// Whether the model supports configuring a deny-list of domains to
     /// exclude from search.
     pub excluded_domains: bool,
+}
+
+/// Tool-calling controls the model accepts.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct ToolsCapability {
+    /// Accepts `tools` (function calling).
+    pub enabled: bool,
+    /// Accepts `parallel_tool_calls`.
+    pub parallel_tool_calls: bool,
+    /// Accepts `max_tool_calls`.
+    pub max_tool_calls: bool,
+    /// Accepts `tool_choice = "required"`.
+    pub tool_choice_required: bool,
+    /// Accepts `tool_choice = "none"`.
+    pub tool_choice_none: bool,
+    /// Accepts a named function in `tool_choice`.
+    pub tool_choice_named: bool,
+}
+
+/// Output-format controls the model accepts.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct OutputCapability {
+    /// Accepts `text.format = json_object`.
+    pub json_mode: bool,
+    /// Accepts `text.format = json_schema`.
+    pub json_schema: bool,
+    /// Accepts `strict = true` on a JSON schema format.
+    pub strict_schema: bool,
+    /// Accepts `text.verbosity`.
+    pub verbosity: bool,
+}
+
+/// Sampling parameters the model accepts.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct SamplingCapability {
+    /// Accepts `temperature`.
+    pub temperature: bool,
+    /// Accepts `top_p`.
+    pub top_p: bool,
+    /// Accepts `seed`.
+    pub seed: bool,
+    /// Accepts `presence_penalty`.
+    pub presence_penalty: bool,
+    /// Accepts `frequency_penalty`.
+    pub frequency_penalty: bool,
+    /// Accepts `top_logprobs` and the `message.output_text.logprobs` include.
+    pub logprobs: bool,
 }
 
 /// Shared shape for media-typed capabilities — `vision`, `file_input`,
@@ -280,6 +366,7 @@ pub struct WebSearchCapability {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct MediaCapability {
     /// Whether the capability is available.
     pub enabled: bool,
@@ -290,21 +377,26 @@ pub struct MediaCapability {
 
 /// Capability flags describing what the model can do.
 ///
+/// Every field defaults to "not supported" when absent from JSON.
+///
 /// `Copy` is intentionally not derived: [`MediaCapability`] carries a
 /// `Vec<String>`, so the struct is `Clone` only.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct ModelCapabilities {
     /// Supports image/vision input.
     pub vision: MediaCapability,
-    /// Reasoning controls (effort, toggle, resume, budget).
+    /// Reasoning controls.
     pub reasoning: ReasoningCapability,
-    /// Supports function/tool calling.
-    pub function_calling: bool,
-    /// Supports structured output via response schema (JSON schema).
-    pub response_schema: bool,
+    /// Tool-calling controls.
+    pub tools: ToolsCapability,
+    /// Output-format controls.
+    pub output: OutputCapability,
+    /// Sampling parameters.
+    pub sampling: SamplingCapability,
     /// Supports streaming responses.
     pub streaming: bool,
     /// Supports file input (e.g. PDFs, documents).
@@ -319,6 +411,10 @@ pub struct ModelCapabilities {
     pub code_interpreter: bool,
     /// Web search capability.
     pub web_search: WebSearchCapability,
+    /// Accepts `truncation`.
+    pub truncation: bool,
+    /// Accepts `instructions` (system prompt).
+    pub instructions: bool,
 }
 
 /// Disablement flags for a [`MediaCapability`].
@@ -329,6 +425,7 @@ pub struct ModelCapabilities {
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct DisabledMediaCapability {
     /// The whole capability is disabled.
     pub disabled: bool,
@@ -350,8 +447,9 @@ pub struct DisabledMediaCapability {
     serde::Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct DisabledReasoningCapability {
-    /// `reasoning_effort` parameter is disabled.
+    /// `reasoning.effort` is disabled.
     pub effort: bool,
     /// Reasoning toggle is disabled.
     pub toggle: bool,
@@ -359,6 +457,8 @@ pub struct DisabledReasoningCapability {
     pub resume: bool,
     /// Reasoning token budget is disabled.
     pub budget: bool,
+    /// `reasoning.summary` is disabled.
+    pub summary: bool,
 }
 
 /// Disablement flags for [`WebSearchCapability`].
@@ -374,6 +474,7 @@ pub struct DisabledReasoningCapability {
     serde::Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct DisabledWebSearchCapability {
     /// The whole web-search capability is disabled.
     pub disabled: bool,
@@ -383,26 +484,115 @@ pub struct DisabledWebSearchCapability {
     pub excluded_domains: bool,
 }
 
+/// Disablement flags for [`ToolsCapability`].
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct DisabledToolsCapability {
+    /// The whole tool-calling capability is disabled.
+    pub disabled: bool,
+    /// `parallel_tool_calls` is disabled.
+    pub parallel_tool_calls: bool,
+    /// `max_tool_calls` is disabled.
+    pub max_tool_calls: bool,
+    /// `tool_choice = "required"` is disabled.
+    pub tool_choice_required: bool,
+    /// `tool_choice = "none"` is disabled.
+    pub tool_choice_none: bool,
+    /// Named `tool_choice` is disabled.
+    pub tool_choice_named: bool,
+}
+
+/// Disablement flags for [`OutputCapability`].
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct DisabledOutputCapability {
+    /// JSON mode is disabled.
+    pub json_mode: bool,
+    /// JSON schema output is disabled.
+    pub json_schema: bool,
+    /// Strict schema enforcement is disabled.
+    pub strict_schema: bool,
+    /// `text.verbosity` is disabled.
+    pub verbosity: bool,
+}
+
+/// Disablement flags for [`SamplingCapability`].
+#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(default)]
+pub struct DisabledSamplingCapability {
+    /// `temperature` is disabled.
+    pub temperature: bool,
+    /// `top_p` is disabled.
+    pub top_p: bool,
+    /// `seed` is disabled.
+    pub seed: bool,
+    /// `presence_penalty` is disabled.
+    pub presence_penalty: bool,
+    /// `frequency_penalty` is disabled.
+    pub frequency_penalty: bool,
+    /// Log-probabilities are disabled.
+    pub logprobs: bool,
+}
+
 /// Subtractive view over [`ModelCapabilities`]: which capability flags are
 /// administratively blocked for this model.
 ///
 /// Every boolean reads as "disabled". The struct shape mirrors
 /// [`ModelCapabilities`] one-to-one but each sub-capability uses a
 /// disabled-named twin (`DisabledMediaCapability`,
-/// `DisabledReasoningCapability`, `DisabledWebSearchCapability`).
+/// `DisabledReasoningCapability`, `DisabledToolsCapability`,
+/// `DisabledOutputCapability`, `DisabledSamplingCapability`,
+/// `DisabledWebSearchCapability`). Every field defaults to "not disabled"
+/// when absent from JSON.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(default)]
 pub struct DisabledCapabilities {
     /// Image / vision input is disabled.
     pub vision: DisabledMediaCapability,
     /// Reasoning controls disabled.
     pub reasoning: DisabledReasoningCapability,
-    /// Function / tool calling is disabled.
-    pub function_calling: bool,
-    /// Response-schema-bound output is disabled.
-    pub response_schema: bool,
+    /// Tool-calling controls disabled.
+    pub tools: DisabledToolsCapability,
+    /// Output-format controls disabled.
+    pub output: DisabledOutputCapability,
+    /// Sampling parameters disabled.
+    pub sampling: DisabledSamplingCapability,
     /// Streaming is disabled.
     pub streaming: bool,
     /// File input is disabled.
@@ -417,6 +607,10 @@ pub struct DisabledCapabilities {
     pub code_interpreter: bool,
     /// Web search is disabled.
     pub web_search: DisabledWebSearchCapability,
+    /// `truncation` is disabled.
+    pub truncation: bool,
+    /// `instructions` is disabled.
+    pub instructions: bool,
 }
 
 impl DisabledCapabilities {
@@ -546,5 +740,47 @@ mod tests {
             SupportedApi::as_str,
             SupportedApi::from_wire,
         );
+    }
+
+    /// Absent capability fields read as "not supported" / "not disabled".
+    #[test]
+    fn capabilities_default_when_absent() {
+        let caps: ModelCapabilities = serde_json::from_str("{}").unwrap();
+        assert_eq!(caps, ModelCapabilities::default());
+        let caps: ModelCapabilities =
+            serde_json::from_value(serde_json::json!({ "tools": { "enabled": true } })).unwrap();
+        assert!(caps.tools.enabled && !caps.tools.parallel_tool_calls);
+        assert_eq!(caps.sampling, SamplingCapability::default());
+
+        let off: DisabledCapabilities = serde_json::from_str("{}").unwrap();
+        assert_eq!(off, DisabledCapabilities::none());
+    }
+
+    #[test]
+    fn capabilities_roundtrip() {
+        let wire = serde_json::json!({
+            "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
+            "reasoning": { "effort": true, "toggle": false, "resume": true, "budget": false, "summary": true },
+            "tools": {
+                "enabled": true, "parallel_tool_calls": true, "max_tool_calls": false,
+                "tool_choice_required": true, "tool_choice_none": true, "tool_choice_named": false
+            },
+            "output": { "json_mode": true, "json_schema": true, "strict_schema": false, "verbosity": false },
+            "sampling": {
+                "temperature": true, "top_p": true, "seed": false,
+                "presence_penalty": false, "frequency_penalty": false, "logprobs": true
+            },
+            "streaming": true,
+            "file_input": { "enabled": false, "supported_mime_types": [] },
+            "image_generation": { "enabled": false, "supported_mime_types": [] },
+            "audio_input": { "enabled": false, "supported_mime_types": [] },
+            "audio_output": { "enabled": false, "supported_mime_types": [] },
+            "code_interpreter": false,
+            "web_search": { "enabled": false, "allowed_domains": false, "excluded_domains": false },
+            "truncation": true,
+            "instructions": true
+        });
+        let caps: ModelCapabilities = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&caps).unwrap(), wire);
     }
 }

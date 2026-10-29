@@ -42,8 +42,8 @@ impl FieldToColumn<ModelFilterField> for ModelODataMapper {
             F::ApprovalDecidedAt => C::ApprovalDecidedAt,
             F::Vision => C::CapVision,
             F::ReasoningEffort => C::CapReasoningEffort,
-            F::FunctionCalling => C::CapFunctionCalling,
-            F::ResponseSchema => C::CapResponseSchema,
+            F::Tools => C::CapTools,
+            F::JsonSchema => C::CapJsonSchema,
             F::Streaming => C::CapStreaming,
             F::FileInput => C::CapFileInput,
             F::ImageGeneration => C::CapImageGeneration,
@@ -94,8 +94,8 @@ impl ODataFieldMapping<ModelFilterField> for ModelODataMapper {
             F::ApprovalDecidedAt => m.approval_decided_at.into(),
             F::Vision => m.cap_vision.into(),
             F::ReasoningEffort => m.cap_reasoning_effort.into(),
-            F::FunctionCalling => m.cap_function_calling.into(),
-            F::ResponseSchema => m.cap_response_schema.into(),
+            F::Tools => m.cap_tools.into(),
+            F::JsonSchema => m.cap_json_schema.into(),
             F::Streaming => m.cap_streaming.into(),
             F::FileInput => m.cap_file_input.into(),
             F::ImageGeneration => m.cap_image_generation.into(),
@@ -182,9 +182,9 @@ mod tests {
             let column = ModelODataMapper::map_field(*field).to_string();
             let name = field.name();
             let expected = match name {
-                "vision" | "reasoning_effort" | "function_calling" | "response_schema"
-                | "streaming" | "file_input" | "image_generation" | "audio_input"
-                | "audio_output" | "code_interpreter" | "web_search" => format!("cap_{name}"),
+                "vision" | "reasoning_effort" | "tools" | "json_schema" | "streaming"
+                | "file_input" | "image_generation" | "audio_input" | "audio_output"
+                | "code_interpreter" | "web_search" => format!("cap_{name}"),
                 "max_input_tokens" | "max_output_tokens" => format!("ctx_{name}"),
                 other => other.to_owned(),
             };

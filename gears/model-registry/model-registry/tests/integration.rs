@@ -1621,6 +1621,7 @@ async fn model_update_replaces_whole_values_and_keeps_promoted_columns_in_sync()
     let mut req = model_req(p, "gpt-4o", SharingMode::Shared, ApprovalState::Approved);
     req.capabilities.streaming = true;
     req.capabilities.vision.enabled = true;
+    req.capabilities.tools.enabled = true;
     req.base_url = Some("https://api.openai.com/v1".into());
     req.secret_ref = Some("openai-key".into());
     let id = h
@@ -1677,18 +1678,23 @@ async fn model_update_replaces_whole_values_and_keeps_promoted_columns_in_sync()
             .is_empty(),
         "effective capability is filtered"
     );
-    let q = QueryBuilder::<ModelSchema>::new()
-        .filter(model_registry_sdk::odata::MODEL_VISION.eq(true))
-        .build();
-    assert_eq!(
-        h.service
-            .list_available_models(&c, &q)
-            .await
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
+    for field in [
+        model_registry_sdk::odata::MODEL_VISION,
+        model_registry_sdk::odata::MODEL_TOOLS,
+    ] {
+        let q = QueryBuilder::<ModelSchema>::new()
+            .filter(field.eq(true))
+            .build();
+        assert_eq!(
+            h.service
+                .list_available_models(&c, &q)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
     assert_eq!(
         h.resolve(t.other, "openai::gpt-4o")
             .await

@@ -354,9 +354,10 @@ Type notation in the field tables: `?` marks an optional field; `uuid`, `string`
 | Field | Type | Meaning |
 |-------|------|---------|
 | `vision` | media capability | Image input. |
-| `reasoning` | object | `effort`, `toggle`, `resume`, `budget` (all bool): support for reasoning effort, switching reasoning on or off, resuming a reasoning chain, and a reasoning token budget. |
-| `function_calling` | bool | Tool or function calling. |
-| `response_schema` | bool | Structured output against a JSON schema. |
+| `reasoning` | object | `effort`, `toggle`, `resume`, `budget`, `summary` (all bool): support for reasoning effort, switching reasoning on or off, resuming a reasoning chain, a reasoning token budget, and a reasoning summary. |
+| `tools` | object | `enabled`, `parallel_tool_calls`, `max_tool_calls`, `tool_choice_required`, `tool_choice_none`, `tool_choice_named` (all bool): tool or function calling, and support for parallel tool calls, a tool call limit, and the `required`, `none`, and named `tool_choice` forms. |
+| `output` | object | `json_mode`, `json_schema`, `strict_schema`, `verbosity` (all bool): JSON output without a schema, structured output against a JSON schema, strict schema enforcement, and the text verbosity setting. |
+| `sampling` | object | `temperature`, `top_p`, `seed`, `presence_penalty`, `frequency_penalty`, `logprobs` (all bool): support for each sampling parameter; `logprobs` covers `top_logprobs` and the log-probabilities include. |
 | `streaming` | bool | Streaming responses. |
 | `file_input` | media capability | Document or file input. |
 | `image_generation` | media capability | Image output. |
@@ -364,8 +365,12 @@ Type notation in the field tables: `?` marks an optional field; `uuid`, `string`
 | `audio_output` | media capability | Audio output. |
 | `code_interpreter` | bool | Sandboxed code execution. |
 | `web_search` | object | `enabled`, `allowed_domains`, `excluded_domains` (all bool): web search, and support for allow-lists and deny-lists of domains. |
+| `truncation` | bool | The `truncation` request parameter. |
+| `instructions` | bool | System-level `instructions`. |
 
-**Disabled Capabilities** (`disabled_capabilities`) mirror the capability structure; every flag reads as "disabled". Media entries have `disabled` (bool) and `disabled_mime_types` (list of string). `reasoning` has `effort`, `toggle`, `resume`, `budget`. `web_search` has `disabled`, `allowed_domains`, `excluded_domains`. The remaining entries are single booleans. The effective capability is the declared capability minus the disabled one.
+Every capability field is optional in JSON and reads as "not supported" when absent.
+
+**Disabled Capabilities** (`disabled_capabilities`) mirror the capability structure; every flag reads as "disabled". Media entries have `disabled` (bool) and `disabled_mime_types` (list of string). `reasoning` has `effort`, `toggle`, `resume`, `budget`, `summary`. `tools` has `disabled` plus `parallel_tool_calls`, `max_tool_calls`, `tool_choice_required`, `tool_choice_none`, `tool_choice_named`. `output` and `sampling` have the same fields as their capability. `web_search` has `disabled`, `allowed_domains`, `excluded_domains`. The remaining entries are single booleans. Absent fields read as "not disabled". The effective capability is the declared capability minus the disabled one.
 
 **Default Parameters** (`default_parameters`). All fields are optional. The registry stores them and applies no range limits.
 
@@ -384,7 +389,6 @@ Type notation in the field tables: `?` marks an optional field; `uuid`, `string`
 | `text` | object? | `format`: `text`, `json_object`, or `json_schema` with `name`, `description?`, `schema?`, `strict`; `verbosity?`: `low`, `medium`, `high`. |
 | `reasoning` | object? | `effort?`: `none`, `low`, `medium`, `high`, `xhigh`; `summary?`: `concise`, `detailed`, `auto`. |
 | `tool_choice` | enum? | `auto`, `required`, `none`, or a named function. |
-| `store` | bool? | Whether the provider should store the response. |
 
 #### Approval
 
@@ -725,7 +729,7 @@ Filter and order fields, with their columns (this is the canonical list):
 |------|-------|--------|--------|
 | Available models and models | Identity | `id`, `tenant_id`, `provider_id`, `canonical_id`, `provider_model_id`, `gts_type`, `sharing_mode` | Same name |
 | Available models and models | Approval | `approval_state`, `approval_decided_at` | Same name |
-| Available models and models | Capabilities (effective values) | `vision`, `reasoning_effort`, `function_calling`, `response_schema`, `streaming`, `file_input`, `image_generation`, `audio_input`, `audio_output`, `code_interpreter`, `web_search` | `cap_<field>` |
+| Available models and models | Capabilities (effective values) | `vision`, `reasoning_effort`, `tools`, `json_schema`, `streaming`, `file_input`, `image_generation`, `audio_input`, `audio_output`, `code_interpreter`, `web_search` | `cap_<field>` |
 | Available models and models | Supported API | `api_completion`, `api_embedding`, `api_batch` | Same name |
 | Available models and models | User-facing | `display_name`, `family`, `vendor`, `hosted_by`, `region`, `version`, `managed`, `architecture`, `format`, `sort_order`, `last_release_at` | Same name |
 | Available models and models | Context window | `max_input_tokens`, `max_output_tokens` | `ctx_<field>`: the `context_window` limits, not `default_parameters.max_output_tokens` |
@@ -1197,7 +1201,7 @@ Two tables in the platform database, created by the gear's migrations and record
 | api_completion, api_embedding, api_batch | BOOLEAN | Promoted from `supported_api` |
 | capabilities | JSON | `capabilities` object (source of truth) |
 | disabled_capabilities | JSON | `disabled_capabilities` object (source of truth) |
-| cap_vision, cap_reasoning_effort, cap_function_calling, cap_response_schema, cap_streaming, cap_file_input, cap_image_generation, cap_audio_input, cap_audio_output, cap_code_interpreter, cap_web_search | BOOLEAN | Promoted effective capability: declared and not disabled (`reasoning.effort` for `cap_reasoning_effort`; `enabled` for media and web search) |
+| cap_vision, cap_reasoning_effort, cap_tools, cap_json_schema, cap_streaming, cap_file_input, cap_image_generation, cap_audio_input, cap_audio_output, cap_code_interpreter, cap_web_search | BOOLEAN | Promoted effective capability: declared and not disabled (`reasoning.effort` for `cap_reasoning_effort`; `tools.enabled` for `cap_tools`; `output.json_schema` for `cap_json_schema`; `enabled` for media and web search) |
 | ctx_max_input_tokens | BIGINT | `context_window.max_input_tokens` |
 | ctx_max_output_tokens | BIGINT | Nullable |
 | ctx_output_vector_size | BIGINT | Nullable |

@@ -51,9 +51,9 @@ pub struct ModelQuery {
     #[odata(filter(kind = "Bool"))]
     pub reasoning_effort: bool,
     #[odata(filter(kind = "Bool"))]
-    pub function_calling: bool,
+    pub tools: bool,
     #[odata(filter(kind = "Bool"))]
-    pub response_schema: bool,
+    pub json_schema: bool,
     #[odata(filter(kind = "Bool"))]
     pub streaming: bool,
     #[odata(filter(kind = "Bool"))]
@@ -177,10 +177,9 @@ pub const MODEL_APPROVAL_DECIDED_AT: FieldRef<ModelSchema, DateTime<Utc>> =
 pub const MODEL_VISION: FieldRef<ModelSchema, bool> = FieldRef::new(ModelFilterField::Vision);
 pub const MODEL_REASONING_EFFORT: FieldRef<ModelSchema, bool> =
     FieldRef::new(ModelFilterField::ReasoningEffort);
-pub const MODEL_FUNCTION_CALLING: FieldRef<ModelSchema, bool> =
-    FieldRef::new(ModelFilterField::FunctionCalling);
-pub const MODEL_RESPONSE_SCHEMA: FieldRef<ModelSchema, bool> =
-    FieldRef::new(ModelFilterField::ResponseSchema);
+pub const MODEL_TOOLS: FieldRef<ModelSchema, bool> = FieldRef::new(ModelFilterField::Tools);
+pub const MODEL_JSON_SCHEMA: FieldRef<ModelSchema, bool> =
+    FieldRef::new(ModelFilterField::JsonSchema);
 pub const MODEL_STREAMING: FieldRef<ModelSchema, bool> = FieldRef::new(ModelFilterField::Streaming);
 pub const MODEL_FILE_INPUT: FieldRef<ModelSchema, bool> =
     FieldRef::new(ModelFilterField::FileInput);
@@ -240,8 +239,8 @@ mod tests {
         "approval_decided_at",
         "vision",
         "reasoning_effort",
-        "function_calling",
-        "response_schema",
+        "tools",
+        "json_schema",
         "streaming",
         "file_input",
         "image_generation",

@@ -112,8 +112,8 @@ pub struct Promoted {
     pub api_batch: bool,
     pub cap_vision: bool,
     pub cap_reasoning_effort: bool,
-    pub cap_function_calling: bool,
-    pub cap_response_schema: bool,
+    pub cap_tools: bool,
+    pub cap_json_schema: bool,
     pub cap_streaming: bool,
     pub cap_file_input: bool,
     pub cap_image_generation: bool,
@@ -138,8 +138,8 @@ impl Promoted {
             api_batch: info.supported_api.contains(&SupportedApi::Batch),
             cap_vision: c.vision.enabled && !d.vision.disabled,
             cap_reasoning_effort: c.reasoning.effort && !d.reasoning.effort,
-            cap_function_calling: c.function_calling && !d.function_calling,
-            cap_response_schema: c.response_schema && !d.response_schema,
+            cap_tools: c.tools.enabled && !d.tools.disabled,
+            cap_json_schema: c.output.json_schema && !d.output.json_schema,
             cap_streaming: c.streaming && !d.streaming,
             cap_file_input: c.file_input.enabled && !d.file_input.disabled,
             cap_image_generation: c.image_generation.enabled && !d.image_generation.disabled,
@@ -162,8 +162,8 @@ impl Promoted {
             api_batch: row.api_batch,
             cap_vision: row.cap_vision,
             cap_reasoning_effort: row.cap_reasoning_effort,
-            cap_function_calling: row.cap_function_calling,
-            cap_response_schema: row.cap_response_schema,
+            cap_tools: row.cap_tools,
+            cap_json_schema: row.cap_json_schema,
             cap_streaming: row.cap_streaming,
             cap_file_input: row.cap_file_input,
             cap_image_generation: row.cap_image_generation,
@@ -228,8 +228,8 @@ pub fn model_to_active(m: &ModelV1) -> Result<model::ActiveModel, DomainError> {
         disabled_capabilities: Set(json("disabled_capabilities", &i.disabled_capabilities)?),
         cap_vision: Set(p.cap_vision),
         cap_reasoning_effort: Set(p.cap_reasoning_effort),
-        cap_function_calling: Set(p.cap_function_calling),
-        cap_response_schema: Set(p.cap_response_schema),
+        cap_tools: Set(p.cap_tools),
+        cap_json_schema: Set(p.cap_json_schema),
         cap_streaming: Set(p.cap_streaming),
         cap_file_input: Set(p.cap_file_input),
         cap_image_generation: Set(p.cap_image_generation),
@@ -398,7 +398,8 @@ mod tests {
     use super::*;
     use model_registry_sdk::{
         ContextWindow, DisabledCapabilities, DisabledMediaCapability, MediaCapability,
-        ModelCapabilities, ReasoningCapability, WebSearchCapability,
+        ModelCapabilities, OutputCapability, ReasoningCapability, SamplingCapability,
+        ToolsCapability, WebSearchCapability,
     };
     use sea_orm::{ActiveValue, Iterable, TryIntoModel};
     use std::collections::{HashMap, HashSet};
@@ -415,9 +416,30 @@ mod tests {
                 toggle: true,
                 resume: true,
                 budget: true,
+                summary: true,
             },
-            function_calling: true,
-            response_schema: true,
+            tools: ToolsCapability {
+                enabled: true,
+                parallel_tool_calls: true,
+                max_tool_calls: true,
+                tool_choice_required: true,
+                tool_choice_none: true,
+                tool_choice_named: true,
+            },
+            output: OutputCapability {
+                json_mode: true,
+                json_schema: true,
+                strict_schema: true,
+                verbosity: true,
+            },
+            sampling: SamplingCapability {
+                temperature: true,
+                top_p: true,
+                seed: true,
+                presence_penalty: true,
+                frequency_penalty: true,
+                logprobs: true,
+            },
             streaming: true,
             file_input: media.clone(),
             image_generation: media.clone(),
@@ -429,6 +451,8 @@ mod tests {
                 allowed_domains: true,
                 excluded_domains: true,
             },
+            truncation: true,
+            instructions: true,
         }
     }
 
@@ -536,7 +560,7 @@ mod tests {
         assert_eq!(p, Promoted::from_info(&m.info));
         assert!(!p.cap_vision, "declared but disabled");
         assert!(!p.cap_streaming, "declared but disabled");
-        assert!(p.cap_reasoning_effort && p.cap_function_calling && p.cap_response_schema);
+        assert!(p.cap_reasoning_effort && p.cap_tools && p.cap_json_schema);
         assert!(
             p.cap_file_input && p.cap_image_generation && p.cap_audio_input && p.cap_audio_output
         );
@@ -576,7 +600,7 @@ mod tests {
         );
         assert_eq!(m.updated_by, subject);
         let p = Promoted::from_row(&row_of(&m));
-        assert!(!p.cap_function_calling && !p.cap_web_search);
+        assert!(!p.cap_tools && !p.cap_web_search);
         assert!(p.api_embedding && !p.api_completion && !p.api_batch);
         assert_eq!(p.ctx_max_input_tokens, 8);
         assert_eq!(p.ctx_output_vector_size, Some(1536));

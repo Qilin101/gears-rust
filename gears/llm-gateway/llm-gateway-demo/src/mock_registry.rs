@@ -253,8 +253,8 @@ fn project(model: &ModelV1, field: ModelFilterField) -> Scalar {
         F::ApprovalDecidedAt => text(&model.approval.decided_at.to_rfc3339()),
         F::Vision => Scalar::Flag(caps.vision.enabled && !off.vision.disabled),
         F::ReasoningEffort => Scalar::Flag(caps.reasoning.effort && !off.reasoning.effort),
-        F::FunctionCalling => Scalar::Flag(caps.function_calling && !off.function_calling),
-        F::ResponseSchema => Scalar::Flag(caps.response_schema && !off.response_schema),
+        F::Tools => Scalar::Flag(caps.tools.enabled && !off.tools.disabled),
+        F::JsonSchema => Scalar::Flag(caps.output.json_schema && !off.output.json_schema),
         F::Streaming => Scalar::Flag(caps.streaming && !off.streaming),
         F::FileInput => Scalar::Flag(caps.file_input.enabled && !off.file_input.disabled),
         F::ImageGeneration => {
@@ -374,8 +374,15 @@ const OPENAI_FIXTURE: &str = r#"{
     "capabilities": {
       "vision": { "enabled": true, "supported_mime_types": ["image/png", "image/jpeg"] },
       "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-      "function_calling": true,
-      "response_schema": true,
+      "tools": {
+        "enabled": true, "parallel_tool_calls": true, "max_tool_calls": true,
+        "tool_choice_required": true, "tool_choice_none": true, "tool_choice_named": true
+      },
+      "output": { "json_mode": true, "json_schema": true, "strict_schema": true, "verbosity": true },
+      "sampling": {
+        "temperature": true, "top_p": true, "seed": true,
+        "presence_penalty": true, "frequency_penalty": true, "logprobs": true
+      },
       "streaming": true,
       "file_input": { "enabled": false, "supported_mime_types": [] },
       "image_generation": { "enabled": false, "supported_mime_types": [] },
@@ -387,8 +394,6 @@ const OPENAI_FIXTURE: &str = r#"{
     "disabled_capabilities": {
       "vision": { "disabled": false, "disabled_mime_types": [] },
       "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-      "function_calling": false,
-      "response_schema": false,
       "streaming": false,
       "file_input": { "disabled": false, "disabled_mime_types": [] },
       "image_generation": { "disabled": false, "disabled_mime_types": [] },
@@ -448,8 +453,15 @@ const OPENAI_MINI_FIXTURE: &str = r#"{
     "capabilities": {
       "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
       "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-      "function_calling": true,
-      "response_schema": true,
+      "tools": {
+        "enabled": true, "parallel_tool_calls": true, "max_tool_calls": true,
+        "tool_choice_required": true, "tool_choice_none": true, "tool_choice_named": true
+      },
+      "output": { "json_mode": true, "json_schema": true, "strict_schema": true, "verbosity": true },
+      "sampling": {
+        "temperature": true, "top_p": true, "seed": true,
+        "presence_penalty": true, "frequency_penalty": true, "logprobs": true
+      },
       "streaming": true,
       "file_input": { "enabled": false, "supported_mime_types": [] },
       "image_generation": { "enabled": false, "supported_mime_types": [] },
@@ -461,8 +473,6 @@ const OPENAI_MINI_FIXTURE: &str = r#"{
     "disabled_capabilities": {
       "vision": { "disabled": false, "disabled_mime_types": [] },
       "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-      "function_calling": false,
-      "response_schema": false,
       "streaming": false,
       "file_input": { "disabled": false, "disabled_mime_types": [] },
       "image_generation": { "disabled": false, "disabled_mime_types": [] },
@@ -522,8 +532,12 @@ const ANTHROPIC_FIXTURE: &str = r#"{
     "capabilities": {
       "vision": { "enabled": true, "supported_mime_types": ["image/png", "image/jpeg", "image/webp"] },
       "reasoning": { "effort": true, "toggle": false, "resume": false, "budget": true },
-      "function_calling": true,
-      "response_schema": true,
+      "tools": {
+        "enabled": true, "parallel_tool_calls": true, "max_tool_calls": false,
+        "tool_choice_required": true, "tool_choice_none": true, "tool_choice_named": true
+      },
+      "output": { "json_mode": false, "json_schema": true, "strict_schema": true, "verbosity": false },
+      "sampling": { "temperature": true, "top_p": true },
       "streaming": true,
       "file_input": { "enabled": true, "supported_mime_types": ["application/pdf"] },
       "image_generation": { "enabled": false, "supported_mime_types": [] },
@@ -535,8 +549,6 @@ const ANTHROPIC_FIXTURE: &str = r#"{
     "disabled_capabilities": {
       "vision": { "disabled": false, "disabled_mime_types": [] },
       "reasoning": { "effort": false, "toggle": false, "resume": false, "budget": false },
-      "function_calling": false,
-      "response_schema": false,
       "streaming": false,
       "file_input": { "disabled": false, "disabled_mime_types": [] },
       "image_generation": { "disabled": false, "disabled_mime_types": [] },

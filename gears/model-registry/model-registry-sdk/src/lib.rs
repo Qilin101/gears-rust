@@ -60,7 +60,10 @@ pub use models::{
     DefaultInferenceParametersV1,
     DisabledCapabilities,
     DisabledMediaCapability,
+    DisabledOutputCapability,
     DisabledReasoningCapability,
+    DisabledSamplingCapability,
+    DisabledToolsCapability,
     DisabledWebSearchCapability,
     // shared media-typed capability (vision, file_input, image_generation,
     // audio_input, audio_output)
@@ -72,6 +75,7 @@ pub use models::{
     ModelV1,
     // tagged-object form of `ToolChoice` (`{"type":"function","name":"…"}`)
     NamedToolChoice,
+    OutputCapability,
     ProviderEntryV1,
     ProviderTypeV1,
     ProviderV1,
@@ -79,6 +83,7 @@ pub use models::{
     ReasoningConfig,
     ReasoningEffort,
     ReasoningSummary,
+    SamplingCapability,
     ServiceTier,
     SharingMode,
     SupportedApi,
@@ -88,6 +93,7 @@ pub use models::{
     ToolChoice,
     // bare-string mode form of `ToolChoice` (`"auto"`/`"required"`/`"none"`)
     ToolChoiceMode,
+    ToolsCapability,
     TruncationStrategy,
     UpdateModelRequestV1,
     UpdateProviderRequestV1,
