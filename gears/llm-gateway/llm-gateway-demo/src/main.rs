@@ -12,8 +12,8 @@
 //!          → plugin selected by info.gts_type, settings narrowed to the plugin type
 //!          → ResponseResource (success)
 //!
-//! main → create_response (openai::gpt-4o-mini) → registry: MODEL_NOT_APPROVED
-//! main → create_response (anthropic::claude-sonnet-4) → no provider plugin registered
+//! main → create_response (openai::gpt-4o-mini) → registry: MODEL_NOT_APPROVED → model_not_found
+//! main → create_response (anthropic::claude-sonnet-4) → provider_not_supported
 //!
 //! main → ModelRegistryClientV1::list_available_models
 //!          → QueryBuilder<ModelSchema> + typed FieldRefs, then the same as $filter text
@@ -153,11 +153,13 @@ async fn main() -> DemoResult {
     let registry: Arc<dyn ModelRegistryClientV1> = Arc::new(mock_registry);
 
     let plugin: Arc<dyn LlmGatewayProviderPluginClientV1> = Arc::new(MockOpenAiPlugin);
+    let capabilities = plugin.capabilities();
     println!(
-        "\n→ registered plugin for {} (streaming={item}, media={md:?})",
+        "\n→ registered plugin for {} (streaming={}, media={:?}, web_search={})",
         OPENAI_PROVIDER_TYPE,
-        item = plugin.capabilities().streaming_transport,
-        md = plugin.capabilities().media_input,
+        capabilities.streaming_transport,
+        capabilities.media_input,
+        capabilities.web_search,
     );
     assert_eq!(
         OpenAiProviderSettingsV1::TYPE_ID,
@@ -184,8 +186,14 @@ async fn main() -> DemoResult {
     println!("← model    : {}", response.model);
     if let Some(usage) = &response.usage {
         println!(
-            "← usage    : in={} out={} total={}",
-            usage.input_tokens, usage.output_tokens, usage.total_tokens
+            "← usage    : in={} out={} total={} cost={} credits",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.cost
+        );
+    }
+    if let Some(details) = &response.provider_details {
+        println!(
+            "← provider : stop_reason={:?} request_id={:?}",
+            details.stop_reason, details.provider_request_id
         );
     }
     for item in &response.output {
@@ -198,7 +206,8 @@ async fn main() -> DemoResult {
         }
     }
 
-    // --- 2. Revoked model → the registry's approval gate. ---
+    // --- 2. Revoked model → the registry's approval gate, reported as
+    //        model_not_found like any model unavailable for the tenant. ---
     println!("\n─── Request 2: openai::gpt-4o-mini (revoked) ───");
     let request = CreateResponseBody {
         model: "openai::gpt-4o-mini".to_owned(),
@@ -211,7 +220,7 @@ async fn main() -> DemoResult {
         Ok(_) => println!("← UNEXPECTED: a revoked model resolved"),
     }
 
-    // --- 3. Anthropic model, no plugin → clean error. ---
+    // --- 3. Anthropic model, no plugin → provider_not_supported. ---
     println!("\n─── Request 3: anthropic::claude-sonnet-4 (no plugin) ───");
     let request = CreateResponseBody {
         model: "anthropic::claude-sonnet-4".to_owned(),

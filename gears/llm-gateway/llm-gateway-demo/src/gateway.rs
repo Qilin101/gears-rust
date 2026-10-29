@@ -16,6 +16,7 @@ use llm_gateway_sdk::{
     LlmGatewayProviderPluginClientV1, ResponseEventStream, ResponseResource,
 };
 use model_registry_sdk::{ModelRegistryClientV1, ModelRegistryError};
+use tokio_util::sync::CancellationToken;
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 
@@ -54,18 +55,15 @@ impl LlmGatewayClientV1 for DemoGateway {
 
         // 2. Select the provider plugin by the model's provider type.
         let provider_type = model.info.gts_type.clone();
-        let plugin = self.plugins.get(&provider_type).ok_or_else(|| {
-            LlmGatewayError::provider_error(format!(
-                "no provider plugin registered for {}",
-                provider_type.as_ref()
-            ))
-        })?;
+        let plugin = self
+            .plugins
+            .get(&provider_type)
+            .ok_or_else(|| LlmGatewayError::provider_not_supported(provider_type.as_ref()))?;
 
-        // 3. Build the per-call context from the resolved model.
-        let call = ProviderCallCtx {
-            model_info: model.info,
-            request_id: "resp_demo_0001".to_owned(),
-        };
+        // 3. Build the per-call context from the resolved model. The real
+        //    gear adds the provider API key fetched from CredStore by
+        //    `info.secret_ref` and cancels the token on consumer disconnect.
+        let call = ProviderCallCtx::new(model.info, "resp_demo_0001", CancellationToken::new());
 
         // 4. Delegate translation + transport to the plugin.
         plugin.create_response(ctx, &call, body).await
@@ -93,20 +91,19 @@ impl LlmGatewayClientV1 for DemoGateway {
 }
 
 /// The registry's canonical error, projected through the SDK's typed view and
-/// mapped to the gateway's own outcomes.
+/// mapped to the gateway's own outcomes: an unknown model and a model that is
+/// not available for the tenant (not approved, provider disabled) both become
+/// `model_not_found` without telling them apart; a registry dependency
+/// outage becomes `model_resolution_unavailable`.
 fn map_registry_err(model: &str, err: CanonicalError) -> LlmGatewayError {
     match ModelRegistryError::from(err) {
-        ModelRegistryError::ModelNotFound { .. } => LlmGatewayError::model_not_found(model),
-        ModelRegistryError::ModelNotApproved { .. } => LlmGatewayError::model_not_approved(model),
-        ModelRegistryError::ProviderDisabled { .. } => {
-            LlmGatewayError::provider_error(format!("provider of {model} is disabled"))
+        ModelRegistryError::ModelNotFound { .. }
+        | ModelRegistryError::ModelNotApproved { .. }
+        | ModelRegistryError::ProviderDisabled { .. } => LlmGatewayError::model_not_found(model),
+        ModelRegistryError::NotPermitted { .. } => LlmGatewayError::PermissionDenied,
+        ModelRegistryError::DependencyUnavailable { .. } => {
+            LlmGatewayError::ModelResolutionUnavailable
         }
-        ModelRegistryError::NotPermitted { detail } => {
-            LlmGatewayError::request_blocked(format!("not permitted to evaluate {model}: {detail}"))
-        }
-        ModelRegistryError::DependencyUnavailable { detail } => {
-            LlmGatewayError::internal(format!("model resolution unavailable: {detail}"))
-        }
-        other => LlmGatewayError::internal(other.to_string()),
+        other => LlmGatewayError::internal_from("model resolution failed", other),
     }
 }

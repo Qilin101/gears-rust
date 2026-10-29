@@ -10,10 +10,9 @@
 
 use async_trait::async_trait;
 use llm_gateway_sdk::models::content::{OutputContentPart, OutputText};
-use llm_gateway_sdk::models::core::ResponseResource;
 use llm_gateway_sdk::models::core::{
-    InputTokensDetails, OutputTokensDetails, ReasoningConfig, ResponseInput, ResponseStatus,
-    TextFormat, ToolChoice, ToolChoiceMode, TruncationStrategy, Usage,
+    ProviderDetails, ReasoningConfig, ResponseInput, ResponseResource, ResponseStatus, TextFormat,
+    ToolChoice, ToolChoiceMode, TruncationStrategy, Usage,
 };
 use llm_gateway_sdk::models::items::{ItemStatus, MessageOutput, OutputItem};
 use llm_gateway_sdk::models::plugin::{
@@ -25,15 +24,28 @@ use llm_gateway_sdk::{
     LlmGatewayProviderPluginClientV1, ResponseEventStream,
 };
 use model_registry_sdk::ProviderTypeV1;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use toolkit_gts::gts_type_schema;
 
 /// Cost table of the demo `OpenAI` provider type, in micro-credits per 1k
-/// tokens. Provider-specific by design: Model Registry stores it opaquely.
+/// tokens. Provider-specific by design: Model Registry stores it opaquely,
+/// and the plugin computes `Usage::cost` from it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpenAiCost {
     pub input_per_1k_micro: Option<u64>,
     pub output_per_1k_micro: Option<u64>,
+}
+
+impl OpenAiCost {
+    /// Cost of a call in AI credits.
+    fn credits(&self, input_tokens: u64, output_tokens: u64) -> Decimal {
+        let per_1k = |rate: Option<u64>, tokens: u64| {
+            Decimal::from(rate.unwrap_or(0)) * Decimal::from(tokens) / Decimal::from(1_000_000_000)
+        };
+        per_1k(self.input_per_1k_micro, input_tokens)
+            + per_1k(self.output_per_1k_micro, output_tokens)
+    }
 }
 
 /// The demo `OpenAI` provider type: the shape of `provider_settings` for every
@@ -58,10 +70,7 @@ pub struct MockOpenAiPlugin;
 #[async_trait]
 impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
     fn capabilities(&self) -> ProviderPluginCapabilities {
-        ProviderPluginCapabilities {
-            streaming_transport: true,
-            media_input: MediaInputMode::UrlForward,
-        }
+        ProviderPluginCapabilities::new(MediaInputMode::UrlForward).with_streaming_transport()
     }
 
     async fn create_response(
@@ -70,9 +79,10 @@ impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
         call: &ProviderCallCtx,
         body: CreateResponseBody,
     ) -> Result<ResponseResource, LlmGatewayError> {
-        // Narrow the opaque settings document to this plugin's typed view. This
-        // checks `gts_type` against the plugin's provider type id and gives
-        // typed field access; the real adapter reads its routing from here.
+        // Narrow the opaque settings document to this plugin's provider type.
+        // This checks `gts_type` against the plugin's provider type id and
+        // gives typed field access; the real adapter reads the OAGW upstream
+        // alias and the pricing from here.
         let settings = call
             .typed_settings::<OpenAiProviderSettingsV1>()
             .map_err(|e| {
@@ -87,14 +97,25 @@ impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
         };
 
         let reply = format!(
-            "echo from provider_model_id={} via oagw_alias={} base_url={} secret_ref={}: {prompt}",
+            "echo from provider_model_id={} via oagw_alias={} base_url={} secret_ref={} api_key={}: {prompt}",
             info.provider_model_id,
             settings.oagw_alias,
             info.base_url.as_deref().unwrap_or("<plugin default>"),
             info.secret_ref.as_deref().unwrap_or("<none>"),
+            if call.api_key.is_some() {
+                "<set>"
+            } else {
+                "<none>"
+            },
         );
 
-        Ok(mock_response(&reply, &body.model))
+        let (input_tokens, output_tokens) = (8, 12);
+        let usage = Usage::reported(
+            input_tokens,
+            output_tokens,
+            settings.cost.credits(input_tokens, output_tokens),
+        );
+        Ok(mock_response(&reply, &body.model, &call.request_id, usage))
     }
 
     async fn create_response_stream(
@@ -121,7 +142,7 @@ impl LlmGatewayProviderPluginClientV1 for MockOpenAiPlugin {
 }
 
 /// Build a completed `ResponseResource` carrying a single assistant message.
-fn mock_response(text: &str, model: &str) -> ResponseResource {
+fn mock_response(text: &str, model: &str, request_id: &str, usage: Usage) -> ResponseResource {
     let message = MessageOutput {
         id: "msg_demo_0001".to_owned(),
         status: ItemStatus::Completed,
@@ -134,7 +155,7 @@ fn mock_response(text: &str, model: &str) -> ResponseResource {
     };
 
     ResponseResource {
-        id: "resp_demo_0001".to_owned(),
+        id: request_id.to_owned(),
         object: "response".to_owned(),
         created_at: 0,
         completed_at: Some(0),
@@ -155,20 +176,18 @@ fn mock_response(text: &str, model: &str) -> ResponseResource {
         top_logprobs: 0,
         temperature: 1.0,
         reasoning: ReasoningConfig::default(),
-        usage: Some(Usage {
-            input_tokens: 8,
-            output_tokens: 12,
-            total_tokens: 20,
-            input_tokens_details: InputTokensDetails { cached_tokens: 0 },
-            output_tokens_details: OutputTokensDetails {
-                reasoning_tokens: 0,
-            },
-        }),
+        usage: Some(usage),
         max_output_tokens: None,
         max_tool_calls: None,
         service_tier: "auto".to_owned(),
         metadata: None,
         safety_identifier: None,
         prompt_cache_key: None,
+        ignored_parameters: Vec::new(),
+        provider_details: Some(
+            ProviderDetails::default()
+                .with_stop_reason("stop")
+                .with_provider_request_id("chatcmpl-demo-0001"),
+        ),
     }
 }

@@ -25,13 +25,13 @@ use tokio_util::sync::CancellationToken;
 #[non_exhaustive]
 pub struct ProviderCallCtx {
     /// The resolved model info the core fetched from Model Registry, carried
-    /// unchanged as the GTS-typed [`ModelInfoV1`] envelope (default
-    /// `serde_json::Value` provider settings). Its `gts_type` is the
-    /// authoritative provider routing key and equals the resolving plugin's
-    /// declared `provider_type`. The plugin narrows it to its typed view (e.g.
-    /// `ModelInfoV1<OpenAiSettingsV1>`) via [`ProviderCallCtx::typed_info`] and
-    /// reads `provider_model_id`, the endpoint, generic and provider-specific
-    /// settings, and pricing from there.
+    /// unchanged. Its `gts_type` is the provider type (derived from
+    /// `model_registry_sdk::ProviderTypeV1`) and the authoritative routing
+    /// key: it equals the resolving plugin's declared `provider_type`. The
+    /// plugin reads `provider_model_id`, `base_url`, and the generic settings
+    /// from here, and narrows the opaque `provider_settings` document to its
+    /// provider type via [`ProviderCallCtx::typed_settings`] for the OAGW
+    /// upstream alias, provider-specific settings, and pricing.
     pub model_info: ModelInfoV1,
 
     /// Gateway request correlation id (the response `id`), propagated for
@@ -87,9 +87,9 @@ impl ProviderCallCtx {
         self
     }
 
-    /// Narrow [`Self::model_info`] to a concrete provider view `Q`, validating
-    /// its `gts_type` against `Q`'s GTS type id. Delegates to Model Registry's
-    /// `ModelInfoV1::try_into_typed`.
+    /// Narrow `model_info.provider_settings` to the plugin's provider type
+    /// `P`, a GTS type derived from `model_registry_sdk::ProviderTypeV1`,
+    /// after checking `model_info.gts_type` against `P`'s type id.
     ///
     /// # Errors
     ///
