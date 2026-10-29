@@ -989,6 +989,26 @@ catalog-version prefix).
 - **Register aliases**: DECISIONS R-24; overlay ticket T3.
 - **Acceptance signal**: both gears' documents name the same DTO and priority.
 
+#### Orders purchase evaluation target — D-197 (2026-10-05)
+
+The selected [Orders R11 contract](../../orders/docs/DESIGN.md#contract-03-rating-purchase-evaluation) and Rating `fr-pre-purchase-evaluation` supersede the historical chain-matrix/catalog-prefix and caller-summation descriptions **for pre-purchase evaluation only**. Input is exact selected Pricing native bindings plus explicit quantity, market and D-193 BillingTerms; Rating owns all money and returns exact amounts and major-unit display estimates for line/order aggregates (Orders D-216) and TCV basis. No renewal resolve, subscription/cohort fabrication, posting or billing input is authorized. Broader snapshot composition remains Rating-owned.
+
+- [ ] Deliver SDK/provider, supported profiles, grants and exact request/response schemas.
+- [ ] Prove finite/rolling/mixed terms, rounding/models, usage versus zero, authorization, Preview-only withholding and receipt-equality/replay scenarios against real providers.
+
+This is an adopted planning target, not runtime conformance or producer-owner signoff; the gear remains docs-only. Historical seam entries remain historical outside this narrow amendment.
+
+
+#### Orders asynchronous start compatibility (Lifecycle D-201)
+
+The actual service start is the Subscriptions `activate` commit instant (`serviceActivatedAt`,
+Subscriptions SUB-D-05; Orders D-217), separate from the held Pricing activation identity and
+quoted date; the OSS outcome time is evidence only. Follow the
+[clock contract](../../orders/docs/DESIGN.md#contract-06-activation-clocks): a supported
+Rating profile must preserve the accepted BillingTerms/period anchors when actual start differs.
+Missing support or a required term change blocks activation and requires reconciliation/new
+commercial acceptance; never silently move the billing anchor. No deployed profile is claimed.
+
 ### 2.12 Platform infrastructure
 
 | # | Contract | Evidence | Status | Consequence for Rating |

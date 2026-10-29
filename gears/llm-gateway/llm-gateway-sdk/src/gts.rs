@@ -49,7 +49,7 @@ use toolkit_gts::gts_type_schema;
     base = PluginV1,
     type_id = gts_id!("cf.toolkit.plugins.plugin.v1~cf.llmgw.provider.plugin.v1~"),
     description = "LLM Gateway provider plugin specification",
-    properties = "provider_type",
+    properties = "provider_type,tool_namespace",
 )]
 pub struct LlmGatewayProviderPluginSpecV1 {
     /// Model Registry provider type this plugin serves: a GTS type derived
@@ -57,4 +57,7 @@ pub struct LlmGatewayProviderPluginSpecV1 {
     /// `gts.cf.genai.model.provider.v1~cf.genai._.openai.v1~`). Matched
     /// against `ModelInfoV1.gts_type` during plugin resolution.
     pub provider_type: GtsTypeId,
+    /// Prefix of the provider-specific tools this plugin accepts (e.g.
+    /// `openai` for `openai:shell`).
+    pub tool_namespace: String,
 }

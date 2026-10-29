@@ -101,6 +101,7 @@ jobs:
             fips:
               - 'libs/toolkit/**'
               - 'libs/toolkit-http/**'
+              - 'libs/toolkit-http-proxy/**'
               - 'libs/rustls-*/**'
             magika:
               - 'gears/file-parser/**'
@@ -431,6 +432,13 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: tools/scripts/with_rust_annotations.sh make test-integration LANE=ledger-pg
 
+      # bss-orders' Postgres tier: the engine, sealed audit, idempotency, claims, role-isolation
+      # and gear-boot proofs all run against a real PostgreSQL. Without this step the tier
+      # compiles here and runs nowhere.
+      - name: Test bss-orders with Postgres (integration)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: tools/scripts/with_rust_annotations.sh make test-integration LANE=orders-pg
+
       - name: Test redis-cluster-plugin (redis integration)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: tools/scripts/with_rust_annotations.sh make test-integration LANE=cluster-redis
@@ -574,13 +582,16 @@ jobs:
         run: |
           cargo test -p cf-gears-rustls-corecrypto-provider --features fips
           cargo test -p cf-gears-toolkit-http --features fips
+          cargo test -p cf-gears-toolkit-http-proxy --features fips --no-run
 
       # Windows: build-verify the CNG provider path. Compile-only is sufficient —
       # runtime FIPS execution depends on host FIPS-mode policy (see ADR 0003).
       - name: FIPS build check (Windows / CNG)
         if: runner.os == 'Windows'
         shell: bash
-        run: cargo check --target x86_64-pc-windows-msvc -p cf-gears-toolkit-http --features fips
+        run: |
+          cargo check --target x86_64-pc-windows-msvc -p cf-gears-toolkit-http --features fips
+          cargo check --target x86_64-pc-windows-msvc -p cf-gears-toolkit-http-proxy --features fips
 
       - name: Save compilation metrics
         if: always() && runner.os == 'Linux' && steps.sccache.outputs.enabled == 'true'
