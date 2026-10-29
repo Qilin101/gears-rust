@@ -638,8 +638,12 @@ pub struct ModelEntryPageDto {
 // ---------------------------------------------------------------------------
 
 /// Mirrors `toolkit_odata::PageInfo`.
+///
+/// Aliased in the `OpenAPI` schema: types-registry also exposes a
+/// `PageInfoDto` of another shape in the server's shared registry.
 #[api_dto(response)]
 #[derive(Debug, Clone)]
+#[schema(as = ModelRegistryPageInfoDto)]
 pub struct PageInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
