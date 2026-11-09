@@ -3598,6 +3598,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-llm-gateway-anthropic-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cf-gears-llm-gateway-sdk",
+ "cf-gears-model-registry-sdk",
+ "cf-gears-oagw-sdk",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-security",
+ "futures",
+ "gts",
+ "http",
+ "rust_decimal",
+ "schemars 1.2.3",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-llm-gateway-sdk"
 version = "0.3.1"
 dependencies = [
