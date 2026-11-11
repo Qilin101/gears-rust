@@ -179,6 +179,7 @@ members = [
     "gears/chat-engine/chat-engine-sdk",
     "gears/chat-engine/chat-engine",
     "gears/model-registry/model-registry-sdk",
+    "gears/model-registry/model-registry",
     "gears/llm-gateway/llm-gateway-sdk",
     "gears/bss/ledger/ledger",
     "gears/bss/ledger/ledger-sdk",
