@@ -958,7 +958,8 @@ async fn lists_page_filter_order_and_project() {
     let projected = h.get(h.root, "/providers?$select=slug,enabled").await;
     assert_eq!(projected.status, StatusCode::OK, "{}", projected.body);
     for item in projected.body["items"].as_array().unwrap() {
-        let keys: Vec<&String> = item.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = item.as_object().unwrap().keys().collect();
+        keys.sort();
         assert_eq!(keys, ["enabled", "slug"], "{item}");
     }
 
