@@ -269,23 +269,6 @@ impl Harness {
     }
 }
 
-/// Drops `null` members: the two surfaces agree on every value but not yet
-/// on writing an absent optional field as `null` or leaving it out.
-fn without_nulls(mut value: Value) -> Value {
-    fn strip(value: &mut Value) {
-        match value {
-            Value::Object(map) => {
-                map.retain(|_, v| !v.is_null());
-                map.values_mut().for_each(strip);
-            }
-            Value::Array(items) => items.iter_mut().for_each(strip),
-            _ => {}
-        }
-    }
-    strip(&mut value);
-    value
-}
-
 fn sdk_json<T: serde::Serialize>(record: &T) -> Value {
     serde_json::to_value(record).unwrap()
 }
@@ -313,15 +296,10 @@ fn json_diff(rest: &Value, sdk: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Same record on both surfaces, `null` and absent taken as equal.
+/// The same record on both surfaces, absent optional fields included.
 fn assert_same_json(rest: &Value, sdk: &Value, what: &str) {
     let mut diff = Vec::new();
-    json_diff(
-        &without_nulls(rest.clone()),
-        &without_nulls(sdk.clone()),
-        "",
-        &mut diff,
-    );
+    json_diff(rest, sdk, "", &mut diff);
     assert!(diff.is_empty(), "{what} differs:\n{}", diff.join("\n"));
 }
 
