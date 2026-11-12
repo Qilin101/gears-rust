@@ -645,6 +645,10 @@ impl Service {
                     let before = (locked.enabled, locked.sharing_mode);
                     let prior = locked.version;
                     apply_provider_update(&mut locked, &req, subject, now);
+                    // A type migration changes a constrained property.
+                    if !decision.matches(&locked) {
+                        return Err(DomainError::not_permitted(OP));
+                    }
                     let saved = providers.save(tx, &locked, prior).await?;
                     if let Some(new_type) = &migration_type {
                         let moved = models

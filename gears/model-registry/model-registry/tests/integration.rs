@@ -1221,6 +1221,53 @@ async fn pdp_row_constraints_admit_matching_rows() {
     );
 }
 
+/// A type migration is checked against the PDP row constraints with the new
+/// `gts_type`.
+#[tokio::test]
+async fn type_migration_out_of_the_permitted_types_is_not_permitted() {
+    let t = Tenants::new();
+    let authz = StaticAuthz::with(|req| {
+        Ok(permit_with(vec![Constraint {
+            predicates: vec![
+                Predicate::Eq(EqPredicate::new("owner_tenant_id", subject_tenant(req))),
+                Predicate::In(InPredicate::new("gts_type", [OPENAI])),
+            ],
+        }]))
+    });
+    let h = harness_with(
+        t.resolver(),
+        authz,
+        schemas(),
+        ModelRegistryConfig::default(),
+    )
+    .await;
+    let c = ctx(t.root);
+    let p = h
+        .provider(t.root, "openai", SharingMode::Tenant, true)
+        .await;
+
+    let err = h
+        .service
+        .update_provider(
+            &c,
+            p,
+            provider_update(|r| r.gts_type = Some(gts::GtsTypeId::new(STRICT))),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::NotPermitted { .. }), "{err:?}");
+    let provider = h.service.get_provider(&c, p).await.unwrap().provider;
+    assert_eq!(provider.gts_type.as_ref(), OPENAI);
+    assert_eq!(provider.version, 1);
+
+    let renamed = h
+        .service
+        .update_provider(&c, p, provider_update(|r| r.name = Some("OpenAI 2".into())))
+        .await
+        .unwrap();
+    assert_eq!(renamed.provider.version, 2);
+}
+
 #[tokio::test]
 async fn every_dependency_fails_closed() {
     let t = Tenants::new();

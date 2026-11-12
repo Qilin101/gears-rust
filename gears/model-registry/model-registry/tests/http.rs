@@ -434,6 +434,33 @@ async fn provider_lifecycle_statuses_headers_and_preconditions() {
         PROVIDER_RESOURCE_TYPE
     );
 
+    // An unknown key is rejected, not dropped into an empty update.
+    let unknown = h
+        .patch(h.root, &path, Some("*"), &json!({ "nmae": "typo" }))
+        .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "{}", unknown.body);
+    assert_eq!(
+        unknown.violations(),
+        vec![("body".to_owned(), field::INVALID_FORMAT.to_owned())]
+    );
+    assert_eq!(
+        h.get(h.root, &path).await.header(header::ETAG),
+        Some("\"3\"")
+    );
+    let unknown = h
+        .post(
+            h.root,
+            "/providers",
+            &json!({ "slug": "x", "name": "X", "gts_type": OPENAI, "enabeld": false }),
+        )
+        .await;
+    assert_eq!(
+        unknown.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        unknown.body
+    );
+
     let duplicate = h
         .post(
             h.root,
@@ -460,6 +487,29 @@ async fn provider_lifecycle_statuses_headers_and_preconditions() {
     assert_eq!(
         h.delete(h.root, &path, None).await.status,
         StatusCode::NOT_FOUND
+    );
+}
+
+/// Behind a gateway `prefix_path`, `Location` keeps the prefix the client used.
+#[tokio::test]
+async fn location_keeps_the_gateway_prefix() {
+    let h = harness().await;
+    let app = Router::new().nest("/cf", h.app(h.root));
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/cf{BASE}/providers"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({ "slug": "openai", "name": "OpenAI", "gts_type": OPENAI }))
+                .unwrap(),
+        ))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let location = response.headers()[header::LOCATION].to_str().unwrap();
+    assert!(
+        location.starts_with(&format!("/cf{BASE}/providers/")),
+        "{location}"
     );
 }
 

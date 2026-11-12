@@ -29,6 +29,20 @@ struct Entry {
     expires_at: DateTime<Utc>,
 }
 
+/// A caller's reference to a tenant gate. Dropping it, on return or on
+/// cancellation, releases the gate.
+struct GateGuard<'a> {
+    cache: &'a ChainCache,
+    tenant_id: Uuid,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        self.cache.release_gate(self.tenant_id);
+    }
+}
+
 pub struct ChainCache {
     /// `None` when caching is disabled (TTL 0).
     entries: Option<Mutex<LruCache<Uuid, Entry>>>,
@@ -77,13 +91,13 @@ impl ChainCache {
         if self.entries.is_none() {
             return self.fetch(ctx, tenant_id).await;
         }
-        let gate = self.gate(tenant_id);
-        let result = {
-            let _flight = gate.lock().await;
-            self.fill(ctx, tenant_id).await
+        let gate = GateGuard {
+            cache: self,
+            tenant_id,
+            gate: self.gate(tenant_id),
         };
-        self.release_gate(tenant_id);
-        result
+        let _flight = gate.gate.lock().await;
+        self.fill(ctx, tenant_id).await
     }
 
     /// Under the per-tenant flight lock: a re-check, then one fetch and store.
@@ -115,6 +129,8 @@ impl ChainCache {
         )
     }
 
+    /// Called by a releasing caller that still holds its reference: the gate
+    /// is removed when the map and that caller are its only holders.
     fn release_gate(&self, tenant_id: Uuid) {
         let mut inflight = self
             .inflight
@@ -122,10 +138,18 @@ impl ChainCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if inflight
             .get(&tenant_id)
-            .is_some_and(|g| Arc::strong_count(g) == 1)
+            .is_some_and(|g| Arc::strong_count(g) == 2)
         {
             inflight.remove(&tenant_id);
         }
+    }
+
+    #[cfg(test)]
+    fn inflight_len(&self) -> usize {
+        self.inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     fn lookup(&self, tenant_id: Uuid) -> Option<Arc<[Uuid]>> {
@@ -412,5 +436,43 @@ mod tests {
             assert_eq!(task.await.unwrap().unwrap(), 1);
         }
         assert_eq!(resolver.calls(), 1);
+        assert_eq!(cache.inflight_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn gates_are_released_after_each_call() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // `b` is unknown to the resolver, so its call fails.
+        let resolver = Arc::new(StaticTenantResolver::new().with_chain(a, vec![]));
+        let cache = cache(Arc::clone(&resolver), Arc::new(ManualClock::fixed()), 30);
+        cache.chain(&security_context(a), a).await.unwrap();
+        cache.chain(&security_context(b), b).await.unwrap_err();
+        assert_eq!(cache.inflight_len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_call_releases_its_gate() {
+        let t0 = Uuid::new_v4();
+        let resolver = Arc::new(
+            StaticTenantResolver::new()
+                .with_chain(t0, vec![])
+                .with_delay(Duration::from_secs(10)),
+        );
+        let cache = ChainCache::new(
+            resolver,
+            Arc::new(ManualClock::fixed()),
+            Duration::from_secs(30),
+            2,
+            Duration::from_secs(60),
+        );
+        let ctx = security_context(t0);
+        let call = cache.chain(&ctx, t0);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), call)
+                .await
+                .is_err()
+        );
+        assert_eq!(cache.inflight_len(), 0);
     }
 }

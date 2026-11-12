@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::Extension;
+use axum::extract::{Extension, OriginalUri};
 use axum::http::{HeaderMap, HeaderName, StatusCode, Uri, header};
 use toolkit::api::canonical_prelude::*;
 use toolkit::api::rest::extract::{Json as JsonRequest, Path};
@@ -90,7 +90,7 @@ pub async fn list_available_models(
 pub async fn create_provider(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Svc,
-    uri: Uri,
+    OriginalUri(uri): OriginalUri,
     JsonRequest(dto): JsonRequest<CreateProviderRequestDto>,
 ) -> ApiResult<impl IntoResponse> {
     let req = parse::create_provider(dto).map_err(DomainError::for_provider)?;
@@ -172,7 +172,7 @@ pub async fn delete_provider(
 pub async fn create_model(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Svc,
-    uri: Uri,
+    OriginalUri(uri): OriginalUri,
     JsonRequest(dto): JsonRequest<CreateModelRequestDto>,
 ) -> ApiResult<impl IntoResponse> {
     let req = parse::create_model(dto)?;

@@ -98,6 +98,7 @@ impl From<ProviderEntryV1> for ProviderEntryDto {
 }
 
 #[api_dto(request)]
+#[serde(deny_unknown_fields)]
 #[derive(Debug, Clone)]
 pub struct CreateProviderRequestDto {
     pub slug: String,
@@ -116,6 +117,7 @@ pub struct CreateProviderRequestDto {
 /// `UpdateProviderRequestV1` on the wire. The precondition comes from the
 /// `If-Match` header, not the body.
 #[api_dto(request)]
+#[serde(deny_unknown_fields)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
 pub struct UpdateProviderRequestDto {
@@ -365,6 +367,7 @@ impl From<ModelEntryV1> for ModelEntryDto {
 /// `gts_type`, plus `provider_id`, `name`, `sharing_mode`, and
 /// `approval_state`.
 #[api_dto(request)]
+#[serde(deny_unknown_fields)]
 #[derive(Debug, Clone)]
 pub struct CreateModelRequestDto {
     pub provider_id: Uuid,
@@ -436,6 +439,7 @@ pub struct CreateModelRequestDto {
 /// `UpdateModelRequestV1` on the wire. Nullable fields accept `null` to
 /// clear. The precondition comes from the `If-Match` header, not the body.
 #[api_dto(request)]
+#[serde(deny_unknown_fields)]
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::option_option)]
 pub struct UpdateModelRequestDto {
