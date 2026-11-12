@@ -61,7 +61,6 @@ chrono = { workspace = true }
 
 # GTS and settings validation
 gts = { workspace = true }
-jsonschema = { workspace = true }
 
 # Async & error handling
 async-trait = { workspace = true }

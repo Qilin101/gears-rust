@@ -3733,7 +3733,6 @@ dependencies = [
  "chrono",
  "gts",
  "inventory",
- "jsonschema 0.60.2",
  "lru",
  "rand 0.10.3",
  "schemars 1.2.3",

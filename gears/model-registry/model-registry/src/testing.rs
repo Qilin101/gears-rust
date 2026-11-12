@@ -19,6 +19,7 @@ use tenant_resolver_sdk::{
 };
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::{PlatformSecurityContext, SecurityContext};
+use types_registry_sdk::{LifecycleStatus, TypeSchema};
 use uuid::Uuid;
 
 use crate::domain::credential_check::{OwnRowState, SecretRefSource};
@@ -358,10 +359,36 @@ impl AuthZResolverApi for StaticAuthz {
 
 type SchemaFailure = Box<dyn Fn() -> DomainError + Send + Sync>;
 
-/// Provider type schema double: a map of type id to resolved schema.
+/// A Types Registry snapshot of an active provider type with `resolved` as
+/// its resolved schema; `content` carries `x-gts-abstract` when `is_abstract`.
+#[must_use]
+pub fn provider_type_schema(
+    type_id: &str,
+    resolved: serde_json::Value,
+    is_abstract: bool,
+) -> TypeSchema {
+    let content = if is_abstract {
+        serde_json::json!({ "x-gts-abstract": true })
+    } else {
+        serde_json::json!({})
+    };
+    TypeSchema {
+        type_id: gts::GtsTypeId::new(type_id),
+        type_uuid: Uuid::nil(),
+        lifecycle_status: LifecycleStatus::Active,
+        origin: None,
+        content: Some(content),
+        resolved_schema: Some(resolved),
+        effective_traits: None,
+        effective_traits_schema: None,
+        provenance: None,
+    }
+}
+
+/// Provider type schema double: a map of type id to Types Registry snapshot.
 #[derive(Default)]
 pub struct StaticSchemaSource {
-    schemas: HashMap<String, serde_json::Value>,
+    schemas: HashMap<String, TypeSchema>,
     failure: Option<SchemaFailure>,
     delay: Option<Duration>,
     calls: AtomicUsize,
@@ -376,22 +403,29 @@ impl StaticSchemaSource {
     /// Registers `type_id` with a resolved schema whose `provider_settings`
     /// subschema is `settings_schema`.
     #[must_use]
-    pub fn with_type(mut self, type_id: &str, settings_schema: &serde_json::Value) -> Self {
-        self.schemas.insert(
-            type_id.to_owned(),
-            serde_json::json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "type": "object",
-                "properties": { "provider_settings": settings_schema }
-            }),
-        );
-        self
+    pub fn with_type(self, type_id: &str, settings_schema: &serde_json::Value) -> Self {
+        let resolved = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "gts_type": { "type": "string" },
+                "provider_settings": settings_schema
+            }
+        });
+        self.with_type_schema(provider_type_schema(type_id, resolved, false))
     }
 
     /// Registers `type_id` with an open `provider_settings`.
     #[must_use]
     pub fn with_open_type(self, type_id: &str) -> Self {
         self.with_type(type_id, &serde_json::json!({ "type": "object" }))
+    }
+
+    /// Registers a prepared snapshot under its type id.
+    #[must_use]
+    pub fn with_type_schema(mut self, schema: TypeSchema) -> Self {
+        self.schemas.insert(schema.type_id.to_string(), schema);
+        self
     }
 
     #[must_use]
@@ -417,11 +451,11 @@ impl StaticSchemaSource {
 
 #[async_trait]
 impl SchemaSource for StaticSchemaSource {
-    async fn resolved_schema(
+    async fn type_schema(
         &self,
         _ctx: &SecurityContext,
         type_id: &gts::GtsTypeId,
-    ) -> Result<Option<serde_json::Value>, DomainError> {
+    ) -> Result<Option<TypeSchema>, DomainError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;

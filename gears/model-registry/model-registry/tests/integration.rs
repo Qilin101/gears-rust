@@ -712,18 +712,13 @@ async fn provider_type_and_settings_are_validated_on_writes() {
     );
     req.provider_settings = serde_json::json!({ "endpoint": { "port": "high" }, "extra": 1 });
     let err = h.service.create_model(&c, req.clone()).await.unwrap_err();
-    let r = reasons(&err);
-    assert!(
-        r.iter()
-            .all(|(_, reason)| *reason == field::Reason::SchemaMismatch),
-        "{r:?}"
+    assert_eq!(
+        reasons(&err),
+        vec![(
+            "provider_settings".to_owned(),
+            field::Reason::SchemaMismatch
+        )]
     );
-    assert!(
-        r.iter()
-            .any(|(f, _)| f == "provider_settings/endpoint/port"),
-        "{r:?}"
-    );
-    assert!(r.iter().any(|(f, _)| f == "provider_settings"), "{r:?}");
 
     req.provider_settings =
         serde_json::json!({ "oagw_alias": "strict-prod", "endpoint": { "port": 443 } });

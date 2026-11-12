@@ -420,8 +420,13 @@ impl Service {
             .decide(ctx, &PROVIDER_RESOURCE, actions::CREATE, None, &[], OP)
             .await?;
         gts_validator::check_provider_type(req.gts_type())?;
-        gts_validator::provider_type_schema(self.schemas.as_ref(), ctx, req.gts_type(), "gts_type")
-            .await?;
+        gts_validator::provider_type_validator(
+            self.schemas.as_ref(),
+            ctx,
+            req.gts_type(),
+            "gts_type",
+        )
+        .await?;
         let now = self.clock.now();
         let subject = ctx.subject_id();
         let mut provider = ProviderV1::new(
@@ -560,14 +565,13 @@ impl Service {
         let recompare_gts = req.gts_type.is_some() && migration.is_none();
         let pre_versions: Option<BTreeMap<Uuid, i64>> = if let Some(new_type) = &migration {
             gts_validator::check_provider_type(new_type)?;
-            let schema = gts_validator::provider_type_schema(
+            let validator = gts_validator::provider_type_validator(
                 self.schemas.as_ref(),
                 ctx,
                 new_type,
                 "gts_type",
             )
             .await?;
-            let validator = gts_validator::compile_settings_validator(&schema)?;
             let pre_models = {
                 let conn = self.db.conn()?;
                 self.models.list_by_provider(&conn, t0, id).await?
@@ -576,7 +580,7 @@ impl Service {
                 .iter()
                 .flat_map(|m| {
                     gts_validator::check_settings(
-                        validator.as_ref(),
+                        &validator,
                         &m.info.provider_settings,
                         "gts_type",
                         Some(&m.canonical_id),
@@ -755,14 +759,14 @@ impl Service {
         let Some(provider) = provider else {
             return Err(self.missing_provider(ctx, req.provider_id, OP).await);
         };
-        let schema = gts_validator::provider_type_schema(
+        let validator = gts_validator::provider_type_validator(
             self.schemas.as_ref(),
             ctx,
             &provider.gts_type,
             "provider_settings",
         )
         .await?;
-        gts_validator::validate_settings(&schema, &req.provider_settings)?;
+        gts_validator::validate_settings(&validator, &req.provider_settings)?;
         if let Some(secret_ref) = &req.secret_ref {
             check_secret_ref(self.secret_refs.as_ref(), ctx, secret_ref).await?;
         }
@@ -966,7 +970,7 @@ impl Service {
             .is_some_and(|s| *s != pre.info.provider_settings);
         let recompare_settings = req.provider_settings.is_some() && !settings_changed;
         let validated_type: Option<gts::GtsTypeId> = if settings_changed {
-            let schema = gts_validator::provider_type_schema(
+            let validator = gts_validator::provider_type_validator(
                 self.schemas.as_ref(),
                 ctx,
                 &pre.info.gts_type,
@@ -974,7 +978,7 @@ impl Service {
             )
             .await?;
             if let Some(settings) = &req.provider_settings {
-                gts_validator::validate_settings(&schema, settings)?;
+                gts_validator::validate_settings(&validator, settings)?;
             }
             Some(pre.info.gts_type.clone())
         } else {

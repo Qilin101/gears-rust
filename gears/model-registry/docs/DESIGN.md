@@ -175,7 +175,7 @@ graph TB
 | Domain | Local client; catalog service (operation flow, authorization calls, validation order, transactions, audit columns); effective-catalog algorithm, approval and sharing rules, PDP scope gate, GTS type and settings checks | Rust in `domain/` (local client included), `#[domain_model]` types, toolkit `PolicyEnforcer` (`cpt-cf-model-registry-tech-toolkit-gear`); settings validated with the workspace JSON Schema validator (`jsonschema`) against schemas from Types Registry (`cpt-cf-model-registry-tech-json-schema-validation`) |
 | Infrastructure | SeaORM entities with `Scopable`, repositories over `DBRunner`, migrations, OData field-to-column mapping, chain cache | SeaORM through `toolkit-db` `SecureConn`; PostgreSQL in production, SQLite in dev/test (`cpt-cf-model-registry-tech-relational-storage`) |
 
-Domain components call dependency SDK traits (`TenantResolverClient`, `AuthZResolverClient` through `PolicyEnforcer`, `TypesRegistryClient`, `CredStoreClientV2`) obtained from ClientHub, and storage through repository traits. These traits are the seams where tests inject mocks.
+Domain components call dependency SDK traits (`TenantResolverClient`, `AuthZResolverClient` through `PolicyEnforcer`, `TypesRegistryApi`, `CredStoreClientV2`) obtained from ClientHub, and storage through repository traits. These traits are the seams where tests inject mocks.
 
 Layer rules follow the [platform gear layout](../../../docs/toolkit_unified_system/02_gear_layout_and_sdk_pattern.md): serde and `ToSchema` derives appear only in `api/rest/` DTOs and in SDK models; domain types carry `#[domain_model]`; all endpoints are versioned. `unsafe` is forbidden and `unwrap`/`expect` are denied in non-test code.
 
@@ -641,7 +641,7 @@ Provider types and provider settings come from plugins the gear does not know at
 
 ##### Responsibility scope
 
-Checks provider GTS types on provider create and on type migration (§4 GTS Checks). Fetches the resolved schema of a provider type from Types Registry and validates `provider_settings` against it on model create, on settings update, and for every model of a provider on type migration. Publishes nothing itself.
+Checks provider GTS types on provider create and on type migration (§4 GTS Checks). Fetches the provider type schema from Types Registry, compiles its payload validator with the Types Registry SDK, and validates `provider_settings` with it on model create, on settings update, and for every model of a provider on type migration. Publishes nothing itself.
 
 ##### Responsibility boundaries
 
@@ -837,7 +837,7 @@ What LLM Gateway and its provider plugins rely on:
 |-------------------|----------------|----------|
 | `tenant-resolver` | `TenantResolverClient::get_ancestors` via ClientHub, once with the default `BarrierMode::Respect` per cache miss | Ancestor chain for inheritance and shadowing |
 | `authz-resolver` | `AuthZResolverClient` wrapped in `PolicyEnforcer` (`authz-resolver-sdk`) | PDP decisions for every operation |
-| `types-registry` | `TypesRegistryClient::get_type_schema` (the effective schema, parent chain inlined) under the caller's context; platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
+| `types-registry` | `TypesRegistryApi::get_type_schema` (authored content and resolved schema selected) under the caller's context; platform GTS publication (provider base type and permission instances) | Provider type checks and settings validation on writes |
 | `credstore` | `CredStoreClientV2::get_record` via ClientHub, under the caller's context | Ownership check of `secret_ref` on model create and on an update that changes it to a non-null value (§4 Credential Binding) |
 | `llm-gateway` (consumer) | Calls `ModelRegistryClientV1` | Resolves models on every inference request; its provider plugins publish provider types derived from `gts.cf.genai.model.provider.v1~` (§3.3 Consumer Contract) |
 
@@ -868,9 +868,9 @@ The gear uses the parent-first, root-last order that Tenant Resolver returns, as
 
 | Dependency Gear | Interface Used | Purpose |
 |-------------------|---------------|---------|
-| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryClient::get_type_schema`, taking the effective schema (the type's schema with its parent chain inlined) | Source of the JSON Schema for `provider_settings` of each provider type |
+| `types-registry` (schemas registered by LLM Gateway provider plugins) | `TypesRegistryApi::get_type_schema` with `Content` and `ResolvedSchema` selected; `TypeSchema::compile_payload_validator` | Payload validator of each provider type |
 
-Schema reads go through the Types Registry client registered in ClientHub and take the effective schema, the type's schema with its parent chain inlined. The read runs under the caller's context, which needs the Types Registry read grant.
+Schema reads go through the `TypesRegistryApi` client registered in ClientHub and select the authored content and the resolved schema, in which Types Registry has inlined every `#/` and `gts://` reference. A schema that is not active counts as not registered. The read runs under the caller's context, which needs the Types Registry read grant.
 
 #### Credential Ownership
 
@@ -1085,7 +1085,7 @@ sequenceDiagram
   - `expected_version`, when given, is compared against the locked row and must equal its `version`; otherwise the request fails with `OPTIMISTIC_LOCK_FAILURE` and nothing is written. Every successful write increments `version`.
   - A request `gts_type` equal to the value read before the transaction is compared again with the locked row; a difference fails with `aborted` and reason `OPTIMISTIC_LOCK_FAILURE` and writes nothing, including for an unconditional update.
   - Fields present in the request are applied to the locked row, including those equal to the stored value. Changes to `enabled` or `sharing_mode` apply to the next request.
-  - A type migration runs the provider GTS checks of §4 GTS Checks on the new type and validates every model's `provider_settings` against the `provider_settings` subschemas of the new type (§4 GTS Checks). Each violation is one field violation with field `gts_type`, reason `SCHEMA_MISMATCH`, and a description naming the model's canonical id and the JSON pointer; one failing model fails the request and nothing is written.
+  - A type migration runs the provider GTS checks of §4 GTS Checks on the new type and validates every model's `provider_settings` against the new type (§4 GTS Checks). Each failing model is one field violation with field `gts_type`, reason `SCHEMA_MISMATCH`, and a description naming the model's canonical id and the validator messages; one failing model fails the request and nothing is written.
   - A type migration is atomic across the provider and all its models: it fails with `OPTIMISTIC_LOCK_FAILURE` if the locked provider row or model rows differ from the validated state (the provider version, the model set, or any model version changed), and otherwise sets `gts_type` on the provider and every model, increments every row's `version`, and sets `updated_at` and `updated_by` on every row. Readers see the old or the new type atomically; the next resolution selects the plugin of the new type. The provider row and its model rows are updated in place and never deleted and recreated, so the provider keeps its id and stays the candidate for its slug throughout; an inherited provider it shadows is never exposed.
   - Validation cost grows with the provider's model count and is bounded by `max_json_document_bytes` per model and by the Types Registry deadline for the single schema read.
   - A write on an inherited provider fails with `INHERITED_READ_ONLY`; an invisible provider is not found.
@@ -1117,8 +1117,8 @@ sequenceDiagram
     Note over MR: inherited provider gives INHERITED_READ_ONLY, unknown gives not found
     MR->>TY: get_type_schema(provider.gts_type, resolved)
     TY-->>MR: resolved schema or failure
-    MR->>MR: validate provider_settings against the provider_settings part of the schema
-    Note over MR: violations give invalid_argument with one field violation each
+    MR->>MR: validate the gts_type and provider_settings envelope with the type's payload validator
+    Note over MR: a mismatch gives invalid_argument with one field violation
     opt secret_ref set
         MR->>CR: get_record(ctx, secret_ref)
         CR-->>MR: own row status, none, denied, or failure
@@ -1394,13 +1394,14 @@ On provider create, and on a provider update whose `gts_type` differs from the s
 
 1. `gts_type` parses as a GTS type id (schema id ending with `~`). Failure: `invalid_argument`, field `gts_type`, reason `INVALID_GTS_TYPE`.
 2. The chain starts with the base type `gts.cf.genai.model.provider.v1~` and has at least one derived segment. Failure: reason `NOT_A_PROVIDER_TYPE`.
-3. Types Registry returns an active type schema for the id (`TypesRegistryClient::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Read denied: `NOT_PERMITTED`. Types Registry failure: dependency unavailable.
+3. Types Registry returns an active type schema for the id (`TypesRegistryApi::get_type_schema` under the caller's context). Not found: reason `GTS_TYPE_NOT_REGISTERED`. Read denied: `NOT_PERMITTED`. Types Registry failure: dependency unavailable.
+4. The type compiles a payload validator (`TypeSchema::compile_payload_validator`). An abstract type (`x-gts-abstract`): reason `NOT_A_PROVIDER_TYPE`. A schema that does not compile: internal error.
 
 On model create, on model update when the request's `provider_settings` differs from the stored value, and for every model of the provider on type migration (against the new type):
 
-1. Read the resolved schema of the provider's `gts_type` from Types Registry (read options in §3.5). Not found: `invalid_argument`, field `provider_settings`, reason `GTS_TYPE_NOT_REGISTERED`. Read denied: `NOT_PERMITTED`. Failure: dependency unavailable.
-2. Take every `provider_settings` subschema of the resolved schema: `properties.provider_settings` at the root and inside each `allOf` branch, where a derived type inlines its parent chain. The root `definitions` and `$defs` travel with them. Validate the bare `provider_settings` document against all of them with the workspace JSON Schema validator as JSON Schema Draft-07, the GTS dialect ([GTS guideline](../../../guidelines/GTS.md)). Schema-only `x-gts-*` keywords do not affect validation. A provider type that does not constrain `provider_settings` accepts any JSON object.
-3. Report every violation as one field violation: field `provider_settings` plus the JSON pointer of the offending value within the `provider_settings` document, reason `SCHEMA_MISMATCH`, and the validator message as description.
+1. Read the provider's `gts_type` from Types Registry (read options in §3.5) and compile its payload validator. Not found: `invalid_argument`, field `provider_settings`, reason `GTS_TYPE_NOT_REGISTERED`. Abstract type: field `provider_settings`, reason `NOT_A_PROVIDER_TYPE`. Read denied: `NOT_PERMITTED`. Failure: dependency unavailable.
+2. `provider_settings` must be a JSON object. Validate the envelope `{"gts_type": <type>, "provider_settings": <document>}`, an instance of the provider type, with the payload validator: the GTS dialect of JSON Schema Draft-07 ([GTS guideline](../../../guidelines/GTS.md)). GTS reference keywords are checked for syntax only. A provider type that does not constrain `provider_settings` accepts any JSON object.
+3. Report a mismatch as one field violation: field `provider_settings`, reason `SCHEMA_MISMATCH`, and the validator messages as description.
 
 Schemas are fetched on these writes only. They are not cached and not fetched on resolution or listing. Stored settings are not re-validated when a plugin publishes a new schema; plugins keep schemas backward compatible or publish a new type version, to which administrators move providers by type migration.
 

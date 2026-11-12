@@ -11,7 +11,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx};
 use toolkit_db::DBProvider;
 use tracing::info;
-use types_registry_sdk::TypesRegistryClient;
+use types_registry_sdk::TypesRegistryApi;
 
 use crate::api::rest::routes;
 use crate::config::ModelRegistryConfig;
@@ -27,9 +27,10 @@ use crate::infra::types_registry::TypesRegistrySchemaSource;
 // `credstore` joins `deps` at the credstore v2 switch (gears/credstore/v2/plan.md);
 // until then the V2 client is looked up lazily and writes that bind a new
 // `secret_ref` fail closed.
+#[toolkit::consumes(contract = types_registry_sdk::TypesRegistryApi, from = "types-registry")]
 #[toolkit::gear(
     name = "model-registry",
-    deps = [authz_resolver, tenant_resolver, types_registry],
+    deps = [authz_resolver, tenant_resolver],
     capabilities = [rest, db]
 )]
 pub struct ModelRegistryGear {
@@ -69,8 +70,8 @@ impl Gear for ModelRegistryGear {
             .map_err(|e| anyhow::anyhow!("failed to get AuthZResolverApi: {e}"))?;
         let types_registry = ctx
             .client_hub()
-            .get::<dyn TypesRegistryClient>()
-            .map_err(|e| anyhow::anyhow!("failed to get TypesRegistryClient: {e}"))?;
+            .get::<dyn TypesRegistryApi>()
+            .map_err(|e| anyhow::anyhow!("failed to get TypesRegistryApi: {e}"))?;
 
         let clock = Arc::new(SystemClock);
         let chain_cache = Arc::new(ChainCache::new(
