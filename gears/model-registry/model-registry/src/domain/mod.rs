@@ -11,6 +11,7 @@ pub mod credential_check;
 pub mod error;
 pub mod gts_validator;
 pub mod local_client;
+pub mod precondition;
 pub mod service;
 pub mod validation;
 pub mod visibility;

@@ -4,10 +4,12 @@
 //! miss or an expired entry calls Tenant Resolver once per tenant at a time
 //! (single flight), bounded by the configured deadline, with the default
 //! `BarrierMode::Respect`. Expiry counts from the start of that call.
-//! Failures are not cached. TTL 0 disables caching.
+//! Failures are not cached: a failed call is reported to the callers that
+//! waited on it, and the next caller calls again. TTL 0 disables caching.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +20,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use crate::domain::clock::Clock;
-use crate::domain::error::{Dependency, DomainError};
+use crate::domain::error::{Dependency, DomainError, Resource};
 
 /// The TTL of each stored entry is reduced by a random jitter of up to
 /// `ttl / JITTER_DIVISOR` (10%).
@@ -29,12 +31,75 @@ struct Entry {
     expires_at: DateTime<Utc>,
 }
 
+/// A failed flight, kept for the callers that waited on it.
+#[derive(Clone)]
+enum Failure {
+    NotPermitted {
+        resource: Resource,
+        operation: &'static str,
+    },
+    Unavailable {
+        dependency: Dependency,
+        diagnostic: String,
+    },
+}
+
+impl Failure {
+    fn of(err: &DomainError) -> Option<Self> {
+        match err {
+            DomainError::NotPermitted {
+                resource,
+                operation,
+            } => Some(Self::NotPermitted {
+                resource: *resource,
+                operation,
+            }),
+            DomainError::DependencyUnavailable {
+                dependency,
+                diagnostic,
+            } => Some(Self::Unavailable {
+                dependency: *dependency,
+                diagnostic: diagnostic.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn into_error(self) -> DomainError {
+        match self {
+            Self::NotPermitted {
+                resource,
+                operation,
+            } => DomainError::NotPermitted {
+                resource,
+                operation,
+            },
+            Self::Unavailable {
+                dependency,
+                diagnostic,
+            } => DomainError::DependencyUnavailable {
+                dependency,
+                diagnostic,
+            },
+        }
+    }
+}
+
+/// The single-flight gate of one tenant. The lock serializes the Tenant
+/// Resolver calls and holds the last flight's failure with its number.
+#[derive(Default)]
+struct Gate {
+    flight: tokio::sync::Mutex<Option<(u64, Failure)>>,
+    /// Number of finished flights.
+    finished: AtomicU64,
+}
+
 /// A caller's reference to a tenant gate. Dropping it, on return or on
 /// cancellation, releases the gate.
 struct GateGuard<'a> {
     cache: &'a ChainCache,
     tenant_id: Uuid,
-    gate: Arc<tokio::sync::Mutex<()>>,
+    gate: Arc<Gate>,
 }
 
 impl Drop for GateGuard<'_> {
@@ -46,7 +111,7 @@ impl Drop for GateGuard<'_> {
 pub struct ChainCache {
     /// `None` when caching is disabled (TTL 0).
     entries: Option<Mutex<LruCache<Uuid, Entry>>>,
-    inflight: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    inflight: Mutex<HashMap<Uuid, Arc<Gate>>>,
     ttl: Duration,
     deadline: Duration,
     clock: Arc<dyn Clock>,
@@ -96,8 +161,23 @@ impl ChainCache {
             tenant_id,
             gate: self.gate(tenant_id),
         };
-        let _flight = gate.gate.lock().await;
-        self.fill(ctx, tenant_id).await
+        let finished_before = gate.gate.finished.load(Ordering::Acquire);
+        let mut flight = gate.gate.flight.lock().await;
+        // A flight that failed while this caller waited is its answer too.
+        if let Some((number, failure)) = &*flight
+            && *number > finished_before
+        {
+            tracing::debug!(%tenant_id, "chain cache shared a failed flight");
+            return Err(failure.clone().into_error());
+        }
+        let result = self.fill(ctx, tenant_id).await;
+        let number = gate.gate.finished.fetch_add(1, Ordering::AcqRel) + 1;
+        *flight = result
+            .as_ref()
+            .err()
+            .and_then(Failure::of)
+            .map(|failure| (number, failure));
+        result
     }
 
     /// Under the per-tenant flight lock: a re-check, then one fetch and store.
@@ -117,16 +197,12 @@ impl ChainCache {
         Ok(chain)
     }
 
-    fn gate(&self, tenant_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    fn gate(&self, tenant_id: Uuid) -> Arc<Gate> {
         let mut inflight = self
             .inflight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(
-            inflight
-                .entry(tenant_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
+        Arc::clone(inflight.entry(tenant_id).or_default())
     }
 
     /// Called by a releasing caller that still holds its reference: the gate
@@ -437,6 +513,43 @@ mod tests {
         }
         assert_eq!(resolver.calls(), 1);
         assert_eq!(cache.inflight_len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiters_share_a_failed_call_and_the_next_caller_retries() {
+        let t0 = Uuid::new_v4();
+        let resolver = Arc::new(
+            StaticTenantResolver::new()
+                .with_chain(t0, vec![])
+                .with_delay(Duration::from_secs(10)),
+        );
+        let cache = Arc::new(cache(
+            Arc::clone(&resolver),
+            Arc::new(ManualClock::fixed()),
+            30,
+        ));
+        let ctx = security_context(t0);
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let ctx = ctx.clone();
+                tokio::spawn(async move { cache.chain(&ctx, t0).await })
+            })
+            .collect();
+        for task in tasks {
+            assert!(matches!(
+                task.await.unwrap(),
+                Err(DomainError::DependencyUnavailable {
+                    dependency: Dependency::TenantResolver,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(resolver.calls(), 1, "one deadline for the whole burst");
+        assert_eq!(cache.inflight_len(), 0);
+
+        cache.chain(&ctx, t0).await.unwrap_err();
+        assert_eq!(resolver.calls(), 2, "the failure is not cached");
     }
 
     #[tokio::test]

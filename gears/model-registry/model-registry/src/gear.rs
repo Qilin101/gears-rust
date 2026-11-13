@@ -30,7 +30,7 @@ use crate::infra::types_registry::TypesRegistrySchemaSource;
 #[toolkit::consumes(contract = types_registry_sdk::TypesRegistryApi, from = "types-registry")]
 #[toolkit::gear(
     name = "model-registry",
-    deps = [authz_resolver, tenant_resolver],
+    deps = [authz_resolver, tenant_resolver, types_registry],
     capabilities = [rest, db]
 )]
 pub struct ModelRegistryGear {

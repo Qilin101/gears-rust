@@ -16,6 +16,7 @@ use super::dto::{
     UpdateProviderRequestDto,
 };
 use crate::domain::error::{DomainError, Violation};
+use crate::domain::precondition::Precondition;
 
 /// Fields no provider update body may carry
 /// (`cpt-cf-model-registry-constraint-immutable-identity`, `version`, and the
@@ -114,15 +115,14 @@ pub fn check_update_body(
 }
 
 /// The `If-Match` precondition of DESIGN §3.3: `*` or a missing optional
-/// header is an unconditional write (`None`); one strong validator
-/// `"<version>"` is the expected version. A missing required header is
-/// `IF_MATCH_REQUIRED`; a weak, unquoted, or non-numeric validator, or more
-/// than one, is `INVALID_FORMAT`.
-pub fn if_match(headers: &HeaderMap, required: bool) -> Result<Option<i64>, DomainError> {
+/// header is an unconditional write; one validator is taken as sent and
+/// compared with the row's `ETag` as a string. A missing required header is
+/// `IF_MATCH_REQUIRED`; more than one validator is `INVALID_FORMAT`.
+pub fn if_match(headers: &HeaderMap, required: bool) -> Result<Precondition, DomainError> {
     let malformed = || {
         invalid(
             "If-Match",
-            "must be `*` or one quoted row version, for example `\"3\"`",
+            "must be `*` or one ETag, for example `\"3\"`",
             field::Reason::InvalidFormat,
         )
     };
@@ -137,13 +137,8 @@ pub fn if_match(headers: &HeaderMap, required: bool) -> Result<Option<i64>, Doma
             "send the current ETag, or `*` for an unconditional update",
             field::Reason::IfMatchRequired,
         )),
-        [] | ["*"] => Ok(None),
-        [tag] => tag
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .and_then(|inner| inner.parse::<i64>().ok())
-            .map(Some)
-            .ok_or_else(malformed),
+        [] | ["*"] => Ok(Precondition::None),
+        [tag] => Ok(Precondition::Tag((*tag).to_owned())),
         _ => Err(malformed()),
     }
 }
@@ -188,12 +183,40 @@ fn supported_api(raw: &[String]) -> Result<HashSet<SupportedApi>, DomainError> {
         .collect()
 }
 
+/// Parses a nested request document into its SDK type. The SDK types ignore
+/// unknown keys so that readers stay compatible; a request must not carry
+/// any, so each ignored key is a violation on its JSON pointer.
 fn nested<T: serde::de::DeserializeOwned>(
     field_name: &str,
     value: serde_json::Value,
 ) -> Result<T, DomainError> {
-    serde_json::from_value(value)
-        .map_err(|e| invalid(field_name, e.to_string(), field::Reason::InvalidFormat))
+    let mut unknown = Vec::new();
+    let parsed = serde_ignored::deserialize(value, |path| {
+        unknown.push(Violation::new(
+            pointer(field_name, &path),
+            "unknown field",
+            field::Reason::InvalidFormat,
+        ));
+    })
+    .map_err(|e| invalid(field_name, e.to_string(), field::Reason::InvalidFormat))?;
+    if unknown.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(DomainError::invalid_all(unknown))
+    }
+}
+
+/// `field_name` plus the JSON pointer of an ignored key.
+fn pointer(field_name: &str, path: &serde_ignored::Path<'_>) -> String {
+    use serde_ignored::Path;
+    match path {
+        Path::Root => field_name.to_owned(),
+        Path::Seq { parent, index } => format!("{}/{index}", pointer(field_name, parent)),
+        Path::Map { parent, key } => format!("{}/{key}", pointer(field_name, parent)),
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => pointer(field_name, parent),
+    }
 }
 
 fn nested_or_default<T: serde::de::DeserializeOwned + Default>(
@@ -225,10 +248,8 @@ pub fn create_provider(
 
 pub fn update_provider(
     dto: UpdateProviderRequestDto,
-    expected_version: Option<i64>,
 ) -> Result<UpdateProviderRequestV1, DomainError> {
     let mut req = UpdateProviderRequestV1::default();
-    req.expected_version = expected_version;
     req.name = dto.name;
     req.gts_type = dto.gts_type.map(|t| gts::GtsTypeId::new(&t));
     req.enabled = dto.enabled;
@@ -293,12 +314,8 @@ pub fn create_model(dto: CreateModelRequestDto) -> Result<CreateModelRequestV1, 
     Ok(req)
 }
 
-pub fn update_model(
-    dto: UpdateModelRequestDto,
-    expected_version: Option<i64>,
-) -> Result<UpdateModelRequestV1, DomainError> {
+pub fn update_model(dto: UpdateModelRequestDto) -> Result<UpdateModelRequestV1, DomainError> {
     let mut req = UpdateModelRequestV1::default();
-    req.expected_version = expected_version;
     req.sharing_mode = dto.sharing_mode.as_deref().map(sharing_mode).transpose()?;
     req.approval_state = dto
         .approval_state
@@ -383,6 +400,61 @@ mod tests {
             h.append(IF_MATCH, HeaderValue::from_str(v).unwrap());
         }
         h
+    }
+
+    #[test]
+    fn unknown_keys_in_a_nested_document_are_rejected() {
+        use model_registry_sdk::{ModelCapabilities, ModelCostV1};
+
+        nested::<ModelCostV1>("cost", json!({ "input_per_1m_micro": 2 })).unwrap();
+        let err = nested::<ModelCostV1>(
+            "cost",
+            json!({ "input_per_1M_micro": 2_500_000, "output_per_1m_micro": 1 }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            violations(&err),
+            vec![(
+                "cost/input_per_1M_micro".to_owned(),
+                field::INVALID_FORMAT.to_owned()
+            )]
+        );
+        let err =
+            nested::<ModelCapabilities>("capabilities", json!({ "vision": { "enabeld": true } }))
+                .unwrap_err();
+        assert_eq!(
+            violations(&err),
+            vec![(
+                "capabilities/vision/enabeld".to_owned(),
+                field::INVALID_FORMAT.to_owned()
+            )]
+        );
+    }
+
+    /// Known gap (DESIGN §3.3): serde buffers a tagged enum before parsing
+    /// it, so keys inside its variants are not reported.
+    #[test]
+    fn unknown_keys_inside_tagged_variants_are_not_seen() {
+        use model_registry_sdk::DefaultInferenceParametersV1;
+
+        let err = nested::<DefaultInferenceParametersV1>(
+            "default_parameters",
+            json!({ "text": { "format": { "type": "text" }, "bogus": 1 } }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            violations(&err),
+            vec![(
+                "default_parameters/text/bogus".to_owned(),
+                field::INVALID_FORMAT.to_owned()
+            )]
+        );
+        for inside_a_variant in [
+            json!({ "text": { "format": { "type": "json_schema", "name": "n", "strict": true, "bogus": 1 } } }),
+            json!({ "tool_choice": { "type": "function", "name": "f", "bogus": 1 } }),
+        ] {
+            nested::<DefaultInferenceParametersV1>("default_parameters", inside_a_variant).unwrap();
+        }
     }
 
     #[test]
@@ -471,29 +543,34 @@ mod tests {
         let body_value = serde_json::Value::Object(all_null);
         check_update_body(&body_value, MODEL_IMMUTABLE_FIELDS, MODEL_NULLABLE_FIELDS).unwrap();
         let dto: UpdateModelRequestDto = body(body_value).unwrap();
-        let req = update_model(dto, None).unwrap();
+        let req = update_model(dto).unwrap();
         assert_eq!(req.base_url, Some(None));
         assert_eq!(req.multiplier_display, Some(None));
     }
 
     #[test]
     fn if_match_precondition() {
-        assert_eq!(if_match(&headers(&["\"3\""]), true).unwrap(), Some(3));
-        assert_eq!(if_match(&headers(&["*"]), true).unwrap(), None);
-        assert_eq!(if_match(&headers(&[]), false).unwrap(), None);
+        assert_eq!(
+            if_match(&headers(&["\"3\""]), true).unwrap(),
+            Precondition::Tag("\"3\"".into())
+        );
+        // A validator is taken as sent; one that is no ETag never matches.
+        assert_eq!(
+            if_match(&headers(&["W/\"3\""]), true).unwrap(),
+            Precondition::Tag("W/\"3\"".into())
+        );
+        assert_eq!(
+            if_match(&headers(&["*"]), true).unwrap(),
+            Precondition::None
+        );
+        assert_eq!(if_match(&headers(&[]), false).unwrap(), Precondition::None);
 
         let err = if_match(&headers(&[]), true).unwrap_err();
         assert_eq!(
             violations(&err),
             vec![("If-Match".to_owned(), field::IF_MATCH_REQUIRED.to_owned())]
         );
-        for bad in [
-            vec!["3"],
-            vec!["W/\"3\""],
-            vec!["\"abc\""],
-            vec!["\"1\", \"2\""],
-            vec!["\"1\"", "\"2\""],
-        ] {
+        for bad in [vec!["\"1\", \"2\""], vec!["\"1\"", "\"2\""]] {
             let err = if_match(&headers(&bad), false).unwrap_err();
             assert_eq!(
                 violations(&err),
@@ -510,8 +587,7 @@ mod tests {
             "provider_model_id": "gpt-4o-2026", "cost": { "input_per_1m_micro": 5 }
         }))
         .unwrap();
-        let req = update_model(dto, Some(7)).unwrap();
-        assert_eq!(req.expected_version, Some(7));
+        let req = update_model(dto).unwrap();
         assert_eq!(req.base_url, Some(None));
         assert_eq!(req.description, Some(Some("d".into())));
         assert_eq!(req.secret_ref, None);
@@ -523,7 +599,7 @@ mod tests {
     #[test]
     fn enums_and_nested_objects_are_validated() {
         let dto: UpdateModelRequestDto = body(json!({ "sharing_mode": "subtree" })).unwrap();
-        let err = update_model(dto, None).unwrap_err();
+        let err = update_model(dto).unwrap_err();
         assert_eq!(
             violations(&err)[0],
             ("sharing_mode".to_owned(), field::INVALID_FORMAT.to_owned())
@@ -574,8 +650,7 @@ mod tests {
 
         let dto: UpdateProviderRequestDto =
             body(json!({ "metadata": null, "enabled": false, "gts_type": gts_id!("cf.genai.model.provider.v1~cf.genai._.azure.v1~") })).unwrap();
-        let req = update_provider(dto, Some(2)).unwrap();
-        assert_eq!(req.expected_version, Some(2));
+        let req = update_provider(dto).unwrap();
         assert_eq!(req.metadata, Some(None));
         assert_eq!(req.enabled, Some(false));
         assert_eq!(

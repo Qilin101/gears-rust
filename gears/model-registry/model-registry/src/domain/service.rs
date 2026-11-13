@@ -34,6 +34,7 @@ use super::clock::Clock;
 use super::credential_check::{SecretRefSource, check_secret_ref};
 use super::error::{DomainError, Resource};
 use super::gts_validator::{self, SchemaSource};
+use super::precondition::Precondition;
 use super::validation::{self, Limits};
 use super::visibility::{Catalog, ProviderCandidate};
 use crate::config::{ModelRegistryConfig, PageLimits};
@@ -87,6 +88,29 @@ fn stale(resource: Resource, id: Uuid, detail: &'static str) -> DomainError {
         id,
         detail,
     }
+}
+
+/// The security events of DESIGN §4 Observability: a `NOT_PERMITTED` or
+/// `INHERITED_READ_ONLY` outcome is logged with subject, tenant, operation,
+/// and resource id.
+fn security_event<T>(
+    ctx: &SecurityContext,
+    resource_id: Option<&dyn std::fmt::Display>,
+    result: Result<T, DomainError>,
+) -> Result<T, DomainError> {
+    let subject = ctx.subject_id();
+    let tenant_id = ctx.subject_tenant_id();
+    match &result {
+        Err(DomainError::NotPermitted { operation, .. }) => {
+            let resource_id = resource_id.map(tracing::field::display);
+            tracing::warn!(%subject, %tenant_id, operation, resource_id, "not permitted");
+        }
+        Err(DomainError::InheritedReadOnly { operation, id, .. }) => {
+            tracing::warn!(%subject, %tenant_id, operation, resource_id = %id, "write against an inherited entry");
+        }
+        _ => {}
+    }
+    result
 }
 
 /// Builds the effective catalog from the chain inside a transaction.
@@ -230,9 +254,80 @@ impl Service {
 
     // ==================== Resolution ====================
 
+    pub async fn resolve_model(
+        &self,
+        ctx: &SecurityContext,
+        canonical_id: &str,
+    ) -> Result<ModelV1, DomainError> {
+        let result = self.resolve_model_inner(ctx, canonical_id).await;
+        security_event(ctx, Some(&canonical_id), result)
+    }
+
+    pub async fn list_available_models(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<ModelV1>, DomainError> {
+        let result = self.list_available_models_inner(ctx, query).await;
+        security_event(ctx, None, result)
+    }
+
+    // ==================== Models ====================
+
+    pub async fn create_model(
+        &self,
+        ctx: &SecurityContext,
+        req: CreateModelRequestV1,
+    ) -> Result<ModelEntryV1, DomainError> {
+        let provider_id = req.provider_id;
+        let result = self.create_model_inner(ctx, req).await;
+        security_event(ctx, Some(&provider_id), result)
+    }
+
+    pub async fn get_model(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ModelEntryV1, DomainError> {
+        let result = self.get_model_inner(ctx, id).await;
+        security_event(ctx, Some(&id), result)
+    }
+
+    pub async fn list_models(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<ModelEntryV1>, DomainError> {
+        let result = self.list_models_inner(ctx, query).await;
+        security_event(ctx, None, result)
+    }
+
+    /// [`Self::update_model`] under `precondition`; `req.expected_version` is
+    /// not read.
+    pub async fn update_model_if(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        req: UpdateModelRequestV1,
+        precondition: Precondition,
+    ) -> Result<ModelEntryV1, DomainError> {
+        let result = Box::pin(self.update_model_inner(ctx, id, req, precondition)).await;
+        security_event(ctx, Some(&id), result)
+    }
+
+    pub async fn delete_model_if(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        precondition: Precondition,
+    ) -> Result<(), DomainError> {
+        let result = self.delete_model_inner(ctx, id, precondition).await;
+        security_event(ctx, Some(&id), result)
+    }
+
     /// DESIGN §3.6 `seq-resolve-model`.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), canonical_id))]
-    pub async fn resolve_model(
+    async fn resolve_model_inner(
         &self,
         ctx: &SecurityContext,
         canonical_id: &str,
@@ -311,7 +406,7 @@ impl Service {
     /// DESIGN §3.6 `seq-list-available-models`: one `evaluate` decision, then
     /// the catalog and the page from one snapshot.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id()))]
-    pub async fn list_available_models(
+    async fn list_available_models_inner(
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
@@ -358,9 +453,8 @@ impl Service {
         ctx: &SecurityContext,
         req: CreateProviderRequestV1,
     ) -> Result<ProviderEntryV1, DomainError> {
-        self.create_provider_inner(ctx, req)
-            .await
-            .map_err(DomainError::for_provider)
+        let result = self.create_provider_inner(ctx, req).await;
+        security_event(ctx, None, result).map_err(DomainError::for_provider)
     }
 
     pub async fn get_provider(
@@ -368,9 +462,8 @@ impl Service {
         ctx: &SecurityContext,
         id: Uuid,
     ) -> Result<ProviderEntryV1, DomainError> {
-        self.get_provider_inner(ctx, id)
-            .await
-            .map_err(DomainError::for_provider)
+        let result = self.get_provider_inner(ctx, id).await;
+        security_event(ctx, Some(&id), result).map_err(DomainError::for_provider)
     }
 
     pub async fn list_providers(
@@ -378,9 +471,8 @@ impl Service {
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<ProviderEntryV1>, DomainError> {
-        self.list_providers_inner(ctx, query)
-            .await
-            .map_err(DomainError::for_provider)
+        let result = self.list_providers_inner(ctx, query).await;
+        security_event(ctx, None, result).map_err(DomainError::for_provider)
     }
 
     pub async fn update_provider(
@@ -389,9 +481,21 @@ impl Service {
         id: Uuid,
         req: UpdateProviderRequestV1,
     ) -> Result<ProviderEntryV1, DomainError> {
-        self.update_provider_inner(ctx, id, req)
-            .await
-            .map_err(DomainError::for_provider)
+        let precondition = req.expected_version.into();
+        self.update_provider_if(ctx, id, req, precondition).await
+    }
+
+    /// [`Self::update_provider`] under `precondition`; `req.expected_version`
+    /// is not read.
+    pub async fn update_provider_if(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        req: UpdateProviderRequestV1,
+        precondition: Precondition,
+    ) -> Result<ProviderEntryV1, DomainError> {
+        let result = self.update_provider_inner(ctx, id, req, precondition).await;
+        security_event(ctx, Some(&id), result).map_err(DomainError::for_provider)
     }
 
     pub async fn delete_provider(
@@ -400,9 +504,18 @@ impl Service {
         id: Uuid,
         expected_version: Option<i64>,
     ) -> Result<(), DomainError> {
-        self.delete_provider_inner(ctx, id, expected_version)
+        self.delete_provider_if(ctx, id, expected_version.into())
             .await
-            .map_err(DomainError::for_provider)
+    }
+
+    pub async fn delete_provider_if(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        precondition: Precondition,
+    ) -> Result<(), DomainError> {
+        let result = self.delete_provider_inner(ctx, id, precondition).await;
+        security_event(ctx, Some(&id), result).map_err(DomainError::for_provider)
     }
 
     /// DESIGN §3.6 `seq-provider-write`, create.
@@ -534,6 +647,7 @@ impl Service {
         ctx: &SecurityContext,
         id: Uuid,
         req: UpdateProviderRequestV1,
+        precondition: Precondition,
     ) -> Result<ProviderEntryV1, DomainError> {
         const OP: &str = "update_provider";
         validation::validate_update_provider(&req, self.limits)?;
@@ -612,7 +726,7 @@ impl Service {
                     if !decision.matches(&locked) {
                         return Err(DomainError::not_permitted(OP));
                     }
-                    if req.expected_version.is_some_and(|v| v != locked.version) {
+                    if !precondition.holds(locked.version) {
                         return Err(stale(Resource::Provider, id, "stale expected_version"));
                     }
                     if recompare_gts && locked.gts_type != pre_type {
@@ -688,7 +802,7 @@ impl Service {
         &self,
         ctx: &SecurityContext,
         id: Uuid,
-        expected_version: Option<i64>,
+        precondition: Precondition,
     ) -> Result<(), DomainError> {
         const OP: &str = "delete_provider";
         let t0 = ctx.subject_tenant_id();
@@ -707,7 +821,7 @@ impl Service {
                     if !decision.matches(&provider) {
                         return Err(DomainError::not_permitted(OP));
                     }
-                    if expected_version.is_some_and(|v| v != provider.version) {
+                    if !precondition.holds(provider.version) {
                         return Err(stale(Resource::Provider, id, "stale expected_version"));
                     }
                     if !repo.delete(tx, t0, id, provider.version).await? {
@@ -732,7 +846,7 @@ impl Service {
 
     /// DESIGN §3.6 `seq-model-write`, create.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), provider_id = %req.provider_id))]
-    pub async fn create_model(
+    async fn create_model_inner(
         &self,
         ctx: &SecurityContext,
         req: CreateModelRequestV1,
@@ -858,7 +972,7 @@ impl Service {
 
     /// DESIGN §3.6 `seq-management-read`, point read.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), %id))]
-    pub async fn get_model(
+    async fn get_model_inner(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
@@ -895,7 +1009,7 @@ impl Service {
 
     /// DESIGN §3.6 `seq-management-read`, admin list.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id()))]
-    pub async fn list_models(
+    async fn list_models_inner(
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
@@ -937,14 +1051,25 @@ impl Service {
         })
     }
 
-    /// DESIGN §3.6 `seq-model-write`, update.
-    #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), %id))]
-    #[allow(clippy::too_many_lines)]
     pub async fn update_model(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
         req: UpdateModelRequestV1,
+    ) -> Result<ModelEntryV1, DomainError> {
+        let precondition = req.expected_version.into();
+        self.update_model_if(ctx, id, req, precondition).await
+    }
+
+    /// DESIGN §3.6 `seq-model-write`, update.
+    #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), %id))]
+    #[allow(clippy::too_many_lines)]
+    async fn update_model_inner(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        req: UpdateModelRequestV1,
+        precondition: Precondition,
     ) -> Result<ModelEntryV1, DomainError> {
         const OP: &str = "update_model";
         validation::validate_update_model(&req, self.limits)?;
@@ -1015,7 +1140,7 @@ impl Service {
                     if !decision.matches(&locked) {
                         return Err(DomainError::not_permitted(OP));
                     }
-                    if req.expected_version.is_some_and(|v| v != locked.version) {
+                    if !precondition.holds(locked.version) {
                         return Err(stale(Resource::Model, id, "stale expected_version"));
                     }
                     if recompare_settings && locked.info.provider_settings != pre_settings {
@@ -1062,13 +1187,22 @@ impl Service {
         Ok(Self::own_model_entry(model, provider_enabled))
     }
 
-    /// DESIGN §3.6 `seq-model-write`, delete.
-    #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), %id))]
     pub async fn delete_model(
         &self,
         ctx: &SecurityContext,
         id: Uuid,
         expected_version: Option<i64>,
+    ) -> Result<(), DomainError> {
+        self.delete_model_if(ctx, id, expected_version.into()).await
+    }
+
+    /// DESIGN §3.6 `seq-model-write`, delete.
+    #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), %id))]
+    async fn delete_model_inner(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+        precondition: Precondition,
     ) -> Result<(), DomainError> {
         const OP: &str = "delete_model";
         let t0 = ctx.subject_tenant_id();
@@ -1087,7 +1221,7 @@ impl Service {
                     if !decision.matches(&model) {
                         return Err(DomainError::not_permitted(OP));
                     }
-                    if expected_version.is_some_and(|v| v != model.version) {
+                    if !precondition.holds(model.version) {
                         return Err(stale(Resource::Model, id, "stale expected_version"));
                     }
                     if !repo.delete(tx, t0, id, model.version).await? {

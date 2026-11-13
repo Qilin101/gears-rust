@@ -74,7 +74,11 @@ pub fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::list_available_models)
-        .json_response_with_schema::<dto::ModelPageDto>(openapi, StatusCode::OK, "A page of models")
+        .json_response_with_schema::<toolkit_odata::Page<dto::ModelDto>>(
+            openapi,
+            StatusCode::OK,
+            "A page of models",
+        )
         .with_odata_filter::<ModelFilterField>()
         .with_odata_orderby::<ModelFilterField>()
         .with_odata_select()
@@ -124,7 +128,7 @@ pub fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::list_providers)
-        .json_response_with_schema::<dto::ProviderEntryPageDto>(
+        .json_response_with_schema::<toolkit_odata::Page<dto::ProviderEntryDto>>(
             openapi,
             StatusCode::OK,
             "A page of providers",
@@ -210,7 +214,7 @@ pub fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .handler(handlers::list_models)
-        .json_response_with_schema::<dto::ModelEntryPageDto>(
+        .json_response_with_schema::<toolkit_odata::Page<dto::ModelEntryDto>>(
             openapi,
             StatusCode::OK,
             "A page of models",

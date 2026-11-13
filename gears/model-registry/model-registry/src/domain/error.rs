@@ -339,35 +339,23 @@ impl From<DomainError> for CanonicalError {
                     .with_reason(permission::MODEL_NOT_APPROVED)
                     .create()
             }
-            DomainError::NotPermitted {
-                resource,
-                operation,
-            } => {
-                tracing::warn!(operation, "not permitted");
-                match resource {
-                    Resource::Provider => ProviderScope::permission_denied()
-                        .with_reason(permission::NOT_PERMITTED)
-                        .create(),
-                    Resource::Model => ModelScope::permission_denied()
-                        .with_reason(permission::NOT_PERMITTED)
-                        .create(),
-                }
-            }
-            DomainError::InheritedReadOnly {
-                resource,
-                operation,
-                id,
-            } => {
-                tracing::warn!(operation, %id, "write against an inherited entry");
-                match resource {
-                    Resource::Provider => ProviderScope::permission_denied()
-                        .with_reason(permission::INHERITED_READ_ONLY)
-                        .create(),
-                    Resource::Model => ModelScope::permission_denied()
-                        .with_reason(permission::INHERITED_READ_ONLY)
-                        .create(),
-                }
-            }
+            // Logged by the service as a security event.
+            DomainError::NotPermitted { resource, .. } => match resource {
+                Resource::Provider => ProviderScope::permission_denied()
+                    .with_reason(permission::NOT_PERMITTED)
+                    .create(),
+                Resource::Model => ModelScope::permission_denied()
+                    .with_reason(permission::NOT_PERMITTED)
+                    .create(),
+            },
+            DomainError::InheritedReadOnly { resource, .. } => match resource {
+                Resource::Provider => ProviderScope::permission_denied()
+                    .with_reason(permission::INHERITED_READ_ONLY)
+                    .create(),
+                Resource::Model => ModelScope::permission_denied()
+                    .with_reason(permission::INHERITED_READ_ONLY)
+                    .create(),
+            },
             DomainError::ProviderAlreadyExists { slug } => {
                 ProviderScope::already_exists("provider slug already exists in the tenant")
                     .with_resource(slug)

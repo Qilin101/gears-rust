@@ -3717,6 +3717,7 @@ dependencies = [
  "cf-gears-authz-resolver",
  "cf-gears-authz-resolver-sdk",
  "cf-gears-credstore-v2-sdk",
+ "cf-gears-model-registry",
  "cf-gears-model-registry-sdk",
  "cf-gears-tenant-resolver",
  "cf-gears-tenant-resolver-sdk",
@@ -3732,13 +3733,14 @@ dependencies = [
  "cf-gears-types-registry-sdk",
  "chrono",
  "gts",
- "inventory",
  "lru",
+ "proptest",
  "rand 0.10.3",
  "schemars 1.2.3",
  "sea-orm",
  "sea-orm-migration",
  "serde",
+ "serde_ignored",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -12238,6 +12240,16 @@ dependencies = [
  "itoa",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

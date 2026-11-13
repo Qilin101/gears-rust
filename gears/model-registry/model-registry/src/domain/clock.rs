@@ -1,6 +1,7 @@
 //! Injectable clock (DESIGN §4 Testability): one source for audit and
 //! approval timestamps and for chain cache expiry.
 
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -22,10 +23,12 @@ impl Clock for SystemClock {
 }
 
 /// A clock that moves only when told to; for tests.
+#[cfg(any(test, feature = "test-support"))]
 #[domain_model]
 #[derive(Debug)]
 pub struct ManualClock(Mutex<DateTime<Utc>>);
 
+#[cfg(any(test, feature = "test-support"))]
 impl ManualClock {
     #[must_use]
     pub fn new(now: DateTime<Utc>) -> Self {
@@ -57,6 +60,7 @@ impl ManualClock {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Clock for ManualClock {
     fn now(&self) -> DateTime<Utc> {
         *self

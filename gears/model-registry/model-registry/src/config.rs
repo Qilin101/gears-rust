@@ -10,6 +10,7 @@ pub const MAX_CHAIN_CACHE_TTL_SECONDS: u64 = 300;
 
 /// Configuration keys of the `config` section; absent keys take the defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRegistryConfig {
     /// Chain cache TTL; 0 disables the cache; at most 300.
     #[serde(default = "default_chain_cache_ttl_seconds")]
@@ -215,6 +216,19 @@ impl PageLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_keys_are_rejected_and_absent_keys_default() {
+        let cfg: ModelRegistryConfig =
+            serde_json::from_value(serde_json::json!({ "chain_cache_ttl_seconds": 5 })).unwrap();
+        assert_eq!(cfg.chain_cache_ttl_seconds, 5);
+        assert_eq!(cfg.max_page_size, 100);
+        let err = serde_json::from_value::<ModelRegistryConfig>(
+            serde_json::json!({ "chain_cache_ttl_second": 5 }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("chain_cache_ttl_second"), "{err}");
+    }
 
     #[test]
     fn defaults_match_design() {

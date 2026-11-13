@@ -21,6 +21,8 @@ pub const DESCRIPTION_MAX: usize = 4096;
 pub const EXTRA_PARAMS_MAX: usize = 64;
 pub const EXTRA_PARAM_NAME_MAX: usize = 128;
 pub const MIME_LIST_MAX: usize = 64;
+/// RFC 6838 §4.2: type and subtype names are at most 127 characters each.
+pub const MIME_MAX: usize = 255;
 
 /// Column bounds of §3.7 for the optional model info strings.
 const FAMILY_MAX: usize = 128;
@@ -66,7 +68,15 @@ impl Checker {
             .push(Violation::new(field, description, reason));
     }
 
+    /// U+0000 cannot be stored in a text or JSON column.
+    fn no_nul(&mut self, field: &str, value: &str) {
+        if value.contains('\0') {
+            self.push(field, "must not contain U+0000", Reason::InvalidFormat);
+        }
+    }
+
     fn len_between(&mut self, field: &str, value: &str, min: usize, max: usize) {
+        self.no_nul(field, value);
         let n = value.chars().count();
         if n < min {
             self.push(
@@ -129,6 +139,7 @@ impl Checker {
     }
 
     fn http_url(&mut self, field: &str, value: &str) {
+        self.no_nul(field, value);
         if value.chars().count() > URL_MAX {
             self.push(
                 field,
@@ -170,6 +181,9 @@ impl Checker {
     }
 
     fn json_document(&mut self, field: &str, value: &serde_json::Value) {
+        if json_has_nul(value) {
+            self.push(field, "must not contain U+0000", Reason::InvalidFormat);
+        }
         let bytes = serde_json::to_vec(value).map_or(usize::MAX, |v| v.len());
         if bytes > self.limits.max_json_document_bytes {
             self.push(
@@ -203,6 +217,14 @@ impl Checker {
             );
         }
         for mime in list {
+            if mime.len() > MIME_MAX {
+                self.push(
+                    field,
+                    format!("a media type must be at most {MIME_MAX} characters"),
+                    Reason::TooLarge,
+                );
+                continue;
+            }
             let ok = mime.split_once('/').is_some_and(|(t, s)| {
                 !t.is_empty()
                     && !s.is_empty()
@@ -221,6 +243,7 @@ impl Checker {
     }
 
     fn capabilities(&mut self, caps: &ModelCapabilities) {
+        self.serialized_document("capabilities", caps);
         self.mime_list(
             "capabilities/vision/supported_mime_types",
             &caps.vision.supported_mime_types,
@@ -244,6 +267,7 @@ impl Checker {
     }
 
     fn disabled_capabilities(&mut self, caps: &DisabledCapabilities) {
+        self.serialized_document("disabled_capabilities", caps);
         self.mime_list(
             "disabled_capabilities/vision/disabled_mime_types",
             &caps.vision.disabled_mime_types,
@@ -275,6 +299,7 @@ impl Checker {
             );
         }
         for (i, name) in names.iter().enumerate() {
+            self.no_nul(&format!("allow_extra_params/{i}"), name);
             let n = name.chars().count();
             if n == 0 || n > EXTRA_PARAM_NAME_MAX {
                 self.push(
@@ -298,6 +323,17 @@ impl Checker {
         if value.is_some_and(|v| i64::try_from(v).is_err()) {
             self.push("size_bytes", "must be at most 2^63 - 1", Reason::TooLarge);
         }
+    }
+}
+
+fn json_has_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(json_has_nul),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key.contains('\0') || json_has_nul(value)),
+        _ => false,
     }
 }
 
@@ -471,7 +507,7 @@ mod tests {
     use uuid::Uuid;
 
     const LIMITS: Limits = Limits {
-        max_json_document_bytes: 64,
+        max_json_document_bytes: 1024,
     };
 
     fn reasons(result: Result<(), DomainError>) -> Vec<(String, Reason)> {
@@ -494,7 +530,7 @@ mod tests {
         assert!(reasons(validate_create_provider(&ok, LIMITS)).is_empty());
 
         let bad = CreateProviderRequestV1::builder("Open AI", "", gts())
-            .metadata(serde_json::json!({ "k": "x".repeat(100) }))
+            .metadata(serde_json::json!({ "k": "x".repeat(2000) }))
             .build();
         let r = reasons(validate_create_provider(&bad, LIMITS));
         assert!(r.contains(&("slug".into(), Reason::InvalidFormat)), "{r:?}");
@@ -557,7 +593,7 @@ mod tests {
         req.allow_extra_params = vec![String::new()];
         req.capabilities.vision.enabled = true;
         req.capabilities.vision.supported_mime_types = vec!["image/PNG".into()];
-        req.provider_settings = serde_json::json!({ "k": "x".repeat(100) });
+        req.provider_settings = serde_json::json!({ "k": "x".repeat(2000) });
         let r = reasons(validate_create_model(&req, LIMITS));
         let expect = [
             ("provider_model_id", Reason::InvalidFormat),
@@ -576,6 +612,39 @@ mod tests {
         for (f, reason) in expect {
             assert!(r.contains(&(f.to_owned(), reason)), "missing {f}: {r:?}");
         }
+    }
+
+    #[test]
+    fn nul_characters_and_oversized_capabilities_are_rejected() {
+        let mut req = model_req();
+        req.display_name = "GPT\0".into();
+        req.provider_settings = serde_json::json!({ "k\0": { "nested": ["a\0"] } });
+        req.capabilities.vision.supported_mime_types =
+            vec![format!("image/{}", "a".repeat(MIME_MAX))];
+        req.disabled_capabilities.vision.disabled_mime_types = (0..MIME_LIST_MAX)
+            .map(|i| format!("image/x-{i:060}"))
+            .collect();
+        let r = reasons(validate_create_model(&req, LIMITS));
+        let expect = [
+            ("display_name", Reason::InvalidFormat),
+            ("provider_settings", Reason::InvalidFormat),
+            ("capabilities/vision/supported_mime_types", Reason::TooLarge),
+            ("disabled_capabilities", Reason::TooLarge),
+        ];
+        for (f, reason) in expect {
+            assert!(r.contains(&(f.to_owned(), reason)), "missing {f}: {r:?}");
+        }
+
+        let bad = CreateProviderRequestV1::builder("openai", "Open\0AI", gts())
+            .metadata(serde_json::json!({ "k": "v\0" }))
+            .build();
+        assert_eq!(
+            reasons(validate_create_provider(&bad, LIMITS)),
+            vec![
+                ("name".into(), Reason::InvalidFormat),
+                ("metadata".into(), Reason::InvalidFormat)
+            ]
+        );
     }
 
     #[test]

@@ -1107,15 +1107,15 @@ async fn pdp_outcomes_per_operation() {
 
     // Catalog reasons come before the PDP on resolve.
     *denied.lock().unwrap() = vec!["evaluate".into()];
+    let calls_before = h.authz.actions().len();
     assert!(matches!(
         h.resolve(t.other, "openai::o1-preview").await,
         Err(DomainError::ModelNotFound { .. })
     ));
-    let actions = h.authz.actions();
     assert_eq!(
-        actions.last().map(String::as_str),
-        Some("evaluate"),
-        "{actions:?}"
+        h.authz.actions().len(),
+        calls_before,
+        "a model outside the catalog makes no PDP call"
     );
 }
 
@@ -1551,6 +1551,122 @@ async fn available_list_equals_the_set_of_resolvable_models() {
     }
 }
 
+/// One generated catalog: per tenant and slug an optional provider
+/// `(shared, enabled)`, per provider and name an optional model
+/// `(shared, approval state)`, and the self-managed flags of Partner and
+/// Customer.
+#[derive(Debug, Clone)]
+struct GeneratedCatalog {
+    providers: Vec<Option<(bool, bool)>>,
+    models: Vec<Option<(bool, u8)>>,
+    partner_self_managed: bool,
+    customer_self_managed: bool,
+}
+
+const GENERATED_SLUGS: [&str; 2] = ["alpha", "beta"];
+const GENERATED_NAMES: [&str; 2] = ["m1", "m2"];
+
+fn generated_catalog() -> impl proptest::strategy::Strategy<Value = GeneratedCatalog> {
+    use proptest::prelude::*;
+    (
+        proptest::collection::vec(proptest::option::of((any::<bool>(), any::<bool>())), 10),
+        proptest::collection::vec(proptest::option::of((any::<bool>(), 0..4u8)), 20),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(providers, models, partner_self_managed, customer_self_managed)| GeneratedCatalog {
+                providers,
+                models,
+                partner_self_managed,
+                customer_self_managed,
+            },
+        )
+}
+
+fn sharing(shared: bool) -> SharingMode {
+    if shared {
+        SharingMode::Shared
+    } else {
+        SharingMode::Tenant
+    }
+}
+
+/// Builds the catalog and returns, per tenant, the available list and the
+/// set of ids that resolve.
+async fn available_and_resolvable(
+    catalog: GeneratedCatalog,
+) -> Vec<(BTreeSet<String>, BTreeSet<String>)> {
+    let t = Tenants::new();
+    let mut resolver = t.resolver();
+    if catalog.partner_self_managed {
+        resolver = resolver.with_self_managed(t.partner);
+    }
+    if catalog.customer_self_managed {
+        resolver = resolver.with_self_managed(t.customer);
+    }
+    let h = harness(resolver).await;
+    let slots = t
+        .all()
+        .into_iter()
+        .flat_map(|tenant| GENERATED_SLUGS.map(|slug| (tenant, slug)));
+    for (slot, (tenant, slug)) in slots.enumerate() {
+        let Some((shared, enabled)) = catalog.providers[slot] else {
+            continue;
+        };
+        let provider = h.provider(tenant, slug, sharing(shared), enabled).await;
+        for (n, name) in GENERATED_NAMES.into_iter().enumerate() {
+            let Some((shared, state)) = catalog.models[slot * 2 + n] else {
+                continue;
+            };
+            let state = match state {
+                0 => ApprovalState::Pending,
+                1 => ApprovalState::Approved,
+                2 => ApprovalState::Rejected,
+                _ => ApprovalState::Revoked,
+            };
+            h.model(tenant, provider, name, sharing(shared), state)
+                .await;
+        }
+    }
+    let mut out = Vec::new();
+    for tenant in t.all() {
+        let mut resolvable = BTreeSet::new();
+        for slug in GENERATED_SLUGS {
+            for name in GENERATED_NAMES {
+                let id = format!("{slug}::{name}");
+                if h.resolve(tenant, &id).await.is_ok() {
+                    resolvable.insert(id);
+                }
+            }
+        }
+        out.push((h.available(tenant).await, resolvable));
+    }
+    out
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// `list_available_models` returns exactly the canonical ids for which
+    /// `resolve_model` succeeds, over shadowing, sharing, approval,
+    /// enablement, and barriers.
+    #[test]
+    fn available_list_equals_resolvable_set_for_any_catalog(catalog in generated_catalog()) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (tenant, (available, resolvable)) in runtime
+            .block_on(available_and_resolvable(catalog))
+            .into_iter()
+            .enumerate()
+        {
+            proptest::prop_assert_eq!(available, resolvable, "tenant #{}", tenant);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Isolation barriers (ADR-0001)
 // ---------------------------------------------------------------------------
@@ -1740,20 +1856,14 @@ async fn pdp_decision_precedes_the_chain() {
     )
     .await;
     let query = ODataQuery::default();
-    assert!(
-        denied
-            .service
-            .list_models(&ctx(t.team), &query)
-            .await
-            .is_err()
-    );
-    assert!(
-        denied
-            .service
-            .get_provider(&ctx(t.team), provider)
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        denied.service.list_models(&ctx(t.team), &query).await,
+        Err(DomainError::NotPermitted { .. })
+    ));
+    assert!(matches!(
+        denied.service.get_provider(&ctx(t.team), provider).await,
+        Err(DomainError::NotPermitted { .. })
+    ));
     assert_eq!(
         denied.resolver.calls(),
         0,

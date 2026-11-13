@@ -364,14 +364,18 @@ async fn provider_lifecycle_statuses_headers_and_preconditions() {
         PROVIDER_RESOURCE_TYPE
     );
 
-    let malformed = h
-        .patch(h.root, &path, Some("W/\"1\""), &json!({ "name": "x" }))
-        .await;
-    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        malformed.violations(),
-        vec![("If-Match".to_owned(), field::INVALID_FORMAT.to_owned())]
-    );
+    // The validator is compared with the ETag as a string: a weak or
+    // differently spelled one never matches.
+    for tag in ["W/\"1\"", "\"01\"", "\"+1\"", "1"] {
+        let unmatched = h
+            .patch(h.root, &path, Some(tag), &json!({ "name": "x" }))
+            .await;
+        assert_eq!(unmatched.status, StatusCode::CONFLICT, "{tag}");
+        assert_eq!(
+            unmatched.body["context"]["reason"],
+            aborted::OPTIMISTIC_LOCK_FAILURE
+        );
+    }
 
     // A stale validator is `aborted` (409), not 412, and changes nothing.
     let stale = h
@@ -1054,6 +1058,15 @@ async fn rest_and_sdk_return_the_same_records() {
             json!({ "base_url": "https://openai.example/v1", "family": "gpt" }),
         )
         .await;
+    // A second model and an own provider, so the lists carry several items.
+    h.model(
+        h.root,
+        &provider,
+        "gpt-4o-mini",
+        json!({ "vendor": "openai" }),
+    )
+    .await;
+    h.provider(h.child, "anthropic", "tenant").await;
     let ctx = security_context(h.child);
     let provider_id = Uuid::parse_str(&provider).unwrap();
     let model_id = Uuid::parse_str(&model).unwrap();
@@ -1068,11 +1081,8 @@ async fn rest_and_sdk_return_the_same_records() {
         .await
         .unwrap();
     let rest = h.get(h.child, "/available-models").await;
-    assert_same_json(
-        &rest.body["items"],
-        &sdk_json(&sdk.items),
-        "list_available_models",
-    );
+    assert_eq!(sdk.items.len(), 2);
+    assert_same_json(&rest.body, &sdk_json(&sdk), "list_available_models");
 
     // The management routes flatten the SDK entry: the record plus the flags.
     let flatten = |record: Value, flags: &[(&str, bool)]| {
@@ -1118,20 +1128,52 @@ async fn rest_and_sdk_return_the_same_records() {
         .await
         .unwrap();
     let rest = h.get(h.child, "/models").await;
-    assert_eq!(
-        rest.body["items"].as_array().unwrap().len(),
-        sdk.items.len()
+    assert_eq!(sdk.items.len(), 2);
+    let items: Vec<Value> = sdk
+        .items
+        .iter()
+        .map(|e| {
+            flatten(
+                sdk_json(&e.model),
+                &[
+                    ("inherited", e.inherited),
+                    ("shadowed", e.shadowed),
+                    ("provider_enabled", e.provider_enabled),
+                    ("available_for_eval", e.available_for_eval),
+                ],
+            )
+        })
+        .collect();
+    assert_same_json(
+        &rest.body,
+        &json!({ "items": items, "page_info": sdk_json(&sdk.page_info) }),
+        "list_models",
     );
-    assert_eq!(rest.body["items"][0]["id"], model.as_str());
     let sdk = h
         .sdk
         .list_providers(&ctx, &ODataQuery::default())
         .await
         .unwrap();
     let rest = h.get(h.child, "/providers").await;
-    assert_eq!(
-        rest.body["items"].as_array().unwrap().len(),
-        sdk.items.len()
+    assert_eq!(sdk.items.len(), 2);
+    let items: Vec<Value> = sdk
+        .items
+        .iter()
+        .map(|e| {
+            flatten(
+                sdk_json(&e.provider),
+                &[
+                    ("inherited", e.inherited),
+                    ("shadowed", e.shadowed),
+                    ("available_for_eval", e.available_for_eval),
+                ],
+            )
+        })
+        .collect();
+    assert_same_json(
+        &rest.body,
+        &json!({ "items": items, "page_info": sdk_json(&sdk.page_info) }),
+        "list_providers",
     );
 }
 

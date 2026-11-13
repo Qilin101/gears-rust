@@ -15,11 +15,12 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use super::dto::{
-    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelEntryDto, PageInfoDto,
-    ProviderEntryDto, UpdateModelRequestDto, UpdateProviderRequestDto,
+    CreateModelRequestDto, CreateProviderRequestDto, ModelDto, ModelEntryDto, ProviderEntryDto,
+    UpdateModelRequestDto, UpdateProviderRequestDto,
 };
 use super::parse;
 use crate::domain::error::DomainError;
+use crate::domain::precondition::version_tag;
 use crate::domain::service::Service;
 
 type Svc = Extension<Arc<Service>>;
@@ -38,7 +39,7 @@ fn projected<T: serde::Serialize, U: Into<T>>(
 
 /// The strong `ETag` of a record: its bare row version, quoted.
 fn etag(version: i64) -> (HeaderName, String) {
-    (header::ETAG, format!("\"{version}\""))
+    (header::ETAG, version_tag(version))
 }
 
 /// 200 with the entry and its `ETag`.
@@ -136,18 +137,18 @@ pub async fn update_provider(
     headers: HeaderMap,
     JsonRequest(body): JsonRequest<serde_json::Value>,
 ) -> ApiResult<impl IntoResponse> {
-    let req = parse::if_match(&headers, true)
-        .and_then(|expected_version| {
+    let (precondition, req) = parse::if_match(&headers, true)
+        .and_then(|precondition| {
             parse::check_update_body(
                 &body,
                 parse::PROVIDER_IMMUTABLE_FIELDS,
                 parse::PROVIDER_NULLABLE_FIELDS,
             )?;
             let dto: UpdateProviderRequestDto = parse::body(body)?;
-            parse::update_provider(dto, expected_version)
+            Ok((precondition, parse::update_provider(dto)?))
         })
         .map_err(DomainError::for_provider)?;
-    let entry = svc.update_provider(&ctx, id, req).await?;
+    let entry = svc.update_provider_if(&ctx, id, req, precondition).await?;
     Ok(ok_with_etag(
         entry.provider.version,
         ProviderEntryDto::from(entry),
@@ -161,8 +162,8 @@ pub async fn delete_provider(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
-    let expected_version = parse::if_match(&headers, false).map_err(DomainError::for_provider)?;
-    svc.delete_provider(&ctx, id, expected_version).await?;
+    let precondition = parse::if_match(&headers, false).map_err(DomainError::for_provider)?;
+    svc.delete_provider_if(&ctx, id, precondition).await?;
     Ok(no_content())
 }
 
@@ -218,7 +219,7 @@ pub async fn update_model(
     headers: HeaderMap,
     JsonRequest(body): JsonRequest<serde_json::Value>,
 ) -> ApiResult<impl IntoResponse> {
-    let expected_version = parse::if_match(&headers, true)?;
+    let precondition = parse::if_match(&headers, true)?;
     parse::check_update_body(
         &body,
         parse::MODEL_IMMUTABLE_FIELDS,
@@ -226,7 +227,7 @@ pub async fn update_model(
     )?;
     let dto: UpdateModelRequestDto = parse::body(body)?;
     let entry = svc
-        .update_model(&ctx, id, parse::update_model(dto, expected_version)?)
+        .update_model_if(&ctx, id, parse::update_model(dto)?, precondition)
         .await?;
     Ok(ok_with_etag(
         entry.model.version,
@@ -241,15 +242,9 @@ pub async fn delete_model(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
-    let expected_version = parse::if_match(&headers, false)?;
-    svc.delete_model(&ctx, id, expected_version).await?;
+    let precondition = parse::if_match(&headers, false)?;
+    svc.delete_model_if(&ctx, id, precondition).await?;
     Ok(no_content())
-}
-
-// Keep the page-info DTO reachable for the OpenAPI schema of the list routes.
-#[allow(dead_code)]
-fn _page_info(p: toolkit_odata::PageInfo) -> PageInfoDto {
-    p.into()
 }
 
 #[cfg(test)]

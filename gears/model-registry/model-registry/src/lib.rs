@@ -23,5 +23,6 @@ pub mod domain;
 pub mod gts;
 #[doc(hidden)]
 pub mod infra;
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod testing;

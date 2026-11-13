@@ -142,13 +142,6 @@ pub struct UpdateProviderRequestDto {
     pub metadata: Option<Option<JsonValue>>,
 }
 
-#[api_dto(response)]
-#[derive(Debug, Clone)]
-pub struct ProviderEntryPageDto {
-    pub items: Vec<ProviderEntryDto>,
-    pub page_info: PageInfoDto,
-}
-
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -567,49 +560,6 @@ pub struct UpdateModelRequestDto {
     pub allow_extra_params: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_settings: Option<JsonValue>,
-}
-
-#[api_dto(response)]
-#[derive(Debug, Clone)]
-pub struct ModelPageDto {
-    pub items: Vec<ModelDto>,
-    pub page_info: PageInfoDto,
-}
-
-#[api_dto(response)]
-#[derive(Debug, Clone)]
-pub struct ModelEntryPageDto {
-    pub items: Vec<ModelEntryDto>,
-    pub page_info: PageInfoDto,
-}
-
-// ---------------------------------------------------------------------------
-// Shared
-// ---------------------------------------------------------------------------
-
-/// Mirrors `toolkit_odata::PageInfo`.
-///
-/// Aliased in the `OpenAPI` schema: types-registry also exposes a
-/// `PageInfoDto` of another shape in the server's shared registry.
-#[api_dto(response)]
-#[derive(Debug, Clone)]
-#[schema(as = ModelRegistryPageInfoDto)]
-pub struct PageInfoDto {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prev_cursor: Option<String>,
-    pub limit: u64,
-}
-
-impl From<toolkit_odata::PageInfo> for PageInfoDto {
-    fn from(p: toolkit_odata::PageInfo) -> Self {
-        Self {
-            next_cursor: p.next_cursor,
-            prev_cursor: p.prev_cursor,
-            limit: p.limit,
-        }
-    }
 }
 
 #[cfg(test)]
