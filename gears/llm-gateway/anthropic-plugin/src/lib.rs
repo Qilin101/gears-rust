@@ -12,6 +12,7 @@ mod client;
 mod error;
 mod request;
 mod response;
+mod schema;
 pub mod settings;
 mod stream;
 mod wire;

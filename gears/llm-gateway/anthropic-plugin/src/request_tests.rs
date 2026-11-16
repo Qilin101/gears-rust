@@ -38,7 +38,7 @@ fn wire(settings: &AnthropicProviderSettingsV1, body_json: Value) -> Value {
 fn text_input_with_instructions() {
     let wire = wire(
         &settings(),
-        json!({ "model": "m", "input": "Hello", "instructions": "Be brief", "temperature": 0.2 }),
+        json!({ "model": "m", "input": "Hello", "instructions": "Be brief" }),
     );
     assert_eq!(
         wire,
@@ -46,8 +46,7 @@ fn text_input_with_instructions() {
             "model": "claude-sonnet-5-5",
             "max_tokens": 8192,
             "system": [{ "type": "text", "text": "Be brief" }],
-            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "Hello" }] }],
-            "temperature": 0.2
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "Hello" }] }]
         })
     );
 }
@@ -55,8 +54,6 @@ fn text_input_with_instructions() {
 #[test]
 fn settings_fill_defaults_and_request_overrides() {
     let settings = AnthropicProviderSettingsV1 {
-        temperature: Some(0.5),
-        top_k: Some(40),
         max_tokens: Some(1024),
         stop_sequences: Some(vec!["END".to_owned()]),
         system: Some("Default system".to_owned()),
@@ -64,11 +61,9 @@ fn settings_fill_defaults_and_request_overrides() {
     };
     let wire = wire(
         &settings,
-        json!({ "model": "m", "input": "Hi", "temperature": 0.9, "max_output_tokens": 256 }),
+        json!({ "model": "m", "input": "Hi", "max_output_tokens": 256 }),
     );
-    assert_eq!(wire["temperature"], json!(0.9));
     assert_eq!(wire["max_tokens"], json!(256));
-    assert_eq!(wire["top_k"], json!(40));
     assert_eq!(wire["stop_sequences"], json!(["END"]));
     assert_eq!(
         wire["system"],
@@ -243,7 +238,8 @@ fn reasoning_and_structured_output() {
     );
     assert_eq!(
         out["output_config"],
-        json!({ "effort": "high", "format": { "type": "json_schema", "schema": { "type": "object" } } })
+        json!({ "effort": "high", "format": { "type": "json_schema", "schema":
+            { "type": "object", "properties": {}, "additionalProperties": false } } })
     );
 
     let budget = wire(
@@ -260,6 +256,37 @@ fn reasoning_and_structured_output() {
         json!({ "model": "m", "input": "Hi", "reasoning": { "effort": "none" } }),
     );
     assert_eq!(disabled["thinking"], json!({ "type": "disabled" }));
+}
+
+#[test]
+fn summary_alone_requests_summarized_thinking() {
+    let request = json!({ "model": "m", "input": "Hi", "reasoning": { "summary": "auto" } });
+    let out = wire(&settings(), request.clone());
+    assert_eq!(
+        out["thinking"],
+        json!({ "type": "adaptive", "display": "summarized" })
+    );
+
+    let budget = AnthropicProviderSettingsV1 {
+        thinking: Some(AnthropicThinking::Enabled {
+            budget_tokens: 1024,
+            display: None,
+        }),
+        ..settings()
+    };
+    assert_eq!(
+        wire(&budget, request.clone())["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 1024, "display": "summarized" })
+    );
+
+    let disabled = AnthropicProviderSettingsV1 {
+        thinking: Some(AnthropicThinking::Disabled),
+        ..settings()
+    };
+    assert_eq!(
+        wire(&disabled, request)["thinking"],
+        json!({ "type": "disabled" })
+    );
 }
 
 #[test]
@@ -307,10 +334,15 @@ fn unsupported_parameters_reject_or_drop() {
 
     let built = build_with(
         &settings(),
-        json!({ "model": "m", "input": "Hi", "seed": 7, "presence_penalty": 0.1, "drop_unsupported_params": true }),
+        json!({ "model": "m", "input": "Hi", "temperature": 0.2, "top_p": 0.9, "seed": 7, "presence_penalty": 0.1, "drop_unsupported_params": true }),
     )
     .unwrap();
-    assert_eq!(built.ignored_parameters, vec!["seed", "presence_penalty"]);
+    assert_eq!(
+        built.ignored_parameters,
+        vec!["temperature", "top_p", "seed", "presence_penalty"]
+    );
+    let wire = built.request.to_body().unwrap();
+    assert!(wire.get("temperature").is_none() && wire.get("top_p").is_none());
 }
 
 #[test]
@@ -355,6 +387,17 @@ fn json_object_format_is_not_supported() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "capability_not_supported");
+}
+
+#[test]
+fn invalid_output_schema_is_a_validation_error() {
+    let err = build_with(
+        &settings(),
+        json!({ "model": "m", "input": "Hi", "text": { "format":
+            { "type": "json_schema", "name": "r", "schema": { "properties": {} }, "strict": true } } }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "validation_error");
 }
 
 #[test]

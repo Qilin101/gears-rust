@@ -11,9 +11,6 @@ fn document() -> serde_json::Value {
         "oagw_alias": "anthropic",
         "anthropic_version": "2026-10-21",
         "anthropic_beta": ["files-api-2025-04-14"],
-        "temperature": null,
-        "top_p": null,
-        "top_k": 40,
         "max_tokens": 4096,
         "stop_sequences": null,
         "system": null,
@@ -48,7 +45,7 @@ fn schema_is_registered_with_settings_properties() {
 fn narrows_settings_document() {
     let settings = gts::try_narrow::<AnthropicProviderSettingsV1>(TYPE_ID, document()).unwrap();
     assert_eq!(settings.oagw_alias, "anthropic");
-    assert_eq!(settings.top_k, Some(40));
+    assert_eq!(settings.max_tokens, Some(4096));
     assert_eq!(
         settings.service_tier,
         Some(AnthropicServiceTier::StandardOnly)

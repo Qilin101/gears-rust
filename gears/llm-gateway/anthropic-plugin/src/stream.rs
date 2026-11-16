@@ -3,7 +3,7 @@
 //!
 //! Anthropic streams one content block at a time. Text, tool arguments, and
 //! thinking are forwarded as deltas; other blocks are emitted whole when they
-//! stop. Every stream ends with exactly one terminal event.
+//! stop. A web search item is done once its result block arrives. Every stream ends with exactly one terminal event.
 
 use std::collections::VecDeque;
 
@@ -83,8 +83,12 @@ enum OpenContent {
         thinking: String,
         signature: String,
     },
-    /// Emitted whole at `content_block_stop`.
-    Whole(Value),
+    /// Emitted whole at `content_block_stop`; `input_json` collects a
+    /// streamed `input`.
+    Whole {
+        raw: Value,
+        input_json: String,
+    },
 }
 
 struct Translator {
@@ -97,6 +101,8 @@ struct Translator {
     open: Option<OpenBlock>,
     /// Output index of a message item not yet reported done.
     open_message: Option<u32>,
+    /// Output indexes of web search items not yet reported done.
+    open_searches: Vec<u32>,
     usage: Value,
     stop_reason: Option<String>,
 }
@@ -114,6 +120,7 @@ impl Translator {
             builder,
             open: None,
             open_message: None,
+            open_searches: Vec::new(),
             usage: Value::Null,
             stop_reason: None,
         }
@@ -200,7 +207,10 @@ impl Translator {
                     signature,
                 }
             }
-            _ => OpenContent::Whole(raw),
+            _ => OpenContent::Whole {
+                raw,
+                input_json: String::new(),
+            },
         };
         self.open = Some(OpenBlock {
             index,
@@ -329,6 +339,13 @@ impl Translator {
                     signature.push_str(&delta);
                     None
                 }
+                (
+                    OpenContent::Whole { input_json, .. },
+                    BlockDelta::InputJsonDelta { partial_json },
+                ) => {
+                    input_json.push_str(&partial_json);
+                    None
+                }
                 _ => None,
             };
         if let Some(event) = event {
@@ -388,20 +405,40 @@ impl Translator {
                 });
                 self.item_done(output_index);
             }
-            OpenContent::Whole(raw) => {
-                let placement = self.builder.push(Block::parse(raw));
-                if placement.new_item {
-                    let item = self
-                        .builder
-                        .items()
-                        .get(placement.output_index as usize)
-                        .cloned();
-                    if let Some(item) = item {
-                        self.item_added(&placement, item);
-                    }
+            OpenContent::Whole {
+                mut raw,
+                input_json,
+            } => {
+                if let Ok(input) = serde_json::from_str::<Value>(&input_json)
+                    && let Some(object) = raw.as_object_mut()
+                {
+                    object.insert("input".to_owned(), input);
                 }
-                self.item_done(placement.output_index);
+                self.stop_whole(Block::parse(raw));
             }
+        }
+    }
+
+    /// A web search call is reported done when its result block arrives, or
+    /// at the end of the stream.
+    fn stop_whole(&mut self, block: Block) {
+        let is_search_call = matches!(block, Block::WebSearchCall { .. });
+        let placement = self.builder.push(block);
+        let output_index = placement.output_index;
+        if placement.new_item {
+            let item = self.builder.items().get(output_index as usize).cloned();
+            if let Some(mut item) = item {
+                if let (true, OutputItem::WebSearchCall(call)) = (is_search_call, &mut item) {
+                    call.status = ItemStatus::InProgress;
+                }
+                self.item_added(&placement, item);
+            }
+        }
+        if is_search_call {
+            self.open_searches.push(output_index);
+        } else {
+            self.open_searches.retain(|index| *index != output_index);
+            self.item_done(output_index);
         }
     }
 
@@ -470,6 +507,9 @@ impl Translator {
 
     fn complete(&mut self) {
         self.close_message();
+        for output_index in std::mem::take(&mut self.open_searches) {
+            self.item_done(output_index);
+        }
         let resource = response::finish(
             self.snapshot.clone(),
             &self.envelope,

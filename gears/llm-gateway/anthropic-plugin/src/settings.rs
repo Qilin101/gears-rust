@@ -99,7 +99,7 @@ pub struct AnthropicOutputConfig {
     base = ProviderTypeV1,
     type_id = gts_id!("cf.genai.model.provider.v1~cf.genai._.anthropic.v1~"),
     description = "Anthropic provider settings (Messages API)",
-    properties = "oagw_alias,anthropic_version,anthropic_beta,temperature,top_p,top_k,max_tokens,stop_sequences,system,inference_geo,service_tier,container,thinking,tool_choice,output_config"
+    properties = "oagw_alias,anthropic_version,anthropic_beta,max_tokens,stop_sequences,system,inference_geo,service_tier,container,thinking,tool_choice,output_config"
 )]
 pub struct AnthropicProviderSettingsV1 {
     /// OAGW upstream alias the plugin sends provider calls through.
@@ -108,9 +108,6 @@ pub struct AnthropicProviderSettingsV1 {
     pub anthropic_version: String,
     /// `anthropic-beta` flags.
     pub anthropic_beta: Vec<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub top_k: Option<u32>,
     /// Default `max_tokens`; Anthropic requires it on every request.
     pub max_tokens: Option<u32>,
     pub stop_sequences: Option<Vec<String>>,

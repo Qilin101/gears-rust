@@ -10,6 +10,7 @@ use llm_gateway_sdk::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::schema;
 use crate::settings::{
     AnthropicJsonOutputFormat, AnthropicOutputEffort, AnthropicProviderSettingsV1,
     AnthropicServiceTier, AnthropicThinking, AnthropicThinkingDisplay, AnthropicToolChoice,
@@ -104,9 +105,6 @@ pub fn build(
         max_tokens: max_tokens(target, body)?,
         messages: conversation.messages,
         system: conversation.system,
-        temperature: body.temperature.or(settings.temperature),
-        top_p: body.top_p.or(settings.top_p),
-        top_k: settings.top_k,
         stop_sequences: settings.stop_sequences.clone(),
         tools,
         tool_choice,
@@ -143,6 +141,8 @@ pub fn build(
 
 fn unsupported_parameters(body: &CreateResponseBody) -> Result<Vec<String>, LlmGatewayError> {
     let checks = [
+        ("temperature", body.temperature.is_some()),
+        ("top_p", body.top_p.is_some()),
         ("seed", body.seed.is_some()),
         ("presence_penalty", body.presence_penalty.is_some()),
         ("frequency_penalty", body.frequency_penalty.is_some()),
@@ -269,7 +269,21 @@ fn reasoning(
             effort.or(default_effort),
         ),
         (Some(_), None) => (Some(Thinking::Adaptive { display }), effort),
-        (None, None) => (default_thinking, default_effort),
+        (None, None) => {
+            let thinking = match (default_thinking, display) {
+                (Some(Thinking::Enabled { budget_tokens, .. }), Some(_)) => {
+                    Some(Thinking::Enabled {
+                        budget_tokens,
+                        display,
+                    })
+                }
+                (Some(Thinking::Adaptive { .. }) | None, Some(_)) => {
+                    Some(Thinking::Adaptive { display })
+                }
+                (thinking, _) => thinking,
+            };
+            (thinking, default_effort)
+        }
     }
 }
 
@@ -303,11 +317,14 @@ fn output_config(
     effort: Option<AnthropicOutputEffort>,
 ) -> Result<Option<OutputConfig>, LlmGatewayError> {
     let format = match body.text.as_ref().map(|t| &t.format) {
-        Some(TextFormatKind::JsonSchema { schema, .. }) => Some(OutputFormat::JsonSchema {
-            schema: schema
+        Some(TextFormatKind::JsonSchema { schema, .. }) => {
+            let schema = schema
                 .clone()
-                .unwrap_or_else(|| json!({ "type": "object" })),
-        }),
+                .unwrap_or_else(|| json!({ "type": "object" }));
+            Some(OutputFormat::JsonSchema {
+                schema: schema::adapt(&schema)?,
+            })
+        }
         Some(TextFormatKind::JsonObject) => {
             return Err(LlmGatewayError::capability_not_supported(
                 "text.format json_object",

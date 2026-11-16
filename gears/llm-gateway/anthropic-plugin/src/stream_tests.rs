@@ -223,7 +223,11 @@ async fn whole_blocks_are_emitted_at_stop() {
     let events = run(vec![
         message_start(),
         event(json!({ "type": "content_block_start", "index": 0, "content_block":
-            { "type": "server_tool_use", "id": "s1", "name": "web_search", "input": { "query": "rust" } } })),
+            { "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} } })),
+        event(json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"query\":" } })),
+        event(json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "\"rust\"}" } })),
         event(json!({ "type": "content_block_stop", "index": 0 })),
         event(json!({ "type": "content_block_start", "index": 1, "content_block":
             { "type": "web_search_tool_result", "tool_use_id": "s1", "content": [
@@ -240,16 +244,50 @@ async fn whole_blocks_are_emitted_at_stop() {
         [
             "response.output_item.added",
             "response.output_item.done",
-            "response.output_item.done",
             "response.completed",
         ]
     );
+    let added = serde_json::to_value(&events[2]).unwrap();
+    assert_eq!(added["item"]["status"], json!("in_progress"));
+    assert_eq!(added["item"]["queries"], json!(["rust"]));
     let output = serde_json::to_value(&terminal(&events).output).unwrap();
     assert_eq!(
         output,
         json!([{ "type": "cf_gears:web_search_call", "id": "ws_req_0", "status": "completed",
             "queries": ["rust"], "results": [{ "url": "https://rust-lang.org", "title": "Rust" }] }])
     );
+}
+
+#[tokio::test]
+async fn unanswered_search_and_provider_blocks_are_done_once() {
+    let events = run(vec![
+        message_start(),
+        event(json!({ "type": "content_block_start", "index": 0, "content_block":
+            { "type": "server_tool_use", "id": "f1", "name": "web_fetch", "input": {} } })),
+        event(json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"url\":\"https://x.test\"}" } })),
+        event(json!({ "type": "content_block_stop", "index": 0 })),
+        event(json!({ "type": "content_block_start", "index": 1, "content_block":
+            { "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} } })),
+        event(json!({ "type": "content_block_stop", "index": 1 })),
+        event(json!({ "type": "message_delta", "delta": { "stop_reason": "pause_turn" }, "usage": { "output_tokens": 3 } })),
+        event(json!({ "type": "message_stop" })),
+    ])
+    .await;
+    let kinds: Vec<String> = events.iter().map(kind).collect();
+    assert_eq!(
+        kinds[2..],
+        [
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.completed",
+        ]
+    );
+    let output = serde_json::to_value(&terminal(&events).output).unwrap();
+    assert_eq!(output[0]["type"], json!("anthropic:server_tool_use"));
+    assert_eq!(output[0]["input"], json!({ "url": "https://x.test" }));
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn request_omits_unset_fields_and_extras_override() {
     let mut extra = Map::new();
-    extra.insert("top_k".to_owned(), json!(5));
+    extra.insert("inference_geo".to_owned(), json!("eu"));
     extra.insert("speed".to_owned(), json!("fast"));
     let request = MessagesRequest {
         model: "claude-x".to_owned(),
@@ -15,7 +15,7 @@ fn request_omits_unset_fields_and_extras_override() {
             role: Role::User,
             content: vec![ContentBlockParam::text("hi")],
         }],
-        top_k: Some(1),
+        inference_geo: Some("us".to_owned()),
         extra,
         ..MessagesRequest::default()
     };
@@ -25,7 +25,7 @@ fn request_omits_unset_fields_and_extras_override() {
             "model": "claude-x",
             "max_tokens": 64,
             "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }],
-            "top_k": 5,
+            "inference_geo": "eu",
             "speed": "fast"
         })
     );

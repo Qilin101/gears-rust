@@ -24,8 +24,7 @@ from Model Registry's `ProviderTypeV1`; it is the shape of a model's
 - `oagw_alias` — OAGW upstream alias; requests go to `/{oagw_alias}/v1/messages`.
 - `anthropic_version` — `anthropic-version` header (defaults to `2026-10-21`).
 - `anthropic_beta` — joined into the `anthropic-beta` header.
-- Inference defaults (`temperature`, `top_p`, `top_k`, `max_tokens`,
-  `stop_sequences`, `system`, `thinking`, `tool_choice`, `output_config`, …)
+- Inference defaults (`max_tokens`, `stop_sequences`, `system`, `thinking`, `tool_choice`, `output_config`, …)
   apply when the request leaves the field unset.
 
 ## OAGW upstream
