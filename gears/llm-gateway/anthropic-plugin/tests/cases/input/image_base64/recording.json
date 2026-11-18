@@ -1,0 +1,27 @@
+{
+  "recorded_at": "2026-11-18T05:14:40+00:00",
+  "sdk_version": "2.8.0",
+  "request": {
+    "max_tokens": 64,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "What colour is this square? One word.",
+            "type": "text"
+          },
+          {
+            "source": {
+              "data": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=",
+              "media_type": "image/png",
+              "type": "base64"
+            },
+            "type": "image"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-haiku-5-5"
+  }
+}

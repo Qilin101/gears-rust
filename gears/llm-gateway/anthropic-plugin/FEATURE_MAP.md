@@ -34,10 +34,10 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 10 | Streaming | Terminal event | Supported | Exactly one of `response.completed`, `response.incomplete`, `response.failed`. The final snapshot equals the non-streaming response for the same blocks. |
 | 11 | Input | Text | Supported | `input_text` and string content → `text` block. |
 | 12 | Input | Images by URL or base64 | Supported | `input_image.image_url` (http(s) URL or base64 data URI) → `image` block. |
-| 13 | Input | Files by URL or base64 | Supported | `input_file.file_url` and `input_file.file_data` (data URI, or bare base64 taken as PDF) → `document` block with the given media type. Accepted file types are declared in the model capabilities. |
+| 13 | Input | Files by URL or base64 | Supported | `input_file.file_url` (http(s) URL or base64 data URI) and `input_file.file_data` (base64 data URI only) → `document` block with the media type of the data URI. `file_data` in any other format is rejected with `validation_error`. Accepted file types are declared in the model capabilities. |
 | 14 | Input | Images and files by `file_id` | Not supported by the plugin | Rejected with `capability_not_supported`. |
 | 15 | Input | Audio and video | Not supported by Anthropic | Rejected with `capability_not_supported`. |
-| 16 | Input | Conversation history | Supported | Assistant messages, `function_call`, `function_call_output`, and `reasoning` items with a signature map to assistant and user blocks. `anthropic:<type>` items are forwarded verbatim. |
+| 16 | Input | Conversation history | Supported | Assistant messages, `function_call`, `function_call_output`, and `reasoning` items with a signature map to assistant and user blocks. `anthropic:<type>` items are forwarded verbatim. Each `message` item is its own message; the other items join the adjacent message of the same role. |
 | 17 | Input | `cf_gears:web_search_call` items | Not supported by the plugin | Dropped from the input. |
 | 18 | Input | `item_reference` | Not supported by Anthropic | Rejected with `capability_not_supported`. |
 | 19 | User-defined tools | Function tools with a schema | Supported | `name`, `description`, `parameters` → `input_schema`, `strict`. The schema is forwarded verbatim. |
@@ -53,7 +53,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 29 | Reasoning | Effort `low` to `xhigh` | Supported | → `thinking: adaptive` and `output_config.effort`. |
 | 30 | Reasoning | Effort `none` | Supported | → `thinking: disabled`. |
 | 31 | Reasoning | Effort `max` | Not supported by LLM Gateway | `ReasoningEffort` ends at `xhigh`. `max` is available as the settings default `output_config.effort`. |
-| 32 | Reasoning | Budget | Supported | `budget_tokens` → `thinking: enabled` with that budget. |
+| 32 | Reasoning | Budget | Supported | `budget_tokens` → `thinking: enabled` with that budget. Newer models reject `thinking: enabled`. |
 | 33 | Reasoning | Summary | Supported | `summary` → `display: summarized`. Without effort or budget it applies to the settings default thinking, or to adaptive thinking when there is no default; a default of `disabled` stays disabled. |
 | 34 | Reasoning | Settings defaults | Supported | Without `reasoning` in the request, the settings `thinking` and `output_config.effort` apply. |
 | 35 | Max output tokens | `max_output_tokens` | Supported | → `max_tokens`, falling back to the settings `max_tokens`, then the model's output limit. A request with none of the three is rejected with `validation_error`. |

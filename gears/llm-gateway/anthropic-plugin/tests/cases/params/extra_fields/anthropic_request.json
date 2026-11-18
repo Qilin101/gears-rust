@@ -1,0 +1,18 @@
+{
+  "max_tokens": 32,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Write exactly: one two HALT three four",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "stop_sequences": [
+    "HALT"
+  ]
+}

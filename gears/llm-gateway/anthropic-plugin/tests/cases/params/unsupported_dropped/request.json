@@ -1,0 +1,17 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": "Reply with exactly: Hello!",
+  "drop_unsupported_params": true,
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "seed": 7,
+  "presence_penalty": 0.1,
+  "frequency_penalty": 0.1,
+  "top_logprobs": 3,
+  "max_tool_calls": 2,
+  "truncation": "auto",
+  "include": [
+    "message.output_text.logprobs"
+  ]
+}

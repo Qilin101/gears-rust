@@ -1,0 +1,93 @@
+{
+  "completed_at": 0,
+  "created_at": 0,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "id": "req_test",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 64,
+  "max_tool_calls": null,
+  "metadata": null,
+  "model": "claude",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQS3QUKEAgTGAI4AUIIdGhpbmtpbmcSDA4SoHlA315JQhDJTBoMDLkJuP5NIiB3ZaszIjBkolUUWB3fIg5kC1C8LBg5k9WHjiKzASNQTbobo8SIYmgvLpxPO4HubaARAb5d1tIq+gStciQD242ekuNXLECAfasuAb+Tf7vokgEHVLprz761pzggiypSAAVlPHuM7ZDhD7qZuwb6Zzah4hycbKb70ImUZLl5Stu5qfgkCiifqQrM9jmaqb04xIvddc1XB45y+G0aIofcmVgtpr3tWI6HJLwwOWYyHsVDKlBSOYKCNonf8On/CWEZZTB+1DFap3Lf4dv5DzDMhch2lbKci82ftFG99g+PQ4EoV3M1c5yuo9RP6+I2eTHH2PhiIx8lXUOgiBS7lRE0KxDhpSO5wuudIW8Tbykr5XhBinMBOfqtosLfEGk2V0PrMkZZ3wIvjoO6FSSrQPETLYW9Ie6ah8HSzLxxK0X8DvWlRNj6G86xs6zPz1z+88Fpj0qa0/bcxFiFBiDMjaSKphQS74/v1DRFSKY0TP3KRcTELA8dR3XuT5ixuNs++p4wLD67JeK/n2MYqHqFcC5ZXrw5a9Hy2chldUuewh4hEOPC+vHvOck46aWfVO/cQrNJAeulAoZyMppD+ZtXWi9HIbAn51HJmjvu2lJbIv4fPygk8bZldWzgV3QnCd+z9vC75IDxXHLFDykb8Bn3/1j++4tRUNXtQpGGj3gqSGZukK293/eQn+oXAy3k7yN0p15KaDLcVxkHWHhqX9i647gvroWCHWHxg7t9jdgaccX6KuWvUywP4eJZFELE4aCQxDFWPl0ZEhXPKqDZ1W4iu36onI9ZBLWNhEXnoJXLPH0RIUZKA0ntktaS9Cez8zkan7MCAeVAi4BjlzL6C0ET7X8tPelTiAn7wuEyPvte29icXQcciKFkp/879K7dt9sbpu0LyvMODv49HWt7Rbh5nxlPlgemTcKIGAE=",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "The Rust Project.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "prompt_cache_key": null,
+  "provider_details": {
+    "provider_request_id": "req_011Ch9piA8tVKhcRAJuW8uQR",
+    "stop_reason": "end_turn"
+  },
+  "reasoning": {},
+  "safety_identifier": null,
+  "service_tier": "auto",
+  "status": "completed",
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "tool_choice": "auto",
+  "tools": [],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "complete": true,
+    "cost": "0",
+    "estimated": false,
+    "input_tokens": 43,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 60,
+    "output_tokens_details": {
+      "reasoning_tokens": 51
+    },
+    "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 43,
+      "output_tokens": 60,
+      "output_tokens_details": {
+        "thinking_tokens": 51
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    },
+    "total_tokens": 103
+  }
+}

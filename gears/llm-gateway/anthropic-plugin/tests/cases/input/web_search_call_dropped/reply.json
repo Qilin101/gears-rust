@@ -1,0 +1,45 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_011Ch9piA8tVKhcRAJuW8uQR"
+  },
+  "body": {
+    "model": "claude-haiku-5-5",
+    "id": "msg_011Ch9piAJ4ErkPvz1f2oV9c",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "CAQS3QUKEAgTGAI4AUIIdGhpbmtpbmcSDA4SoHlA315JQhDJTBoMDLkJuP5NIiB3ZaszIjBkolUUWB3fIg5kC1C8LBg5k9WHjiKzASNQTbobo8SIYmgvLpxPO4HubaARAb5d1tIq+gStciQD242ekuNXLECAfasuAb+Tf7vokgEHVLprz761pzggiypSAAVlPHuM7ZDhD7qZuwb6Zzah4hycbKb70ImUZLl5Stu5qfgkCiifqQrM9jmaqb04xIvddc1XB45y+G0aIofcmVgtpr3tWI6HJLwwOWYyHsVDKlBSOYKCNonf8On/CWEZZTB+1DFap3Lf4dv5DzDMhch2lbKci82ftFG99g+PQ4EoV3M1c5yuo9RP6+I2eTHH2PhiIx8lXUOgiBS7lRE0KxDhpSO5wuudIW8Tbykr5XhBinMBOfqtosLfEGk2V0PrMkZZ3wIvjoO6FSSrQPETLYW9Ie6ah8HSzLxxK0X8DvWlRNj6G86xs6zPz1z+88Fpj0qa0/bcxFiFBiDMjaSKphQS74/v1DRFSKY0TP3KRcTELA8dR3XuT5ixuNs++p4wLD67JeK/n2MYqHqFcC5ZXrw5a9Hy2chldUuewh4hEOPC+vHvOck46aWfVO/cQrNJAeulAoZyMppD+ZtXWi9HIbAn51HJmjvu2lJbIv4fPygk8bZldWzgV3QnCd+z9vC75IDxXHLFDykb8Bn3/1j++4tRUNXtQpGGj3gqSGZukK293/eQn+oXAy3k7yN0p15KaDLcVxkHWHhqX9i647gvroWCHWHxg7t9jdgaccX6KuWvUywP4eJZFELE4aCQxDFWPl0ZEhXPKqDZ1W4iu36onI9ZBLWNhEXnoJXLPH0RIUZKA0ntktaS9Cez8zkan7MCAeVAi4BjlzL6C0ET7X8tPelTiAn7wuEyPvte29icXQcciKFkp/879K7dt9sbpu0LyvMODv49HWt7Rbh5nxlPlgemTcKIGAE="
+      },
+      {
+        "type": "text",
+        "text": "The Rust Project."
+      }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+      "input_tokens": 43,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "output_tokens": 60,
+      "output_tokens_details": {
+        "thinking_tokens": 51
+      },
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+    },
+    "diagnostics": null
+  }
+}

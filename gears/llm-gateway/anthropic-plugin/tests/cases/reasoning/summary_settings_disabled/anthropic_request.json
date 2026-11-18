@@ -1,0 +1,18 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "A bat and a ball cost 1.10 in total. The bat costs 1.00 more than the ball. How much is the ball? Answer with the number only.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "thinking": {
+    "type": "disabled"
+  }
+}

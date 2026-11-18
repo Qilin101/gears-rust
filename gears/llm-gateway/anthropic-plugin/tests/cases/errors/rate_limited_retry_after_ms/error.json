@@ -1,0 +1,8 @@
+{
+  "code": "rate_limited",
+  "message": "rate_limited: Rate limited.",
+  "provider_code": "rate_limit_error",
+  "provider_message": "Rate limited.",
+  "provider_request_id": "req_synthetic_error",
+  "retry_after": 2
+}

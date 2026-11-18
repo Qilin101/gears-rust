@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: max_output_tokens is required: the model has no default output limit",
+  "param": "max_output_tokens"
+}

@@ -1,0 +1,276 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "arguments": "",
+      "call_id": "toolu_01J3bxA2vahTdTKvRtu1XSX7",
+      "id": "fc_req_test_0",
+      "name": "get_weather",
+      "status": "in_progress",
+      "type": "function_call"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "arguments": "",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\"",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": ": \"Pari",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "s\"}",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\":\"Paris\"}",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "type": "response.function_call_arguments.done"
+  },
+  {
+    "item": {
+      "arguments": "{\"city\":\"Paris\"}",
+      "call_id": "toolu_01J3bxA2vahTdTKvRtu1XSX7",
+      "id": "fc_req_test_0",
+      "name": "get_weather",
+      "status": "completed",
+      "type": "function_call"
+    },
+    "output_index": 0,
+    "sequence_number": 8,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "arguments": "{\"city\":\"Paris\"}",
+          "call_id": "toolu_01J3bxA2vahTdTKvRtu1XSX7",
+          "id": "fc_req_test_0",
+          "name": "get_weather",
+          "status": "completed",
+          "type": "function_call"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9po6U1ehU6Edcpwrqx8",
+        "stop_reason": "tool_use"
+      },
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 390,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 50,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 390,
+          "output_tokens": 50,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 440
+      }
+    },
+    "sequence_number": 9,
+    "type": "response.completed"
+  }
+]

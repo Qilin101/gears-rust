@@ -1,0 +1,5 @@
+{
+  "model": "claude",
+  "input": [{ "type": "item_reference", "id": "msg_1" }],
+  "max_output_tokens": 64
+}

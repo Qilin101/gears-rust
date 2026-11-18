@@ -1,0 +1,7 @@
+{
+  "code": "authentication_failed",
+  "message": "authentication_failed: Your API key does not have permission to use the specified resource.",
+  "provider_code": "permission_error",
+  "provider_message": "Your API key does not have permission to use the specified resource.",
+  "provider_request_id": "req_synthetic_error"
+}

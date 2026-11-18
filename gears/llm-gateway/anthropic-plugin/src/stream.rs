@@ -197,7 +197,7 @@ impl Translator {
             } => {
                 let item = OutputItem::Reasoning(ReasoningOutput {
                     id: placement.item_id.clone(),
-                    summary: None,
+                    summary: Some(Vec::new()),
                     content: Some(Vec::new()),
                     encrypted_content: None,
                 });

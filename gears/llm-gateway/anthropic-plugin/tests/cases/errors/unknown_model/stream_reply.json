@@ -1,0 +1,15 @@
+{
+  "status": 404,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_011Ch9phFW4e1gTcpfPEZbyk"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "not_found_error",
+      "message": "model: claude-does-not-exist-0"
+    },
+    "request_id": "req_011Ch9phFW4e1gTcpfPEZbyk"
+  }
+}

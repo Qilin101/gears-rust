@@ -1,0 +1,45 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_011Ch9r3oqBXSoEcDTDvdk24"
+  },
+  "body": {
+    "model": "claude-haiku-5-5",
+    "id": "msg_011Ch9r3ox7tvBPzKe8Fpoyf",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "I'm working out how to count the integers from 1 to 1000 that are divisible by 3 or 5 but not by 15. I'm treating the union as multiples of 3 plus multiples of 5, minus the multiples of 15 to avoid double-counting, and I'm still setting up that sum.\n\nI'm finishing the count: multiples of 3 (333) plus multiples of 5 (200), minus twice the multiples of 15 (66), which gives 401. A cross-check, 267 plus 134, lands on the same total.\n\n",
+        "signature": "CAQSsQkKEAgTGAI4AUIIdGhpbmtpbmcSDAYEcfKw+kPl7RLDfxoMsE16nzunas7dC1ZsIjCwn+z4Ap3+irkxKblwBXmgClEsr/lLnz80HfPTFRaN4KNyG2AJq7zGbd3dLQ4JE6UqzggJaylXnipnLtBpxek+OpV2XgMMlRIloOuoDmu0G0Dxhy8nEMo85TdzURjOdFqjAGLNCZ9aNTZnHQLYZt2P5mKzpbh1XvfAZmtkwHaKc4dC2NF6ysXVsu5PH2+GhRDBJ40akLsWn3Lj3XFXSGV0Spvv716yhJF24A36zmuMSpZu/0cjWG/stLqpBOnbc6FOiFubX7gjV3tHMdFLmXXdatU5weleDzUnP89J4Jn9yZRDOdk52dqJqQDvJOOIkGf9r9/AkwMfTy3iaTGnMmhehogUFErYxg1gdx0NpU+AMoBSm+DXckTdr3sQngcwQ2UgBwdc52ta9fRE8N+MaLc+usKyDBei4SOpCx9uLgvpjOoMZwQHiLAhi22lgdXPi7Y0QJg5vOAUaIV90m5px3rg+5D95Y9GUCqxL6o30o8joWMIy9cnVRdvexw94OhttgPPoH5Cyug4Kzj+k7Ue6LDEYTTmi3X79OjdKFpSZnljITMXbMkD3OcwKbvHg9VL/XJldtsT8nE+gQGKFK9Nter9U8Wftsao9iCV4qDaap9gQJlYGF1YJgyROvjje0qyc7G72tcoNF/rbcOURhqYHws/QnYdBhZz8dEEHuhqlZiweRyXY/6Ph591lJwPP3TUhuwulLZcyEIIPDIZtuVl3jPiCUJe1dUJQT9SVvBIBaZphsALn0WmMN4ijNkv/DuLS1YH6G5oSjTjC6ViCj6Bkx3pT7ga+Kil3+wRYExOTj0xtfEl9LbqS9jLi7mUTO1HwKHjDwvWcELtwNItS3Ji8L7xDEnjWVkYTwufJRBfJvzG1XHmBfdSHBF7hvZNTVJYOgB2xB87r7WtH6SYP/DMl+N34el4/tEgxnQB07qlltwD/K85Ld6CEDuIzgIpDkAkMpqYVVBY28wkYWHkkPlDrBwafE1Pa82GPBkHbxA6UMJJE1QNJC8QpRxE1WnwU1ta4Cqp6HBub5juf8HIaap1QNivNNccS66PkedjOvzm+dH/Z8SsA8gA7Zc0YPIntbYKEV0aL8MbUsRQfb8j7FgEdgGNcb76ldkwK+7A4zmvExlLL7Xgn0jwjac5Nogb+qZ6/PI0sTb5PuDrmzC4OS7Nnf6sza5P4WMq947CbHhjeTyFKHjL7xbR39nk/0kvCAH7cG2Z+ubx395XPU06BvNJGtzAny5OZnZknQDEs7jstZmxEevEw9Fk1q11AKluGxTtC1vA0H4CsEyugsFmKya5RQ8coIcZMG7j/DCGP2bYuEcUNBRpDXkBDslrQNt8cSwpMG04JE8LRiXJMwlLcgEzTrxBAzDOAsQWjySFtzZy/rg44eEQthCjkU0a4jYJ/Ix7uZ+/PwiX7LysMKsvt8tT6Zv0qy9datJIawxmfWkNz6srxGU6NjcqWzRQg2TT7Kl3ksbfLzmqKP+Uy0yGqkpeenqzxtFoF5/MSKEPBxpMne6mrajaFudcJSkyQMRln5H919xzGAE="
+      },
+      {
+        "type": "text",
+        "text": "401"
+      }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+      "input_tokens": 55,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "output_tokens": 288,
+      "output_tokens_details": {
+        "thinking_tokens": 285
+      },
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+    },
+    "diagnostics": null
+  }
+}

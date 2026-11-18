@@ -1,0 +1,17 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_audio",
+          "data": "AAAA",
+          "format": "wav"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,400 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 3,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "text": "Ottawa is the fur",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "text": "thest north of the four,",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "text": " at about 45.4°N",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "text": ".",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 8,
+    "text": " Mad",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 9,
+    "text": "rid is about",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 10,
+    "text": " 40.4°N,",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 11,
+    "text": " Sapporo about 43.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 12,
+    "text": "1°N, and Marse",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 13,
+    "text": "ille about 43.3°N",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 14,
+    "text": ".\n\nThe",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 15,
+    "text": " current weather in Ottaw",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 16,
+    "text": "a is -",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 17,
+    "text": "4°C with light snow.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 18,
+    "text": "Ottawa is the furthest north of the four, at about 45.4°N. Madrid is about 40.4°N, Sapporo about 43.1°N, and Marseille about 43.3°N.\n\nThe current weather in Ottawa is -4°C with light snow.",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "Ottawa is the furthest north of the four, at about 45.4°N. Madrid is about 40.4°N, Sapporo about 43.1°N, and Marseille about 43.3°N.\n\nThe current weather in Ottawa is -4°C with light snow.",
+      "type": "output_text"
+    },
+    "sequence_number": 19,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Ottawa is the furthest north of the four, at about 45.4°N. Madrid is about 40.4°N, Sapporo about 43.1°N, and Marseille about 43.3°N.\n\nThe current weather in Ottawa is -4°C with light snow.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 20,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "Ottawa is the furthest north of the four, at about 45.4°N. Madrid is about 40.4°N, Sapporo about 43.1°N, and Marseille about 43.3°N.\n\nThe current weather in Ottawa is -4°C with light snow.",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_0",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9wCWEbAZnzP6Meu8srk",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 578,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 86,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 578,
+          "output_tokens": 86,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 664
+      }
+    },
+    "sequence_number": 21,
+    "type": "response.completed"
+  }
+]

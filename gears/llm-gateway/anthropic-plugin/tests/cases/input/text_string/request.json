@@ -1,0 +1,5 @@
+{
+  "model": "claude",
+  "input": "Reply with exactly: Hello!",
+  "max_output_tokens": 64
+}

@@ -1,0 +1,20 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Which animal is in this picture? One word."
+        },
+        {
+          "type": "input_image",
+          "image_url": "https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,263 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 2048,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "low"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 2048,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "low"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "encrypted_content": "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpPkNRj2YfWXGmKDxH4mPnZ5sQ7vB9URj2pLmN3",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "item": {
+      "encrypted_content": "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpPkNRj2YfWXGmKDxH4mPnZ5sQ7vB9URj2pLmN3",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 1,
+    "sequence_number": 4,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 5,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "sequence_number": 6,
+    "text": "0.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "sequence_number": 7,
+    "text": "05",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "sequence_number": 8,
+    "text": "0.05",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "part": {
+      "annotations": [],
+      "text": "0.05",
+      "type": "output_text"
+    },
+    "sequence_number": 9,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "0.05",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 1,
+    "sequence_number": 10,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 2048,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "encrypted_content": "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpPkNRj2YfWXGmKDxH4mPnZ5sQ7vB9URj2pLmN3",
+          "id": "rs_req_test_0",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "0.05",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_1",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_synthetic_stream",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {
+        "effort": "low"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 12,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 5,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "provider_raw": {
+          "input_tokens": 12,
+          "output_tokens": 5
+        },
+        "total_tokens": 17
+      }
+    },
+    "sequence_number": 11,
+    "type": "response.completed"
+  }
+]

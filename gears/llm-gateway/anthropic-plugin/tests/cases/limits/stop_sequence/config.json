@@ -1,0 +1,7 @@
+{
+  "settings": {
+    "stop_sequences": [
+      "STOP"
+    ]
+  }
+}

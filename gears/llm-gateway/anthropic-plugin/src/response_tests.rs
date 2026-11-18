@@ -141,7 +141,7 @@ fn thinking_blocks_become_reasoning_items() {
         vec![
             OutputItem::Reasoning(ReasoningOutput {
                 id: "rs_req_0".to_owned(),
-                summary: None,
+                summary: Some(Vec::new()),
                 content: Some(vec![ReasoningContentPart::ReasoningText {
                     text: "Let me think".to_owned()
                 }]),
@@ -149,7 +149,7 @@ fn thinking_blocks_become_reasoning_items() {
             }),
             OutputItem::Reasoning(ReasoningOutput {
                 id: "rs_req_1".to_owned(),
-                summary: None,
+                summary: Some(Vec::new()),
                 content: None,
                 encrypted_content: Some("opaque".to_owned()),
             }),

@@ -1,0 +1,11 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": "Write exactly: one two HALT three four",
+  "extra_fields": {
+    "stop_sequences": [
+      "HALT"
+    ],
+    "max_tokens": 32
+  }
+}

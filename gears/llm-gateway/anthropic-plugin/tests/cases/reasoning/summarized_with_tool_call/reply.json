@@ -1,0 +1,52 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_011Ch9r49FE1StdEvD98L4zf"
+  },
+  "body": {
+    "model": "claude-haiku-5-5",
+    "id": "msg_011Ch9r49NRCAsPyDqohmcBD",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "I'm comparing the latitudes of Madrid, Ottawa, Sapporo, and Marseille, and Ottawa comes out furthest north at about 45.4°N. So I'll get the weather for Ottawa only.\n\n",
+        "signature": "CAQS3QUKEAgTGAI4AUIIdGhpbmtpbmcSDGU1ho5Q4uvpgNppZBoM3Ve7fy/Jo2lOZgfDIjDqshoNznnngqTaKQkPqXaQYb1J9khGHAP3e+5JFVU+haCYoLhiHRN1Pz/Tu98ZSi8q+gRXvgvdQ7+rD3BzwdK8JFqE9ouijgiO58vjQHt6KAdOE+moemS4p771zIEjiU2mvJYneahWh1dwZ59U15WtSoG3Svcknk01/5tV+j7zA3ho24/+QIZ+to5Zj29iuS8NOC0LuHM8elfsfja5lGdtcHxZbsYyOPXzGGhIvOGXVB3surp4dkeJDSpVoUCKxxbjH17nyErZzR7LoqOHyC0eJnJ1R3OmLX7mYWBEnzMGfbPBY7mCq37IzukdgG/e1ABg0YzWtZzBYpWsmKIRpNZaodeSNowG1HReC1RlwJj1RH9oshLnCIdWVXnYYjbZbRo2o5gGd2ILzijB4lieQgSuO+nVeAtF1I2rdkiPnCDnTbWjSgXYwSWupsKhqItBKNHx+VWOYNnAowD19DWRfoIY2VmLTZUxQtYkRclw4R/ID6IrA564vw1RE+z5QFxDpecBHx69J2A7HMC6TftYxit8ocOSEoiGzK/i9QC7fLKsIS52x4JZn9vGM5GOeG7z7fwonTL739XSv5bB8Kr+3crreE3UUmKlNbBVPxYXDL5AGTZgWCRsvP4v05Barva/Om3lUd+N/xp9gXTdJm9KeABv6vgku3iamo4GRYj9HK6cHms7c+X5e5Sz1M58vffKdCDruyaOnBuAcOltnD55KO1gfx8Km09VdcmCVQlRPzY7VdK2xfcnKkRtUA4zoKSK2cF9ApIfG8eiFe3/7GULvlRbklq6ojuEhXfJat/KG1k4J1gKHpsEQ314mvCFW9Oi58HOrMUospA01NOhd+N9YrV/+Pa1fep7tqmMXsOqPGEfTcsW2cgIi0V2YoXAMZ+zdH2hdQzf0QXWHkWW+4AzGAE="
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_017w86UaPqQo73sx8iGRKJkm",
+        "name": "get_weather",
+        "input": {
+          "city": "Ottawa"
+        },
+        "caller": {
+          "type": "direct"
+        }
+      }
+    ],
+    "container": null,
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+      "input_tokens": 421,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "output_tokens": 138,
+      "output_tokens_details": {
+        "thinking_tokens": 85
+      },
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+    },
+    "diagnostics": null
+  }
+}

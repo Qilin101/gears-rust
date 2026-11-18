@@ -1,0 +1,7 @@
+{
+  "model": {
+    "context_window": {
+      "max_output_tokens": null
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "model": "claude",
+  "max_output_tokens": 4096,
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "input": "Work out which of these cities is furthest north: Madrid, Ottawa, Sapporo, Marseille. Then get the weather for that city only."
+}

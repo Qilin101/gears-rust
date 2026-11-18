@@ -1,0 +1,21 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Search the web for the latest Rust release.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "tools": [
+    {
+      "name": "web_search",
+      "type": "web_search_20250305"
+    }
+  ]
+}

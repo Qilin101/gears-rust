@@ -343,14 +343,14 @@ impl OutputBuilder {
                 signature,
             } => self.items.push(OutputItem::Reasoning(ReasoningOutput {
                 id: item_id,
-                summary: None,
+                summary: Some(Vec::new()),
                 content: Some(vec![ReasoningContentPart::ReasoningText { text: thinking }]),
                 encrypted_content: Some(signature),
             })),
             Block::RedactedThinking { data } => {
                 self.items.push(OutputItem::Reasoning(ReasoningOutput {
                     id: item_id,
-                    summary: None,
+                    summary: Some(Vec::new()),
                     content: None,
                     encrypted_content: Some(data),
                 }));

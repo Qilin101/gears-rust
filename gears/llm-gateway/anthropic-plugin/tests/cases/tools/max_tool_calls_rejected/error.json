@@ -1,0 +1,5 @@
+{
+  "code": "unsupported_parameter",
+  "message": "unsupported parameter: max_tool_calls",
+  "param": "max_tool_calls"
+}

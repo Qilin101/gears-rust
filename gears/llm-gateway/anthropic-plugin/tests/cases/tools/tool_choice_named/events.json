@@ -1,0 +1,402 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": {
+        "name": "get_time",
+        "type": "function"
+      },
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        },
+        {
+          "description": "Current local time for a city.",
+          "name": "get_time",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": {
+        "name": "get_time",
+        "type": "function"
+      },
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        },
+        {
+          "description": "Current local time for a city.",
+          "name": "get_time",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "arguments": "",
+      "call_id": "toolu_0194iosAqFdGodctL7ttsX7P",
+      "id": "fc_req_test_0",
+      "name": "get_time",
+      "status": "in_progress",
+      "type": "function_call"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "arguments": "",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\"",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": ": \"Pari",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "s\"}",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\":\"Paris\"}",
+    "item_id": "fc_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "type": "response.function_call_arguments.done"
+  },
+  {
+    "item": {
+      "arguments": "{\"city\":\"Paris\"}",
+      "call_id": "toolu_0194iosAqFdGodctL7ttsX7P",
+      "id": "fc_req_test_0",
+      "name": "get_time",
+      "status": "completed",
+      "type": "function_call"
+    },
+    "output_index": 0,
+    "sequence_number": 8,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "arguments": "",
+      "call_id": "toolu_014aUYN1sqUarSpj4gHvYjzR",
+      "id": "fc_req_test_1",
+      "name": "get_weather",
+      "status": "in_progress",
+      "type": "function_call"
+    },
+    "output_index": 1,
+    "sequence_number": 9,
+    "type": "response.output_item.added"
+  },
+  {
+    "arguments": "",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 10,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\"",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 11,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": ": \"Pari",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 12,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "s\"}",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 13,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\":\"Paris\"}",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 14,
+    "type": "response.function_call_arguments.done"
+  },
+  {
+    "item": {
+      "arguments": "{\"city\":\"Paris\"}",
+      "call_id": "toolu_014aUYN1sqUarSpj4gHvYjzR",
+      "id": "fc_req_test_1",
+      "name": "get_weather",
+      "status": "completed",
+      "type": "function_call"
+    },
+    "output_index": 1,
+    "sequence_number": 15,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 256,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "arguments": "{\"city\":\"Paris\"}",
+          "call_id": "toolu_0194iosAqFdGodctL7ttsX7P",
+          "id": "fc_req_test_0",
+          "name": "get_time",
+          "status": "completed",
+          "type": "function_call"
+        },
+        {
+          "arguments": "{\"city\":\"Paris\"}",
+          "call_id": "toolu_014aUYN1sqUarSpj4gHvYjzR",
+          "id": "fc_req_test_1",
+          "name": "get_weather",
+          "status": "completed",
+          "type": "function_call"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9pomayYr45RroC5hhAe",
+        "stop_reason": "tool_use"
+      },
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": {
+        "name": "get_time",
+        "type": "function"
+      },
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        },
+        {
+          "description": "Current local time for a city.",
+          "name": "get_time",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 586,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 81,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 586,
+          "output_tokens": 81,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 667
+      }
+    },
+    "sequence_number": 16,
+    "type": "response.completed"
+  }
+]

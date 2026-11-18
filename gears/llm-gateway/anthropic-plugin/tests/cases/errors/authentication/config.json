@@ -1,0 +1,6 @@
+{
+  "record": {
+    "expect_error": true,
+    "api_key": "sk-ant-invalid"
+  }
+}

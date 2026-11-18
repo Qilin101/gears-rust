@@ -1,0 +1,8 @@
+{
+  "model": {
+    "provider_model_id": "claude-does-not-exist-0"
+  },
+  "record": {
+    "expect_error": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "settings": {
+    "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+    },
+    "output_config": {
+      "effort": "low",
+      "format": null
+    }
+  }
+}

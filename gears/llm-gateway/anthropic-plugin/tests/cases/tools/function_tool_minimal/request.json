@@ -1,0 +1,11 @@
+{
+  "model": "claude",
+  "max_output_tokens": 256,
+  "input": "Call the ping tool.",
+  "tools": [
+    {
+      "type": "function",
+      "name": "ping"
+    }
+  ]
+}

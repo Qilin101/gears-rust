@@ -1,0 +1,25 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Reply with the two words I give you, joined by a dash."
+        },
+        {
+          "type": "input_text",
+          "text": "First word: alpha."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Second word: beta."
+    }
+  ]
+}

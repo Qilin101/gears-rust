@@ -1,0 +1,10 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": "Reply with exactly: Hello!",
+  "tools": [
+    {
+      "type": "openai:code_interpreter"
+    }
+  ]
+}

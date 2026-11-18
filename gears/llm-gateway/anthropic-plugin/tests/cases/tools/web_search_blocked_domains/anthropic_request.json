@@ -1,0 +1,25 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Use web search to find today's top headline about the Rust programming language. One sentence.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "tools": [
+    {
+      "blocked_domains": [
+        "wikipedia.org"
+      ],
+      "max_uses": 1,
+      "name": "web_search",
+      "type": "web_search_20250305"
+    }
+  ]
+}

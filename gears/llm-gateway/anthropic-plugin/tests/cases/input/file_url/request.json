@@ -1,0 +1,21 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What text does this PDF contain? Quote it."
+        },
+        {
+          "type": "input_file",
+          "filename": "dummy.pdf",
+          "file_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+        }
+      ]
+    }
+  ]
+}

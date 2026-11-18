@@ -1,0 +1,14 @@
+{
+  "model": "claude",
+  "max_output_tokens": 1024,
+  "input": "Use web search to find today's top headline about the Rust programming language. One sentence.",
+  "tools": [
+    {
+      "type": "cf_gears:web_search",
+      "blocked_domains": [
+        "wikipedia.org"
+      ],
+      "max_uses": 1
+    }
+  ]
+}

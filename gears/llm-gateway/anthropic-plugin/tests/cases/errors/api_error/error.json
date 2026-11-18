@@ -1,0 +1,7 @@
+{
+  "code": "provider_unavailable",
+  "message": "provider_unavailable: Internal server error",
+  "provider_code": "api_error",
+  "provider_message": "Internal server error",
+  "provider_request_id": "req_synthetic_error"
+}

@@ -1,0 +1,36 @@
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Extract the city: I live in Berlin.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "output_config": {
+    "effort": "low",
+    "format": {
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "type": "object"
+      },
+      "type": "json_schema"
+    }
+  },
+  "thinking": {
+    "type": "adaptive"
+  }
+}

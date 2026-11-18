@@ -1,0 +1,82 @@
+{
+  "completed_at": 0,
+  "created_at": 0,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "id": "req_test",
+  "incomplete_details": {
+    "reason": "max_output_tokens"
+  },
+  "instructions": null,
+  "max_output_tokens": 8,
+  "max_tool_calls": null,
+  "metadata": null,
+  "model": "claude",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQS4wQKEAgTGAI4AUIIdGhpbmtpbmcSDARedbOZzqyxK0xXQBoM0H7AuuXDAgpJ7kBuIjBcYAEsIr28Rbh0VBD9J0vFTVjkdqcdkRmyf20/T0/9uPgs4jM4e0yYxTCYhpvhnREqgAQO+UQpxwkRgVaO9/OgV4SDP+Ir5pyh/F6Bw3sMcweEsx5WZkue+f895ULaOqy5SsdjyYZiMlDXeNo0ydUxpKLLgM6tn6WRi3VZv0mQ9W6iQK1By8uIpCvWwTyoDOmgErMNv2EQwfYzvec4qiAdIEAV/ZwNVI7koHNjXtdrhVBG5wUME5kcd8fY1/CmnZVw55hXg2AK0FVbsh/xP0eIpAocGQT6eIrMyyxXfhmLZK4GuWHhoPR6+5rwdfabTwnYRkkj6NP0Rhu0o8E2VwUY5L+qCpN1NYK5DlwAnw9bGhnZOrD8mu58rDO+pCmniaDRLMxcG28ds7OdVOG2XEozn7rFsMMeTJGLdvxSIuUMae/kA+Y4ArJh7+uUtaf2A9DPlpnLT4ej2TtfdS3M/uzNfw5RY1XeiWKYQS4JHRA7rqChi77dFQS9QRrEuPd4qX3KDWs8Mht1rAsceVuvcx1wLwb0OEMbpPWILvg4bNcb1VUf2tf0py23zHm7gkzMVCuQXLo+zh9Q6ntYn5BB3XGwMEJ31m4cm+XN8BRXosmnn9t2UsciBtV2TaPNTStETrQLUvIa5vTMwrgAeO3CewNQM/SmI4dgqrcSgpV5M/1btu76uU/M19/koS6F4QQ9Lu7LNI64YZCnBuJkLq7JplvEN6Uy1HC++TQeHXwBIuWJzDRoDRgB",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "prompt_cache_key": null,
+  "provider_details": {
+    "provider_request_id": "req_011Ch9piQScGT296u7st8Tne",
+    "stop_reason": "max_tokens"
+  },
+  "reasoning": {},
+  "safety_identifier": null,
+  "service_tier": "auto",
+  "status": "incomplete",
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "tool_choice": "auto",
+  "tools": [],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "complete": true,
+    "cost": "0",
+    "estimated": false,
+    "input_tokens": 19,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 8,
+    "output_tokens_details": {
+      "reasoning_tokens": 8
+    },
+    "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 19,
+      "output_tokens": 8,
+      "output_tokens_details": {
+        "thinking_tokens": 8
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    },
+    "total_tokens": 27
+  }
+}

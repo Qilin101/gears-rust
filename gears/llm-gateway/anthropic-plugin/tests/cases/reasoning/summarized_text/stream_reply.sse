@@ -1,0 +1,129 @@
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011Ch9r3yf2BHT9dDmxhKATJ","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":55,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"global","speed":"standard"},"diagnostics":null}          }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""} }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm working"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" out how many integers from 1"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to 1000 are div"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"isible by 3 or "}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"5 but not by 15,"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" so I'll subtract the"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" multiples of 15 from"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the comb"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ined count of"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" multiples of 3 or"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 5. I'm get"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ting "}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"333 mult"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"iples of 3, 200"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" multiples of 5,"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" and 66 multiples of"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 15."}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm sub"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"tracting the multiples of"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 15 from the combined count"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", which gives 401. As"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a c"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ross-check, the multiples"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" of 3 without"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 15 come"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to 267 and the multi"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ples of 5 without 15"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" come"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to 134, and those"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" add up to the"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" same 401."}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQSsQgKEAgTGAI4AUIIdGhpbmtpbmcSDGmmVLOhtI+/49/5CBoMOzY/EtnSpQzlGwXtIjDfEryX4DyrL/2rAQndTzzqrPPAThv1tXXSKKH1QJA8G2Xo41E5OPy86CXCtRSfTIkqzge5WbWzN+kqVmbRsc1HKKZ4R3dAFIeOKH6oQVGxekhGN4z+3+PM5AH9nj9b7EfpDIiJJ2ORFo4ObDwCMNd3ne2juSMYzeRUKxvRJEr/YTvKxXzbO/qMYeeOEs5f2zqda+0aMxEsN9GCvNx+7RgYNg81PEYnxp6J503RdqXFZ9UKSpA93cbSXKyZ17d3tp/TsP2NEqZCH/MrT2pmU8ZMSokacrijqZ2tyINDAHoOkOg7LWtxpZmx940qPBL/SuhmhFEAulzvXUAx1zp5Hi4xpnjJILXA9YPASNZoc7ca9kA44XKxJGT9i6It2zZuI/K/0OIK26bdyeFgn6wUSH99kaXym6BI1B2p7JCpneTT+6v1XeFn0B8LKumbCgyee6nE9n9sobvCogu0rsDFXhU318xRFBva4lXzhsgy74rycoL1iyjq72nXO23wEFSPTtdgdaXcm3yTWxuSbFeH0RJn81Tvkm2J1267cHhE9s9+OXga19yO7udI3KSA9FTnDmKtQvCoqe0DOfBfmrbEoWJ55ZXeMlZHZTeX0aWRTkCPic4kDIAbdYnPBWR4hIQ7xgy6GTxzf8rDneaQ19iKiZnd7BvqqKXWYABot/qq36AQsyD9yy2b7OHADMk6BTasqyOkN5xRULx05qY6fYi8jM/fFmsq/Hzz0sgM4jCwQHg0wT3ltLfm7ZpH2XQRyjR19Txt6ntzuvfv7axSmuCccRb8GkLR2iYhqJuyzVyYVaU0rRyF2ygTA88GCeA3l4Q9YNop7mFJOfFt73L10Tdu8/VmZpcTJMt7Pf1swoxnCu41HJ9ojKhGFpJR6FYrNkyrIO+hpWN30bL15AXj3H7wmKfpNPphlAm1pNxaIf9AjcC0MMCyebBl8icTDu2XitFfPtZGr9DIFsgQl3tyLUpW1PvEMYw7bhIku+BooZz6Rlmzx/Ib388oOXJpX1XWhqfgLDJWQWgMnKbspcu4X055psYd2LiUAy0+/n1bAR9B8UwmRjLizpayETTM0Py6baR6qaEBHMmyw8yfzkKeNIu39WYfe6zfKOCL6svIYIhLtnMLh3ZX8cDJXJvY1Ut0ommnNs5W7doFFXD18PUl/uW6QSHtigQ71rUl06AQvlr29WI31ToEdq8ArIPkM36nMECcOaIPcAoCR7CXwhRPxt9/hjIvsjXI5B2s8d4Gi/tKVsLW0hWbX+M+xxqteNHhOdz8e7ecfXnknJTfX7V3r5UUheq1bGtmpwk5/NlZOQDDFt6h5g/D3adm+1+aQDMtHx3OWE+NpJeC2hMAsYr/k3jkKlIXHBgB"} }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0             }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"**401**"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":55,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":244,"output_tokens_details":{"thinking_tokens":239}}             }
+
+event: message_stop
+data: {"type":"message_stop"}
+

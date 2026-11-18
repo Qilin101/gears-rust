@@ -1,0 +1,5 @@
+{
+  "model": "claude",
+  "max_output_tokens": 8,
+  "input": "Write a long poem about the sea."
+}

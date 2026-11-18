@@ -64,6 +64,9 @@ pub fn from_http(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> LlmGat
         Some(body) => (Some(body.error), body.request_id),
         None => (None, None),
     };
+    if let Some(model) = object.as_ref().and_then(unknown_model) {
+        return LlmGatewayError::model_not_found(model);
+    }
     let category = categorize(object.as_ref(), Some(status));
     let message = object.as_ref().map_or_else(
         || format!("provider returned HTTP {}", status.as_u16()),
@@ -98,6 +101,14 @@ pub fn from_stream_error(object: &ErrorObject, request_id: Option<&str>) -> LlmG
         object.message.clone(),
         details,
     )
+}
+
+/// The model id of a `not_found_error` about the model (`model: <id>`).
+fn unknown_model(object: &ErrorObject) -> Option<&str> {
+    if object.kind != "not_found_error" {
+        return None;
+    }
+    object.message.strip_prefix("model:").map(str::trim)
 }
 
 fn categorize(object: Option<&ErrorObject>, status: Option<StatusCode>) -> ProviderErrorCategory {

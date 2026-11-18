@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: system and developer messages accept only text",
+  "param": "input[0].content"
+}

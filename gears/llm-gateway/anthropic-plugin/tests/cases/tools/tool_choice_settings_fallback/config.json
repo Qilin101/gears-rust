@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "tool_choice": {
+      "type": "any",
+      "disable_parallel_tool_use": null
+    }
+  }
+}

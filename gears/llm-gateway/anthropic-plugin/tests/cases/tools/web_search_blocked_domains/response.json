@@ -1,0 +1,185 @@
+{
+  "completed_at": 0,
+  "created_at": 0,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "id": "req_test",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 1024,
+  "max_tool_calls": null,
+  "metadata": null,
+  "model": "claude",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSugUKEAgTGAI4AUIIdGhpbmtpbmcSDLBczdbZ2Wm2SXdlARoMw/VwCiSx/nUnGjT9IjBbTUxULour2muTMw3tN97O8oKGY+5E6ty9em1wsJxnFgBazG9q35aoGOJ9zx7FVGIq1wRrUJrvG1ySZu7jVXtLvSrHAf0dhfcjuovzWtB29lZclLdcKCQsJTxRdkWo5qFewBu2hXZgvGz8CEfsjRuPaFybxSymQbzSkkNsa9gdaBwrggzMi/ehqTm/9iXbXbUMl+/r+ldnw7ECFCxddIgkXKbhn0UKV4CODQbgBdka9rOQWQQrY1xPW45BtaUL4POIeuxrxr2+Ahb6fcg26ommyTi/lZuvdbYUO+W1656YTzUzRwPbCWMyP9uw6tWuxt2qxisLL9p6po9U/wQdjnxAR4/VFIw4LaJ1kta9tldXKOmKTEyfzMMsNX+Ix+nIWSBOTXShe7zrSjQwBxOOcBiE2+2qVIxIJ7u5Ye6KpqlpZUu6ijIZrpJ0DLGBMkfMR9Cr8h5DnVtKuD35ekNOuxwqOF54WDLkJc0dbReGKJffnc/2+LU1dZZGI+maYtL/FRe3E3xutgFEIHN6+AbDR2Qx6UfHdQ17Ks9wPOr9+NybXoV0MII0hFleGQBEJHjZdbkT7j8Rrj/zesTQQnaJnCSTghWZZ1rhXsrp+SG1Ak5j7r6J4zcBZLAPDLpUDKDIFWfEcl7qndImGUzyvi2Uh15Io7I0dIhAkGBnfleJgWXm5zjrhVVLx/d19w017f2CJVc5T+gptS2N8SXz/Z1cUCqnPBbKwHtutqeNNaCSt+ZuC8zVcZH0qkUNuI5a1dzT+GWgoJ8OZsCBh91c2Yt5v3RqS2SyB4h61aCCjpZJEj+VJpS2fw7AsZZRElBLwdLleO599MxhxEYKQlWeiygG0HhofZ/PkaDeJSUzIBgB",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "id": "ws_req_test_1",
+      "queries": [
+        "Rust programming language news today"
+      ],
+      "results": [
+        {
+          "title": "Rust Trends: Biweekly Rust Newsletter and Ecosystem News",
+          "url": "https://rust-trends.com/"
+        },
+        {
+          "title": "Rust Programming Language Portal",
+          "url": "https://devtalk.com/rust"
+        },
+        {
+          "title": "Rust and Go News Today",
+          "url": "https://www.newsnow.com/us/Tech/Cyber+Security/Rust+and+Go"
+        },
+        {
+          "title": "Rust > News > Page #1 - InfoQ",
+          "url": "https://www.infoq.com/Rust/news/"
+        },
+        {
+          "title": "Rust 1.100 Released With The \"Never\" Type Finally Stable - Phoronix",
+          "url": "https://www.phoronix.com/news/Rust-1.100-Released"
+        },
+        {
+          "title": "Linus Torvalds takes aim at Rust: This goes too far for him",
+          "url": "https://www.pcgameshardware.de/Linux-Software-26761/News/Linus-Torvalds-vs-Rust-Human-hostile-code-1560227/"
+        },
+        {
+          "title": "Rust",
+          "url": "https://www.infoworld.com/rust/"
+        },
+        {
+          "title": "This Week in Rust 675 · This Week in Rust",
+          "url": "https://this-week-in-rust.org/blog/2026/10/28/this-week-in-rust-675/"
+        },
+        {
+          "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+          "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+        },
+        {
+          "title": "Rust Programming Language - InfoQ",
+          "url": "https://www.infoq.com/rust/"
+        }
+      ],
+      "status": "completed",
+      "type": "cf_gears:web_search_call"
+    },
+    {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "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",
+      "id": "rs_req_test_2",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Linus Torvalds criticized Rust's readability in a Linux kernel mailing list discussion on November 12, 2026, per ",
+          "type": "output_text"
+        },
+        {
+          "annotations": [
+            {
+              "end_index": 24,
+              "start_index": 0,
+              "title": "Linus Torvalds takes aim at Rust: This goes too far for him",
+              "type": "url_citation",
+              "url": "https://www.pcgameshardware.de/Linux-Software-26761/News/Linus-Torvalds-vs-Rust-Human-hostile-code-1560227/"
+            }
+          ],
+          "text": "a PCGameshardware report",
+          "type": "output_text"
+        },
+        {
+          "annotations": [],
+          "text": ", though I couldn't confirm a headline dated today.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_3",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "prompt_cache_key": null,
+  "provider_details": {
+    "provider_request_id": "req_011Ch9r4N49zaGN5HWUxmikC",
+    "stop_reason": "end_turn"
+  },
+  "reasoning": {},
+  "safety_identifier": null,
+  "service_tier": "auto",
+  "status": "completed",
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "blocked_domains": [
+        "wikipedia.org"
+      ],
+      "max_uses": 1,
+      "type": "cf_gears:web_search"
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "complete": true,
+    "cost": "0",
+    "estimated": false,
+    "input_tokens": 22541,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 661,
+    "output_tokens_details": {
+      "reasoning_tokens": 517
+    },
+    "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 22541,
+      "output_tokens": 661,
+      "output_tokens_details": {
+        "thinking_tokens": 517
+      },
+      "server_tool_use": {
+        "web_fetch_requests": 0,
+        "web_search_requests": 1
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    },
+    "total_tokens": 23202
+  }
+}

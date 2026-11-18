@@ -1,0 +1,15 @@
+{
+  "status": 401,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_011Ch9ph9G2RrvzzGpi3dr4Y"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "authentication_error",
+      "message": "invalid x-api-key"
+    },
+    "request_id": "req_011Ch9ph9G2RrvzzGpi3dr4Y"
+  }
+}

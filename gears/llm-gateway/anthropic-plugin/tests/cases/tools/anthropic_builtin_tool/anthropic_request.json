@@ -1,0 +1,21 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Use code execution to compute 2**64 and report the number.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "tools": [
+    {
+      "name": "code_execution",
+      "type": "code_execution_20250825"
+    }
+  ]
+}

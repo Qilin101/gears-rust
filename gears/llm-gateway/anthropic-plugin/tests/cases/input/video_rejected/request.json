@@ -1,0 +1,16 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_video",
+          "url": "https://example.com/a.mp4"
+        }
+      ]
+    }
+  ]
+}

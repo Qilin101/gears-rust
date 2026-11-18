@@ -1,0 +1,21 @@
+{
+  "model": "claude",
+  "max_output_tokens": 1024,
+  "input": "Search the web: what is the latest stable Rust version? Answer in one sentence and cite the source.",
+  "tools": [
+    {
+      "type": "cf_gears:web_search",
+      "allowed_domains": [
+        "rust-lang.org"
+      ],
+      "max_uses": 1,
+      "user_location": {
+        "type": "approximate",
+        "country": "DE",
+        "city": "Berlin",
+        "timezone": "Europe/Berlin"
+      },
+      "search_context_size": "high"
+    }
+  ]
+}
