@@ -23,15 +23,15 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | # | Area | Feature | Status | Mapping |
 |---|---|---|---|---|
 | 1 | Output blocks | Text | Supported | `text` block → `message` item with an `output_text` part. Consecutive text blocks share one message item. |
-| 2 | Output blocks | Reasoning | Supported | `thinking` → `reasoning` item with the text in `content` and the signature in `encrypted_content`. `redacted_thinking` → `reasoning` item with `encrypted_content` only. |
+| 2 | Output blocks | Reasoning | Supported | `thinking` → `reasoning` item with the text in `content` (summarized thinking included) and the signature in `encrypted_content`; omitted thinking text is an empty `reasoning_text` part, so the item replays as a `thinking` block. `redacted_thinking` → `reasoning` item with `encrypted_content` only. |
 | 3 | Output blocks | Tool calls | Supported | `tool_use` → `function_call` item. |
 | 4 | Output blocks | Web search results | Supported | `server_tool_use` (web search) and `web_search_tool_result` → one `cf_gears:web_search_call` item with `queries` and `results`. `web_search_result_location` citations → `url_citation` annotations spanning the whole text part. |
 | 5 | Output blocks | Other blocks | Supported | Any other block → `anthropic:<type>` item, kept verbatim. |
 | 6 | Streaming | Text | Supported | `text_delta` → `response.output_text.delta`. |
 | 7 | Streaming | Reasoning | Supported | `thinking_delta` → `response.reasoning.delta`. Thinking text is requested with `reasoning.summary` (see 33). |
 | 8 | Streaming | Tool call arguments | Supported | `input_json_delta` → `response.function_call_arguments.delta`. |
-| 9 | Streaming | Web search and other blocks | Supported | Emitted whole when the block stops. A web search item is added as `in_progress` when the call block stops and is done when its result block arrives or the stream ends. |
-| 10 | Streaming | Terminal event | Supported | Exactly one of `response.completed`, `response.incomplete`, `response.failed`. The final snapshot equals the non-streaming response for the same blocks. |
+| 9 | Streaming | Web search and other blocks | Supported | Emitted whole when the block stops. A web search item is added as `in_progress` when the call block stops and is done when its result block arrives or the stream ends; without a result it is `incomplete`. |
+| 10 | Streaming | Terminal event | Supported | Exactly one of `response.completed`, `response.incomplete`, `response.failed`. The final snapshot equals the non-streaming response for the same blocks. Before `response.failed`, every open item is done; a block cut off mid-stream is kept as `incomplete`. Argument and text deltas add up to the done values; empty deltas are not sent. |
 | 11 | Input | Text | Supported | `input_text` and string content → `text` block. |
 | 12 | Input | Images by URL or base64 | Supported | `input_image.image_url` (http(s) URL or base64 data URI) → `image` block. |
 | 13 | Input | Files by URL or base64 | Supported | `input_file.file_url` (http(s) URL or base64 data URI) and `input_file.file_data` (base64 data URI only) → `document` block with the media type of the data URI. `file_data` in any other format is rejected with `validation_error`. Accepted file types are declared in the model capabilities. |
@@ -41,12 +41,13 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 17 | Input | `cf_gears:web_search_call` items | Not supported by the plugin | Dropped from the input. |
 | 18 | Input | `item_reference` | Not supported by Anthropic | Rejected with `capability_not_supported`. |
 | 19 | User-defined tools | Function tools with a schema | Supported | `name`, `description`, `parameters` → `input_schema`, `strict`. The schema is forwarded verbatim. |
-| 20 | Anthropic built-in tools | `anthropic:<type>` tools | Supported | Forwarded verbatim with the prefix stripped. |
+| 20 | Anthropic built-in tools | `anthropic:<type>` tools the consumer runs | Supported | `bash_*`, `text_editor_*`, `memory_*`, `computer_*`: forwarded verbatim with the prefix stripped. |
+| 20a | Anthropic built-in tools | `anthropic:<type>` tools Anthropic runs | Not supported by the plugin | Code execution, web fetch, tool search, and other server tools keep state or cost at Anthropic: rejected with `capability_not_supported`. Web search goes through `cf_gears:web_search`. |
 | 21 | Anthropic built-in tools | Allowing built-in tools per model | Not supported by LLM Gateway | Model Registry has no per-model allow-list for provider tools, and `ProviderPluginCapabilities` has no tool-namespace field. |
 | 22 | `cf_gears:web_search` | Web search tool | Supported | → `web_search_20250305` with `allowed_domains`, `blocked_domains`, `max_uses`, `user_location`. |
-| 23 | `cf_gears:web_search` | Other web search options | Not supported by Anthropic | Dropped without an entry in `ignored_parameters`. |
-| 24 | `cf_gears:web_search` | Resuming a paused search turn | Not supported by the plugin | `pause_turn` maps to status `completed`, and web search items are dropped from the input. |
-| 25 | Tool choice | `auto`, `required`, `none`, named function | Supported | → `auto`, `any`, `none`, `tool`. Sent only when the request has tools; falls back to the settings `tool_choice`. |
+| 23 | `cf_gears:web_search` | Other web search options | Not supported by Anthropic | Unsupported parameter, named `tools[<i>].<option>`. |
+| 24 | `cf_gears:web_search` | Resuming a paused search turn | Not supported by the plugin | `pause_turn` maps to status `incomplete` with reason `max_output_tokens`, and web search items are dropped from the input. |
+| 25 | Tool choice | `auto`, `required`, `none`, named function | Supported | → `auto`, `any`, `none`, `tool`. Sent only when the request has tools; falls back to the settings `tool_choice`. `required` or a named function without tools, or a name that is not a function tool, is rejected with `validation_error`. A forced choice (`any`, `tool`) with thinking on is an unsupported parameter; dropped, it becomes `auto`. With parallel calls allowed, a named choice can still yield further calls. |
 | 26 | Tool choice | Forcing a non-function tool | Not supported by LLM Gateway | `NamedToolChoice` has only the function variant. |
 | 27 | Tool choice | Parallel tool calls | Supported | `parallel_tool_calls: false` → `disable_parallel_tool_use: true`. |
 | 28 | Tool choice | `max_tool_calls` | Not supported by Anthropic | Unsupported parameter. |
@@ -65,7 +66,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 41 | General settings | `top_k` | Not supported by Anthropic | No request field and no settings field. |
 | 42 | General settings | `seed`, `presence_penalty`, `frequency_penalty` | Not supported by Anthropic | Unsupported parameters. |
 | 43 | General settings | `top_logprobs`, `include: message.output_text.logprobs` | Not supported by Anthropic | Unsupported parameters. |
-| 44 | General settings | `text.verbosity` | Not supported by Anthropic | Dropped without an entry in `ignored_parameters`. |
+| 44 | General settings | `text.verbosity` | Not supported by Anthropic | Unsupported parameter. |
 | 45 | General settings | `service_tier` | Supported | `auto` → `auto`, `default` → `standard_only`; falls back to the settings. |
 | 46 | General settings | `safety_identifier` | Supported | → `metadata.user_id`. |
 | 47 | Truncation | `truncation: disabled` | Supported | Nothing is sent. |
@@ -75,8 +76,11 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 51 | Cache settings | Cache-creation token count | Not supported by LLM Gateway | Available only in `usage.provider_raw`. |
 | 52 | Stop words | Stop words per request | Not supported by LLM Gateway | `CreateResponseBody` has no `stop` field, and the response has no field for the matched sequence. |
 | 53 | Stop words | Stop words per model | Supported | Settings `stop_sequences` → `stop_sequences`. |
-| 54 | Extra fields | Forwarding `extra_fields` | Supported | Each entry is merged into the top level of the request body and overrides a typed field of the same name. |
-| 55 | Effort | Effort with reasoning | Supported | `reasoning.effort` → `output_config.effort`, together with `thinking: adaptive` (see 29). |
+| 54 | Extra fields | Forwarding `extra_fields` | Supported | Each entry is added to the top level of the request body. An entry for a field the plugin builds (`model`, `messages`, `max_tokens`, `stream`, `system`, `tools`, `tool_choice`, `thinking`, `output_config`, ...) is rejected with `validation_error`. |
+| 55 | Effort | Effort with reasoning | Supported | `reasoning.effort` → `output_config.effort`, together with `thinking: adaptive` (see 29); with `budget_tokens` too, `thinking: enabled` and the effort are both sent. `budget_tokens` with effort `none` is rejected with `validation_error`. |
+| 56 | Input | Image `detail` | Not supported by Anthropic | `low` and `high` are unsupported parameters; `auto` is accepted. |
+| 57 | Status | Stop reasons | Supported | `end_turn`, `stop_sequence`, `tool_use` → `completed`; `max_tokens`, `model_context_window_exceeded`, `pause_turn` → `incomplete` (`max_output_tokens`); `refusal` → `incomplete` (`content_filter`), or `content_filtered` error when nothing was produced. The last item of an incomplete response is `incomplete`. The original stop reason is in `provider_details`. |
+| 58 | Response | Echoed request fields | Supported | `max_output_tokens`, `tool_choice`, and `parallel_tool_calls` report the values sent, settings fallbacks included; `service_tier` reports Anthropic's `usage.service_tier` (`standard` → `default`). |
 
 ## Schema adaptation
 
@@ -91,4 +95,4 @@ Anthropic Python SDK:
 - every other unsupported keyword moves into `description`;
 - a schema node that is not an object, or has none of `type`, `anyOf`,
   `oneOf`, `allOf`, `enum`, `const`, `$ref`, is rejected with
-  `validation_error`.
+  `unsupported_schema`.

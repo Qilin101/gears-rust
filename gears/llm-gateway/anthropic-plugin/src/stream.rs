@@ -3,7 +3,9 @@
 //!
 //! Anthropic streams one content block at a time. Text, tool arguments, and
 //! thinking are forwarded as deltas; other blocks are emitted whole when they
-//! stop. A web search item is done once its result block arrives. Every stream ends with exactly one terminal event.
+//! stop. A web search item is done once its result block arrives. Every
+//! stream ends with exactly one terminal event; a failed stream first closes
+//! the open items as `incomplete` and keeps them in its final snapshot.
 
 use std::collections::VecDeque;
 
@@ -44,19 +46,11 @@ where
                 }
                 match events.next().await {
                     Some(Ok(event)) => translator.on_event(event),
-                    Some(Err(err)) => translator.fail(&interrupted(&err.to_string())),
-                    None => translator.on_end(),
+                    Some(Err(err)) => translator.interrupt(&err.to_string()),
+                    None => translator.interrupt("stream ended before message_stop"),
                 }
             }
         },
-    )
-}
-
-fn interrupted(detail: &str) -> LlmGatewayError {
-    LlmGatewayError::provider(
-        ProviderErrorCategory::ProviderUnavailable,
-        format!("provider stream interrupted: {detail}"),
-        ProviderFailure::default(),
     )
 }
 
@@ -105,6 +99,7 @@ struct Translator {
     open_searches: Vec<u32>,
     usage: Value,
     stop_reason: Option<String>,
+    stop_details: Option<Value>,
 }
 
 impl Translator {
@@ -123,6 +118,7 @@ impl Translator {
             open_searches: Vec::new(),
             usage: Value::Null,
             stop_reason: None,
+            stop_details: None,
         }
     }
 
@@ -149,6 +145,9 @@ impl Translator {
                 if delta.stop_reason.is_some() {
                     self.stop_reason = delta.stop_reason;
                 }
+                if delta.stop_details.is_some() {
+                    self.stop_details = delta.stop_details;
+                }
                 merge_usage(&mut self.usage, usage);
             }
             StreamEvent::MessageStop => self.complete(),
@@ -161,8 +160,18 @@ impl Translator {
         }
     }
 
-    fn on_end(&mut self) {
-        self.fail(&interrupted("stream ended before message_stop"));
+    /// The provider stream broke off or ended before `message_stop`.
+    fn interrupt(&mut self, detail: &str) {
+        let mut details = ProviderFailure::default();
+        if let Some(id) = &self.envelope.provider_request_id {
+            details = details.with_provider_request_id(id.clone());
+        }
+        let err = LlmGatewayError::provider(
+            ProviderErrorCategory::ProviderUnavailable,
+            format!("provider stream interrupted: {detail}"),
+            details,
+        );
+        self.fail(&err);
     }
 
     fn on_block_start(&mut self, index: u32, raw: Value) {
@@ -281,6 +290,15 @@ impl Translator {
         let Some(open) = self.open.as_mut().filter(|o| o.index == index) else {
             return;
         };
+        let empty = match &delta {
+            BlockDelta::TextDelta { text } => text.is_empty(),
+            BlockDelta::InputJsonDelta { partial_json } => partial_json.is_empty(),
+            BlockDelta::ThinkingDelta { thinking } => thinking.is_empty(),
+            _ => false,
+        };
+        if empty {
+            return;
+        }
         let item_id = open.placement.item_id.clone();
         let output_index = open.placement.output_index;
         let content_index = open.placement.content_index;
@@ -357,23 +375,45 @@ impl Translator {
         let Some(open) = self.open.take_if(|o| o.index == index) else {
             return;
         };
+        self.stop_block(open, false);
+    }
+
+    /// Finish a block; `cut` marks a block the stream broke off in.
+    fn stop_block(&mut self, open: OpenBlock, cut: bool) {
         let placement = open.placement;
         match open.content {
-            OpenContent::Text { text, citations } => self.stop_text(&placement, text, citations),
+            OpenContent::Text { text, citations } => {
+                self.stop_text(&placement, text, citations);
+                if cut {
+                    self.builder.set_incomplete(placement.output_index);
+                }
+            }
             OpenContent::ToolUse {
                 id,
                 name,
-                arguments,
+                mut arguments,
             } => {
-                let input = serde_json::from_str(&arguments)
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-                self.builder.push(Block::ToolUse { id, name, input });
-                let arguments = match self.builder.items().get(placement.output_index as usize) {
-                    Some(OutputItem::FunctionCall(call)) => call.arguments.clone(),
-                    _ => arguments,
-                };
                 let item_id = placement.item_id.clone();
                 let output_index = placement.output_index;
+                // A call without input streams no JSON; send `{}` as its only
+                // delta so the deltas always add up to the arguments.
+                if arguments.is_empty() && !cut {
+                    "{}".clone_into(&mut arguments);
+                    let delta = arguments.clone();
+                    let item_id = item_id.clone();
+                    self.emit(|n| {
+                        StreamingEvent::FunctionCallArgumentsDelta(FunctionCallArgumentsEvent {
+                            sequence_number: n,
+                            item_id,
+                            output_index,
+                            arguments: delta,
+                        })
+                    });
+                }
+                self.builder.push_function_call(id, name, arguments.clone());
+                if cut {
+                    self.builder.set_incomplete(output_index);
+                }
                 self.emit(|n| {
                     StreamingEvent::FunctionCallArgumentsDone(FunctionCallArgumentsEvent {
                         sequence_number: n,
@@ -414,17 +454,20 @@ impl Translator {
                 {
                     object.insert("input".to_owned(), input);
                 }
-                self.stop_whole(Block::parse(raw));
+                self.stop_whole(Block::parse(raw), cut);
             }
         }
     }
 
     /// A web search call is reported done when its result block arrives, or
     /// at the end of the stream.
-    fn stop_whole(&mut self, block: Block) {
+    fn stop_whole(&mut self, block: Block, cut: bool) {
         let is_search_call = matches!(block, Block::WebSearchCall { .. });
         let placement = self.builder.push(block);
         let output_index = placement.output_index;
+        if cut {
+            self.builder.set_incomplete(output_index);
+        }
         if placement.new_item {
             let item = self.builder.items().get(output_index as usize).cloned();
             if let Some(mut item) = item {
@@ -506,10 +549,20 @@ impl Translator {
     }
 
     fn complete(&mut self) {
-        self.close_message();
-        for output_index in std::mem::take(&mut self.open_searches) {
-            self.item_done(output_index);
+        if let Some(err) = response::refused_without_output(
+            self.stop_reason.as_deref(),
+            self.builder.items(),
+            self.stop_details.as_ref(),
+            &self.envelope,
+        ) {
+            self.fail(&err);
+            return;
         }
+        let (status, _) = response::status_for(self.stop_reason.as_deref());
+        if status == ResponseStatus::Incomplete {
+            self.builder.set_last_incomplete();
+        }
+        self.close_items();
         let resource = response::finish(
             self.snapshot.clone(),
             &self.envelope,
@@ -529,7 +582,21 @@ impl Translator {
         self.finished = true;
     }
 
+    /// Report every item still open as done.
+    fn close_items(&mut self) {
+        self.close_message();
+        for output_index in std::mem::take(&mut self.open_searches) {
+            self.item_done(output_index);
+        }
+    }
+
+    /// End the stream with `response.failed`, keeping the output so far: a
+    /// block cut off mid-stream is closed as `incomplete`.
     fn fail(&mut self, err: &LlmGatewayError) {
+        if let Some(open) = self.open.take() {
+            self.stop_block(open, true);
+        }
+        self.close_items();
         let mut resource = self.snapshot.clone();
         resource.status = ResponseStatus::Failed;
         resource.error = Some(err.to_response_error());

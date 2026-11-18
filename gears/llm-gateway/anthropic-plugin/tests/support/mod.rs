@@ -323,14 +323,14 @@ impl Case {
             "supported_api": ["completion"],
             "capabilities": {
                 "vision": { "enabled": true, "supported_mime_types": ["image/png"] },
-                "reasoning": { "effort": true, "toggle": true, "resume": true, "budget": true },
+                "reasoning": { "effort": true, "toggle": true, "resume": true, "budget": false },
                 "tools": {
                     "enabled": true, "parallel_tool_calls": true, "max_tool_calls": false,
                     "tool_choice_required": true, "tool_choice_none": true, "tool_choice_named": true
                 },
                 "output": { "json_mode": false, "json_schema": true, "strict_schema": true, "verbosity": false },
                 "sampling": {
-                    "temperature": true, "top_p": true, "seed": false,
+                    "temperature": false, "top_p": false, "seed": false,
                     "presence_penalty": false, "frequency_penalty": false, "logprobs": false
                 },
                 "streaming": true,

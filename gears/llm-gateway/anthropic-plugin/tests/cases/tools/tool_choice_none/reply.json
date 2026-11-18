@@ -2,27 +2,32 @@
   "status": 200,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_011Ch9poqWP2ccPauqziSJWx"
+    "request-id": "req_011ChA3TdRJjapiZ1Y23AZtm"
   },
   "body": {
     "model": "claude-haiku-5-5",
-    "id": "msg_011Ch9poqe4jTPEBJRp4QyTo",
+    "id": "msg_011ChA3TdaUgvpinGVEsGHHM",
     "type": "message",
     "role": "assistant",
-    "content": [],
+    "content": [
+      {
+        "type": "text",
+        "text": "Paris is known for its iconic landmarks like the Eiffel Tower and Louvre Museum, its rich art, fashion, and café culture, and its status as one of the world's great centers of history and romance."
+      }
+    ],
     "container": null,
     "stop_reason": "end_turn",
     "stop_sequence": null,
     "stop_details": null,
     "usage": {
-      "input_tokens": 390,
+      "input_tokens": 388,
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "cache_creation": {
         "ephemeral_5m_input_tokens": 0,
         "ephemeral_1h_input_tokens": 0
       },
-      "output_tokens": 1,
+      "output_tokens": 67,
       "output_tokens_details": {
         "thinking_tokens": 0
       },

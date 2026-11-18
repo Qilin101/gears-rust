@@ -10,10 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use llm_gateway_sdk::{
     Annotation, CreateResponseBody, Extension, FunctionCallItem, IncompleteDetails,
-    InputTokensDetails, ItemStatus, MessageOutput, OutputContentPart, OutputItem, OutputText,
-    OutputTokensDetails, ProviderDetails, ReasoningContentPart, ReasoningOutput, ResponseResource,
-    ResponseStatus, Role, ServiceTier, ToolChoice, ToolChoiceMode, TruncationStrategy, UrlCitation,
-    Usage, WebSearchCallOutput, WebSearchResult,
+    InputTokensDetails, ItemStatus, LlmGatewayError, MessageOutput, OutputContentPart, OutputItem,
+    OutputText, OutputTokensDetails, ProviderDetails, ProviderErrorCategory, ProviderFailure,
+    ReasoningContentPart, ReasoningOutput, ResponseResource, ResponseStatus, Role, ServiceTier,
+    ToolChoice, ToolChoiceMode, TruncationStrategy, UrlCitation, Usage, WebSearchCallOutput,
+    WebSearchResult,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -30,6 +31,18 @@ pub struct Envelope {
     pub ignored_parameters: Vec<String>,
     /// Anthropic's `request-id` response header.
     pub provider_request_id: Option<String>,
+    pub echo: Echo,
+}
+
+/// Values sent to Anthropic that the response reports in place of the
+/// request's: settings defaults and fallbacks apply. `None` keeps the request
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Echo {
+    pub max_output_tokens: Option<u32>,
+    pub tool_choice: Option<ToolChoice>,
+    pub parallel_tool_calls: Option<bool>,
+    pub service_tier: Option<String>,
 }
 
 /// Current Unix time in seconds.
@@ -49,6 +62,11 @@ pub fn base_resource(
     envelope: &Envelope,
     status: ResponseStatus,
 ) -> ResponseResource {
+    let echo = &envelope.echo;
+    let requested_tier = match body.service_tier {
+        Some(ServiceTier::Default) => "default",
+        Some(ServiceTier::Auto) | None => "auto",
+    };
     ResponseResource {
         id: envelope.request_id.clone(),
         object: "response".to_owned(),
@@ -61,12 +79,16 @@ pub fn base_resource(
         output: Vec::new(),
         error: None,
         tools: body.tools.clone().unwrap_or_default(),
-        tool_choice: body
+        tool_choice: echo
             .tool_choice
             .clone()
+            .or_else(|| body.tool_choice.clone())
             .unwrap_or(ToolChoice::Mode(ToolChoiceMode::Auto)),
         truncation: body.truncation.unwrap_or(TruncationStrategy::Disabled),
-        parallel_tool_calls: body.parallel_tool_calls.unwrap_or(true),
+        parallel_tool_calls: echo
+            .parallel_tool_calls
+            .or(body.parallel_tool_calls)
+            .unwrap_or(true),
         text: body.text.clone().unwrap_or_default(),
         top_p: body.top_p.unwrap_or(1.0),
         presence_penalty: body.presence_penalty.unwrap_or_default(),
@@ -75,13 +97,12 @@ pub fn base_resource(
         temperature: body.temperature.unwrap_or(1.0),
         reasoning: body.reasoning.clone().unwrap_or_default(),
         usage: None,
-        max_output_tokens: body.max_output_tokens,
+        max_output_tokens: echo.max_output_tokens.or(body.max_output_tokens),
         max_tool_calls: body.max_tool_calls,
-        service_tier: match body.service_tier {
-            Some(ServiceTier::Default) => "default",
-            Some(ServiceTier::Auto) | None => "auto",
-        }
-        .to_owned(),
+        service_tier: echo
+            .service_tier
+            .clone()
+            .unwrap_or_else(|| requested_tier.to_owned()),
         metadata: body.metadata.clone(),
         safety_identifier: body.safety_identifier.clone(),
         prompt_cache_key: body.prompt_cache_key.clone(),
@@ -91,23 +112,36 @@ pub fn base_resource(
 }
 
 /// The final response resource for a sync Messages response.
-#[must_use]
+///
+/// # Errors
+///
+/// `content_filtered` when Anthropic refused before producing any output.
 pub fn to_resource(
     body: &CreateResponseBody,
     envelope: &Envelope,
     message: Message,
-) -> ResponseResource {
+) -> Result<ResponseResource, LlmGatewayError> {
     let mut builder = OutputBuilder::new(&envelope.request_id);
     for block in message.content {
         builder.push(Block::parse(block));
     }
-    finish(
+    let output = builder.into_items();
+    let stop_reason = message.stop_reason.as_deref();
+    if let Some(err) = refused_without_output(
+        stop_reason,
+        &output,
+        message.stop_details.as_ref(),
+        envelope,
+    ) {
+        return Err(err);
+    }
+    Ok(finish(
         base_resource(body, envelope, ResponseStatus::Completed),
         envelope,
-        builder.into_items(),
-        message.stop_reason.as_deref(),
+        output,
+        stop_reason,
         &message.usage,
-    )
+    ))
 }
 
 /// Fill a resource with the output, status, usage, and provider details.
@@ -115,18 +149,75 @@ pub fn to_resource(
 pub fn finish(
     mut resource: ResponseResource,
     envelope: &Envelope,
-    output: Vec<OutputItem>,
+    mut output: Vec<OutputItem>,
     stop_reason: Option<&str>,
     raw_usage: &Value,
 ) -> ResponseResource {
     let (status, incomplete_details) = status_for(stop_reason);
+    if status == ResponseStatus::Incomplete
+        && let Some(last) = output.last_mut()
+    {
+        set_incomplete(last);
+    }
     resource.status = status;
     resource.incomplete_details = incomplete_details;
     resource.output = output;
     resource.usage = Some(usage(raw_usage, true));
     resource.completed_at = Some(now_unix());
     resource.provider_details = Some(provider_details(stop_reason, envelope));
+    if let Some(tier) = served_tier(raw_usage) {
+        resource.service_tier = tier;
+    }
     resource
+}
+
+/// Mark an item cut off by the stop reason as `incomplete`.
+pub fn set_incomplete(item: &mut OutputItem) {
+    match item {
+        OutputItem::Message(message) => message.status = ItemStatus::Incomplete,
+        OutputItem::FunctionCall(call) => call.status = Some(ItemStatus::Incomplete),
+        OutputItem::WebSearchCall(call) => call.status = ItemStatus::Incomplete,
+        _ => {}
+    }
+}
+
+/// The service tier Anthropic reports in `usage.service_tier`, in Open
+/// Responses terms.
+fn served_tier(raw_usage: &Value) -> Option<String> {
+    let tier = raw_usage.get("service_tier")?.as_str()?;
+    Some(match tier {
+        "standard" => "default".to_owned(),
+        other => other.to_owned(),
+    })
+}
+
+/// A refusal without any output is a provider error, not an incomplete
+/// response.
+#[must_use]
+pub fn refused_without_output(
+    stop_reason: Option<&str>,
+    output: &[OutputItem],
+    stop_details: Option<&Value>,
+    envelope: &Envelope,
+) -> Option<LlmGatewayError> {
+    if stop_reason != Some("refusal") || !output.is_empty() {
+        return None;
+    }
+    let explanation = stop_details
+        .and_then(|d| d.get("explanation"))
+        .and_then(Value::as_str);
+    let mut details = ProviderFailure::default().with_provider_code("refusal");
+    if let Some(explanation) = explanation {
+        details = details.with_provider_message(explanation);
+    }
+    if let Some(id) = &envelope.provider_request_id {
+        details = details.with_provider_request_id(id.clone());
+    }
+    Some(LlmGatewayError::provider(
+        ProviderErrorCategory::ContentFiltered,
+        explanation.unwrap_or("the provider refused the request"),
+        details,
+    ))
 }
 
 #[must_use]
@@ -145,7 +236,9 @@ pub fn provider_details(stop_reason: Option<&str>, envelope: &Envelope) -> Provi
 #[must_use]
 pub fn status_for(stop_reason: Option<&str>) -> (ResponseStatus, Option<IncompleteDetails>) {
     let reason = match stop_reason {
-        Some("max_tokens" | "model_context_window_exceeded") => {
+        // A paused server-tool turn is unfinished; the gateway cannot resume
+        // it, so it reports the turn as cut short.
+        Some("max_tokens" | "model_context_window_exceeded" | "pause_turn") => {
             IncompleteDetails::MAX_OUTPUT_TOKENS
         }
         Some("refusal") => IncompleteDetails::CONTENT_FILTER,
@@ -279,6 +372,35 @@ impl OutputBuilder {
         self.items
     }
 
+    /// Mark the last item `incomplete`.
+    pub fn set_last_incomplete(&mut self) {
+        if let Some(last) = self.items.last_mut() {
+            set_incomplete(last);
+        }
+    }
+
+    /// Mark the item at `output_index` `incomplete`.
+    pub fn set_incomplete(&mut self, output_index: u32) {
+        if let Some(item) = self.items.get_mut(output_index as usize) {
+            set_incomplete(item);
+        }
+    }
+
+    /// Add a function call whose arguments arrived as streamed JSON text,
+    /// keeping that text verbatim.
+    pub fn push_function_call(&mut self, id: String, name: String, arguments: String) -> Placement {
+        let placement = self.peek(BlockKind::ToolUse);
+        self.message_open = false;
+        self.items.push(OutputItem::FunctionCall(FunctionCallItem {
+            id: Some(placement.item_id.clone()),
+            status: Some(ItemStatus::Completed),
+            call_id: id,
+            name,
+            arguments,
+        }));
+        placement
+    }
+
     /// Where a block of `kind` would land if pushed now.
     #[must_use]
     pub fn peek(&self, kind: BlockKind<'_>) -> Placement {
@@ -355,10 +477,11 @@ impl OutputBuilder {
                     encrypted_content: Some(data),
                 }));
             }
+            // Incomplete until its result block arrives.
             Block::WebSearchCall { id, query } => {
                 self.web_searches.insert(id, self.items.len());
                 self.items.push(OutputItem::WebSearchCall(
-                    WebSearchCallOutput::new(item_id, ItemStatus::Completed)
+                    WebSearchCallOutput::new(item_id, ItemStatus::Incomplete)
                         .with_queries(query.into_iter().collect()),
                 ));
             }

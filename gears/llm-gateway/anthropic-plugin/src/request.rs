@@ -2,7 +2,7 @@
 //! Open Responses request -> Anthropic Messages request.
 
 use llm_gateway_sdk::{
-    CreateResponseBody, FunctionCallItem, FunctionTool, IncludeField, InputContent,
+    CreateResponseBody, FunctionCallItem, FunctionTool, ImageDetail, IncludeField, InputContent,
     InputContentPart, InputFile, InputImage, InputItem, LlmGatewayError, MessageItem,
     NamedToolChoice, ReasoningConfig, ReasoningContentPart, ReasoningEffort, ReasoningItem,
     ResponseInput, Role as InputRole, ServiceTier, TextFormatKind, Tool, ToolChoice as InputChoice,
@@ -10,6 +10,7 @@ use llm_gateway_sdk::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::response::Echo;
 use crate::schema;
 use crate::settings::{
     AnthropicJsonOutputFormat, AnthropicOutputEffort, AnthropicProviderSettingsV1,
@@ -27,6 +28,29 @@ pub const ANTHROPIC_PREFIX: &str = "anthropic:";
 /// Web search options forwarded from `cf_gears:web_search` to Anthropic.
 const WEB_SEARCH_OPTIONS: [&str; 3] = ["blocked_domains", "max_uses", "user_location"];
 
+/// Type prefixes of the Anthropic built-in tools that may be forwarded: tools
+/// the consumer runs, which keep no state at Anthropic.
+const CLIENT_TOOL_PREFIXES: [&str; 4] = ["bash_", "text_editor_", "memory_", "computer_"];
+
+/// Top-level request fields the plugin builds; `extra_fields` cannot set them.
+const BUILT_FIELDS: [&str; 15] = [
+    "model",
+    "max_tokens",
+    "messages",
+    "system",
+    "stop_sequences",
+    "tools",
+    "tool_choice",
+    "thinking",
+    "output_config",
+    "metadata",
+    "service_tier",
+    "inference_geo",
+    "container",
+    "cache_control",
+    "stream",
+];
+
 /// The resolved model the request is built for.
 #[derive(Debug, Clone, Copy)]
 pub struct Target<'a> {
@@ -43,6 +67,8 @@ pub struct Built {
     /// Request parameters Anthropic has no equivalent for, dropped under
     /// `drop_unsupported_params`.
     pub ignored_parameters: Vec<String>,
+    /// The values sent where they differ from the request.
+    pub echo: Echo,
 }
 
 /// Build the Messages request for `body`.
@@ -51,15 +77,19 @@ pub struct Built {
 ///
 /// - `unsupported_parameter` for a parameter Anthropic lacks, unless
 ///   `drop_unsupported_params` is set.
-/// - `capability_not_supported` for input or options Anthropic cannot take.
-/// - `validation_error` for malformed input or a missing `max_tokens`.
+/// - `capability_not_supported` for input, tools, or options Anthropic cannot
+///   take.
+/// - `unsupported_schema` for a `text.format` schema Anthropic cannot express.
+/// - `validation_error` for malformed input, a missing `max_tokens`, or an
+///   `extra_fields` entry that sets a field the plugin builds.
 pub fn build(
     target: &Target<'_>,
     body: &CreateResponseBody,
     stream: bool,
 ) -> Result<Built, LlmGatewayError> {
     let settings = target.settings;
-    let ignored_parameters = unsupported_parameters(body)?;
+    let extra = extra_fields(body)?;
+    let mut unsupported = unsupported_parameters(body);
 
     let mut conversation = Conversation::default();
     if let Some(system) = settings.system.as_ref().filter(|s| !s.is_empty()) {
@@ -84,19 +114,43 @@ pub fn build(
         None => {}
     }
 
+    unsupported.append(&mut conversation.unsupported);
+
     let tools = body
         .tools
         .iter()
         .flatten()
         .enumerate()
-        .map(|(index, tool)| convert_tool(tool, index))
+        .map(|(index, tool)| convert_tool(tool, index, &mut unsupported))
         .collect::<Result<Vec<_>, _>>()?;
-    let tool_choice = if tools.is_empty() {
+    let (thinking, effort) = reasoning(body.reasoning.as_ref(), settings)?;
+    let mut tool_choice = if tools.is_empty() {
+        check_choice_without_tools(body)?;
         None
     } else {
+        check_named_choice(body)?;
         tool_choice(body, settings)
     };
-    let (thinking, effort) = reasoning(body.reasoning.as_ref(), settings);
+    // Anthropic rejects forced tool use while thinking is on.
+    if matches!(
+        thinking,
+        Some(Thinking::Enabled { .. } | Thinking::Adaptive { .. })
+    ) && let Some(
+        ToolChoice::Any {
+            disable_parallel_tool_use,
+        }
+        | ToolChoice::Tool {
+            disable_parallel_tool_use,
+            ..
+        },
+    ) = tool_choice
+    {
+        unsupported.push("tool_choice".to_owned());
+        tool_choice = Some(ToolChoice::Auto {
+            disable_parallel_tool_use,
+        });
+    }
+    let ignored_parameters = apply_drop_policy(body, unsupported)?;
 
     let request = MessagesRequest {
         model: target.provider_model_id.to_owned(),
@@ -120,16 +174,13 @@ pub fn build(
             .as_ref()
             .map(|_| CacheControl::Ephemeral),
         stream: stream.then_some(true),
-        extra: body
-            .extra_fields
-            .iter()
-            .flatten()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        extra,
     };
+    let echo = echo(&request);
     Ok(Built {
         request,
         ignored_parameters,
+        echo,
     })
 }
 
@@ -137,7 +188,74 @@ pub fn build(
 // Parameters
 // ---------------------------------------------------------------------------
 
-fn unsupported_parameters(body: &CreateResponseBody) -> Result<Vec<String>, LlmGatewayError> {
+/// `extra_fields` entries; none may set a field the plugin builds.
+fn extra_fields(body: &CreateResponseBody) -> Result<Map<String, Value>, LlmGatewayError> {
+    let fields = body.extra_fields.iter().flatten();
+    if let Some(key) = BUILT_FIELDS
+        .iter()
+        .find(|key| fields.clone().any(|(k, _)| k == *key))
+    {
+        return Err(LlmGatewayError::validation_param(
+            format!("extra_fields cannot set {key}, which the provider plugin builds"),
+            format!("extra_fields.{key}"),
+        ));
+    }
+    Ok(fields.map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+
+/// Reject the unsupported parameters, or drop them under
+/// `drop_unsupported_params` and return them.
+fn apply_drop_policy(
+    body: &CreateResponseBody,
+    unsupported: Vec<String>,
+) -> Result<Vec<String>, LlmGatewayError> {
+    match unsupported.first() {
+        Some(first) if body.drop_unsupported_params != Some(true) => {
+            Err(LlmGatewayError::unsupported_parameter(first.clone()))
+        }
+        _ => Ok(unsupported),
+    }
+}
+
+/// Request values the response reports as sent.
+fn echo(request: &MessagesRequest) -> Echo {
+    let (tool_choice, disable_parallel) = match &request.tool_choice {
+        Some(ToolChoice::Auto {
+            disable_parallel_tool_use,
+        }) => (
+            Some(InputChoice::Mode(ToolChoiceMode::Auto)),
+            *disable_parallel_tool_use,
+        ),
+        Some(ToolChoice::Any {
+            disable_parallel_tool_use,
+        }) => (
+            Some(InputChoice::Mode(ToolChoiceMode::Required)),
+            *disable_parallel_tool_use,
+        ),
+        Some(ToolChoice::Tool {
+            name,
+            disable_parallel_tool_use,
+        }) => (
+            Some(InputChoice::Named(NamedToolChoice::Function {
+                name: name.clone(),
+            })),
+            *disable_parallel_tool_use,
+        ),
+        Some(ToolChoice::None) => (Some(InputChoice::Mode(ToolChoiceMode::None)), None),
+        None => (None, None),
+    };
+    Echo {
+        max_output_tokens: Some(request.max_tokens),
+        tool_choice,
+        parallel_tool_calls: disable_parallel.map(|disable| !disable),
+        service_tier: request.service_tier.map(|tier| match tier {
+            AnthropicServiceTier::Auto => "auto".to_owned(),
+            AnthropicServiceTier::StandardOnly => "default".to_owned(),
+        }),
+    }
+}
+
+fn unsupported_parameters(body: &CreateResponseBody) -> Vec<String> {
     let checks = [
         ("temperature", body.temperature.is_some()),
         ("top_p", body.top_p.is_some()),
@@ -157,17 +275,48 @@ fn unsupported_parameters(body: &CreateResponseBody) -> Result<Vec<String>, LlmG
                 .flatten()
                 .any(|f| *f == IncludeField::MessageOutputTextLogprobs),
         ),
+        (
+            "text.verbosity",
+            body.text.as_ref().is_some_and(|t| t.verbosity.is_some()),
+        ),
     ];
-    let params: Vec<String> = checks
+    checks
         .into_iter()
         .filter(|(_, present)| *present)
         .map(|(name, _)| name.to_owned())
-        .collect();
-    match params.first() {
-        Some(first) if body.drop_unsupported_params != Some(true) => {
-            Err(LlmGatewayError::unsupported_parameter(first.clone()))
+        .collect()
+}
+
+/// A forced tool choice needs tools.
+fn check_choice_without_tools(body: &CreateResponseBody) -> Result<(), LlmGatewayError> {
+    match &body.tool_choice {
+        Some(InputChoice::Mode(ToolChoiceMode::Required) | InputChoice::Named(_)) => {
+            Err(LlmGatewayError::validation_param(
+                "tool_choice forces a tool call but the request has no tools",
+                "tool_choice",
+            ))
         }
-        _ => Ok(params),
+        _ => Ok(()),
+    }
+}
+
+/// A named tool choice must name a function tool of the request.
+fn check_named_choice(body: &CreateResponseBody) -> Result<(), LlmGatewayError> {
+    let Some(InputChoice::Named(NamedToolChoice::Function { name })) = &body.tool_choice else {
+        return Ok(());
+    };
+    let defined = body
+        .tools
+        .iter()
+        .flatten()
+        .any(|tool| matches!(tool, Tool::Function(f) if f.name == *name));
+    if defined {
+        Ok(())
+    } else {
+        Err(LlmGatewayError::validation_param(
+            format!("tool_choice names function {name:?}, which is not among the tools"),
+            "tool_choice",
+        ))
     }
 }
 
@@ -249,16 +398,22 @@ fn settings_tool_choice(choice: &AnthropicToolChoice, disable: Option<bool>) -> 
 fn reasoning(
     config: Option<&ReasoningConfig>,
     settings: &AnthropicProviderSettingsV1,
-) -> (Option<Thinking>, Option<AnthropicOutputEffort>) {
+) -> Result<(Option<Thinking>, Option<AnthropicOutputEffort>), LlmGatewayError> {
     let default_thinking = settings.thinking.as_ref().map(settings_thinking);
     let default_effort = settings.output_config.as_ref().and_then(|c| c.effort);
     let Some(config) = config else {
-        return (default_thinking, default_effort);
+        return Ok((default_thinking, default_effort));
     };
     let display = config.summary.map(|_| AnthropicThinkingDisplay::Summarized);
     let effort = config.effort.and_then(effort_level);
-    match (config.effort, config.budget_tokens) {
-        (Some(ReasoningEffort::None), _) => (Some(Thinking::Disabled), None),
+    Ok(match (config.effort, config.budget_tokens) {
+        (Some(ReasoningEffort::None), Some(_)) => {
+            return Err(LlmGatewayError::validation_param(
+                "reasoning.budget_tokens cannot be combined with effort none",
+                "reasoning.budget_tokens",
+            ));
+        }
+        (Some(ReasoningEffort::None), None) => (Some(Thinking::Disabled), None),
         (_, Some(budget_tokens)) => (
             Some(Thinking::Enabled {
                 budget_tokens,
@@ -282,7 +437,7 @@ fn reasoning(
             };
             (thinking, default_effort)
         }
-    }
+    })
 }
 
 fn effort_level(effort: ReasoningEffort) -> Option<AnthropicOutputEffort> {
@@ -346,19 +501,36 @@ fn output_config(
 // Tools
 // ---------------------------------------------------------------------------
 
-fn convert_tool(tool: &Tool, index: usize) -> Result<Value, LlmGatewayError> {
+fn convert_tool(
+    tool: &Tool,
+    index: usize,
+    unsupported: &mut Vec<String>,
+) -> Result<Value, LlmGatewayError> {
     match tool {
         Tool::Function(function) => Ok(function_tool(function)),
-        Tool::WebSearch(web_search) => Ok(web_search_tool(web_search)),
-        Tool::Other(ext) => passthrough(&ext.0).ok_or_else(|| {
-            LlmGatewayError::validation_param(
-                format!(
-                    "tool type {:?} is not supported by the Anthropic provider",
-                    ext.kind().unwrap_or_default()
-                ),
-                format!("tools[{index}]"),
-            )
-        }),
+        Tool::WebSearch(web_search) => Ok(web_search_tool(web_search, index, unsupported)),
+        Tool::Other(ext) => {
+            let tool = passthrough(&ext.0).ok_or_else(|| {
+                LlmGatewayError::validation_param(
+                    format!(
+                        "tool type {:?} is not supported by the Anthropic provider",
+                        ext.kind().unwrap_or_default()
+                    ),
+                    format!("tools[{index}]"),
+                )
+            })?;
+            let kind = tool.get("type").and_then(Value::as_str).unwrap_or_default();
+            if CLIENT_TOOL_PREFIXES
+                .iter()
+                .any(|prefix| kind.starts_with(prefix))
+            {
+                Ok(tool)
+            } else {
+                Err(LlmGatewayError::capability_not_supported(format!(
+                    "{ANTHROPIC_PREFIX}{kind}"
+                )))
+            }
+        }
         Tool::Reference(_) | Tool::InlineGts(_) => Err(LlmGatewayError::internal(
             "GTS tool definitions must be resolved before dispatch",
         )),
@@ -387,16 +559,22 @@ fn function_tool(function: &FunctionTool) -> Value {
     Value::Object(tool)
 }
 
-fn web_search_tool(web_search: &WebSearchTool) -> Value {
+fn web_search_tool(
+    web_search: &WebSearchTool,
+    index: usize,
+    unsupported: &mut Vec<String>,
+) -> Value {
     let mut tool = Map::new();
     tool.insert("type".to_owned(), json!(WEB_SEARCH_TOOL_TYPE));
     tool.insert("name".to_owned(), json!(WEB_SEARCH_TOOL_NAME));
     if let Some(domains) = &web_search.allowed_domains {
         tool.insert("allowed_domains".to_owned(), json!(domains));
     }
-    for key in WEB_SEARCH_OPTIONS {
-        if let Some(value) = web_search.options.get(key) {
-            tool.insert(key.to_owned(), value.clone());
+    for (key, value) in &web_search.options {
+        if WEB_SEARCH_OPTIONS.contains(&key.as_str()) {
+            tool.insert(key.clone(), value.clone());
+        } else {
+            unsupported.push(format!("tools[{index}].{key}"));
         }
     }
     Value::Object(tool)
@@ -423,6 +601,8 @@ struct Conversation {
     messages: Vec<MessageParam>,
     /// Whether the last message ends with the content of a `message` item.
     ends_with_message_item: bool,
+    /// Input options Anthropic has no equivalent for.
+    unsupported: Vec<String>,
 }
 
 impl Conversation {
@@ -465,7 +645,11 @@ impl Conversation {
                 Ok(())
             }
             InputItem::FunctionCallOutput(output) => {
-                let content = content_blocks(&output.output, &format!("input[{index}].output"))?;
+                let content = content_blocks(
+                    &output.output,
+                    &format!("input[{index}].output"),
+                    &mut self.unsupported,
+                )?;
                 self.push(
                     Role::User,
                     ContentBlockParam::ToolResult {
@@ -505,7 +689,7 @@ impl Conversation {
 
     fn add_message(&mut self, message: &MessageItem, index: usize) -> Result<(), LlmGatewayError> {
         let param = format!("input[{index}].content");
-        let blocks = content_blocks(&message.content, &param)?;
+        let blocks = content_blocks(&message.content, &param, &mut self.unsupported)?;
         match message.role {
             InputRole::User => self.push_message(Role::User, blocks),
             InputRole::Assistant => self.push_message(Role::Assistant, blocks),
@@ -530,12 +714,15 @@ fn tool_use(call: &FunctionCallItem, index: usize) -> Result<ContentBlockParam, 
     let input = if call.arguments.trim().is_empty() {
         json!({})
     } else {
-        serde_json::from_str(&call.arguments).map_err(|_| {
-            LlmGatewayError::validation_param(
-                "function call arguments must be valid JSON",
-                format!("input[{index}].arguments"),
-            )
-        })?
+        serde_json::from_str::<Value>(&call.arguments)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| {
+                LlmGatewayError::validation_param(
+                    "function call arguments must be a JSON object",
+                    format!("input[{index}].arguments"),
+                )
+            })?
     };
     Ok(ContentBlockParam::ToolUse {
         id: call.call_id.clone(),
@@ -564,13 +751,14 @@ fn reasoning_block(reasoning: &ReasoningItem) -> Option<ContentBlockParam> {
 fn content_blocks(
     content: &InputContent,
     param: &str,
+    unsupported: &mut Vec<String>,
 ) -> Result<Vec<ContentBlockParam>, LlmGatewayError> {
     match content {
         InputContent::Text(text) => Ok(vec![ContentBlockParam::text(text)]),
         InputContent::Parts(parts) => parts
             .iter()
             .enumerate()
-            .map(|(index, part)| content_part(part, &format!("{param}[{index}]")))
+            .map(|(index, part)| content_part(part, &format!("{param}[{index}]"), unsupported))
             .collect(),
     }
 }
@@ -578,10 +766,16 @@ fn content_blocks(
 fn content_part(
     part: &InputContentPart,
     param: &str,
+    unsupported: &mut Vec<String>,
 ) -> Result<ContentBlockParam, LlmGatewayError> {
     match part {
         InputContentPart::InputText(text) => Ok(ContentBlockParam::text(&text.text)),
-        InputContentPart::InputImage(image) => image_block(image, param),
+        InputContentPart::InputImage(image) => {
+            if matches!(image.detail, Some(ImageDetail::Low | ImageDetail::High)) {
+                unsupported.push(format!("{param}.detail"));
+            }
+            image_block(image, param)
+        }
         InputContentPart::InputFile(file) => document_block(file, param),
         InputContentPart::InputAudio(_) => {
             Err(LlmGatewayError::capability_not_supported("input_audio"))

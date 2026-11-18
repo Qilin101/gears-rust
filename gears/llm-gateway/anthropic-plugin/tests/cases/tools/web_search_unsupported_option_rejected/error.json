@@ -1,0 +1,5 @@
+{
+  "code": "unsupported_parameter",
+  "message": "unsupported parameter: tools[0].search_context_size",
+  "param": "tools[0].search_context_size"
+}

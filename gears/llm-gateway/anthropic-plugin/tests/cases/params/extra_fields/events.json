@@ -104,7 +104,7 @@
     "item_id": "msg_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
-    "text": "one two ",
+    "text": "Hello!",
     "type": "response.output_text.delta"
   },
   {
@@ -112,7 +112,7 @@
     "item_id": "msg_req_test_0",
     "output_index": 0,
     "sequence_number": 5,
-    "text": "one two ",
+    "text": "Hello!",
     "type": "response.output_text.done"
   },
   {
@@ -121,7 +121,7 @@
     "output_index": 0,
     "part": {
       "annotations": [],
-      "text": "one two ",
+      "text": "Hello!",
       "type": "output_text"
     },
     "sequence_number": 6,
@@ -132,7 +132,7 @@
       "content": [
         {
           "annotations": [],
-          "text": "one two ",
+          "text": "Hello!",
           "type": "output_text"
         }
       ],
@@ -164,7 +164,7 @@
           "content": [
             {
               "annotations": [],
-              "text": "one two ",
+              "text": "Hello!",
               "type": "output_text"
             }
           ],
@@ -178,12 +178,12 @@
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "provider_details": {
-        "provider_request_id": "req_011Ch9r3kRJBSEH7d47tGkdj",
-        "stop_reason": "stop_sequence"
+        "provider_request_id": "req_011ChA3Z1F7EDJmjBQafHtX5",
+        "stop_reason": "end_turn"
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -200,11 +200,11 @@
         "complete": true,
         "cost": "0",
         "estimated": false,
-        "input_tokens": 21,
+        "input_tokens": 20,
         "input_tokens_details": {
           "cached_tokens": 0
         },
-        "output_tokens": 5,
+        "output_tokens": 6,
         "output_tokens_details": {
           "reasoning_tokens": 0
         },
@@ -216,8 +216,8 @@
           "cache_creation_input_tokens": 0,
           "cache_read_input_tokens": 0,
           "inference_geo": "global",
-          "input_tokens": 21,
-          "output_tokens": 5,
+          "input_tokens": 20,
+          "output_tokens": 6,
           "output_tokens_details": {
             "thinking_tokens": 0
           },

@@ -6,7 +6,7 @@
   "id": "req_test",
   "incomplete_details": null,
   "instructions": null,
-  "max_output_tokens": 64,
+  "max_output_tokens": 2048,
   "max_tool_calls": null,
   "metadata": null,
   "model": "claude",
@@ -15,12 +15,24 @@
     {
       "content": [
         {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSowUKEAgTGAI4AUIIdGhpbmtpbmcSDF+p+vjYLM1XNUAVaxoMXyYeVtzmfzXCE1tDIjBQtcebz2qF9qCeFSEm/vaj4THf0pSAjjbncVMjxv5/Weaba5xPwIjEdOFD/6O9i1gqwAS9se3qDU5T+9yOuoy633AGCcBbeQLv+GPYHbvfvfw2WWD0L1zeGviQVjLmz3ecQp+cpxpKZuD0ccLh3MrVIjugWz6klbI1q3LqDaA3CyZ7qT3S4r0mz9IMoi/FFNMEXZbLk+0xDn3EuF0p4FAJlseBmAvw+2kPQJhrD8yBzGrNKspBQ3BbVVRrQD7Pe4Iaq9qAWWtKQxFtYKdq/qUZFR1pY6A2TjFZDvchk9V7EIenjae+joTw/mTFPVwXYYZbqf9TIvp2BX/8EC2IuFZJFUfEHeWxGKtudm31qN6hjvHlV5yr8tNOPSpNg6136hBbwul/e8UGHpO+B+FhgLgqUCZHKmqgginJoXLUcEr/orzA6Ms3bu1ZplFZmrjv739FLCLd3m+G6voK9tpYxxM1o7y9EAOc3MBOJaS0jl/kb2w30wgdcEeeouKnDGVF6PVOGqZNbtrc3cAJUVMXSM/ZvCrn+2x7pKZqoYSGv1imp5jIwfFq3Pz1aBnRF6g7ncLCndbGDZjudabXHyOI4/JfgH8XdWJe5RNJ9fb8FHd+PDqfSC/7nSOLv78QhgteJLIWhx4APv66iaszy4+mbilDWrtbP/6v5zwF96w+F9ZE5LquLC2ati0Y7eAHtCKLv1ltSNJGdn+inNVflqVEYN4Aenzva2ac37HlV+LI1YZapDOIfZU24bLvo1tF2E0kDUFwiGegxyHZmjGpDQxPfIIUYZayDOX+NGmjH8m1v6GW4Nmo0Qk13al6GUiH3Tu/F69dqlsYAQ==",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
           "annotations": [],
-          "text": "Hello!",
+          "text": "0.05",
           "type": "output_text"
         }
       ],
-      "id": "msg_req_test_0",
+      "id": "msg_req_test_1",
       "role": "assistant",
       "status": "completed",
       "type": "message"
@@ -30,12 +42,14 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_011Ch9pizn6EPnYXFDNBrm9S",
+    "provider_request_id": "req_011ChA3S2z6A54TPR1W9E1aR",
     "stop_reason": "end_turn"
   },
-  "reasoning": {},
+  "reasoning": {
+    "effort": "high"
+  },
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -52,13 +66,13 @@
     "complete": true,
     "cost": "0",
     "estimated": false,
-    "input_tokens": 20,
+    "input_tokens": 56,
     "input_tokens_details": {
       "cached_tokens": 0
     },
-    "output_tokens": 6,
+    "output_tokens": 50,
     "output_tokens_details": {
-      "reasoning_tokens": 0
+      "reasoning_tokens": 45
     },
     "provider_raw": {
       "cache_creation": {
@@ -68,14 +82,14 @@
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "inference_geo": "global",
-      "input_tokens": 20,
-      "output_tokens": 6,
+      "input_tokens": 56,
+      "output_tokens": 50,
       "output_tokens_details": {
-        "thinking_tokens": 0
+        "thinking_tokens": 45
       },
       "service_tier": "standard",
       "speed": "standard"
     },
-    "total_tokens": 26
+    "total_tokens": 106
   }
 }

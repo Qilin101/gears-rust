@@ -15,7 +15,8 @@
         "top_logprobs",
         "max_tool_calls",
         "truncation",
-        "include"
+        "include",
+        "text.verbosity"
       ],
       "incomplete_details": null,
       "instructions": null,
@@ -36,7 +37,8 @@
       "text": {
         "format": {
           "type": "text"
-        }
+        },
+        "verbosity": "low"
       },
       "tool_choice": "auto",
       "tools": [],
@@ -64,7 +66,8 @@
         "top_logprobs",
         "max_tool_calls",
         "truncation",
-        "include"
+        "include",
+        "text.verbosity"
       ],
       "incomplete_details": null,
       "instructions": null,
@@ -85,7 +88,8 @@
       "text": {
         "format": {
           "type": "text"
-        }
+        },
+        "verbosity": "low"
       },
       "tool_choice": "auto",
       "tools": [],
@@ -183,7 +187,8 @@
         "top_logprobs",
         "max_tool_calls",
         "truncation",
-        "include"
+        "include",
+        "text.verbosity"
       ],
       "incomplete_details": null,
       "instructions": null,
@@ -216,13 +221,14 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 0.2,
       "text": {
         "format": {
           "type": "text"
-        }
+        },
+        "verbosity": "low"
       },
       "tool_choice": "auto",
       "tools": [],

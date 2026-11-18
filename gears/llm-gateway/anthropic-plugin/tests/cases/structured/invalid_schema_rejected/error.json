@@ -1,5 +1,4 @@
 {
-  "code": "validation_error",
-  "message": "validation error: schema must have type, anyOf, oneOf, allOf, enum, or const",
-  "param": "text.format.schema"
+  "code": "unsupported_schema",
+  "message": "unsupported schema construct: schema without type, anyOf, oneOf, allOf, enum, const, or $ref"
 }

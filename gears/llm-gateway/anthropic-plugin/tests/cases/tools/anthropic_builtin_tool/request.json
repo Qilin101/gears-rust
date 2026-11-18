@@ -1,11 +1,11 @@
 {
   "model": "claude",
   "max_output_tokens": 1024,
-  "input": "Use code execution to compute 2**64 and report the number.",
+  "input": "Use the bash tool to print the current date.",
   "tools": [
     {
-      "type": "anthropic:code_execution_20250825",
-      "name": "code_execution"
+      "type": "anthropic:bash_20250124",
+      "name": "bash"
     }
   ]
 }

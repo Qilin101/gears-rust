@@ -1,18 +1,18 @@
 {
-  "max_tokens": 32,
+  "diagnostics": {
+    "previous_message_id": null
+  },
+  "max_tokens": 64,
   "messages": [
     {
       "content": [
         {
-          "text": "Write exactly: one two HALT three four",
+          "text": "Reply with exactly: Hello!",
           "type": "text"
         }
       ],
       "role": "user"
     }
   ],
-  "model": "claude-haiku-5-5",
-  "stop_sequences": [
-    "HALT"
-  ]
+  "model": "claude-haiku-5-5"
 }

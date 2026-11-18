@@ -19,7 +19,7 @@
       "prompt_cache_key": null,
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "in_progress",
       "temperature": 1.0,
       "text": {
@@ -57,7 +57,7 @@
       "prompt_cache_key": null,
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "in_progress",
       "temperature": 1.0,
       "text": {
@@ -183,7 +183,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {

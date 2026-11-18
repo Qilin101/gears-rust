@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: tool_choice forces a tool call but the request has no tools",
+  "param": "tool_choice"
+}

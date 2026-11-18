@@ -27,7 +27,7 @@
           "type": "text"
         }
       },
-      "tool_choice": "auto",
+      "tool_choice": "required",
       "tools": [
         {
           "description": "Current weather for a city.",
@@ -83,7 +83,7 @@
           "type": "text"
         }
       },
-      "tool_choice": "auto",
+      "tool_choice": "required",
       "tools": [
         {
           "description": "Current weather for a city.",
@@ -125,43 +125,36 @@
     "type": "response.output_item.added"
   },
   {
-    "arguments": "",
+    "arguments": "{\"city\"",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "{\"city\"",
+    "arguments": ": \"<UNK",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": ": \"<UNK",
+    "arguments": "NOWN>\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 5,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "NOWN>\"}",
+    "arguments": "{\"city\": \"<UNKNOWN>\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 6,
-    "type": "response.function_call_arguments.delta"
-  },
-  {
-    "arguments": "{\"city\":\"<UNKNOWN>\"}",
-    "item_id": "fc_req_test_0",
-    "output_index": 0,
-    "sequence_number": 7,
     "type": "response.function_call_arguments.done"
   },
   {
     "item": {
-      "arguments": "{\"city\":\"<UNKNOWN>\"}",
+      "arguments": "{\"city\": \"<UNKNOWN>\"}",
       "call_id": "toolu_01NuMDs98jbXvnsUbioKPjbs",
       "id": "fc_req_test_0",
       "name": "get_weather",
@@ -169,7 +162,7 @@
       "type": "function_call"
     },
     "output_index": 0,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "type": "response.output_item.done"
   },
   {
@@ -188,7 +181,7 @@
       "object": "response",
       "output": [
         {
-          "arguments": "{\"city\":\"<UNKNOWN>\"}",
+          "arguments": "{\"city\": \"<UNKNOWN>\"}",
           "call_id": "toolu_01NuMDs98jbXvnsUbioKPjbs",
           "id": "fc_req_test_0",
           "name": "get_weather",
@@ -205,7 +198,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -213,7 +206,7 @@
           "type": "text"
         }
       },
-      "tool_choice": "auto",
+      "tool_choice": "required",
       "tools": [
         {
           "description": "Current weather for a city.",
@@ -267,7 +260,7 @@
         "total_tokens": 544
       }
     },
-    "sequence_number": 9,
+    "sequence_number": 8,
     "type": "response.completed"
   }
 ]

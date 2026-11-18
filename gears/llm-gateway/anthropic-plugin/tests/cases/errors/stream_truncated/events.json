@@ -108,12 +108,51 @@
     "type": "response.output_text.delta"
   },
   {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "text": "Hel",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "Hel",
+      "type": "output_text"
+    },
+    "sequence_number": 6,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Hel",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "incomplete",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 7,
+    "type": "response.output_item.done"
+  },
+  {
     "response": {
       "completed_at": 0,
       "created_at": 0,
       "error": {
         "code": "provider_unavailable",
-        "message": "provider_unavailable: provider stream interrupted: stream ended before message_stop"
+        "message": "provider_unavailable: provider stream interrupted: stream ended before message_stop",
+        "provider_request_id": "req_synthetic_stream"
       },
       "frequency_penalty": 0.0,
       "id": "req_test",
@@ -124,7 +163,21 @@
       "metadata": null,
       "model": "claude",
       "object": "response",
-      "output": [],
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "Hel",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_0",
+          "role": "assistant",
+          "status": "incomplete",
+          "type": "message"
+        }
+      ],
       "parallel_tool_calls": true,
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
@@ -165,7 +218,7 @@
         "total_tokens": 13
       }
     },
-    "sequence_number": 5,
+    "sequence_number": 8,
     "type": "response.failed"
   }
 ]

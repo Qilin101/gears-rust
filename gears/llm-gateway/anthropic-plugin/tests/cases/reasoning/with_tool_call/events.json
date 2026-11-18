@@ -18,7 +18,7 @@
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "reasoning": {
-        "effort": "low",
+        "effort": "high",
         "summary": "auto"
       },
       "safety_identifier": null,
@@ -77,7 +77,7 @@
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "reasoning": {
-        "effort": "low",
+        "effort": "high",
         "summary": "auto"
       },
       "safety_identifier": null,
@@ -120,7 +120,7 @@
   {
     "item": {
       "arguments": "",
-      "call_id": "toolu_01UU39SaiYe3J5AxFxj3oVoq",
+      "call_id": "toolu_01Hu8iDbhXJFoG2DjgBCkgvv",
       "id": "fc_req_test_0",
       "name": "get_weather",
       "status": "in_progress",
@@ -131,51 +131,44 @@
     "type": "response.output_item.added"
   },
   {
-    "arguments": "",
+    "arguments": "{\"city\"",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "{\"city\"",
+    "arguments": ": \"Pari",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": ": \"Pari",
+    "arguments": "s\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 5,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "s\"}",
+    "arguments": "{\"city\": \"Paris\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 6,
-    "type": "response.function_call_arguments.delta"
-  },
-  {
-    "arguments": "{\"city\":\"Paris\"}",
-    "item_id": "fc_req_test_0",
-    "output_index": 0,
-    "sequence_number": 7,
     "type": "response.function_call_arguments.done"
   },
   {
     "item": {
-      "arguments": "{\"city\":\"Paris\"}",
-      "call_id": "toolu_01UU39SaiYe3J5AxFxj3oVoq",
+      "arguments": "{\"city\": \"Paris\"}",
+      "call_id": "toolu_01Hu8iDbhXJFoG2DjgBCkgvv",
       "id": "fc_req_test_0",
       "name": "get_weather",
       "status": "completed",
       "type": "function_call"
     },
     "output_index": 0,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "type": "response.output_item.done"
   },
   {
@@ -194,8 +187,8 @@
       "object": "response",
       "output": [
         {
-          "arguments": "{\"city\":\"Paris\"}",
-          "call_id": "toolu_01UU39SaiYe3J5AxFxj3oVoq",
+          "arguments": "{\"city\": \"Paris\"}",
+          "call_id": "toolu_01Hu8iDbhXJFoG2DjgBCkgvv",
           "id": "fc_req_test_0",
           "name": "get_weather",
           "status": "completed",
@@ -206,15 +199,15 @@
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "provider_details": {
-        "provider_request_id": "req_011Ch9pmK9wsNRRxddj3Mx8X",
+        "provider_request_id": "req_011ChA3TSWiidsUwstTREQo7",
         "stop_reason": "tool_use"
       },
       "reasoning": {
-        "effort": "low",
+        "effort": "high",
         "summary": "auto"
       },
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -276,7 +269,7 @@
         "total_tokens": 440
       }
     },
-    "sequence_number": 9,
+    "sequence_number": 8,
     "type": "response.completed"
   }
 ]

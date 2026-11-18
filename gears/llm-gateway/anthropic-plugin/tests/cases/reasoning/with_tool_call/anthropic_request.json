@@ -13,7 +13,7 @@
   ],
   "model": "claude-haiku-5-5",
   "output_config": {
-    "effort": "low"
+    "effort": "high"
   },
   "thinking": {
     "display": "summarized",

@@ -183,7 +183,7 @@
       },
       "reasoning": {},
       "safety_identifier": "user-7f3a",
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {

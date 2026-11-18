@@ -70,13 +70,13 @@ fn rewrites_one_of_and_keeps_refs_and_literals() {
 }
 
 #[test]
-fn rejects_untyped_and_non_object_schemas() {
+fn untyped_and_non_object_schemas_are_unsupported() {
     for schema in [
         json!({ "properties": {} }),
         json!(true),
         json!({ "type": "array", "items": true }),
     ] {
         let err = adapt(&schema).unwrap_err();
-        assert_eq!(err.code(), "validation_error", "{schema}");
+        assert_eq!(err.code(), "unsupported_schema", "{schema}");
     }
 }

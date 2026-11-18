@@ -13,5 +13,11 @@
   "truncation": "auto",
   "include": [
     "message.output_text.logprobs"
-  ]
+  ],
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "low"
+  }
 }

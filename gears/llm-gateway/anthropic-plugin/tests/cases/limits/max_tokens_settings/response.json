@@ -6,7 +6,7 @@
   "id": "req_test",
   "incomplete_details": null,
   "instructions": null,
-  "max_output_tokens": null,
+  "max_output_tokens": 48,
   "max_tool_calls": null,
   "metadata": null,
   "model": "claude",
@@ -35,7 +35,7 @@
   },
   "reasoning": {},
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {

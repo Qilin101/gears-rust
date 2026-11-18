@@ -13,48 +13,24 @@
   "object": "response",
   "output": [
     {
-      "id": "srvtoolu_019yj9BqruoTMP7gSCjNmSAo",
-      "input": {
-        "command": "python3 -c \"print(2**64)\""
-      },
-      "name": "bash_code_execution",
-      "type": "anthropic:server_tool_use"
-    },
-    {
-      "content": {
-        "content": [],
-        "return_code": 0,
-        "stderr": "",
-        "stdout": "18446744073709551616\n",
-        "type": "bash_code_execution_result"
-      },
-      "tool_use_id": "srvtoolu_019yj9BqruoTMP7gSCjNmSAo",
-      "type": "anthropic:bash_code_execution_tool_result"
-    },
-    {
-      "content": [
-        {
-          "annotations": [],
-          "text": "2**64 = **18446744073709551616**",
-          "type": "output_text"
-        }
-      ],
-      "id": "msg_req_test_2",
-      "role": "assistant",
+      "arguments": "{\"command\":\"date\"}",
+      "call_id": "toolu_01A9Q6HLfciVvmCHc2xwTHYo",
+      "id": "fc_req_test_0",
+      "name": "bash",
       "status": "completed",
-      "type": "message"
+      "type": "function_call"
     }
   ],
   "parallel_tool_calls": true,
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_011Ch9pnLNefCVitiNMe5K87",
-    "stop_reason": "end_turn"
+    "provider_request_id": "req_011ChA3TWTretX6AdQV8bjqU",
+    "stop_reason": "tool_use"
   },
   "reasoning": {},
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -65,8 +41,8 @@
   "tool_choice": "auto",
   "tools": [
     {
-      "name": "code_execution",
-      "type": "anthropic:code_execution_20250825"
+      "name": "bash",
+      "type": "anthropic:bash_20250124"
     }
   ],
   "top_logprobs": 0,
@@ -76,11 +52,11 @@
     "complete": true,
     "cost": "0",
     "estimated": false,
-    "input_tokens": 5852,
+    "input_tokens": 632,
     "input_tokens_details": {
       "cached_tokens": 0
     },
-    "output_tokens": 79,
+    "output_tokens": 46,
     "output_tokens_details": {
       "reasoning_tokens": 0
     },
@@ -92,18 +68,14 @@
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "inference_geo": "global",
-      "input_tokens": 5852,
-      "output_tokens": 79,
+      "input_tokens": 632,
+      "output_tokens": 46,
       "output_tokens_details": {
         "thinking_tokens": 0
-      },
-      "server_tool_use": {
-        "web_fetch_requests": 0,
-        "web_search_requests": 0
       },
       "service_tier": "standard",
       "speed": "standard"
     },
-    "total_tokens": 5931
+    "total_tokens": 678
   }
 }

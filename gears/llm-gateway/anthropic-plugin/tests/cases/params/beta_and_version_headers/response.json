@@ -30,12 +30,12 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_011Ch9piqTmGesPtd9gzQQUf",
+    "provider_request_id": "req_011ChA3aWpP1Q2oKBZawo7bp",
     "stop_reason": "end_turn"
   },
   "reasoning": {},
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {

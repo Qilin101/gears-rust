@@ -306,9 +306,6 @@ fn invariants(events: &[Value]) -> Result<(), String> {
             _ => {}
         }
     }
-    if kind(last) == "response.failed" {
-        return Ok(());
-    }
     if let Some(output) = open.first() {
         return Err(format!("output item {output} was added but never done"));
     }
@@ -339,13 +336,8 @@ fn invariants(events: &[Value]) -> Result<(), String> {
             ));
         }
     }
-    // The final arguments are re-serialized, so they match the deltas as JSON.
-    let json = |text: &str| serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({}));
     for (output_index, deltas) in &arguments {
-        let done = item(*output_index)["arguments"]
-            .as_str()
-            .unwrap_or_default();
-        if json(done) != json(deltas) {
+        if item(*output_index)["arguments"].as_str() != Some(deltas) {
             return Err(format!(
                 "argument deltas of item {output_index} do not add up to the final arguments"
             ));

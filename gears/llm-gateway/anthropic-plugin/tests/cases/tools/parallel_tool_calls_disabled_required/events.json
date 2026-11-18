@@ -159,43 +159,36 @@
     "type": "response.output_item.added"
   },
   {
-    "arguments": "",
+    "arguments": "{\"city\"",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "{\"city\"",
+    "arguments": ": \"Pari",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": ": \"Pari",
+    "arguments": "s\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 5,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "s\"}",
+    "arguments": "{\"city\": \"Paris\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 6,
-    "type": "response.function_call_arguments.delta"
-  },
-  {
-    "arguments": "{\"city\":\"Paris\"}",
-    "item_id": "fc_req_test_0",
-    "output_index": 0,
-    "sequence_number": 7,
     "type": "response.function_call_arguments.done"
   },
   {
     "item": {
-      "arguments": "{\"city\":\"Paris\"}",
+      "arguments": "{\"city\": \"Paris\"}",
       "call_id": "toolu_01RDtZavXaDydPXfk4HUFeGT",
       "id": "fc_req_test_0",
       "name": "get_weather",
@@ -203,7 +196,7 @@
       "type": "function_call"
     },
     "output_index": 0,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "type": "response.output_item.done"
   },
   {
@@ -222,7 +215,7 @@
       "object": "response",
       "output": [
         {
-          "arguments": "{\"city\":\"Paris\"}",
+          "arguments": "{\"city\": \"Paris\"}",
           "call_id": "toolu_01RDtZavXaDydPXfk4HUFeGT",
           "id": "fc_req_test_0",
           "name": "get_weather",
@@ -239,7 +232,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -318,7 +311,7 @@
         "total_tokens": 627
       }
     },
-    "sequence_number": 9,
+    "sequence_number": 8,
     "type": "response.completed"
   }
 ]

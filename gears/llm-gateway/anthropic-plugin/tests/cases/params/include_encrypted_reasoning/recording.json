@@ -1,19 +1,25 @@
 {
-  "recorded_at": "2026-11-18T05:14:57+00:00",
+  "recorded_at": "2026-11-18T08:01:36+00:00",
   "sdk_version": "2.8.0",
   "request": {
-    "max_tokens": 64,
+    "max_tokens": 2048,
     "messages": [
       {
         "content": [
           {
-            "text": "Reply with exactly: Hello!",
+            "text": "A bat and a ball cost 1.10 in total. The bat costs 1.00 more than the ball. How much is the ball? Answer with the number only.",
             "type": "text"
           }
         ],
         "role": "user"
       }
     ],
-    "model": "claude-haiku-5-5"
+    "model": "claude-haiku-5-5",
+    "output_config": {
+      "effort": "high"
+    },
+    "thinking": {
+      "type": "adaptive"
+    }
   }
 }

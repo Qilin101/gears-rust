@@ -1,4 +1,5 @@
 {
   "code": "provider_error",
-  "message": "provider_error: malformed provider response"
+  "message": "provider_error: malformed provider response: EOF while parsing a string at line 1 column 117",
+  "provider_request_id": "req_synthetic_sync"
 }

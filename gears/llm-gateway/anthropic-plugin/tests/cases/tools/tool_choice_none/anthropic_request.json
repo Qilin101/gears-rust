@@ -4,7 +4,7 @@
     {
       "content": [
         {
-          "text": "What is the weather in Paris? Use the tool.",
+          "text": "In one sentence, what is Paris known for?",
           "type": "text"
         }
       ],

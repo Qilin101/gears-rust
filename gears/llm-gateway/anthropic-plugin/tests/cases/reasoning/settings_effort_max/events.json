@@ -92,14 +92,6 @@
     "item_id": "rs_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
-    "type": "response.reasoning.delta"
-  },
-  {
-    "content_index": 0,
-    "delta": "",
-    "item_id": "rs_req_test_0",
-    "output_index": 0,
-    "sequence_number": 4,
     "type": "response.reasoning.done"
   },
   {
@@ -116,7 +108,7 @@
       "type": "reasoning"
     },
     "output_index": 0,
-    "sequence_number": 5,
+    "sequence_number": 4,
     "type": "response.output_item.done"
   },
   {
@@ -128,7 +120,7 @@
       "type": "message"
     },
     "output_index": 1,
-    "sequence_number": 6,
+    "sequence_number": 5,
     "type": "response.output_item.added"
   },
   {
@@ -140,14 +132,14 @@
       "text": "",
       "type": "output_text"
     },
-    "sequence_number": 7,
+    "sequence_number": 6,
     "type": "response.content_part.added"
   },
   {
     "content_index": 0,
     "item_id": "msg_req_test_1",
     "output_index": 1,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "text": "0",
     "type": "response.output_text.delta"
   },
@@ -155,7 +147,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_1",
     "output_index": 1,
-    "sequence_number": 9,
+    "sequence_number": 8,
     "text": ".05",
     "type": "response.output_text.delta"
   },
@@ -163,7 +155,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_1",
     "output_index": 1,
-    "sequence_number": 10,
+    "sequence_number": 9,
     "text": "0.05",
     "type": "response.output_text.done"
   },
@@ -176,7 +168,7 @@
       "text": "0.05",
       "type": "output_text"
     },
-    "sequence_number": 11,
+    "sequence_number": 10,
     "type": "response.content_part.done"
   },
   {
@@ -194,7 +186,7 @@
       "type": "message"
     },
     "output_index": 1,
-    "sequence_number": 12,
+    "sequence_number": 11,
     "type": "response.output_item.done"
   },
   {
@@ -247,7 +239,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -291,7 +283,7 @@
         "total_tokens": 185
       }
     },
-    "sequence_number": 13,
+    "sequence_number": 12,
     "type": "response.completed"
   }
 ]

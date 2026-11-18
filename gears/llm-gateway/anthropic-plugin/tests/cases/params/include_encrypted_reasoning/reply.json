@@ -2,17 +2,22 @@
   "status": 200,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_011Ch9pizn6EPnYXFDNBrm9S"
+    "request-id": "req_011ChA3S2z6A54TPR1W9E1aR"
   },
   "body": {
     "model": "claude-haiku-5-5",
-    "id": "msg_011Ch9pizvmZgveiFXWyXit1",
+    "id": "msg_011ChA3S3A1bwFaC6JRFq89b",
     "type": "message",
     "role": "assistant",
     "content": [
       {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "CAQSowUKEAgTGAI4AUIIdGhpbmtpbmcSDF+p+vjYLM1XNUAVaxoMXyYeVtzmfzXCE1tDIjBQtcebz2qF9qCeFSEm/vaj4THf0pSAjjbncVMjxv5/Weaba5xPwIjEdOFD/6O9i1gqwAS9se3qDU5T+9yOuoy633AGCcBbeQLv+GPYHbvfvfw2WWD0L1zeGviQVjLmz3ecQp+cpxpKZuD0ccLh3MrVIjugWz6klbI1q3LqDaA3CyZ7qT3S4r0mz9IMoi/FFNMEXZbLk+0xDn3EuF0p4FAJlseBmAvw+2kPQJhrD8yBzGrNKspBQ3BbVVRrQD7Pe4Iaq9qAWWtKQxFtYKdq/qUZFR1pY6A2TjFZDvchk9V7EIenjae+joTw/mTFPVwXYYZbqf9TIvp2BX/8EC2IuFZJFUfEHeWxGKtudm31qN6hjvHlV5yr8tNOPSpNg6136hBbwul/e8UGHpO+B+FhgLgqUCZHKmqgginJoXLUcEr/orzA6Ms3bu1ZplFZmrjv739FLCLd3m+G6voK9tpYxxM1o7y9EAOc3MBOJaS0jl/kb2w30wgdcEeeouKnDGVF6PVOGqZNbtrc3cAJUVMXSM/ZvCrn+2x7pKZqoYSGv1imp5jIwfFq3Pz1aBnRF6g7ncLCndbGDZjudabXHyOI4/JfgH8XdWJe5RNJ9fb8FHd+PDqfSC/7nSOLv78QhgteJLIWhx4APv66iaszy4+mbilDWrtbP/6v5zwF96w+F9ZE5LquLC2ati0Y7eAHtCKLv1ltSNJGdn+inNVflqVEYN4Aenzva2ac37HlV+LI1YZapDOIfZU24bLvo1tF2E0kDUFwiGegxyHZmjGpDQxPfIIUYZayDOX+NGmjH8m1v6GW4Nmo0Qk13al6GUiH3Tu/F69dqlsYAQ=="
+      },
+      {
         "type": "text",
-        "text": "Hello!"
+        "text": "0.05"
       }
     ],
     "container": null,
@@ -20,16 +25,16 @@
     "stop_sequence": null,
     "stop_details": null,
     "usage": {
-      "input_tokens": 20,
+      "input_tokens": 56,
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "cache_creation": {
         "ephemeral_5m_input_tokens": 0,
         "ephemeral_1h_input_tokens": 0
       },
-      "output_tokens": 6,
+      "output_tokens": 50,
       "output_tokens_details": {
-        "thinking_tokens": 0
+        "thinking_tokens": 45
       },
       "service_tier": "standard",
       "inference_geo": "global",

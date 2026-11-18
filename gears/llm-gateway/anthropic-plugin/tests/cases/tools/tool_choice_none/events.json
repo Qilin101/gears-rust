@@ -112,6 +112,172 @@
     "type": "response.in_progress"
   },
   {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 3,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "text": "Paris is known for its i",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "text": "conic landmarks like",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "text": " the Eiffel T",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "text": "ower and the",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 8,
+    "text": " Louvre, its",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 9,
+    "text": " rich art",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 10,
+    "text": ",",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 11,
+    "text": " history, and caf",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 12,
+    "text": "e culture, and its status",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 13,
+    "text": " as a",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 14,
+    "text": " global center",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 15,
+    "text": " for fashion and",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 16,
+    "text": " cuisine.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 17,
+    "text": "Paris is known for its iconic landmarks like the Eiffel Tower and the Louvre, its rich art, history, and cafe culture, and its status as a global center for fashion and cuisine.",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "Paris is known for its iconic landmarks like the Eiffel Tower and the Louvre, its rich art, history, and cafe culture, and its status as a global center for fashion and cuisine.",
+      "type": "output_text"
+    },
+    "sequence_number": 18,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Paris is known for its iconic landmarks like the Eiffel Tower and the Louvre, its rich art, history, and cafe culture, and its status as a global center for fashion and cuisine.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 19,
+    "type": "response.output_item.done"
+  },
+  {
     "response": {
       "completed_at": 0,
       "created_at": 0,
@@ -125,17 +291,31 @@
       "metadata": null,
       "model": "claude",
       "object": "response",
-      "output": [],
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "Paris is known for its iconic landmarks like the Eiffel Tower and the Louvre, its rich art, history, and cafe culture, and its status as a global center for fashion and cuisine.",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_0",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
       "parallel_tool_calls": true,
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "provider_details": {
-        "provider_request_id": "req_011Ch9potoKaS3P3u5ogxfom",
+        "provider_request_id": "req_011ChA3Thoivvrc26NMRiWD4",
         "stop_reason": "end_turn"
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -170,11 +350,11 @@
         "complete": true,
         "cost": "0",
         "estimated": false,
-        "input_tokens": 390,
+        "input_tokens": 388,
         "input_tokens_details": {
           "cached_tokens": 0
         },
-        "output_tokens": 1,
+        "output_tokens": 64,
         "output_tokens_details": {
           "reasoning_tokens": 0
         },
@@ -186,18 +366,18 @@
           "cache_creation_input_tokens": 0,
           "cache_read_input_tokens": 0,
           "inference_geo": "global",
-          "input_tokens": 390,
-          "output_tokens": 1,
+          "input_tokens": 388,
+          "output_tokens": 64,
           "output_tokens_details": {
             "thinking_tokens": 0
           },
           "service_tier": "standard",
           "speed": "standard"
         },
-        "total_tokens": 391
+        "total_tokens": 452
       }
     },
-    "sequence_number": 2,
+    "sequence_number": 20,
     "type": "response.completed"
   }
 ]

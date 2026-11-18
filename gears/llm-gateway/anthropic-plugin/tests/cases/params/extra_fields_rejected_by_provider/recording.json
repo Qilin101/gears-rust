@@ -1,8 +1,8 @@
 {
-  "recorded_at": "2026-11-18T05:14:55+00:00",
+  "recorded_at": "2026-11-18T08:01:34+00:00",
   "sdk_version": "2.8.0",
   "request": {
-    "max_tokens": 32,
+    "max_tokens": 64,
     "messages": [
       {
         "content": [

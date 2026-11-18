@@ -1,7 +1,8 @@
 {
   "status": 200,
   "headers": {
-    "content-type": "text/html"
+    "content-type": "application/json",
+    "request-id": "req_synthetic_sync"
   },
-  "body": "<html>Bad gateway</html>"
+  "body": "{\"model\":\"claude-haiku-5-5\",\"id\":\"msg_synthetic_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"te"
 }

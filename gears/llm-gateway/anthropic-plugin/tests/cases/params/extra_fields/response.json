@@ -16,7 +16,7 @@
       "content": [
         {
           "annotations": [],
-          "text": "one two ",
+          "text": "Hello!",
           "type": "output_text"
         }
       ],
@@ -30,12 +30,12 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_011Ch9r3hKWcNucJu735dnmR",
-    "stop_reason": "stop_sequence"
+    "provider_request_id": "req_011ChA3YwfoQAnm77FXEYRtw",
+    "stop_reason": "end_turn"
   },
   "reasoning": {},
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -52,11 +52,11 @@
     "complete": true,
     "cost": "0",
     "estimated": false,
-    "input_tokens": 21,
+    "input_tokens": 20,
     "input_tokens_details": {
       "cached_tokens": 0
     },
-    "output_tokens": 5,
+    "output_tokens": 6,
     "output_tokens_details": {
       "reasoning_tokens": 0
     },
@@ -68,8 +68,8 @@
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "inference_geo": "global",
-      "input_tokens": 21,
-      "output_tokens": 5,
+      "input_tokens": 20,
+      "output_tokens": 6,
       "output_tokens_details": {
         "thinking_tokens": 0
       },
