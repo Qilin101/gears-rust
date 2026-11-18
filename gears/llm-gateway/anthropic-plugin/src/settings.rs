@@ -99,7 +99,7 @@ pub struct AnthropicOutputConfig {
     base = ProviderTypeV1,
     type_id = gts_id!("cf.genai.model.provider.v1~cf.genai._.anthropic.v1~"),
     description = "Anthropic provider settings (Messages API)",
-    properties = "oagw_alias,anthropic_version,anthropic_beta,max_tokens,stop_sequences,system,inference_geo,service_tier,container,thinking,tool_choice,output_config"
+    properties = "oagw_alias,anthropic_version,anthropic_beta,max_tokens,stop_sequences,system,inference_geo,service_tier,thinking,tool_choice,output_config"
 )]
 pub struct AnthropicProviderSettingsV1 {
     /// OAGW upstream alias the plugin sends provider calls through.
@@ -115,7 +115,6 @@ pub struct AnthropicProviderSettingsV1 {
     pub system: Option<String>,
     pub inference_geo: Option<String>,
     pub service_tier: Option<AnthropicServiceTier>,
-    pub container: Option<String>,
     pub thinking: Option<AnthropicThinking>,
     pub tool_choice: Option<AnthropicToolChoice>,
     pub output_config: Option<AnthropicOutputConfig>,

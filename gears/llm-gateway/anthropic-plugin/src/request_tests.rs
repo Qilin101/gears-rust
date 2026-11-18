@@ -573,3 +573,38 @@ fn echo_reports_the_values_sent() {
         }
     );
 }
+
+#[test]
+fn settings_output_schema_is_adapted() {
+    let settings = AnthropicProviderSettingsV1 {
+        output_config: Some(AnthropicOutputConfig {
+            effort: None,
+            format: Some(AnthropicJsonOutputFormat::JsonSchema {
+                schema: json!({ "type": "object", "properties": {
+                    "phone": { "type": "string", "maxLength": 20 }
+                } }),
+            }),
+        }),
+        ..settings()
+    };
+    let wire = wire(&settings, json!({ "model": "m", "input": "Hi" }));
+    assert_eq!(
+        wire["output_config"]["format"]["schema"],
+        json!({ "type": "object", "additionalProperties": false, "properties": {
+            "phone": { "type": "string", "description": "{maxLength: 20}" }
+        } })
+    );
+}
+
+#[test]
+fn extra_fields_cannot_set_a_container() {
+    let err = build_with(
+        &settings(),
+        json!({ "model": "m", "input": "Hi", "extra_fields": { "container": "container_1" } }),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_response_error().param.as_deref(),
+        Some("extra_fields.container")
+    );
+}

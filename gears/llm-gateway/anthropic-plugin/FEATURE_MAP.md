@@ -70,7 +70,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 46 | Reasoning | Settings defaults | Supported | Without `reasoning` in the request, the settings `thinking` and `output_config.effort` apply. |
 | 47 | Max output tokens | `max_output_tokens` | Supported | → `max_tokens`, falling back to the settings `max_tokens`, then the model's output limit. A request with none of the three is rejected with `validation_error`. |
 | 48 | Structured output | `text` | Supported | No `output_config.format` is sent. |
-| 49 | Structured output | `json_schema` | Supported | → `output_config.format`, with the schema adapted to Anthropic's subset (see Schema adaptation). Falls back to the settings `output_config.format`, which is forwarded verbatim. |
+| 49 | Structured output | `json_schema` | Supported | → `output_config.format`, with the schema adapted to Anthropic's subset (see Schema adaptation). Falls back to the settings `output_config.format`, adapted the same way. |
 | 50 | Structured output | `json_object` | Not supported by Anthropic | Rejected with `capability_not_supported`. |
 | 51 | General settings | `temperature`, `top_p` | Not supported by Anthropic | Unsupported parameters. |
 | 52 | General settings | `top_k` | Not supported by Anthropic | No request field and no settings field. |
@@ -79,7 +79,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 55 | General settings | `text.verbosity` | Not supported by Anthropic | Unsupported parameter. |
 | 56 | General settings | `service_tier` | Supported | `auto` → `auto`, `default` → `standard_only`; falls back to the settings. |
 | 57 | General settings | `safety_identifier` | Supported | → `metadata.user_id`. |
-| 58 | General settings | Model settings | Supported | Settings `inference_geo` and `container` are forwarded as-is. |
+| 58 | General settings | Model settings | Supported | Settings `inference_geo` is forwarded as-is. There is no `container` setting: containers keep state at Anthropic. |
 | 59 | Truncation | `truncation: disabled` | Supported | Nothing is sent. |
 | 60 | Truncation | `truncation: auto` | Not supported by Anthropic | Unsupported parameter. |
 | 61 | Cache settings | Prompt caching | Supported | A `prompt_cache_key` → top-level `cache_control: ephemeral`. Cache-read tokens → `usage.input_tokens_details.cached_tokens`. |
@@ -87,12 +87,12 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 63 | Cache settings | Cache-creation token count | Not supported by LLM Gateway | Available only in `usage.provider_raw`. |
 | 64 | Stop words | Stop words per request | Not supported by LLM Gateway | `CreateResponseBody` has no `stop` field, and the response has no field for the matched sequence. |
 | 65 | Stop words | Stop words per model | Supported | Settings `stop_sequences` → `stop_sequences`. |
-| 66 | Extra fields | Forwarding `extra_fields` | Supported | Each entry is added to the top level of the request body. An entry for a field the plugin builds (`model`, `messages`, `max_tokens`, `stream`, `system`, `tools`, `tool_choice`, `thinking`, `output_config`, ...) is rejected with `validation_error`, `param` `extra_fields.<key>`. |
+| 66 | Extra fields | Forwarding `extra_fields` | Supported | Each entry is added to the top level of the request body. An entry for a field the plugin builds (`model`, `messages`, `max_tokens`, `stream`, `system`, `tools`, `tool_choice`, `thinking`, `output_config`, ...) or for `container` is rejected with `validation_error`, `param` `extra_fields.<key>`. |
 
 ## Schema adaptation
 
-`text.format` JSON schemas are adapted like `transform_schema` of the
-Anthropic Python SDK:
+`text.format` and settings `output_config.format` JSON schemas are adapted
+like `transform_schema` of the Anthropic Python SDK:
 
 - objects get `additionalProperties: false`;
 - `oneOf` becomes `anyOf`;

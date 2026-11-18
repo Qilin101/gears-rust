@@ -1,5 +1,5 @@
 {
   "code": "validation_error",
-  "message": "validation error: extra_fields cannot set max_tokens, which the provider plugin builds",
+  "message": "validation error: extra_fields cannot set max_tokens",
   "param": "extra_fields.max_tokens"
 }

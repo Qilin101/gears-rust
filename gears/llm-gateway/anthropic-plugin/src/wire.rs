@@ -55,8 +55,6 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_geo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub container: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,

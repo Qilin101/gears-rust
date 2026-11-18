@@ -16,7 +16,6 @@ fn document() -> serde_json::Value {
         "system": null,
         "inference_geo": null,
         "service_tier": "standard_only",
-        "container": null,
         "thinking": { "type": "adaptive", "display": "summarized" },
         "tool_choice": { "type": "auto", "disable_parallel_tool_use": true },
         "output_config": { "effort": "high", "format": null }

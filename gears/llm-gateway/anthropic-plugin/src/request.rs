@@ -32,8 +32,9 @@ const WEB_SEARCH_OPTIONS: [&str; 3] = ["blocked_domains", "max_uses", "user_loca
 /// the consumer runs, which keep no state at Anthropic.
 const CLIENT_TOOL_PREFIXES: [&str; 4] = ["bash_", "text_editor_", "memory_", "computer_"];
 
-/// Top-level request fields the plugin builds; `extra_fields` cannot set them.
-const BUILT_FIELDS: [&str; 15] = [
+/// Top-level request fields `extra_fields` cannot set: the fields the plugin
+/// builds, and `container`, which refers to state kept at Anthropic.
+const RESERVED_FIELDS: [&str; 15] = [
     "model",
     "max_tokens",
     "messages",
@@ -168,7 +169,6 @@ pub fn build(
             .map(|user_id| Metadata { user_id }),
         service_tier: service_tier(body, settings),
         inference_geo: settings.inference_geo.clone(),
-        container: settings.container.clone(),
         cache_control: body
             .prompt_cache_key
             .as_ref()
@@ -188,15 +188,15 @@ pub fn build(
 // Parameters
 // ---------------------------------------------------------------------------
 
-/// `extra_fields` entries; none may set a field the plugin builds.
+/// `extra_fields` entries; none may set a reserved field.
 fn extra_fields(body: &CreateResponseBody) -> Result<Map<String, Value>, LlmGatewayError> {
     let fields = body.extra_fields.iter().flatten();
-    if let Some(key) = BUILT_FIELDS
+    if let Some(key) = RESERVED_FIELDS
         .iter()
         .find(|key| fields.clone().any(|(k, _)| k == *key))
     {
         return Err(LlmGatewayError::validation_param(
-            format!("extra_fields cannot set {key}, which the provider plugin builds"),
+            format!("extra_fields cannot set {key}"),
             format!("extra_fields.{key}"),
         ));
     }
@@ -484,15 +484,18 @@ fn output_config(
             ));
         }
         Some(TextFormatKind::Text) => None,
-        None => settings
+        None => match settings
             .output_config
             .as_ref()
             .and_then(|c| c.format.as_ref())
-            .map(
-                |AnthropicJsonOutputFormat::JsonSchema { schema }| OutputFormat::JsonSchema {
-                    schema: schema.clone(),
-                },
-            ),
+        {
+            Some(AnthropicJsonOutputFormat::JsonSchema { schema }) => {
+                Some(OutputFormat::JsonSchema {
+                    schema: schema::adapt(schema)?,
+                })
+            }
+            None => None,
+        },
     };
     Ok((effort.is_some() || format.is_some()).then_some(OutputConfig { effort, format }))
 }
