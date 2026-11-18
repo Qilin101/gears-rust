@@ -28,11 +28,15 @@ const STRING_FORMATS: [&str; 10] = [
 ///
 /// # Errors
 ///
-/// `validation_error` when a schema node is not an object or has none of
-/// `type`, `anyOf`, `oneOf`, `allOf`, `enum`, `const`, `$ref`.
+/// - `unsupported_schema` when a schema node is not an object (e.g. a boolean
+///   schema) or has none of `type`, `anyOf`, `oneOf`, `allOf`, `enum`,
+///   `const`, `$ref`.
+/// - `validation_error` when `properties` or `$defs` is not an object.
 pub fn adapt(schema: &Value) -> Result<Value, LlmGatewayError> {
     let Value::Object(source) = schema else {
-        return Err(invalid("schema must be an object"));
+        return Err(LlmGatewayError::unsupported_schema(format!(
+            "schema {schema} that is not an object"
+        )));
     };
     let mut rest = source.clone();
     let mut out = Map::new();
@@ -70,9 +74,11 @@ pub fn adapt(schema: &Value) -> Result<Value, LlmGatewayError> {
     } else if let Some(Value::Array(variants)) = all_of {
         out.insert("allOf".to_owned(), adapt_all(&variants)?);
     } else if !literals {
-        let kind = kind
-            .clone()
-            .ok_or_else(|| invalid("schema must have type, anyOf, oneOf, allOf, enum, or const"))?;
+        let kind = kind.clone().ok_or_else(|| {
+            LlmGatewayError::unsupported_schema(
+                "schema without type, anyOf, oneOf, allOf, enum, const, or $ref",
+            )
+        })?;
         out.insert("type".to_owned(), kind);
     }
 

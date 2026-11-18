@@ -1,5 +1,5 @@
 {
   "code": "validation_error",
-  "message": "validation error: function call arguments must be valid JSON",
+  "message": "validation error: function call arguments must be a JSON object",
   "param": "input[0].arguments"
 }

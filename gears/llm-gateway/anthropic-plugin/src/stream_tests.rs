@@ -2,6 +2,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::response::Echo;
 use crate::wire::Message;
 
 fn envelope() -> Envelope {
@@ -10,6 +11,7 @@ fn envelope() -> Envelope {
         created_at: 1_700_000_000,
         ignored_parameters: Vec::new(),
         provider_request_id: Some("req_anthropic".to_owned()),
+        echo: Echo::default(),
     }
 }
 
@@ -144,7 +146,7 @@ async fn final_snapshot_matches_sync_mapping() {
         "usage": { "input_tokens": 10, "output_tokens": 30, "cache_read_input_tokens": 2 }
     }))
     .unwrap();
-    let sync = response::to_resource(&request(), &envelope(), message);
+    let sync = response::to_resource(&request(), &envelope(), message).unwrap();
 
     assert_eq!(streamed.status, ResponseStatus::Completed);
     assert_eq!(streamed.output, sync.output);
@@ -282,12 +284,13 @@ async fn unanswered_search_and_provider_blocks_are_done_once() {
             "response.output_item.done",
             "response.output_item.added",
             "response.output_item.done",
-            "response.completed",
+            "response.incomplete",
         ]
     );
     let output = serde_json::to_value(&terminal(&events).output).unwrap();
     assert_eq!(output[0]["type"], json!("anthropic:server_tool_use"));
     assert_eq!(output[0]["input"], json!({ "url": "https://x.test" }));
+    assert_eq!(output[1]["status"], json!("incomplete"));
 }
 
 #[tokio::test]
@@ -314,4 +317,102 @@ async fn citations_are_emitted_as_annotations() {
         serde_json::to_value(annotation).unwrap(),
         json!({ "type": "url_citation", "url": "https://x.test", "title": "X", "start_index": 0, "end_index": 3 })
     );
+}
+
+fn arguments_of(events: &[StreamingEvent], kind_name: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| kind(e) == kind_name)
+        .map(|e| {
+            serde_json::to_value(e).unwrap()["arguments"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn tool_call(partial_json: &[&str]) -> Vec<StreamEvent> {
+    let mut events = vec![
+        message_start(),
+        event(
+            json!({ "type": "content_block_start", "index": 0, "content_block":
+            { "type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {} } }),
+        ),
+    ];
+    for part in partial_json {
+        events.push(event(json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": part } })));
+    }
+    events.extend([
+        event(json!({ "type": "content_block_stop", "index": 0 })),
+        event(json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 3 } })),
+        event(json!({ "type": "message_stop" })),
+    ]);
+    events
+}
+
+#[tokio::test]
+async fn argument_deltas_add_up_to_the_done_arguments() {
+    for (parts, expected) in [
+        (
+            &["", "{\"city\": ", "\"Paris\"}"][..],
+            "{\"city\": \"Paris\"}",
+        ),
+        (&[""][..], "{}"),
+    ] {
+        let events = run(tool_call(parts)).await;
+        let deltas = arguments_of(&events, "response.function_call_arguments.delta");
+        assert!(deltas.iter().all(|d| !d.is_empty()));
+        assert_eq!(deltas.concat(), expected);
+        assert_eq!(
+            arguments_of(&events, "response.function_call_arguments.done"),
+            vec![expected.to_owned()]
+        );
+        let output = serde_json::to_value(&terminal(&events).output).unwrap();
+        assert_eq!(output[0]["arguments"], json!(expected));
+    }
+}
+
+#[tokio::test]
+async fn failed_stream_keeps_the_partial_output() {
+    let events = run(vec![
+        message_start(),
+        event(json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
+        event(json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Hel" } })),
+    ])
+    .await;
+    let kinds: Vec<String> = events.iter().map(kind).collect();
+    assert_eq!(
+        kinds[kinds.len() - 4..],
+        [
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.failed",
+        ]
+    );
+    let failed = terminal(&events);
+    let output = serde_json::to_value(&failed.output).unwrap();
+    assert_eq!(output[0]["status"], json!("incomplete"));
+    assert_eq!(output[0]["content"][0]["text"], json!("Hel"));
+    let error = serde_json::to_value(failed.error.as_ref().unwrap()).unwrap();
+    assert_eq!(error["code"], json!("provider_unavailable"));
+    assert_eq!(error["provider_request_id"], json!("req_anthropic"));
+}
+
+#[tokio::test]
+async fn refusal_without_output_fails() {
+    let events = run(vec![
+        message_start(),
+        event(json!({ "type": "message_delta",
+            "delta": { "stop_reason": "refusal",
+                "stop_details": { "type": "refusal", "category": "cyber", "explanation": "Blocked." } },
+            "usage": { "output_tokens": 0 } })),
+        event(json!({ "type": "message_stop" })),
+    ])
+    .await;
+    let failed = terminal(&events);
+    assert_eq!(failed.status, ResponseStatus::Failed);
+    assert_eq!(failed.error.as_ref().unwrap().code, "content_filtered");
 }

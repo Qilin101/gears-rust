@@ -1,0 +1,11 @@
+{
+  "model": "claude",
+  "max_output_tokens": 1024,
+  "input": "Search the web: what is the latest stable Rust version?",
+  "tools": [
+    {
+      "type": "cf_gears:web_search",
+      "search_context_size": "high"
+    }
+  ]
+}

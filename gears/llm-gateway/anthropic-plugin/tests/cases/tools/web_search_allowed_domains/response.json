@@ -115,7 +115,7 @@
   },
   "reasoning": {},
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -130,7 +130,6 @@
         "rust-lang.org"
       ],
       "max_uses": 1,
-      "search_context_size": "high",
       "type": "cf_gears:web_search",
       "user_location": {
         "city": "Berlin",

@@ -189,7 +189,7 @@
         "effort": "low"
       },
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {

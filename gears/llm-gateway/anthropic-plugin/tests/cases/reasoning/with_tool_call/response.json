@@ -14,7 +14,7 @@
   "output": [
     {
       "arguments": "{\"city\":\"Paris\"}",
-      "call_id": "toolu_01JuQma2woMjsNwvFzSBY6aW",
+      "call_id": "toolu_017YDuohUZKNveDf9JNSzvwG",
       "id": "fc_req_test_0",
       "name": "get_weather",
       "status": "completed",
@@ -25,15 +25,15 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_011Ch9pmG5AHwpLve6jUq2SK",
+    "provider_request_id": "req_011ChA3TNxQwJjyWgRkVq6fd",
     "stop_reason": "tool_use"
   },
   "reasoning": {
-    "effort": "low",
+    "effort": "high",
     "summary": "auto"
   },
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {

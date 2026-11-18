@@ -55,13 +55,10 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_geo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub container: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    /// Provider-specific top-level fields; they override typed fields of the
-    /// same name.
+    /// Provider-specific top-level fields the plugin does not build.
     #[serde(skip)]
     pub extra: Map<String, Value>,
 }
@@ -227,6 +224,9 @@ pub struct Message {
     pub content: Vec<Value>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// Details of a `refusal` stop: `category` and `explanation`.
+    #[serde(default)]
+    pub stop_details: Option<Value>,
     #[serde(default)]
     pub usage: Value,
 }
@@ -431,10 +431,12 @@ pub enum StreamEvent {
 }
 
 /// `message_delta.delta`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct MessageDeltaBody {
     #[serde(default)]
     pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub stop_details: Option<Value>,
 }
 
 /// `content_block_delta.delta`.

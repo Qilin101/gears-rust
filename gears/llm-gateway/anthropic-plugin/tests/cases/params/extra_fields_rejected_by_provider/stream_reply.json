@@ -2,7 +2,7 @@
   "status": 400,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_011Ch9piyDajScyHCgwWruPE"
+    "request-id": "req_011ChA3S1XXGETtTLZ4qEXj4"
   },
   "body": {
     "type": "error",
@@ -10,6 +10,6 @@
       "type": "invalid_request_error",
       "message": "top_k: Extra inputs are not permitted"
     },
-    "request_id": "req_011Ch9piyDajScyHCgwWruPE"
+    "request_id": "req_011ChA3S1XXGETtTLZ4qEXj4"
   }
 }

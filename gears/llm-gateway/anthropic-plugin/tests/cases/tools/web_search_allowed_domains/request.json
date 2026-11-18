@@ -14,8 +14,7 @@
         "country": "DE",
         "city": "Berlin",
         "timezone": "Europe/Berlin"
-      },
-      "search_context_size": "high"
+      }
     }
   ]
 }

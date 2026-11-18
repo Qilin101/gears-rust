@@ -1,3 +1,10 @@
 {
-  "synthetic": true
+  "model": {
+    "provider_model_id": "claude-sonnet-4-6",
+    "capabilities": {
+      "reasoning": {
+        "budget": true
+      }
+    }
+  }
 }

@@ -9,6 +9,7 @@ fn envelope() -> Envelope {
         created_at: 1_700_000_000,
         ignored_parameters: vec!["seed".to_owned()],
         provider_request_id: Some("req_anthropic".to_owned()),
+        echo: Echo::default(),
     }
 }
 
@@ -48,7 +49,8 @@ fn text_and_tool_use_become_message_and_function_call() {
             ]),
             "tool_use",
         ),
-    );
+    )
+    .unwrap();
     assert_eq!(resource.id, "req");
     assert_eq!(resource.model, "claude");
     assert_eq!(resource.instructions.as_deref(), Some("Be brief"));
@@ -75,7 +77,7 @@ fn text_and_tool_use_become_message_and_function_call() {
 
 #[test]
 fn usage_counts_cache_tokens_as_input() {
-    let resource = to_resource(&request(), &envelope(), message(&json!([]), "end_turn"));
+    let resource = to_resource(&request(), &envelope(), message(&json!([]), "end_turn")).unwrap();
     let usage = resource.usage.unwrap();
     assert_eq!(usage.input_tokens, 18);
     assert_eq!(usage.output_tokens, 20);
@@ -95,7 +97,11 @@ fn stop_reasons_map_to_status() {
     let cases = [
         ("end_turn", ResponseStatus::Completed, None),
         ("stop_sequence", ResponseStatus::Completed, None),
-        ("pause_turn", ResponseStatus::Completed, None),
+        (
+            "pause_turn",
+            ResponseStatus::Incomplete,
+            Some(IncompleteDetails::MAX_OUTPUT_TOKENS),
+        ),
         (
             "max_tokens",
             ResponseStatus::Incomplete,
@@ -135,7 +141,8 @@ fn thinking_blocks_become_reasoning_items() {
             ]),
             "end_turn",
         ),
-    );
+    )
+    .unwrap();
     assert_eq!(
         resource.output,
         vec![
@@ -177,7 +184,8 @@ fn web_search_is_normalized_with_citations() {
             ]),
             "end_turn",
         ),
-    );
+    )
+    .unwrap();
     let output = serde_json::to_value(&resource.output).unwrap();
     assert_eq!(
         output[0],
@@ -206,7 +214,8 @@ fn unknown_blocks_are_preserved_with_prefix() {
             &json!([{ "type": "server_tool_use", "id": "s1", "name": "web_fetch", "input": { "url": "https://x.test" } }]),
             "end_turn",
         ),
-    );
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_value(&resource.output).unwrap(),
         json!([{ "type": "anthropic:server_tool_use", "id": "s1", "name": "web_fetch", "input": { "url": "https://x.test" } }])
@@ -221,4 +230,23 @@ fn estimated_usage_without_counts_is_unknown() {
     let usage = super::usage(&json!({ "input_tokens": 4 }), false);
     assert!(usage.estimated);
     assert_eq!(usage.input_tokens, 4);
+}
+
+#[test]
+fn incomplete_response_marks_the_last_item_and_reports_the_served_tier() {
+    let mut message = message(&json!([{ "type": "text", "text": "Cut" }]), "max_tokens");
+    message.usage = json!({ "input_tokens": 1, "output_tokens": 1, "service_tier": "standard" });
+    let resource = to_resource(&request(), &envelope(), message).unwrap();
+    assert_eq!(resource.status, ResponseStatus::Incomplete);
+    assert_eq!(
+        serde_json::to_value(&resource.output).unwrap()[0]["status"],
+        json!("incomplete")
+    );
+    assert_eq!(resource.service_tier, "default");
+}
+
+#[test]
+fn refusal_without_output_is_content_filtered() {
+    let err = to_resource(&request(), &envelope(), message(&json!([]), "refusal")).unwrap_err();
+    assert_eq!(err.code(), "content_filtered");
 }

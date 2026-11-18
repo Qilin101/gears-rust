@@ -4,7 +4,7 @@
     {
       "content": [
         {
-          "text": "Use code execution to compute 2**64 and report the number.",
+          "text": "Use the bash tool to print the current date.",
           "type": "text"
         }
       ],
@@ -14,8 +14,8 @@
   "model": "claude-haiku-5-5",
   "tools": [
     {
-      "name": "code_execution",
-      "type": "code_execution_20250825"
+      "name": "bash",
+      "type": "bash_20250124"
     }
   ]
 }

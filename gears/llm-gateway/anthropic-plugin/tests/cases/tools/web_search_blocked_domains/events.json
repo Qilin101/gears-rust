@@ -108,14 +108,6 @@
     "item_id": "rs_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
-    "type": "response.reasoning.delta"
-  },
-  {
-    "content_index": 0,
-    "delta": "",
-    "item_id": "rs_req_test_0",
-    "output_index": 0,
-    "sequence_number": 4,
     "type": "response.reasoning.done"
   },
   {
@@ -132,7 +124,7 @@
       "type": "reasoning"
     },
     "output_index": 0,
-    "sequence_number": 5,
+    "sequence_number": 4,
     "type": "response.output_item.done"
   },
   {
@@ -145,7 +137,7 @@
       "type": "cf_gears:web_search_call"
     },
     "output_index": 1,
-    "sequence_number": 6,
+    "sequence_number": 5,
     "type": "response.output_item.added"
   },
   {
@@ -200,7 +192,7 @@
       "type": "cf_gears:web_search_call"
     },
     "output_index": 1,
-    "sequence_number": 7,
+    "sequence_number": 6,
     "type": "response.output_item.done"
   },
   {
@@ -211,7 +203,7 @@
       "type": "reasoning"
     },
     "output_index": 2,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "type": "response.output_item.added"
   },
   {
@@ -219,15 +211,7 @@
     "delta": "",
     "item_id": "rs_req_test_2",
     "output_index": 2,
-    "sequence_number": 9,
-    "type": "response.reasoning.delta"
-  },
-  {
-    "content_index": 0,
-    "delta": "",
-    "item_id": "rs_req_test_2",
-    "output_index": 2,
-    "sequence_number": 10,
+    "sequence_number": 8,
     "type": "response.reasoning.done"
   },
   {
@@ -244,7 +228,7 @@
       "type": "reasoning"
     },
     "output_index": 2,
-    "sequence_number": 11,
+    "sequence_number": 9,
     "type": "response.output_item.done"
   },
   {
@@ -256,7 +240,7 @@
       "type": "message"
     },
     "output_index": 3,
-    "sequence_number": 12,
+    "sequence_number": 10,
     "type": "response.output_item.added"
   },
   {
@@ -268,14 +252,14 @@
       "text": "",
       "type": "output_text"
     },
-    "sequence_number": 13,
+    "sequence_number": 11,
     "type": "response.content_part.added"
   },
   {
     "content_index": 0,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 14,
+    "sequence_number": 12,
     "text": "The",
     "type": "response.output_text.delta"
   },
@@ -283,7 +267,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 15,
+    "sequence_number": 13,
     "text": " most prominent recent R",
     "type": "response.output_text.delta"
   },
@@ -291,7 +275,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 16,
+    "sequence_number": 14,
     "text": "ust story I found is the",
     "type": "response.output_text.delta"
   },
@@ -299,7 +283,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 17,
+    "sequence_number": 15,
     "text": " ",
     "type": "response.output_text.delta"
   },
@@ -307,7 +291,7 @@
     "content_index": 0,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 18,
+    "sequence_number": 16,
     "text": "The most prominent recent Rust story I found is the ",
     "type": "response.output_text.done"
   },
@@ -320,7 +304,7 @@
       "text": "The most prominent recent Rust story I found is the ",
       "type": "output_text"
     },
-    "sequence_number": 19,
+    "sequence_number": 17,
     "type": "response.content_part.done"
   },
   {
@@ -332,14 +316,14 @@
       "text": "",
       "type": "output_text"
     },
-    "sequence_number": 20,
+    "sequence_number": 18,
     "type": "response.content_part.added"
   },
   {
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 21,
+    "sequence_number": 19,
     "text": "Rust",
     "type": "response.output_text.delta"
   },
@@ -347,7 +331,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 22,
+    "sequence_number": 20,
     "text": " ",
     "type": "response.output_text.delta"
   },
@@ -355,7 +339,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 23,
+    "sequence_number": 21,
     "text": "1.100 announ",
     "type": "response.output_text.delta"
   },
@@ -363,7 +347,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 24,
+    "sequence_number": 22,
     "text": "cement from",
     "type": "response.output_text.delta"
   },
@@ -371,7 +355,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 25,
+    "sequence_number": 23,
     "text": " November 12, 2026,",
     "type": "response.output_text.delta"
   },
@@ -379,7 +363,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 26,
+    "sequence_number": 24,
     "text": " which marks",
     "type": "response.output_text.delta"
   },
@@ -387,7 +371,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 27,
+    "sequence_number": 25,
     "text": " the language",
     "type": "response.output_text.delta"
   },
@@ -395,7 +379,7 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 28,
+    "sequence_number": 26,
     "text": "'s 100th stable version",
     "type": "response.output_text.delta"
   },
@@ -411,14 +395,14 @@
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 29,
+    "sequence_number": 27,
     "type": "response.output_text.annotation.added"
   },
   {
     "content_index": 1,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 30,
+    "sequence_number": 28,
     "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
     "type": "response.output_text.done"
   },
@@ -439,7 +423,7 @@
       "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
       "type": "output_text"
     },
-    "sequence_number": 31,
+    "sequence_number": 29,
     "type": "response.content_part.done"
   },
   {
@@ -451,14 +435,14 @@
       "text": "",
       "type": "output_text"
     },
-    "sequence_number": 32,
+    "sequence_number": 30,
     "type": "response.content_part.added"
   },
   {
     "content_index": 2,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 33,
+    "sequence_number": 31,
     "text": ", but",
     "type": "response.output_text.delta"
   },
@@ -466,7 +450,7 @@
     "content_index": 2,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 34,
+    "sequence_number": 32,
     "text": " I couldn't confirm",
     "type": "response.output_text.delta"
   },
@@ -474,7 +458,7 @@
     "content_index": 2,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 35,
+    "sequence_number": 33,
     "text": " a headline dated today.",
     "type": "response.output_text.delta"
   },
@@ -482,7 +466,7 @@
     "content_index": 2,
     "item_id": "msg_req_test_3",
     "output_index": 3,
-    "sequence_number": 36,
+    "sequence_number": 34,
     "text": ", but I couldn't confirm a headline dated today.",
     "type": "response.output_text.done"
   },
@@ -495,7 +479,7 @@
       "text": ", but I couldn't confirm a headline dated today.",
       "type": "output_text"
     },
-    "sequence_number": 37,
+    "sequence_number": 35,
     "type": "response.content_part.done"
   },
   {
@@ -531,7 +515,7 @@
       "type": "message"
     },
     "output_index": 3,
-    "sequence_number": 38,
+    "sequence_number": 36,
     "type": "response.output_item.done"
   },
   {
@@ -664,7 +648,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -720,7 +704,7 @@
         "total_tokens": 23264
       }
     },
-    "sequence_number": 39,
+    "sequence_number": 37,
     "type": "response.completed"
   }
 ]

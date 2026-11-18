@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-11-18T05:15:45+00:00",
+  "recorded_at": "2026-11-18T08:01:56+00:00",
   "sdk_version": "2.8.0",
   "request": {
     "max_tokens": 1024,
@@ -7,7 +7,7 @@
       {
         "content": [
           {
-            "text": "Use code execution to compute 2**64 and report the number.",
+            "text": "Use the bash tool to print the current date.",
             "type": "text"
           }
         ],
@@ -17,8 +17,8 @@
     "model": "claude-haiku-5-5",
     "tools": [
       {
-        "name": "code_execution",
-        "type": "code_execution_20250825"
+        "name": "bash",
+        "type": "bash_20250124"
       }
     ]
   }

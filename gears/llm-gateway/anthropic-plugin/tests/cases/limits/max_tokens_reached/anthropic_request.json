@@ -11,5 +11,8 @@
       "role": "user"
     }
   ],
-  "model": "claude-haiku-5-5"
+  "model": "claude-haiku-5-5",
+  "thinking": {
+    "type": "disabled"
+  }
 }

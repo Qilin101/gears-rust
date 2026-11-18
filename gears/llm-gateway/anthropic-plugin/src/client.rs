@@ -97,6 +97,7 @@ impl AnthropicPlugin {
             created_at,
             ignored_parameters: built.ignored_parameters,
             provider_request_id: error::request_id(response.headers()),
+            echo: built.echo,
         };
         Ok(Sent { response, envelope })
     }
@@ -122,9 +123,10 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
         if !parts.status.is_success() {
             return Err(error::from_http(parts.status, &parts.headers, &bytes));
         }
-        let message: Message = serde_json::from_slice(&bytes)
-            .map_err(|_| malformed_response(&envelope, "malformed provider response"))?;
-        Ok(response::to_resource(&body, &envelope, message))
+        let message: Message = serde_json::from_slice(&bytes).map_err(|e| {
+            malformed_response(&envelope, &format!("malformed provider response: {e}"))
+        })?;
+        response::to_resource(&body, &envelope, message)
     }
 
     async fn create_response_stream(
@@ -144,9 +146,16 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
                 let (parts, response_body) = response.into_parts();
                 let bytes = read_body(&call.cancel, response_body).await?;
                 if parts.status.is_success() {
+                    let content_type = parts
+                        .headers
+                        .get(CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("none");
                     Err(malformed_response(
                         &envelope,
-                        "provider did not return an event stream",
+                        &format!(
+                            "provider did not return an event stream (content type: {content_type})"
+                        ),
                     ))
                 } else {
                     Err(error::from_http(parts.status, &parts.headers, &bytes))

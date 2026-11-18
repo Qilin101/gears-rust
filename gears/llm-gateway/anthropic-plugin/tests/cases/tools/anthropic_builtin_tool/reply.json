@@ -2,64 +2,45 @@
   "status": 200,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_011Ch9pnLNefCVitiNMe5K87"
+    "request-id": "req_011ChA3TWTretX6AdQV8bjqU"
   },
   "body": {
     "model": "claude-haiku-5-5",
-    "id": "msg_011Ch9pnLVqTvhf5re8MKGk7",
+    "id": "msg_011ChA3TWb3onB3ipfw1Qw9K",
     "type": "message",
     "role": "assistant",
     "content": [
       {
-        "type": "server_tool_use",
-        "id": "srvtoolu_019yj9BqruoTMP7gSCjNmSAo",
-        "name": "bash_code_execution",
+        "type": "tool_use",
+        "id": "toolu_01A9Q6HLfciVvmCHc2xwTHYo",
+        "name": "bash",
         "input": {
-          "command": "python3 -c \"print(2**64)\""
+          "command": "date"
+        },
+        "caller": {
+          "type": "direct"
         }
-      },
-      {
-        "type": "bash_code_execution_tool_result",
-        "tool_use_id": "srvtoolu_019yj9BqruoTMP7gSCjNmSAo",
-        "content": {
-          "type": "bash_code_execution_result",
-          "stdout": "18446744073709551616\n",
-          "stderr": "",
-          "return_code": 0,
-          "content": []
-        }
-      },
-      {
-        "type": "text",
-        "text": "2**64 = **18446744073709551616**"
       }
     ],
-    "container": {
-      "id": "container_01JSz2tFWH7thrgNzeBfuQ5X",
-      "expires_at": "2026-11-18T06:15:42.971681Z"
-    },
-    "stop_reason": "end_turn",
+    "container": null,
+    "stop_reason": "tool_use",
     "stop_sequence": null,
     "stop_details": null,
     "usage": {
-      "input_tokens": 5852,
+      "input_tokens": 632,
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "cache_creation": {
         "ephemeral_5m_input_tokens": 0,
         "ephemeral_1h_input_tokens": 0
       },
-      "output_tokens": 79,
+      "output_tokens": 46,
       "output_tokens_details": {
         "thinking_tokens": 0
       },
       "service_tier": "standard",
       "inference_geo": "global",
-      "speed": "standard",
-      "server_tool_use": {
-        "web_search_requests": 0,
-        "web_fetch_requests": 0
-      }
+      "speed": "standard"
     },
     "diagnostics": null
   }

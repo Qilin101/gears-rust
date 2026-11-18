@@ -15,11 +15,11 @@
     {
       "content": [
         {
-          "text": "Setting up one equation for the ball price and solving it.",
+          "text": "0.05",
           "type": "reasoning_text"
         }
       ],
-      "encrypted_content": "EqQBCkYIAxgCIkDsyntheticSignatureForConformanceTests0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ==",
+      "encrypted_content": "Eo8CCqgBCBMYAipAnaKMWtwOlHQPDorjRIxkZMg4XJWcbuv22p3RF6j4pDYopWVX4rINgPuRwTt0nEFdAGgcpg1l80oF0v5AAf8JDTIRY2xhdWRlLXNvbm5ldC00LTY4AEIIdGhpbmtpbmdaJGQ1NWVlMjU1LTRiYTQtNDg4Ni05NjM4LThmZmRjMjgyNDY0MZoBEwoRY2xhdWRlLXNvbm5ldC00LTaoAe629dcGEgyhid+7Vazzdi9Py+saDNJD2Z6T7XEQ3ktBliIw7wMaRPREFk9ed7G4McQLxDujinDCpVAnxzgQiZNAZW1VCmCO+GYbGnwmHFdi34uwKhS4rcwIx78K4aTGLddvpk2BJNUvnRgB",
       "id": "rs_req_test_0",
       "summary": [],
       "type": "reasoning"
@@ -42,14 +42,14 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_synthetic_sync",
+    "provider_request_id": "req_011ChA3T7TFLjPRkxMQHMF3E",
     "stop_reason": "end_turn"
   },
   "reasoning": {
     "summary": "auto"
   },
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -66,23 +66,30 @@
     "complete": true,
     "cost": "0",
     "estimated": false,
-    "input_tokens": 56,
+    "input_tokens": 75,
     "input_tokens_details": {
       "cached_tokens": 0
     },
-    "output_tokens": 48,
+    "output_tokens": 17,
     "output_tokens_details": {
-      "reasoning_tokens": 41
+      "reasoning_tokens": 9
     },
     "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
-      "input_tokens": 56,
-      "output_tokens": 48,
+      "inference_geo": "global",
+      "input_tokens": 75,
+      "output_tokens": 17,
       "output_tokens_details": {
-        "thinking_tokens": 41
-      }
+        "thinking_tokens": 9
+      },
+      "service_tier": "standard",
+      "speed": "standard"
     },
-    "total_tokens": 104
+    "total_tokens": 92
   }
 }

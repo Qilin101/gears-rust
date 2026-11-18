@@ -1,4 +1,7 @@
 {
-  "code": "model_not_found",
-  "message": "model not found: claude-does-not-exist-0"
+  "code": "invalid_request",
+  "message": "invalid_request: model: claude-does-not-exist-0",
+  "provider_code": "not_found_error",
+  "provider_message": "model: claude-does-not-exist-0",
+  "provider_request_id": "req_011Ch9phFW4e1gTcpfPEZbyk"
 }

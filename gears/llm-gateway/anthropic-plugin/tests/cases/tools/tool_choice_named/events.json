@@ -165,43 +165,36 @@
     "type": "response.output_item.added"
   },
   {
-    "arguments": "",
+    "arguments": "{\"city\"",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 3,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "{\"city\"",
+    "arguments": ": \"Pari",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": ": \"Pari",
+    "arguments": "s\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 5,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "s\"}",
+    "arguments": "{\"city\": \"Paris\"}",
     "item_id": "fc_req_test_0",
     "output_index": 0,
     "sequence_number": 6,
-    "type": "response.function_call_arguments.delta"
-  },
-  {
-    "arguments": "{\"city\":\"Paris\"}",
-    "item_id": "fc_req_test_0",
-    "output_index": 0,
-    "sequence_number": 7,
     "type": "response.function_call_arguments.done"
   },
   {
     "item": {
-      "arguments": "{\"city\":\"Paris\"}",
+      "arguments": "{\"city\": \"Paris\"}",
       "call_id": "toolu_0194iosAqFdGodctL7ttsX7P",
       "id": "fc_req_test_0",
       "name": "get_time",
@@ -209,7 +202,7 @@
       "type": "function_call"
     },
     "output_index": 0,
-    "sequence_number": 8,
+    "sequence_number": 7,
     "type": "response.output_item.done"
   },
   {
@@ -222,47 +215,40 @@
       "type": "function_call"
     },
     "output_index": 1,
-    "sequence_number": 9,
+    "sequence_number": 8,
     "type": "response.output_item.added"
-  },
-  {
-    "arguments": "",
-    "item_id": "fc_req_test_1",
-    "output_index": 1,
-    "sequence_number": 10,
-    "type": "response.function_call_arguments.delta"
   },
   {
     "arguments": "{\"city\"",
     "item_id": "fc_req_test_1",
     "output_index": 1,
-    "sequence_number": 11,
+    "sequence_number": 9,
     "type": "response.function_call_arguments.delta"
   },
   {
     "arguments": ": \"Pari",
     "item_id": "fc_req_test_1",
     "output_index": 1,
-    "sequence_number": 12,
+    "sequence_number": 10,
     "type": "response.function_call_arguments.delta"
   },
   {
     "arguments": "s\"}",
     "item_id": "fc_req_test_1",
     "output_index": 1,
-    "sequence_number": 13,
+    "sequence_number": 11,
     "type": "response.function_call_arguments.delta"
   },
   {
-    "arguments": "{\"city\":\"Paris\"}",
+    "arguments": "{\"city\": \"Paris\"}",
     "item_id": "fc_req_test_1",
     "output_index": 1,
-    "sequence_number": 14,
+    "sequence_number": 12,
     "type": "response.function_call_arguments.done"
   },
   {
     "item": {
-      "arguments": "{\"city\":\"Paris\"}",
+      "arguments": "{\"city\": \"Paris\"}",
       "call_id": "toolu_014aUYN1sqUarSpj4gHvYjzR",
       "id": "fc_req_test_1",
       "name": "get_weather",
@@ -270,7 +256,7 @@
       "type": "function_call"
     },
     "output_index": 1,
-    "sequence_number": 15,
+    "sequence_number": 13,
     "type": "response.output_item.done"
   },
   {
@@ -289,7 +275,7 @@
       "object": "response",
       "output": [
         {
-          "arguments": "{\"city\":\"Paris\"}",
+          "arguments": "{\"city\": \"Paris\"}",
           "call_id": "toolu_0194iosAqFdGodctL7ttsX7P",
           "id": "fc_req_test_0",
           "name": "get_time",
@@ -297,7 +283,7 @@
           "type": "function_call"
         },
         {
-          "arguments": "{\"city\":\"Paris\"}",
+          "arguments": "{\"city\": \"Paris\"}",
           "call_id": "toolu_014aUYN1sqUarSpj4gHvYjzR",
           "id": "fc_req_test_1",
           "name": "get_weather",
@@ -314,7 +300,7 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "completed",
       "temperature": 1.0,
       "text": {
@@ -396,7 +382,7 @@
         "total_tokens": 667
       }
     },
-    "sequence_number": 16,
+    "sequence_number": 14,
     "type": "response.completed"
   }
 ]

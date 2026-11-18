@@ -71,7 +71,6 @@ fn settings(beta: &[&str]) -> Value {
         "system": null,
         "inference_geo": null,
         "service_tier": null,
-        "container": null,
         "thinking": null,
         "tool_choice": null,
         "output_config": null

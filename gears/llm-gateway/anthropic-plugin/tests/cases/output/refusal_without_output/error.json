@@ -1,0 +1,7 @@
+{
+  "code": "content_filtered",
+  "message": "content_filtered: This request could enable cyber harm, such as malware or exploit development.",
+  "provider_code": "refusal",
+  "provider_message": "This request could enable cyber harm, such as malware or exploit development.",
+  "provider_request_id": "req_synthetic_sync"
+}

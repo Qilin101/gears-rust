@@ -17,7 +17,9 @@
       "parallel_tool_calls": true,
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
-      "reasoning": {},
+      "reasoning": {
+        "effort": "none"
+      },
       "safety_identifier": null,
       "service_tier": "auto",
       "status": "in_progress",
@@ -55,7 +57,9 @@
       "parallel_tool_calls": true,
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
-      "reasoning": {},
+      "reasoning": {
+        "effort": "none"
+      },
       "safety_identifier": null,
       "service_tier": "auto",
       "status": "in_progress",
@@ -78,9 +82,10 @@
   {
     "item": {
       "content": [],
-      "id": "rs_req_test_0",
-      "summary": [],
-      "type": "reasoning"
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
     },
     "output_index": 0,
     "sequence_number": 2,
@@ -88,35 +93,68 @@
   },
   {
     "content_index": 0,
-    "delta": "",
-    "item_id": "rs_req_test_0",
+    "item_id": "msg_req_test_0",
     "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
     "sequence_number": 3,
-    "type": "response.reasoning.delta"
+    "type": "response.content_part.added"
   },
   {
     "content_index": 0,
-    "delta": "",
-    "item_id": "rs_req_test_0",
+    "item_id": "msg_req_test_0",
     "output_index": 0,
     "sequence_number": 4,
-    "type": "response.reasoning.done"
+    "text": "**The Long",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "text": " Tide**",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "text": "**The Long Tide**",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "**The Long Tide**",
+      "type": "output_text"
+    },
+    "sequence_number": 7,
+    "type": "response.content_part.done"
   },
   {
     "item": {
       "content": [
         {
-          "text": "",
-          "type": "reasoning_text"
+          "annotations": [],
+          "text": "**The Long Tide**",
+          "type": "output_text"
         }
       ],
-      "encrypted_content": "CAQS4wQKEAgTGAI4AUIIdGhpbmtpbmcSDBu0xOp3a3WBEg7/IxoMmTT067csjmho6UFDIjBbGvibYeCyd8CWha2GHY052ur3ePrE3JhYzpyzdO+cy3KGsHwUKcLG8X1jPGt+mjYqgATZw2yo8uUI1WtYVTmZF9jmOS0pO3su4hxEIRg3CUQ6DRUIFxwMFe43U9N2NwMqVOXPsg0L7CnUPC08JG6XPXHbIWMOKTkreo20GgWSdYFr9kC8mtsmCFiMS2cR2uaNmMEL3Gp6r73Pu29mh5nbLLpJs3h2v7hhJ3bk0Vy9CXWTfcQZG6fAZjJCTpExAHWmcVt8ld5PbdtCvEh2mZzA4uQF0hkMelvUPpleAFoJiH9tbV/pSyeqr4tfmhDzM2DJQlPQcw1CZyeCBHIyurgkyYh1xYZlH+4cyuJ9QzHjSC3yEf1hiBUppFG56seq/ypP236Df1IJNgtLoEn2GbxWDb8GCMQRnLdK0sCFR45bJRmLNoqrQtr68d7Tvhk6NgI62qCw/zkD4zRUfDXRBzAVJYeO5uYzc00bCtsi9+c6v/pNz+qkp4/EdsZygu9d11N0YziAu8jZetb+HdusFpug7/vwY6SaCAvHpfRta/iOXaMAFLtBNW3CYuV5gpgkDnv7/cBoJ/1M80JnXeD6CsklyHVE3VSP5iPZ4EW/1X5OYv592MAtT+JDfAxrPMGl4RrRCbldkzUtvqQzXLslEa4zFef8IdOUMb48atS0aq4nP21C78ShjbicVNBtBV6XeAzdZhSrUSTZqa7XXdDgBg0Q5rLV/egRkxNTXnDO+AYxEXcIcBgB",
-      "id": "rs_req_test_0",
-      "summary": [],
-      "type": "reasoning"
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "incomplete",
+      "type": "message"
     },
     "output_index": 0,
-    "sequence_number": 5,
+    "sequence_number": 8,
     "type": "response.output_item.done"
   },
   {
@@ -139,26 +177,29 @@
         {
           "content": [
             {
-              "text": "",
-              "type": "reasoning_text"
+              "annotations": [],
+              "text": "**The Long Tide**",
+              "type": "output_text"
             }
           ],
-          "encrypted_content": "CAQS4wQKEAgTGAI4AUIIdGhpbmtpbmcSDBu0xOp3a3WBEg7/IxoMmTT067csjmho6UFDIjBbGvibYeCyd8CWha2GHY052ur3ePrE3JhYzpyzdO+cy3KGsHwUKcLG8X1jPGt+mjYqgATZw2yo8uUI1WtYVTmZF9jmOS0pO3su4hxEIRg3CUQ6DRUIFxwMFe43U9N2NwMqVOXPsg0L7CnUPC08JG6XPXHbIWMOKTkreo20GgWSdYFr9kC8mtsmCFiMS2cR2uaNmMEL3Gp6r73Pu29mh5nbLLpJs3h2v7hhJ3bk0Vy9CXWTfcQZG6fAZjJCTpExAHWmcVt8ld5PbdtCvEh2mZzA4uQF0hkMelvUPpleAFoJiH9tbV/pSyeqr4tfmhDzM2DJQlPQcw1CZyeCBHIyurgkyYh1xYZlH+4cyuJ9QzHjSC3yEf1hiBUppFG56seq/ypP236Df1IJNgtLoEn2GbxWDb8GCMQRnLdK0sCFR45bJRmLNoqrQtr68d7Tvhk6NgI62qCw/zkD4zRUfDXRBzAVJYeO5uYzc00bCtsi9+c6v/pNz+qkp4/EdsZygu9d11N0YziAu8jZetb+HdusFpug7/vwY6SaCAvHpfRta/iOXaMAFLtBNW3CYuV5gpgkDnv7/cBoJ/1M80JnXeD6CsklyHVE3VSP5iPZ4EW/1X5OYv592MAtT+JDfAxrPMGl4RrRCbldkzUtvqQzXLslEa4zFef8IdOUMb48atS0aq4nP21C78ShjbicVNBtBV6XeAzdZhSrUSTZqa7XXdDgBg0Q5rLV/egRkxNTXnDO+AYxEXcIcBgB",
-          "id": "rs_req_test_0",
-          "summary": [],
-          "type": "reasoning"
+          "id": "msg_req_test_0",
+          "role": "assistant",
+          "status": "incomplete",
+          "type": "message"
         }
       ],
       "parallel_tool_calls": true,
       "presence_penalty": 0.0,
       "prompt_cache_key": null,
       "provider_details": {
-        "provider_request_id": "req_011Ch9piTUvJgcXLmj2m4HHV",
+        "provider_request_id": "req_011ChA3RseGM2Tjt12tUX3CW",
         "stop_reason": "max_tokens"
       },
-      "reasoning": {},
+      "reasoning": {
+        "effort": "none"
+      },
       "safety_identifier": null,
-      "service_tier": "auto",
+      "service_tier": "default",
       "status": "incomplete",
       "temperature": 1.0,
       "text": {
@@ -175,13 +216,13 @@
         "complete": true,
         "cost": "0",
         "estimated": false,
-        "input_tokens": 19,
+        "input_tokens": 17,
         "input_tokens_details": {
           "cached_tokens": 0
         },
         "output_tokens": 8,
         "output_tokens_details": {
-          "reasoning_tokens": 8
+          "reasoning_tokens": 0
         },
         "provider_raw": {
           "cache_creation": {
@@ -191,18 +232,18 @@
           "cache_creation_input_tokens": 0,
           "cache_read_input_tokens": 0,
           "inference_geo": "global",
-          "input_tokens": 19,
+          "input_tokens": 17,
           "output_tokens": 8,
           "output_tokens_details": {
-            "thinking_tokens": 8
+            "thinking_tokens": 0
           },
           "service_tier": "standard",
           "speed": "standard"
         },
-        "total_tokens": 27
+        "total_tokens": 25
       }
     },
-    "sequence_number": 6,
+    "sequence_number": 9,
     "type": "response.incomplete"
   }
 ]

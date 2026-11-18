@@ -2,17 +2,17 @@
   "status": 200,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_011Ch9pmG5AHwpLve6jUq2SK"
+    "request-id": "req_011ChA3TNxQwJjyWgRkVq6fd"
   },
   "body": {
     "model": "claude-haiku-5-5",
-    "id": "msg_011Ch9pmGCMUG7wB1AYGKAZQ",
+    "id": "msg_011ChA3TP66Uxez2szVbGWwh",
     "type": "message",
     "role": "assistant",
     "content": [
       {
         "type": "tool_use",
-        "id": "toolu_01JuQma2woMjsNwvFzSBY6aW",
+        "id": "toolu_017YDuohUZKNveDf9JNSzvwG",
         "name": "get_weather",
         "input": {
           "city": "Paris"

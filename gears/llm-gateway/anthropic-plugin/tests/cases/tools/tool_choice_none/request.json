@@ -1,7 +1,7 @@
 {
   "model": "claude",
   "max_output_tokens": 128,
-  "input": "What is the weather in Paris? Use the tool.",
+  "input": "In one sentence, what is Paris known for?",
   "tools": [
     {
       "type": "function",

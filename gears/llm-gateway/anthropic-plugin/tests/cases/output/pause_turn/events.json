@@ -180,7 +180,7 @@
       "queries": [
         "latest Rust release"
       ],
-      "status": "completed",
+      "status": "incomplete",
       "type": "cf_gears:web_search_call"
     },
     "output_index": 1,
@@ -194,7 +194,9 @@
       "error": null,
       "frequency_penalty": 0.0,
       "id": "req_test",
-      "incomplete_details": null,
+      "incomplete_details": {
+        "reason": "max_output_tokens"
+      },
       "instructions": null,
       "max_output_tokens": 1024,
       "max_tool_calls": null,
@@ -220,7 +222,7 @@
           "queries": [
             "latest Rust release"
           ],
-          "status": "completed",
+          "status": "incomplete",
           "type": "cf_gears:web_search_call"
         }
       ],
@@ -233,8 +235,8 @@
       },
       "reasoning": {},
       "safety_identifier": null,
-      "service_tier": "auto",
-      "status": "completed",
+      "service_tier": "default",
+      "status": "incomplete",
       "temperature": 1.0,
       "text": {
         "format": {
@@ -254,7 +256,7 @@
         "complete": true,
         "cost": "0",
         "estimated": false,
-        "input_tokens": 30,
+        "input_tokens": 56,
         "input_tokens_details": {
           "cached_tokens": 0
         },
@@ -263,16 +265,29 @@
           "reasoning_tokens": 0
         },
         "provider_raw": {
-          "input_tokens": 30,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 56,
           "output_tokens": 20,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
           "server_tool_use": {
-            "web_search_requests": 1
-          }
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
         },
-        "total_tokens": 50
+        "total_tokens": 76
       }
     },
     "sequence_number": 11,
-    "type": "response.completed"
+    "type": "response.incomplete"
   }
 ]

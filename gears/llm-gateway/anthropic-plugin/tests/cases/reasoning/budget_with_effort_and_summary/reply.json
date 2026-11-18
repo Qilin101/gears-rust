@@ -2,34 +2,44 @@
   "status": 200,
   "headers": {
     "content-type": "application/json",
-    "request-id": "req_synthetic_sync"
+    "request-id": "req_011ChA3SxHMCNdF5Vez4upAa"
   },
   "body": {
-    "id": "msg_synthetic_01",
+    "model": "claude-sonnet-4-6",
+    "id": "msg_011ChA3SxSmAJ2pwzJiT15BZ",
     "type": "message",
     "role": "assistant",
-    "model": "claude-haiku-5-5",
     "content": [
       {
         "type": "thinking",
-        "thinking": "Setting up one equation for the ball price and solving it.",
-        "signature": "EqQBCkYIAxgCIkDsyntheticSignatureForConformanceTests0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=="
+        "thinking": "0.05",
+        "signature": "Eo8CCqgBCBMYAipAnaKMWtwOlHQPDorjRIxkZMg4XJWcbuv22p3RF6j4pDYopWVX4rINgPuRwTt0nEFdAGgcpg1l80oF0v5AAf8JDTIRY2xhdWRlLXNvbm5ldC00LTY4AEIIdGhpbmtpbmdaJGQ1NWVlMjU1LTRiYTQtNDg4Ni05NjM4LThmZmRjMjgyNDY0MZoBEwoRY2xhdWRlLXNvbm5ldC00LTaoAeu29dcGEgxR42ee/Ww9U+jAZjQaDD9RwHzcxXFOIpHWniIw6HVyg+wNZrlxTE9yZ37h28CKM3voi/VacsOTjMWZF6odeSLbsPWmoh3KphNQJkOFKhTeFAZxfZ8LvxTGIsdeKkeugHkTbBgB"
       },
       {
         "type": "text",
         "text": "0.05"
       }
     ],
+    "container": null,
     "stop_reason": "end_turn",
     "stop_sequence": null,
+    "stop_details": null,
     "usage": {
-      "input_tokens": 56,
+      "input_tokens": 75,
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
-      "output_tokens": 48,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "output_tokens": 17,
       "output_tokens_details": {
-        "thinking_tokens": 41
-      }
-    }
+        "thinking_tokens": 9
+      },
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+    },
+    "diagnostics": null
   }
 }

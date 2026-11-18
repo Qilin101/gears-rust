@@ -15,11 +15,11 @@
     {
       "content": [
         {
-          "text": "Let the ball cost x. Then the bat costs x + 1.00, so 2x + 1.00 = 1.10 and x = 0.05.",
+          "text": "0.05",
           "type": "reasoning_text"
         }
       ],
-      "encrypted_content": "EqQBCkYIAxgCIkDsyntheticSignatureForConformanceTests0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ==",
+      "encrypted_content": "Eo8CCqgBCBMYAipAnaKMWtwOlHQPDorjRIxkZMg4XJWcbuv22p3RF6j4pDYopWVX4rINgPuRwTt0nEFdAGgcpg1l80oF0v5AAf8JDTIRY2xhdWRlLXNvbm5ldC00LTY4AEIIdGhpbmtpbmdaJGQ1NWVlMjU1LTRiYTQtNDg4Ni05NjM4LThmZmRjMjgyNDY0MZoBEwoRY2xhdWRlLXNvbm5ldC00LTaoAeO29dcGEgwi+FfaHlZwwPl1AucaDD05XdGJHljOT/UQgiIw5L45aKJkdOGX4jwamnkk7kID2122vV9Eb4qfcDHYTO0gEswDUsr0GJawRWE0SL7/KhQO2J88KvbNNdr2+oENPQ7BSXZFexgB",
       "id": "rs_req_test_0",
       "summary": [],
       "type": "reasoning"
@@ -42,14 +42,14 @@
   "presence_penalty": 0.0,
   "prompt_cache_key": null,
   "provider_details": {
-    "provider_request_id": "req_synthetic_sync",
+    "provider_request_id": "req_011ChA3SAY1qj3uRhg4bHypA",
     "stop_reason": "end_turn"
   },
   "reasoning": {
     "budget_tokens": 1024
   },
   "safety_identifier": null,
-  "service_tier": "auto",
+  "service_tier": "default",
   "status": "completed",
   "temperature": 1.0,
   "text": {
@@ -66,23 +66,30 @@
     "complete": true,
     "cost": "0",
     "estimated": false,
-    "input_tokens": 56,
+    "input_tokens": 75,
     "input_tokens_details": {
       "cached_tokens": 0
     },
-    "output_tokens": 48,
+    "output_tokens": 17,
     "output_tokens_details": {
-      "reasoning_tokens": 41
+      "reasoning_tokens": 9
     },
     "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
-      "input_tokens": 56,
-      "output_tokens": 48,
+      "inference_geo": "global",
+      "input_tokens": 75,
+      "output_tokens": 17,
       "output_tokens_details": {
-        "thinking_tokens": 41
-      }
+        "thinking_tokens": 9
+      },
+      "service_tier": "standard",
+      "speed": "standard"
     },
-    "total_tokens": 104
+    "total_tokens": 92
   }
 }

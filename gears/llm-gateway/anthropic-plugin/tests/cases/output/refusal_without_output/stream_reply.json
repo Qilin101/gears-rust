@@ -2,6 +2,6 @@
   "status": 200,
   "headers": {
     "content-type": "text/event-stream; charset=utf-8",
-    "request-id": "req_011Ch9pjpNoYzr2T3cBpPwxb"
+    "request-id": "req_synthetic_stream"
   }
 }
