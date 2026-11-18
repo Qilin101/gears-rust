@@ -10,8 +10,10 @@ use http::header::{ACCEPT, CONTENT_TYPE};
 use http::{Method, Uri};
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
-    LlmGatewayProviderPluginClientV1, MediaInputMode, ProviderCallCtx, ProviderErrorCategory,
-    ProviderFailure, ProviderPluginCapabilities, ResponseEventStream, ResponseResource,
+    LlmGatewayProviderPluginClientV1, MediaInputMode, PassthroughApi, PassthroughCapability,
+    PassthroughEndpoint, PassthroughRequest, PassthroughResponse, ProviderCallCtx,
+    ProviderErrorCategory, ProviderFailure, ProviderPluginCapabilities, ResponseEventStream,
+    ResponseResource,
 };
 use oagw_sdk::sse::{ServerEventsResponse, ServerEventsStream};
 use oagw_sdk::{Body, ServiceGatewayClientV1};
@@ -19,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use toolkit_security::SecurityContext;
 
 use crate::error;
+use crate::passthrough;
 use crate::request::{self, Target};
 use crate::response::{self, Envelope};
 use crate::settings::AnthropicProviderSettingsV1;
@@ -27,12 +30,13 @@ use crate::wire::{
     DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, MESSAGES_PATH, Message, StreamEvent,
 };
 
-const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
-const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
+pub const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
+pub const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
 const JSON: &str = "application/json";
 const EVENT_STREAM: &str = "text/event-stream";
 
-/// Provider plugin for the Anthropic Messages API (`POST /v1/messages`).
+/// Provider plugin for the Anthropic Messages API (`POST /v1/messages`), for
+/// both the unified API and the Anthropic pass-through route.
 ///
 /// Sends every request through OAGW to the model's destination: `base_url`,
 /// or [`DEFAULT_BASE_URL`] when the model has none; its host and port name the
@@ -88,7 +92,14 @@ impl AnthropicPlugin {
             .to_body()
             .and_then(|b| serde_json::to_vec(&b))
             .map_err(|e| LlmGatewayError::internal_from("failed to serialize the request", e))?;
-        let http_request = http_request(&settings, info.base_url.as_deref(), payload, stream)?;
+        let beta = (!settings.anthropic_beta.is_empty()).then(|| settings.anthropic_beta.join(","));
+        let http_request = http_request(
+            version(&settings),
+            beta.as_deref(),
+            info.base_url.as_deref(),
+            payload,
+            stream,
+        )?;
 
         let response = with_cancel(
             &call.cancel,
@@ -114,6 +125,10 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
         ProviderPluginCapabilities::new(MediaInputMode::UrlForward)
             .with_streaming_transport()
             .with_web_search()
+            .with_passthrough(PassthroughCapability::new(
+                PassthroughApi::Anthropic,
+                vec![PassthroughEndpoint::metered(passthrough::MESSAGES_ENDPOINT)],
+            ))
     }
 
     async fn create_response(
@@ -129,7 +144,10 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
             return Err(error::from_http(parts.status, &parts.headers, &bytes));
         }
         let message: Message = serde_json::from_slice(&bytes).map_err(|e| {
-            malformed_response(&envelope, &format!("malformed provider response: {e}"))
+            malformed_response(
+                envelope.provider_request_id.as_deref(),
+                &format!("malformed provider response: {e}"),
+            )
         })?;
         response::to_resource(&body, &envelope, message)
     }
@@ -157,7 +175,7 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("none");
                     Err(malformed_response(
-                        &envelope,
+                        envelope.provider_request_id.as_deref(),
                         &format!(
                             "provider did not return an event stream (content type: {content_type})"
                         ),
@@ -177,27 +195,41 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
     ) -> Result<EmbeddingResponse, LlmGatewayError> {
         Err(LlmGatewayError::capability_not_supported("embeddings"))
     }
+
+    async fn forward_passthrough(
+        &self,
+        ctx: &SecurityContext,
+        call: &ProviderCallCtx,
+        req: PassthroughRequest,
+    ) -> Result<PassthroughResponse, LlmGatewayError> {
+        passthrough::forward(self.gateway.as_ref(), ctx, call, req).await
+    }
 }
 
-fn http_request(
-    settings: &AnthropicProviderSettingsV1,
+/// The `anthropic-version` of the model's settings, or the default.
+pub fn version(settings: &AnthropicProviderSettingsV1) -> &str {
+    if settings.anthropic_version.is_empty() {
+        DEFAULT_ANTHROPIC_VERSION
+    } else {
+        &settings.anthropic_version
+    }
+}
+
+pub fn http_request(
+    version: &str,
+    beta: Option<&str>,
     base_url: Option<&str>,
     payload: Vec<u8>,
     stream: bool,
 ) -> Result<http::Request<Body>, LlmGatewayError> {
-    let version = if settings.anthropic_version.is_empty() {
-        DEFAULT_ANTHROPIC_VERSION
-    } else {
-        &settings.anthropic_version
-    };
     let mut builder = http::Request::builder()
         .method(Method::POST)
         .uri(destination(base_url)?)
         .header(CONTENT_TYPE, JSON)
         .header(ACCEPT, if stream { EVENT_STREAM } else { JSON })
         .header(ANTHROPIC_VERSION_HEADER, version);
-    if !settings.anthropic_beta.is_empty() {
-        builder = builder.header(ANTHROPIC_BETA_HEADER, settings.anthropic_beta.join(","));
+    if let Some(beta) = beta {
+        builder = builder.header(ANTHROPIC_BETA_HEADER, beta);
     }
     builder
         .body(Body::Bytes(payload.into()))
@@ -223,7 +255,7 @@ fn destination(base_url: Option<&str>) -> Result<String, LlmGatewayError> {
 }
 
 /// Run `future` unless the request is cancelled first.
-async fn with_cancel<T>(
+pub async fn with_cancel<T>(
     cancel: &CancellationToken,
     future: impl Future<Output = T>,
 ) -> Result<T, LlmGatewayError> {
@@ -234,7 +266,7 @@ async fn with_cancel<T>(
     }
 }
 
-async fn read_body(
+pub async fn read_body(
     cancel: &CancellationToken,
     body: Body,
 ) -> Result<bytes::Bytes, LlmGatewayError> {
@@ -255,10 +287,10 @@ fn cancelled() -> LlmGatewayError {
     )
 }
 
-fn malformed_response(envelope: &Envelope, message: &str) -> LlmGatewayError {
+pub fn malformed_response(provider_request_id: Option<&str>, message: &str) -> LlmGatewayError {
     let mut details = ProviderFailure::default();
-    if let Some(id) = &envelope.provider_request_id {
-        details = details.with_provider_request_id(id.clone());
+    if let Some(id) = provider_request_id {
+        details = details.with_provider_request_id(id);
     }
     LlmGatewayError::provider(ProviderErrorCategory::ProviderError, message, details)
 }

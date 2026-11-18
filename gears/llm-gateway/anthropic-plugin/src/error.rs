@@ -59,6 +59,16 @@ fn gateway_provider(
 
 /// Map a non-success HTTP response from the Messages endpoint.
 pub fn from_http(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> LlmGatewayError {
+    let (category, message, details) = http_failure(status, headers, body);
+    LlmGatewayError::provider(category, message, details)
+}
+
+/// Category, message, and provider originals of a non-success HTTP response.
+pub fn http_failure(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> (ProviderErrorCategory, String, ProviderFailure) {
     let parsed = serde_json::from_slice::<ErrorBody>(body).ok();
     let (object, body_request_id) = match parsed {
         Some(body) => (Some(body.error), body.request_id),
@@ -82,7 +92,7 @@ pub fn from_http(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> LlmGat
     if let Some(seconds) = retry_after(headers) {
         details = details.with_retry_after(seconds);
     }
-    LlmGatewayError::provider(category, message, details)
+    (category, message, details)
 }
 
 /// Map an in-band SSE `error` event.

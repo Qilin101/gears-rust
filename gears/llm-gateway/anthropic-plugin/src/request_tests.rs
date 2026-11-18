@@ -605,3 +605,48 @@ fn extra_fields_cannot_set_a_container() {
         Some("extra_fields.container")
     );
 }
+
+#[test]
+fn provider_items_and_tools_pass_the_stateless_guard() {
+    let cases = [
+        (
+            json!({ "input": [
+                { "type": "message", "role": "user", "content": "Run it" },
+                { "type": "anthropic:code_execution_tool_result", "tool_use_id": "srv_1",
+                  "content": { "type": "code_execution_result", "content": [
+                      { "type": "code_execution_output", "file_id": "file_1" }
+                  ] } }
+            ] }),
+            "input[1].content.content[0].file_id",
+        ),
+        (
+            json!({ "input": [{ "type": "anthropic:container_upload", "id": "x" }] }),
+            "input[0]",
+        ),
+        (
+            json!({ "tools": [
+                { "type": "anthropic:memory_20250818", "name": "memory", "container": "cnt_1" }
+            ] }),
+            "tools[0].container",
+        ),
+    ];
+    for (extra, param) in cases {
+        let mut request = json!({ "model": "m", "input": "Hi" });
+        merge(&mut request, extra);
+        let err = build_with(&settings(), request).unwrap_err();
+        assert_eq!(err.code(), "capability_not_supported", "{param}");
+        assert_eq!(err.to_response_error().param.as_deref(), Some(param));
+    }
+
+    let wire = wire(
+        &settings(),
+        json!({ "model": "m", "input": [
+            { "type": "message", "role": "user", "content": "Open it" },
+            { "type": "anthropic:tool_use", "id": "t1", "name": "open", "input": { "file_id": "mine" } }
+        ] }),
+    );
+    assert_eq!(
+        wire["messages"][1]["content"][0]["input"],
+        json!({ "file_id": "mine" })
+    );
+}

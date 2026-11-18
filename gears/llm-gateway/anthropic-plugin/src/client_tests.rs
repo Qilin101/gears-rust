@@ -489,3 +489,224 @@ fn reports_streaming_and_web_search_capabilities() {
     assert!(capabilities.web_search);
     assert_eq!(capabilities.media_input, MediaInputMode::UrlForward);
 }
+
+// ---------------------------------------------------------------------------
+// Pass-through
+// ---------------------------------------------------------------------------
+
+fn native_request() -> PassthroughRequest {
+    PassthroughRequest::new(
+        PassthroughApi::Anthropic,
+        "/v1/messages",
+        json!({
+            "model": "anthropic::claude",
+            "max_tokens": 16,
+            "metadata": { "user_id": "u1" },
+            "messages": [{ "role": "user", "content": "Hi" }]
+        }),
+    )
+}
+
+async fn forward(
+    gateway: &Arc<FakeGateway>,
+    call: &ProviderCallCtx,
+    req: PassthroughRequest,
+) -> Result<PassthroughResponse, LlmGatewayError> {
+    AnthropicPlugin::new(gateway.clone())
+        .forward_passthrough(&SecurityContext::anonymous(), call, req)
+        .await
+}
+
+fn json_of(response: PassthroughResponse) -> llm_gateway_sdk::PassthroughJsonResponse {
+    match response {
+        PassthroughResponse::Json(json) => *json,
+        other => panic!("expected a JSON response, got {other:?}"),
+    }
+}
+
+#[test]
+fn declares_messages_passthrough_only() {
+    let plugin = AnthropicPlugin::new(FakeGateway::new(|| {
+        json_response(200, &[], &message_json())
+    }));
+    let passthrough = plugin.capabilities().passthrough.unwrap();
+    assert_eq!(passthrough.api, PassthroughApi::Anthropic);
+    assert_eq!(
+        passthrough.endpoints,
+        vec![PassthroughEndpoint::metered("/v1/messages")]
+    );
+}
+
+#[tokio::test]
+async fn passthrough_forwards_the_native_body_and_maps_the_model_back() {
+    let gateway =
+        FakeGateway::new(|| json_response(200, &[("request-id", "req_a")], &message_json()));
+    let req = native_request()
+        .with_header("anthropic-version", "2023-06-01")
+        .with_header("anthropic-beta", "beta-a")
+        .with_header("anthropic-beta", "beta-b");
+    let response = json_of(
+        forward(&gateway, &call(&["settings-beta"]), req)
+            .await
+            .unwrap(),
+    );
+
+    let sent = gateway.last();
+    assert_eq!(sent.method, Method::POST);
+    assert_eq!(sent.uri, "/api.anthropic.com/v1/messages");
+    assert!(sent.headers.get(AUTHORIZATION).is_none());
+    assert_eq!(sent.headers[ANTHROPIC_VERSION_HEADER], "2023-06-01");
+    assert_eq!(sent.headers[ANTHROPIC_BETA_HEADER], "beta-a,beta-b");
+    assert_eq!(sent.headers[ACCEPT], JSON);
+    let mut expected = native_request().body;
+    expected["model"] = json!("claude-sonnet-5-5");
+    assert_eq!(sent.body, expected);
+
+    assert_eq!(response.status, 200);
+    let mut expected = message_json();
+    expected["model"] = json!("anthropic::claude");
+    assert_eq!(response.body, expected);
+    assert_eq!(response.usage.unwrap().total_tokens, 5);
+    assert_eq!(response.error_category, None);
+    assert_eq!(
+        response.details.provider_request_id.as_deref(),
+        Some("req_a")
+    );
+}
+
+#[tokio::test]
+async fn passthrough_without_protocol_headers_uses_the_default_version() {
+    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+    forward(&gateway, &call(&["settings-beta"]), native_request())
+        .await
+        .unwrap();
+    let sent = gateway.last();
+    assert_eq!(
+        sent.headers[ANTHROPIC_VERSION_HEADER],
+        DEFAULT_ANTHROPIC_VERSION
+    );
+    assert!(sent.headers.get(ANTHROPIC_BETA_HEADER).is_none());
+}
+
+#[tokio::test]
+async fn passthrough_rejects_before_sending() {
+    let mut stateful = native_request();
+    stateful.body["container"] = json!("cnt_1");
+    let mut paid = native_request();
+    paid.body["tools"] = json!([{ "type": "web_search_20250305", "name": "web_search" }]);
+    let mut no_model = native_request();
+    no_model.body.as_object_mut().unwrap().remove("model");
+    let count_tokens = PassthroughRequest::new(
+        PassthroughApi::Anthropic,
+        "/v1/messages/count_tokens",
+        native_request().body,
+    );
+    let openai = PassthroughRequest::new(
+        PassthroughApi::OpenAi,
+        "/v1/messages",
+        native_request().body,
+    );
+    let cases = [
+        (stateful, "capability_not_supported", Some("container")),
+        (paid, "capability_not_supported", Some("tools[0]")),
+        (no_model, "validation_error", Some("model")),
+        (count_tokens, "capability_not_supported", None),
+        (openai, "capability_not_supported", None),
+    ];
+    for (req, code, param) in cases {
+        let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+        let err = forward(&gateway, &call(&[]), req).await.unwrap_err();
+        assert_eq!(err.code(), code, "{param:?}");
+        assert_eq!(err.to_response_error().param.as_deref(), param);
+        assert!(gateway.recorded.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn passthrough_model_with_secret_ref_is_not_sent() {
+    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+    let mut call = call(&[]);
+    call.model_info.secret_ref = Some("anthropic-key".to_owned());
+    let err = forward(&gateway, &call, native_request())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "credentials_unavailable");
+    assert!(gateway.recorded.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn passthrough_relays_a_provider_error() {
+    let error =
+        json!({ "type": "error", "error": { "type": "rate_limit_error", "message": "Too many" } });
+    for stream in [false, true] {
+        let body = error.clone();
+        let gateway = FakeGateway::new(move || json_response(429, &[("retry-after", "12")], &body));
+        let req = native_request().with_stream(stream);
+        let response = json_of(forward(&gateway, &call(&[]), req).await.unwrap());
+        assert_eq!(response.status, 429);
+        assert_eq!(response.body, error);
+        assert_eq!(
+            response.error_category,
+            Some(ProviderErrorCategory::RateLimited)
+        );
+        assert_eq!(response.details.retry_after, Some(12));
+        assert_eq!(response.usage, None);
+    }
+}
+
+#[tokio::test]
+async fn passthrough_stream_relays_native_events() {
+    let events = [
+        json!({ "type": "message_start", "message": {
+            "id": "msg_01", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
+            "content": [], "stop_reason": null, "usage": { "input_tokens": 3, "output_tokens": 0 } } }),
+        json!({ "type": "ping" }),
+        json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+        json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Hi!" } }),
+        json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{\"a\"" } }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 2 } }),
+        json!({ "type": "message_stop" }),
+    ];
+    let reply = events.clone();
+    let gateway = FakeGateway::new(move || sse_response(&reply));
+    let req = native_request().with_stream(true);
+    let response = forward(&gateway, &call(&[]), req).await.unwrap();
+    assert_eq!(gateway.last().headers[ACCEPT], EVENT_STREAM);
+
+    let PassthroughResponse::Stream {
+        events: relayed, ..
+    } = response
+    else {
+        panic!("expected a stream, got {response:?}");
+    };
+    let relayed: Vec<_> = relayed.map(Result::unwrap).collect().await;
+    assert_eq!(relayed.len(), events.len());
+
+    for (relayed, native) in relayed.iter().zip(&events) {
+        assert_eq!(relayed.event.as_deref(), native["type"].as_str());
+        assert!(relayed.relay);
+        let mut expected = native.clone();
+        if expected["type"] == "message_start" {
+            expected["message"]["model"] = json!("anthropic::claude");
+        }
+        let data: Value = serde_json::from_str(&relayed.data).unwrap();
+        assert_eq!(data, expected);
+    }
+    // Events without a model are relayed byte for byte.
+    assert_eq!(relayed[1].data, events[1].to_string());
+    let texts: Vec<_> = relayed.iter().map(|e| e.output_text.as_str()).collect();
+    assert_eq!(texts, ["", "", "", "Hi!", "{\"a\"", "", "", ""]);
+    let usages: Vec<_> = relayed.iter().filter_map(|e| e.usage.as_ref()).collect();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].total_tokens, 5);
+    assert!(relayed[6].usage.is_some());
+}
+
+#[tokio::test]
+async fn passthrough_stream_without_events_is_a_malformed_response() {
+    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+    let req = native_request().with_stream(true);
+    let err = forward(&gateway, &call(&[]), req).await.unwrap_err();
+    assert_eq!(err.code(), "provider_error");
+}

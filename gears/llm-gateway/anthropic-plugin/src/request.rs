@@ -10,6 +10,7 @@ use llm_gateway_sdk::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::guard;
 use crate::response::Echo;
 use crate::schema;
 use crate::settings::{
@@ -527,6 +528,7 @@ fn convert_tool(
                 .iter()
                 .any(|prefix| kind.starts_with(prefix))
             {
+                guard::check_value(&tool, &format!("tools[{index}]"))?;
                 Ok(tool)
             } else {
                 Err(LlmGatewayError::capability_not_supported(format!(
@@ -684,6 +686,7 @@ impl Conversation {
                         format!("input[{index}]"),
                     )
                 })?;
+                guard::check_value(&block, &format!("input[{index}]"))?;
                 self.push(Role::Assistant, ContentBlockParam::Raw(block));
                 Ok(())
             }

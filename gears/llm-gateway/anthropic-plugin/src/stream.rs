@@ -620,7 +620,7 @@ fn snapshot_event(sequence_number: u64, response: ResponseResource) -> ResponseS
 }
 
 /// Overlay the fields of a `message_delta` usage onto the accumulated usage.
-fn merge_usage(usage: &mut Value, delta: Value) {
+pub fn merge_usage(usage: &mut Value, delta: Value) {
     match (usage.as_object_mut(), delta) {
         (Some(current), Value::Object(delta)) => {
             for (key, value) in delta {
