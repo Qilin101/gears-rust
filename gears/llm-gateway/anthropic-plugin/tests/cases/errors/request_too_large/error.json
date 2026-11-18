@@ -1,0 +1,7 @@
+{
+  "code": "invalid_request",
+  "message": "invalid_request: Request exceeds the maximum allowed number of bytes.",
+  "provider_code": "request_too_large",
+  "provider_message": "Request exceeds the maximum allowed number of bytes.",
+  "provider_request_id": "req_synthetic_error"
+}

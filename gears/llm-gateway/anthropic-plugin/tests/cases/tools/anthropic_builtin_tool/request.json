@@ -1,0 +1,11 @@
+{
+  "model": "claude",
+  "max_output_tokens": 1024,
+  "input": "Use code execution to compute 2**64 and report the number.",
+  "tools": [
+    {
+      "type": "anthropic:code_execution_20250825",
+      "name": "code_execution"
+    }
+  ]
+}

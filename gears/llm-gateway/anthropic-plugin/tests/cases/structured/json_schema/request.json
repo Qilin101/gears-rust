@@ -1,0 +1,86 @@
+{
+  "model": "claude",
+  "max_output_tokens": 512,
+  "input": "Extract the person: John Smith, john@example.com, +1 555 0100, 42 years old, tags: vip; scores 1, 2 and 3; no other contact; lives in Berlin.",
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "person",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "phone": {
+            "type": "string",
+            "format": "phone",
+            "pattern": "^[0-9+ ]+$"
+          },
+          "age": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 150
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 5
+          },
+          "contact": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "address": {
+            "$ref": "#/$defs/address"
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "phone",
+          "age",
+          "tags",
+          "scores",
+          "contact",
+          "address"
+        ],
+        "$defs": {
+          "address": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      },
+      "strict": true
+    }
+  }
+}

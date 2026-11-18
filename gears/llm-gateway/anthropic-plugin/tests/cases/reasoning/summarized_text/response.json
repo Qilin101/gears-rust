@@ -1,0 +1,96 @@
+{
+  "completed_at": 0,
+  "created_at": 0,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "id": "req_test",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 4096,
+  "max_tool_calls": null,
+  "metadata": null,
+  "model": "claude",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "text": "I'm working out how to count the integers from 1 to 1000 that are divisible by 3 or 5 but not by 15. I'm treating the union as multiples of 3 plus multiples of 5, minus the multiples of 15 to avoid double-counting, and I'm still setting up that sum.\n\nI'm finishing the count: multiples of 3 (333) plus multiples of 5 (200), minus twice the multiples of 15 (66), which gives 401. A cross-check, 267 plus 134, lands on the same total.\n\n",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSsQkKEAgTGAI4AUIIdGhpbmtpbmcSDAYEcfKw+kPl7RLDfxoMsE16nzunas7dC1ZsIjCwn+z4Ap3+irkxKblwBXmgClEsr/lLnz80HfPTFRaN4KNyG2AJq7zGbd3dLQ4JE6UqzggJaylXnipnLtBpxek+OpV2XgMMlRIloOuoDmu0G0Dxhy8nEMo85TdzURjOdFqjAGLNCZ9aNTZnHQLYZt2P5mKzpbh1XvfAZmtkwHaKc4dC2NF6ysXVsu5PH2+GhRDBJ40akLsWn3Lj3XFXSGV0Spvv716yhJF24A36zmuMSpZu/0cjWG/stLqpBOnbc6FOiFubX7gjV3tHMdFLmXXdatU5weleDzUnP89J4Jn9yZRDOdk52dqJqQDvJOOIkGf9r9/AkwMfTy3iaTGnMmhehogUFErYxg1gdx0NpU+AMoBSm+DXckTdr3sQngcwQ2UgBwdc52ta9fRE8N+MaLc+usKyDBei4SOpCx9uLgvpjOoMZwQHiLAhi22lgdXPi7Y0QJg5vOAUaIV90m5px3rg+5D95Y9GUCqxL6o30o8joWMIy9cnVRdvexw94OhttgPPoH5Cyug4Kzj+k7Ue6LDEYTTmi3X79OjdKFpSZnljITMXbMkD3OcwKbvHg9VL/XJldtsT8nE+gQGKFK9Nter9U8Wftsao9iCV4qDaap9gQJlYGF1YJgyROvjje0qyc7G72tcoNF/rbcOURhqYHws/QnYdBhZz8dEEHuhqlZiweRyXY/6Ph591lJwPP3TUhuwulLZcyEIIPDIZtuVl3jPiCUJe1dUJQT9SVvBIBaZphsALn0WmMN4ijNkv/DuLS1YH6G5oSjTjC6ViCj6Bkx3pT7ga+Kil3+wRYExOTj0xtfEl9LbqS9jLi7mUTO1HwKHjDwvWcELtwNItS3Ji8L7xDEnjWVkYTwufJRBfJvzG1XHmBfdSHBF7hvZNTVJYOgB2xB87r7WtH6SYP/DMl+N34el4/tEgxnQB07qlltwD/K85Ld6CEDuIzgIpDkAkMpqYVVBY28wkYWHkkPlDrBwafE1Pa82GPBkHbxA6UMJJE1QNJC8QpRxE1WnwU1ta4Cqp6HBub5juf8HIaap1QNivNNccS66PkedjOvzm+dH/Z8SsA8gA7Zc0YPIntbYKEV0aL8MbUsRQfb8j7FgEdgGNcb76ldkwK+7A4zmvExlLL7Xgn0jwjac5Nogb+qZ6/PI0sTb5PuDrmzC4OS7Nnf6sza5P4WMq947CbHhjeTyFKHjL7xbR39nk/0kvCAH7cG2Z+ubx395XPU06BvNJGtzAny5OZnZknQDEs7jstZmxEevEw9Fk1q11AKluGxTtC1vA0H4CsEyugsFmKya5RQ8coIcZMG7j/DCGP2bYuEcUNBRpDXkBDslrQNt8cSwpMG04JE8LRiXJMwlLcgEzTrxBAzDOAsQWjySFtzZy/rg44eEQthCjkU0a4jYJ/Ix7uZ+/PwiX7LysMKsvt8tT6Zv0qy9datJIawxmfWkNz6srxGU6NjcqWzRQg2TT7Kl3ksbfLzmqKP+Uy0yGqkpeenqzxtFoF5/MSKEPBxpMne6mrajaFudcJSkyQMRln5H919xzGAE=",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "401",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "prompt_cache_key": null,
+  "provider_details": {
+    "provider_request_id": "req_011Ch9r3oqBXSoEcDTDvdk24",
+    "stop_reason": "end_turn"
+  },
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "safety_identifier": null,
+  "service_tier": "auto",
+  "status": "completed",
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "tool_choice": "auto",
+  "tools": [],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "complete": true,
+    "cost": "0",
+    "estimated": false,
+    "input_tokens": 55,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 288,
+    "output_tokens_details": {
+      "reasoning_tokens": 285
+    },
+    "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 55,
+      "output_tokens": 288,
+      "output_tokens_details": {
+        "thinking_tokens": 285
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    },
+    "total_tokens": 343
+  }
+}

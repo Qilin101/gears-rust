@@ -1,0 +1,22 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "How many integers from 1 to 1000 are divisible by 3 or 5 but not by 15? Work it out carefully, then answer with the number only.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "output_config": {
+    "effort": "high"
+  },
+  "thinking": {
+    "display": "summarized",
+    "type": "adaptive"
+  }
+}

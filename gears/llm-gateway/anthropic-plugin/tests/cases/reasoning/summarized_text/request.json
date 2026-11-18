@@ -1,0 +1,9 @@
+{
+  "model": "claude",
+  "max_output_tokens": 4096,
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "input": "How many integers from 1 to 1000 are divisible by 3 or 5 but not by 15? Work it out carefully, then answer with the number only."
+}

@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: tool type \"openai:code_interpreter\" is not supported by the Anthropic provider",
+  "param": "tools[0]"
+}

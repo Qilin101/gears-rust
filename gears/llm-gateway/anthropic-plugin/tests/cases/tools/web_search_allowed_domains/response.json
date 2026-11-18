@@ -1,0 +1,180 @@
+{
+  "completed_at": 0,
+  "created_at": 0,
+  "error": null,
+  "frequency_penalty": 0.0,
+  "id": "req_test",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 1024,
+  "max_tool_calls": null,
+  "metadata": null,
+  "model": "claude",
+  "object": "response",
+  "output": [
+    {
+      "id": "ws_req_test_0",
+      "queries": [
+        "latest stable Rust version"
+      ],
+      "results": [
+        {
+          "title": "Rust Release Notes",
+          "url": "https://doc.rust-lang.org/beta/releases.html"
+        },
+        {
+          "title": "Announcing Rust 1.100.0",
+          "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+        },
+        {
+          "title": "Announcing Rust 1.99.0",
+          "url": "https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/"
+        },
+        {
+          "title": "Announcing Rust 1.97.0",
+          "url": "https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"
+        },
+        {
+          "title": "The Rust Release Announcements",
+          "url": "https://blog.rust-lang.org/releases/"
+        },
+        {
+          "title": "Announcing Rust 1.96.0",
+          "url": "https://blog.rust-lang.org/2026/05/28/Rust-1.96.0/"
+        },
+        {
+          "title": "Announcing Rust 1.98.0",
+          "url": "https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/"
+        },
+        {
+          "title": "Announcing Rust 1.93.0",
+          "url": "https://blog.rust-lang.org/2026/01/22/Rust-1.93.0/"
+        },
+        {
+          "title": "Announcing Rust 1.95.0",
+          "url": "https://blog.rust-lang.org/2026/04/16/Rust-1.95.0/"
+        },
+        {
+          "title": "Announcing Rust 1.99.1",
+          "url": "https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/"
+        }
+      ],
+      "status": "completed",
+      "type": "cf_gears:web_search_call"
+    },
+    {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQS+AkKEAgTGAI4AUIIdGhpbmtpbmcSDB90N73/Uln0ilZGhhoMUneLjWPUWC71B7SwIjAoAS47fA0queANxqu8h3CWgLlTZ3ck/+43es5r/nOrdJSQKT9JunvfQQb/gkh6r+IqlQnUmr9kX2SeuKiSFxZDNspGpbTvuIyNNjnC3jpF7dksnXipZ5WVO6vkfbyjEBJNtWDN83vv+UB8/NuyFDByFraXR+KPSRFnQ3yBY0/MOv2bES1j7QefV0yzmOe6c94ZSLHOY0BeU8noSEIRx+UwMGr0Ek2k1CB+8asDKCa8nfibUHMwfT5N17pkPGvLDIoYFdKfZR3uJZG/b+STyagQqbe7sf2027/I+QcC+hMfGPiOpn0Dz0dGtPoVNMsU0phgLjPOVvUNer3aVflN9JCbGRGg0RzrJQhf0aN3lhqma4gYJyAziDlHbw1yqpPokVww8pAuUyq/Ga11YSVXshEwSEZvKXTxIaTvmtmDMUBYItjrL6CffIzbaW+llmW7tyM+t0rZJqyzDlWTuT/hj0ncgjC+2f/IahPhErffWHBH7dLlN2zoT2Vpxn6Ac9opRMANtMeRyRlSLihJ7YMAQCZCJFKGHZ9ICgPAC7WBW/KZO7kR1oUDPjrw3VWy/p2dwd7R8TISVKlkyAT7gawya9eqLhI+BFEsO2tNlIhuNdSsJOtV5iDPsnOd+Kp9sTdy5zvnrcd7QrH1SLKJVBA5Z+JWck5TW8up9SPzz2kIrta7QqzVve5w5Lx99tSK24Na782yeucb4tNfbcInVlcFocejfZ03ze1LIybhRfiBc6q0IANTVsNVaFUq9OA3cLxr39B3eNbscwYlVa9yBYDN326XWxtFJTpALWxIX7QRCQ5MfMjkaxEGtvntyXNtggDWIUTRJ5n8dRQq10hPKpDRoCsxkH1ya/L85m/qkpC7B7okUWdFMisoDZvNoudSHTPRthkElJL0nm6+BORYwHjmiYsSIl2rdH4Qd3uMX8rz3BMUC1UvI1H1ztPSiFaN61XNUL1R0bwZ9MKjZuWI2EL7M6W5kDKhBIlQ5RxCjV4JraixTLciB2oP9NKGEH80OWPHcqeo+3IzIQitw4wHdDNJtzxtbE3liQ7owhGeeRDnYl+AF5ix7HAU/XQd4wGJ/xzqJXFplaZGgkxrYI+YbNuyWiEN3RenzgBURv2aruxIKFGSxfM9yBymJ3/iTLgsE7WC0VyMVMmNJ0t2peXU0z9lnl69j73yi8ackAr72b5VzIrIE8j4oERTq95cnhBm/ODdqrfiIKmPT5wASEPJDTgXcGJ8YBurDhMMWH5z23e0RR38oHf4qC1DqfVuZWF5PZeD1qbldBWgnzPVP0bTFQeVQfqxlGJZlRuKk6u/lUUsxmi/w7UOGoBuMGobUl7sX2DijVX31zfkFp/Fqg8vWKKMNBnt/F6wSg76vB6TbdnIOH13n2IFWYU1m4WXjijZ5QE21AWOJ3gBIgoCUntWnXpsLSLN6XbLZ9tqAjYHiqe3SDIppZq6usO/vf8r6WLKRqOWGKdMqkVz9TrsEclJ9juwcVJd8ShMXiqPJdAFaYF7KexrKytTkaB29mCJ1Bp+P6bbaGmkKfnsy7oe6TEtuYolvWAAYNC+ia4eGI0eL7Iyhn9E7y1aUF3AUU/eSObJd+XC6QuNBW/ckElywlSHzppQgBH1uW085QrOvTgYAQ==",
+      "id": "rs_req_test_1",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "The most recent stable release I found is Rust 1.100.0, which the Rust team's official blog announced on November 12, 2026 ",
+          "type": "output_text"
+        },
+        {
+          "annotations": [
+            {
+              "end_index": 105,
+              "start_index": 0,
+              "title": "Announcing Rust 1.100.0",
+              "type": "url_citation",
+              "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+            }
+          ],
+          "text": "Nov. 12, 2026 · The Rust Release Team. The Rust team is happy to announce a new version of Rust, 1.100.0.",
+          "type": "output_text"
+        },
+        {
+          "annotations": [],
+          "text": " (Source: https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/)",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_2",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0.0,
+  "prompt_cache_key": null,
+  "provider_details": {
+    "provider_request_id": "req_011Ch9ppJByxfih8TVHfKoYx",
+    "stop_reason": "end_turn"
+  },
+  "reasoning": {},
+  "safety_identifier": null,
+  "service_tier": "auto",
+  "status": "completed",
+  "temperature": 1.0,
+  "text": {
+    "format": {
+      "type": "text"
+    }
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "allowed_domains": [
+        "rust-lang.org"
+      ],
+      "max_uses": 1,
+      "search_context_size": "high",
+      "type": "cf_gears:web_search",
+      "user_location": {
+        "city": "Berlin",
+        "country": "DE",
+        "timezone": "Europe/Berlin",
+        "type": "approximate"
+      }
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "complete": true,
+    "cost": "0",
+    "estimated": false,
+    "input_tokens": 16928,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 470,
+    "output_tokens_details": {
+      "reasoning_tokens": 272
+    },
+    "provider_raw": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 16928,
+      "output_tokens": 470,
+      "output_tokens_details": {
+        "thinking_tokens": 272
+      },
+      "server_tool_use": {
+        "web_fetch_requests": 0,
+        "web_search_requests": 1
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    },
+    "total_tokens": 17398
+  }
+}

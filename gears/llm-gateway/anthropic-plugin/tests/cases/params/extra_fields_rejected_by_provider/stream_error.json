@@ -1,0 +1,7 @@
+{
+  "code": "invalid_request",
+  "message": "invalid_request: top_k: Extra inputs are not permitted",
+  "provider_code": "invalid_request_error",
+  "provider_message": "top_k: Extra inputs are not permitted",
+  "provider_request_id": "req_011Ch9piyDajScyHCgwWruPE"
+}

@@ -1,0 +1,28 @@
+{
+  "model": "claude",
+  "max_output_tokens": 2048,
+  "input": "What is the weather in Paris? Use the tool.",
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "reasoning": {
+    "effort": "low",
+    "summary": "auto"
+  }
+}

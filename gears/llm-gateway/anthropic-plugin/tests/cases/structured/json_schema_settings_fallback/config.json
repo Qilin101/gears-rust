@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "output_config": {
+      "effort": null,
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

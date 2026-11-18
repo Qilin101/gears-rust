@@ -1,0 +1,15 @@
+{
+  "max_tokens": 8,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Write a long poem about the sea.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5"
+}

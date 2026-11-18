@@ -1,0 +1,28 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Reply with the two words I give you, joined by a dash.",
+          "type": "text"
+        },
+        {
+          "text": "First word: alpha.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Second word: beta.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5"
+}

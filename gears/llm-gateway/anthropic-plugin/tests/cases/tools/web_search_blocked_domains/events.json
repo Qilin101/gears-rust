@@ -1,0 +1,726 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "blocked_domains": [
+            "wikipedia.org"
+          ],
+          "max_uses": 1,
+          "type": "cf_gears:web_search"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "blocked_domains": [
+            "wikipedia.org"
+          ],
+          "max_uses": 1,
+          "type": "cf_gears:web_search"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "type": "response.reasoning.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSugUKEAgTGAI4AUIIdGhpbmtpbmcSDLipDiGJIQWTvAlEHhoM91n0ycH7cFGNpAPPIjA9NJtnPSuJS/hWPFkzFj8C7HUH41V5ePJu+Qy/wdeOjRk0kQksY9qoKjpvwuDKH18q1wRNDpfsHwG2/4BWkhmmmq7tzjueGGCMm2M5ilYq745H+t/aeCd3GIjWt4rddDWG1ruTPIIIoeoT6/8p3hLQCCp7xlNdt8z2EvdcMrNx+EJtOrgpJu4AknMRlW7CWgQSFWJhMn/BEjO/kmEe6P3dqWcrvJ92mblpXtISxDQAnKc/fOi/eT5oyKqwOiHvMABLQOsgduLRianB3MMRzjtJr+xBNsVoLxDETrhgxjQG1//Szfc0GGq3yH2x4YP7sSyh9MSnvceZgQ1Gs6UKigFuLKRmwc36H2P/tPXJ0i3iJATtGfIzqPdXxlUE4w/w01j9m5MgOpSO6wxqEV0BvvMal4nc0lyrVAZYoK821RLDN+AKsn8YoFjfR0lyw54gWQoGwvwoA71ORBr1VyHxzzet3v2dV8T5V2V6l0Kx1BlclYkyBAo6MExCSQj+i0O31eaDDYhKEv9oTHdlro8VErHc6fihac5/7KqYwZtSQCnwM7kMBKJdmyLdioFwD6MUdnFiF6Jt8aZhkMc+LeaBaWwQrqFFS9QsHCxiFUYoQqQzl7w6bpwkLwQHaH/kV6j2vL4idfIf76gNM2Ue10ydMAfpT2fM7XccbUY9BXmvq7vFqWeiAxzf2ClkwOFikFT6sml+6VtnwB5frLmKn4BZ3ufSCRi3Hik+dKgHiSx2EkyqvnJ70PBfW5Qps/VwXfSM8L18j+nFbHVJ4XOymGnBSK6TQ7c8QAMfOVs+SVjkc9ZcubabYfeE8cGM6NVzqWOnVTk3DbTTh6Z+JWcaJIhG+/q+NFs9Lwf6Sv16CRgB",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 5,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "id": "ws_req_test_1",
+      "queries": [
+        "Rust programming language news today"
+      ],
+      "status": "in_progress",
+      "type": "cf_gears:web_search_call"
+    },
+    "output_index": 1,
+    "sequence_number": 6,
+    "type": "response.output_item.added"
+  },
+  {
+    "item": {
+      "id": "ws_req_test_1",
+      "queries": [
+        "Rust programming language news today"
+      ],
+      "results": [
+        {
+          "title": "Rust Trends: Biweekly Rust Newsletter and Ecosystem News",
+          "url": "https://rust-trends.com/"
+        },
+        {
+          "title": "Rust Programming Language Portal",
+          "url": "https://devtalk.com/rust"
+        },
+        {
+          "title": "Rust and Go News Today",
+          "url": "https://www.newsnow.com/us/Tech/Cyber+Security/Rust+and+Go"
+        },
+        {
+          "title": "Rust > News > Page #1 - InfoQ",
+          "url": "https://www.infoq.com/Rust/news/"
+        },
+        {
+          "title": "Rust 1.100 Released With The \"Never\" Type Finally Stable - Phoronix",
+          "url": "https://www.phoronix.com/news/Rust-1.100-Released"
+        },
+        {
+          "title": "Linus Torvalds takes aim at Rust: This goes too far for him",
+          "url": "https://www.pcgameshardware.de/Linux-Software-26761/News/Linus-Torvalds-vs-Rust-Human-hostile-code-1560227/"
+        },
+        {
+          "title": "Rust",
+          "url": "https://www.infoworld.com/rust/"
+        },
+        {
+          "title": "This Week in Rust 675 · This Week in Rust",
+          "url": "https://this-week-in-rust.org/blog/2026/10/28/this-week-in-rust-675/"
+        },
+        {
+          "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+          "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+        },
+        {
+          "title": "Rust Programming Language - InfoQ",
+          "url": "https://www.infoq.com/rust/"
+        }
+      ],
+      "status": "completed",
+      "type": "cf_gears:web_search_call"
+    },
+    "output_index": 1,
+    "sequence_number": 7,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "rs_req_test_2",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 2,
+    "sequence_number": 8,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_2",
+    "output_index": 2,
+    "sequence_number": 9,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_2",
+    "output_index": 2,
+    "sequence_number": 10,
+    "type": "response.reasoning.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "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",
+      "id": "rs_req_test_2",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 2,
+    "sequence_number": 11,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_3",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 3,
+    "sequence_number": 12,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 13,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 14,
+    "text": "The",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 15,
+    "text": " most prominent recent R",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 16,
+    "text": "ust story I found is the",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 17,
+    "text": " ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 18,
+    "text": "The most prominent recent Rust story I found is the ",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [],
+      "text": "The most prominent recent Rust story I found is the ",
+      "type": "output_text"
+    },
+    "sequence_number": 19,
+    "type": "response.content_part.done"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 20,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 21,
+    "text": "Rust",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 22,
+    "text": " ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 23,
+    "text": "1.100 announ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 24,
+    "text": "cement from",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 25,
+    "text": " November 12, 2026,",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 26,
+    "text": " which marks",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 27,
+    "text": " the language",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 28,
+    "text": "'s 100th stable version",
+    "type": "response.output_text.delta"
+  },
+  {
+    "annotation": {
+      "end_index": 95,
+      "start_index": 0,
+      "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+      "type": "url_citation",
+      "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+    },
+    "annotation_index": 0,
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 29,
+    "type": "response.output_text.annotation.added"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 30,
+    "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [
+        {
+          "end_index": 95,
+          "start_index": 0,
+          "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+          "type": "url_citation",
+          "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+        }
+      ],
+      "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
+      "type": "output_text"
+    },
+    "sequence_number": 31,
+    "type": "response.content_part.done"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 32,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 33,
+    "text": ", but",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 34,
+    "text": " I couldn't confirm",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 35,
+    "text": " a headline dated today.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "sequence_number": 36,
+    "text": ", but I couldn't confirm a headline dated today.",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_3",
+    "output_index": 3,
+    "part": {
+      "annotations": [],
+      "text": ", but I couldn't confirm a headline dated today.",
+      "type": "output_text"
+    },
+    "sequence_number": 37,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "The most prominent recent Rust story I found is the ",
+          "type": "output_text"
+        },
+        {
+          "annotations": [
+            {
+              "end_index": 95,
+              "start_index": 0,
+              "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+              "type": "url_citation",
+              "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+            }
+          ],
+          "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
+          "type": "output_text"
+        },
+        {
+          "annotations": [],
+          "text": ", but I couldn't confirm a headline dated today.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_3",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 3,
+    "sequence_number": 38,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "text": "",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "CAQSugUKEAgTGAI4AUIIdGhpbmtpbmcSDLipDiGJIQWTvAlEHhoM91n0ycH7cFGNpAPPIjA9NJtnPSuJS/hWPFkzFj8C7HUH41V5ePJu+Qy/wdeOjRk0kQksY9qoKjpvwuDKH18q1wRNDpfsHwG2/4BWkhmmmq7tzjueGGCMm2M5ilYq745H+t/aeCd3GIjWt4rddDWG1ruTPIIIoeoT6/8p3hLQCCp7xlNdt8z2EvdcMrNx+EJtOrgpJu4AknMRlW7CWgQSFWJhMn/BEjO/kmEe6P3dqWcrvJ92mblpXtISxDQAnKc/fOi/eT5oyKqwOiHvMABLQOsgduLRianB3MMRzjtJr+xBNsVoLxDETrhgxjQG1//Szfc0GGq3yH2x4YP7sSyh9MSnvceZgQ1Gs6UKigFuLKRmwc36H2P/tPXJ0i3iJATtGfIzqPdXxlUE4w/w01j9m5MgOpSO6wxqEV0BvvMal4nc0lyrVAZYoK821RLDN+AKsn8YoFjfR0lyw54gWQoGwvwoA71ORBr1VyHxzzet3v2dV8T5V2V6l0Kx1BlclYkyBAo6MExCSQj+i0O31eaDDYhKEv9oTHdlro8VErHc6fihac5/7KqYwZtSQCnwM7kMBKJdmyLdioFwD6MUdnFiF6Jt8aZhkMc+LeaBaWwQrqFFS9QsHCxiFUYoQqQzl7w6bpwkLwQHaH/kV6j2vL4idfIf76gNM2Ue10ydMAfpT2fM7XccbUY9BXmvq7vFqWeiAxzf2ClkwOFikFT6sml+6VtnwB5frLmKn4BZ3ufSCRi3Hik+dKgHiSx2EkyqvnJ70PBfW5Qps/VwXfSM8L18j+nFbHVJ4XOymGnBSK6TQ7c8QAMfOVs+SVjkc9ZcubabYfeE8cGM6NVzqWOnVTk3DbTTh6Z+JWcaJIhG+/q+NFs9Lwf6Sv16CRgB",
+          "id": "rs_req_test_0",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "id": "ws_req_test_1",
+          "queries": [
+            "Rust programming language news today"
+          ],
+          "results": [
+            {
+              "title": "Rust Trends: Biweekly Rust Newsletter and Ecosystem News",
+              "url": "https://rust-trends.com/"
+            },
+            {
+              "title": "Rust Programming Language Portal",
+              "url": "https://devtalk.com/rust"
+            },
+            {
+              "title": "Rust and Go News Today",
+              "url": "https://www.newsnow.com/us/Tech/Cyber+Security/Rust+and+Go"
+            },
+            {
+              "title": "Rust > News > Page #1 - InfoQ",
+              "url": "https://www.infoq.com/Rust/news/"
+            },
+            {
+              "title": "Rust 1.100 Released With The \"Never\" Type Finally Stable - Phoronix",
+              "url": "https://www.phoronix.com/news/Rust-1.100-Released"
+            },
+            {
+              "title": "Linus Torvalds takes aim at Rust: This goes too far for him",
+              "url": "https://www.pcgameshardware.de/Linux-Software-26761/News/Linus-Torvalds-vs-Rust-Human-hostile-code-1560227/"
+            },
+            {
+              "title": "Rust",
+              "url": "https://www.infoworld.com/rust/"
+            },
+            {
+              "title": "This Week in Rust 675 · This Week in Rust",
+              "url": "https://this-week-in-rust.org/blog/2026/10/28/this-week-in-rust-675/"
+            },
+            {
+              "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+              "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+            },
+            {
+              "title": "Rust Programming Language - InfoQ",
+              "url": "https://www.infoq.com/rust/"
+            }
+          ],
+          "status": "completed",
+          "type": "cf_gears:web_search_call"
+        },
+        {
+          "content": [
+            {
+              "text": "",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "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",
+          "id": "rs_req_test_2",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "The most prominent recent Rust story I found is the ",
+              "type": "output_text"
+            },
+            {
+              "annotations": [
+                {
+                  "end_index": 95,
+                  "start_index": 0,
+                  "title": "Rust 1.100 Stabilizes Never Type After a Decade of Development",
+                  "type": "url_citation",
+                  "url": "https://linuxiac.com/rust-1-100-stabilizes-never-type-after-a-decade-of-development/"
+                }
+              ],
+              "text": "Rust 1.100 announcement from November 12, 2026, which marks the language's 100th stable version",
+              "type": "output_text"
+            },
+            {
+              "annotations": [],
+              "text": ", but I couldn't confirm a headline dated today.",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_3",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9r4hZBT84FfRPsESGnt",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "blocked_domains": [
+            "wikipedia.org"
+          ],
+          "max_uses": 1,
+          "type": "cf_gears:web_search"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 22541,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 723,
+        "output_tokens_details": {
+          "reasoning_tokens": 583
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 22541,
+          "output_tokens": 723,
+          "output_tokens_details": {
+            "thinking_tokens": 583
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 1
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 23264
+      }
+    },
+    "sequence_number": 39,
+    "type": "response.completed"
+  }
+]

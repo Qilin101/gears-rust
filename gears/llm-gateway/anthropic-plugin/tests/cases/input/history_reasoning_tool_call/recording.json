@@ -1,0 +1,77 @@
+{
+  "recorded_at": "2026-11-18T06:39:51+00:00",
+  "sdk_version": "2.8.0",
+  "request": {
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "Work out which of these cities is furthest north: Madrid, Ottawa, Sapporo, Marseille. Then get the weather for that city only.",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "signature": "CAQS3QUKEAgTGAI4AUIIdGhpbmtpbmcSDGU1ho5Q4uvpgNppZBoM3Ve7fy/Jo2lOZgfDIjDqshoNznnngqTaKQkPqXaQYb1J9khGHAP3e+5JFVU+haCYoLhiHRN1Pz/Tu98ZSi8q+gRXvgvdQ7+rD3BzwdK8JFqE9ouijgiO58vjQHt6KAdOE+moemS4p771zIEjiU2mvJYneahWh1dwZ59U15WtSoG3Svcknk01/5tV+j7zA3ho24/+QIZ+to5Zj29iuS8NOC0LuHM8elfsfja5lGdtcHxZbsYyOPXzGGhIvOGXVB3surp4dkeJDSpVoUCKxxbjH17nyErZzR7LoqOHyC0eJnJ1R3OmLX7mYWBEnzMGfbPBY7mCq37IzukdgG/e1ABg0YzWtZzBYpWsmKIRpNZaodeSNowG1HReC1RlwJj1RH9oshLnCIdWVXnYYjbZbRo2o5gGd2ILzijB4lieQgSuO+nVeAtF1I2rdkiPnCDnTbWjSgXYwSWupsKhqItBKNHx+VWOYNnAowD19DWRfoIY2VmLTZUxQtYkRclw4R/ID6IrA564vw1RE+z5QFxDpecBHx69J2A7HMC6TftYxit8ocOSEoiGzK/i9QC7fLKsIS52x4JZn9vGM5GOeG7z7fwonTL739XSv5bB8Kr+3crreE3UUmKlNbBVPxYXDL5AGTZgWCRsvP4v05Barva/Om3lUd+N/xp9gXTdJm9KeABv6vgku3iamo4GRYj9HK6cHms7c+X5e5Sz1M58vffKdCDruyaOnBuAcOltnD55KO1gfx8Km09VdcmCVQlRPzY7VdK2xfcnKkRtUA4zoKSK2cF9ApIfG8eiFe3/7GULvlRbklq6ojuEhXfJat/KG1k4J1gKHpsEQ314mvCFW9Oi58HOrMUospA01NOhd+N9YrV/+Pa1fep7tqmMXsOqPGEfTcsW2cgIi0V2YoXAMZ+zdH2hdQzf0QXWHkWW+4AzGAE=",
+            "thinking": "I'm comparing the latitudes of Madrid, Ottawa, Sapporo, and Marseille, and Ottawa comes out furthest north at about 45.4°N. So I'll get the weather for Ottawa only.\n\n",
+            "type": "thinking"
+          },
+          {
+            "id": "toolu_017w86UaPqQo73sx8iGRKJkm",
+            "input": {
+              "city": "Ottawa"
+            },
+            "name": "get_weather",
+            "type": "tool_use"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "-4 degrees Celsius, light snow",
+                "type": "text"
+              }
+            ],
+            "tool_use_id": "toolu_017w86UaPqQo73sx8iGRKJkm",
+            "type": "tool_result"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "claude-haiku-5-5",
+    "output_config": {
+      "effort": "high"
+    },
+    "thinking": {
+      "display": "summarized",
+      "type": "adaptive"
+    },
+    "tools": [
+      {
+        "description": "Current weather for a city.",
+        "input_schema": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "name": "get_weather"
+      }
+    ]
+  }
+}

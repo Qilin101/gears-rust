@@ -1,0 +1,27 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "instructions": "Always answer in upper case.",
+  "input": [
+    {
+      "type": "message",
+      "role": "system",
+      "content": "End every answer with an exclamation mark."
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Answer with one word."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "What is the opposite of hot?"
+    }
+  ]
+}

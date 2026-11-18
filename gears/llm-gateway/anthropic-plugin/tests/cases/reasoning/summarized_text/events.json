@@ -1,0 +1,554 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "delta": "I'm working",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " out how many integers from 1",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " to 1000 are div",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "isible by 3 or ",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "5 but not by 15,",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " so I'll subtract the",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 8,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " multiples of 15 from",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 9,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " the comb",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 10,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "ined count of",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 11,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " multiples of 3 or",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 12,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " 5. I'm get",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 13,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "ting ",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 14,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "333 mult",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 15,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "iples of 3, 200",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 16,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " multiples of 5,",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 17,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " and 66 multiples of",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 18,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " 15.",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 19,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "\n\n",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 20,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "I'm sub",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 21,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "tracting the multiples of",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 22,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " 15 from the combined count",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 23,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": ", which gives 401. As",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 24,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " a c",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 25,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "ross-check, the multiples",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 26,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " of 3 without",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 27,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " 15 come",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 28,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " to 267 and the multi",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 29,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "ples of 5 without 15",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 30,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " come",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 31,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " to 134, and those",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 32,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " add up to the",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 33,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " same 401.",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 34,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "\n\n",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 35,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "I'm working out how many integers from 1 to 1000 are divisible by 3 or 5 but not by 15, so I'll subtract the multiples of 15 from the combined count of multiples of 3 or 5. I'm getting 333 multiples of 3, 200 multiples of 5, and 66 multiples of 15.\n\nI'm subtracting the multiples of 15 from the combined count, which gives 401. As a cross-check, the multiples of 3 without 15 come to 267 and the multiples of 5 without 15 come to 134, and those add up to the same 401.\n\n",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 36,
+    "type": "response.reasoning.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "text": "I'm working out how many integers from 1 to 1000 are divisible by 3 or 5 but not by 15, so I'll subtract the multiples of 15 from the combined count of multiples of 3 or 5. I'm getting 333 multiples of 3, 200 multiples of 5, and 66 multiples of 15.\n\nI'm subtracting the multiples of 15 from the combined count, which gives 401. As a cross-check, the multiples of 3 without 15 come to 267 and the multiples of 5 without 15 come to 134, and those add up to the same 401.\n\n",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSsQgKEAgTGAI4AUIIdGhpbmtpbmcSDGmmVLOhtI+/49/5CBoMOzY/EtnSpQzlGwXtIjDfEryX4DyrL/2rAQndTzzqrPPAThv1tXXSKKH1QJA8G2Xo41E5OPy86CXCtRSfTIkqzge5WbWzN+kqVmbRsc1HKKZ4R3dAFIeOKH6oQVGxekhGN4z+3+PM5AH9nj9b7EfpDIiJJ2ORFo4ObDwCMNd3ne2juSMYzeRUKxvRJEr/YTvKxXzbO/qMYeeOEs5f2zqda+0aMxEsN9GCvNx+7RgYNg81PEYnxp6J503RdqXFZ9UKSpA93cbSXKyZ17d3tp/TsP2NEqZCH/MrT2pmU8ZMSokacrijqZ2tyINDAHoOkOg7LWtxpZmx940qPBL/SuhmhFEAulzvXUAx1zp5Hi4xpnjJILXA9YPASNZoc7ca9kA44XKxJGT9i6It2zZuI/K/0OIK26bdyeFgn6wUSH99kaXym6BI1B2p7JCpneTT+6v1XeFn0B8LKumbCgyee6nE9n9sobvCogu0rsDFXhU318xRFBva4lXzhsgy74rycoL1iyjq72nXO23wEFSPTtdgdaXcm3yTWxuSbFeH0RJn81Tvkm2J1267cHhE9s9+OXga19yO7udI3KSA9FTnDmKtQvCoqe0DOfBfmrbEoWJ55ZXeMlZHZTeX0aWRTkCPic4kDIAbdYnPBWR4hIQ7xgy6GTxzf8rDneaQ19iKiZnd7BvqqKXWYABot/qq36AQsyD9yy2b7OHADMk6BTasqyOkN5xRULx05qY6fYi8jM/fFmsq/Hzz0sgM4jCwQHg0wT3ltLfm7ZpH2XQRyjR19Txt6ntzuvfv7axSmuCccRb8GkLR2iYhqJuyzVyYVaU0rRyF2ygTA88GCeA3l4Q9YNop7mFJOfFt73L10Tdu8/VmZpcTJMt7Pf1swoxnCu41HJ9ojKhGFpJR6FYrNkyrIO+hpWN30bL15AXj3H7wmKfpNPphlAm1pNxaIf9AjcC0MMCyebBl8icTDu2XitFfPtZGr9DIFsgQl3tyLUpW1PvEMYw7bhIku+BooZz6Rlmzx/Ib388oOXJpX1XWhqfgLDJWQWgMnKbspcu4X055psYd2LiUAy0+/n1bAR9B8UwmRjLizpayETTM0Py6baR6qaEBHMmyw8yfzkKeNIu39WYfe6zfKOCL6svIYIhLtnMLh3ZX8cDJXJvY1Ut0ommnNs5W7doFFXD18PUl/uW6QSHtigQ71rUl06AQvlr29WI31ToEdq8ArIPkM36nMECcOaIPcAoCR7CXwhRPxt9/hjIvsjXI5B2s8d4Gi/tKVsLW0hWbX+M+xxqteNHhOdz8e7ecfXnknJTfX7V3r5UUheq1bGtmpwk5/NlZOQDDFt6h5g/D3adm+1+aQDMtHx3OWE+NpJeC2hMAsYr/k3jkKlIXHBgB",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 37,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 1,
+    "sequence_number": 38,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 39,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "sequence_number": 40,
+    "text": "**401**",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "sequence_number": 41,
+    "text": "**401**",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_1",
+    "output_index": 1,
+    "part": {
+      "annotations": [],
+      "text": "**401**",
+      "type": "output_text"
+    },
+    "sequence_number": 42,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "**401**",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_1",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 1,
+    "sequence_number": 43,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "text": "I'm working out how many integers from 1 to 1000 are divisible by 3 or 5 but not by 15, so I'll subtract the multiples of 15 from the combined count of multiples of 3 or 5. I'm getting 333 multiples of 3, 200 multiples of 5, and 66 multiples of 15.\n\nI'm subtracting the multiples of 15 from the combined count, which gives 401. As a cross-check, the multiples of 3 without 15 come to 267 and the multiples of 5 without 15 come to 134, and those add up to the same 401.\n\n",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "CAQSsQgKEAgTGAI4AUIIdGhpbmtpbmcSDGmmVLOhtI+/49/5CBoMOzY/EtnSpQzlGwXtIjDfEryX4DyrL/2rAQndTzzqrPPAThv1tXXSKKH1QJA8G2Xo41E5OPy86CXCtRSfTIkqzge5WbWzN+kqVmbRsc1HKKZ4R3dAFIeOKH6oQVGxekhGN4z+3+PM5AH9nj9b7EfpDIiJJ2ORFo4ObDwCMNd3ne2juSMYzeRUKxvRJEr/YTvKxXzbO/qMYeeOEs5f2zqda+0aMxEsN9GCvNx+7RgYNg81PEYnxp6J503RdqXFZ9UKSpA93cbSXKyZ17d3tp/TsP2NEqZCH/MrT2pmU8ZMSokacrijqZ2tyINDAHoOkOg7LWtxpZmx940qPBL/SuhmhFEAulzvXUAx1zp5Hi4xpnjJILXA9YPASNZoc7ca9kA44XKxJGT9i6It2zZuI/K/0OIK26bdyeFgn6wUSH99kaXym6BI1B2p7JCpneTT+6v1XeFn0B8LKumbCgyee6nE9n9sobvCogu0rsDFXhU318xRFBva4lXzhsgy74rycoL1iyjq72nXO23wEFSPTtdgdaXcm3yTWxuSbFeH0RJn81Tvkm2J1267cHhE9s9+OXga19yO7udI3KSA9FTnDmKtQvCoqe0DOfBfmrbEoWJ55ZXeMlZHZTeX0aWRTkCPic4kDIAbdYnPBWR4hIQ7xgy6GTxzf8rDneaQ19iKiZnd7BvqqKXWYABot/qq36AQsyD9yy2b7OHADMk6BTasqyOkN5xRULx05qY6fYi8jM/fFmsq/Hzz0sgM4jCwQHg0wT3ltLfm7ZpH2XQRyjR19Txt6ntzuvfv7axSmuCccRb8GkLR2iYhqJuyzVyYVaU0rRyF2ygTA88GCeA3l4Q9YNop7mFJOfFt73L10Tdu8/VmZpcTJMt7Pf1swoxnCu41HJ9ojKhGFpJR6FYrNkyrIO+hpWN30bL15AXj3H7wmKfpNPphlAm1pNxaIf9AjcC0MMCyebBl8icTDu2XitFfPtZGr9DIFsgQl3tyLUpW1PvEMYw7bhIku+BooZz6Rlmzx/Ib388oOXJpX1XWhqfgLDJWQWgMnKbspcu4X055psYd2LiUAy0+/n1bAR9B8UwmRjLizpayETTM0Py6baR6qaEBHMmyw8yfzkKeNIu39WYfe6zfKOCL6svIYIhLtnMLh3ZX8cDJXJvY1Ut0ommnNs5W7doFFXD18PUl/uW6QSHtigQ71rUl06AQvlr29WI31ToEdq8ArIPkM36nMECcOaIPcAoCR7CXwhRPxt9/hjIvsjXI5B2s8d4Gi/tKVsLW0hWbX+M+xxqteNHhOdz8e7ecfXnknJTfX7V3r5UUheq1bGtmpwk5/NlZOQDDFt6h5g/D3adm+1+aQDMtHx3OWE+NpJeC2hMAsYr/k3jkKlIXHBgB",
+          "id": "rs_req_test_0",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "**401**",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_1",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9r3yXb5q3QerzHvTgtm",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 55,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 244,
+        "output_tokens_details": {
+          "reasoning_tokens": 239
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 55,
+          "output_tokens": 244,
+          "output_tokens_details": {
+            "thinking_tokens": 239
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 299
+      }
+    },
+    "sequence_number": 44,
+    "type": "response.completed"
+  }
+]

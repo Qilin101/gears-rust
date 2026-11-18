@@ -1,0 +1,426 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "delta": "I'm",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " comparing the lat",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "itudes of the",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " four cities,",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " and Ottawa,",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " at about 45.4N,",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 8,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " is",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 9,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " the furthest north. So I",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 10,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "'ll get the",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 11,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " weather for Ottawa",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 12,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": " alone.",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 13,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "\n\n",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 14,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "I'm comparing the latitudes of the four cities, and Ottawa, at about 45.4N, is the furthest north. So I'll get the weather for Ottawa alone.\n\n",
+    "item_id": "rs_req_test_0",
+    "output_index": 0,
+    "sequence_number": 15,
+    "type": "response.reasoning.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "text": "I'm comparing the latitudes of the four cities, and Ottawa, at about 45.4N, is the furthest north. So I'll get the weather for Ottawa alone.\n\n",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQS0QUKEAgTGAI4AUIIdGhpbmtpbmcSDGBYbzWGWM/rSJrXAhoMmrUtwQA+FkSRsHKgIjDlktKbaTP7aWhi2N4Ock8e8yh32iRaALvqMd1c7Vc6kl7Aj8PaUOYIqKbvTT+pZ/Iq7gQEIJcYLZQIQ83xhicRJp2ACtsD/CckE56KGTZEYbh2jo/EDifE8QMAi6nILJO2oRbuKOk9Gjw21tjvXXTQCL9SUfImm+6Yi8dl4k+9GjDYw1TzKI88LbJweRZfCAlq876o2UPg4aMvMf/wnJc+6kxrNTEnEK6KwSJ7dsJvPfCO+sQyIYDQcyEkL+NLODD1G5QK6laW8OT0dsulyK2Hg8XYKxtDpD/ap1iZ+wG7kx5wv2YbkFZGw8fzRIYC4m8NNq5NRBPt/C2mm/yRCwyl0jY6U79ihWLmImOEleWCuJAhguj6NkQmyfz5DPcQiAn2olP350JBdB7+65Kpxg6cTqBuuakRLJyIrxZPt84EIA/4yLJv+ot76qWd9l6RYkEBetF50yJ9GD3Tim7pbpzR4/3AasvD1LOqjhOsP2rZ9dn6B92QvpZ6X4cF5L881tOsSBh3YIeq9k6KGB8xCcuhFv4OBGZoBxEd3KySqOoSxrT7POmK72pcPCm2L4W8E+I7mSEMGnu9w0QKIysVhDwcL8W/UrxqqMRywq1hquxD+x4SEa2i+Phoga6abRBh0HQOaCwEJiwPCNNk2iCB9IxHTdbrQvFO6K/DNVmnNrNM03Ziqr2zaj2QlS84JnqGxsqSvkc7fYgAOiGPJ0LAdb1k4EmDtl+GUN9dEbgyg77WtiCUdDW4EBZYRMoVZVyjFsOMprfFjk1iB1t85xoQch1PCnrCb1oNJrvU1ywKCbuxDEQqj6Hw3RVuQIA57XVRx+7exdshFoUWnkj8h5YhWxa4qSpj1DtgYdPVsWvm9H6unzrdl6cXbTsv+jiriPUUs33DGAE=",
+      "id": "rs_req_test_0",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 0,
+    "sequence_number": 16,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "arguments": "",
+      "call_id": "toolu_01Cc9xKG1LzF8ooBjLvq8YWy",
+      "id": "fc_req_test_1",
+      "name": "get_weather",
+      "status": "in_progress",
+      "type": "function_call"
+    },
+    "output_index": 1,
+    "sequence_number": 17,
+    "type": "response.output_item.added"
+  },
+  {
+    "arguments": "",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 18,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\"",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 19,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": ": \"Otta",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 20,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "wa\"}",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 21,
+    "type": "response.function_call_arguments.delta"
+  },
+  {
+    "arguments": "{\"city\":\"Ottawa\"}",
+    "item_id": "fc_req_test_1",
+    "output_index": 1,
+    "sequence_number": 22,
+    "type": "response.function_call_arguments.done"
+  },
+  {
+    "item": {
+      "arguments": "{\"city\":\"Ottawa\"}",
+      "call_id": "toolu_01Cc9xKG1LzF8ooBjLvq8YWy",
+      "id": "fc_req_test_1",
+      "name": "get_weather",
+      "status": "completed",
+      "type": "function_call"
+    },
+    "output_index": 1,
+    "sequence_number": 23,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 4096,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "text": "I'm comparing the latitudes of the four cities, and Ottawa, at about 45.4N, is the furthest north. So I'll get the weather for Ottawa alone.\n\n",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "CAQS0QUKEAgTGAI4AUIIdGhpbmtpbmcSDGBYbzWGWM/rSJrXAhoMmrUtwQA+FkSRsHKgIjDlktKbaTP7aWhi2N4Ock8e8yh32iRaALvqMd1c7Vc6kl7Aj8PaUOYIqKbvTT+pZ/Iq7gQEIJcYLZQIQ83xhicRJp2ACtsD/CckE56KGTZEYbh2jo/EDifE8QMAi6nILJO2oRbuKOk9Gjw21tjvXXTQCL9SUfImm+6Yi8dl4k+9GjDYw1TzKI88LbJweRZfCAlq876o2UPg4aMvMf/wnJc+6kxrNTEnEK6KwSJ7dsJvPfCO+sQyIYDQcyEkL+NLODD1G5QK6laW8OT0dsulyK2Hg8XYKxtDpD/ap1iZ+wG7kx5wv2YbkFZGw8fzRIYC4m8NNq5NRBPt/C2mm/yRCwyl0jY6U79ihWLmImOEleWCuJAhguj6NkQmyfz5DPcQiAn2olP350JBdB7+65Kpxg6cTqBuuakRLJyIrxZPt84EIA/4yLJv+ot76qWd9l6RYkEBetF50yJ9GD3Tim7pbpzR4/3AasvD1LOqjhOsP2rZ9dn6B92QvpZ6X4cF5L881tOsSBh3YIeq9k6KGB8xCcuhFv4OBGZoBxEd3KySqOoSxrT7POmK72pcPCm2L4W8E+I7mSEMGnu9w0QKIysVhDwcL8W/UrxqqMRywq1hquxD+x4SEa2i+Phoga6abRBh0HQOaCwEJiwPCNNk2iCB9IxHTdbrQvFO6K/DNVmnNrNM03Ziqr2zaj2QlS84JnqGxsqSvkc7fYgAOiGPJ0LAdb1k4EmDtl+GUN9dEbgyg77WtiCUdDW4EBZYRMoVZVyjFsOMprfFjk1iB1t85xoQch1PCnrCb1oNJrvU1ywKCbuxDEQqj6Hw3RVuQIA57XVRx+7exdshFoUWnkj8h5YhWxa4qSpj1DtgYdPVsWvm9H6unzrdl6cXbTsv+jiriPUUs33DGAE=",
+          "id": "rs_req_test_0",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "arguments": "{\"city\":\"Ottawa\"}",
+          "call_id": "toolu_01Cc9xKG1LzF8ooBjLvq8YWy",
+          "id": "fc_req_test_1",
+          "name": "get_weather",
+          "status": "completed",
+          "type": "function_call"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9r4FbyNXVzMCGWZGz8k",
+        "stop_reason": "tool_use"
+      },
+      "reasoning": {
+        "effort": "high",
+        "summary": "auto"
+      },
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "description": "Current weather for a city.",
+          "name": "get_weather",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 421,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 132,
+        "output_tokens_details": {
+          "reasoning_tokens": 79
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 421,
+          "output_tokens": 132,
+          "output_tokens_details": {
+            "thinking_tokens": 79
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 553
+      }
+    },
+    "sequence_number": 24,
+    "type": "response.completed"
+  }
+]

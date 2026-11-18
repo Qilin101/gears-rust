@@ -1,0 +1,35 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_synthetic_sync"
+  },
+  "body": {
+    "id": "msg_synthetic_01",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-5-5",
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "Setting up one equation for the ball price and solving it.",
+        "signature": "EqQBCkYIAxgCIkDsyntheticSignatureForConformanceTests0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=="
+      },
+      {
+        "type": "text",
+        "text": "0.05"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 56,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 48,
+      "output_tokens_details": {
+        "thinking_tokens": 41
+      }
+    }
+  }
+}

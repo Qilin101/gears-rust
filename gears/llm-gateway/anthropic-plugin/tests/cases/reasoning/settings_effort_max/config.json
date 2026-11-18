@@ -1,0 +1,12 @@
+{
+  "settings": {
+    "thinking": {
+      "type": "adaptive",
+      "display": null
+    },
+    "output_config": {
+      "effort": "max",
+      "format": null
+    }
+  }
+}

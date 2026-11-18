@@ -1,0 +1,667 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "allowed_domains": [
+            "rust-lang.org"
+          ],
+          "max_uses": 1,
+          "search_context_size": "high",
+          "type": "cf_gears:web_search",
+          "user_location": {
+            "city": "Berlin",
+            "country": "DE",
+            "timezone": "Europe/Berlin",
+            "type": "approximate"
+          }
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "allowed_domains": [
+            "rust-lang.org"
+          ],
+          "max_uses": 1,
+          "search_context_size": "high",
+          "type": "cf_gears:web_search",
+          "user_location": {
+            "city": "Berlin",
+            "country": "DE",
+            "timezone": "Europe/Berlin",
+            "type": "approximate"
+          }
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "id": "ws_req_test_0",
+      "queries": [
+        "latest stable Rust version"
+      ],
+      "status": "in_progress",
+      "type": "cf_gears:web_search_call"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "item": {
+      "id": "ws_req_test_0",
+      "queries": [
+        "latest stable Rust version"
+      ],
+      "results": [
+        {
+          "title": "Rust Release Notes",
+          "url": "https://doc.rust-lang.org/beta/releases.html"
+        },
+        {
+          "title": "Announcing Rust 1.100.0",
+          "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+        },
+        {
+          "title": "Announcing Rust 1.99.0",
+          "url": "https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/"
+        },
+        {
+          "title": "Announcing Rust 1.97.0",
+          "url": "https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"
+        },
+        {
+          "title": "The Rust Release Announcements",
+          "url": "https://blog.rust-lang.org/releases/"
+        },
+        {
+          "title": "Announcing Rust 1.96.0",
+          "url": "https://blog.rust-lang.org/2026/05/28/Rust-1.96.0/"
+        },
+        {
+          "title": "Announcing Rust 1.98.0",
+          "url": "https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/"
+        },
+        {
+          "title": "Announcing Rust 1.93.0",
+          "url": "https://blog.rust-lang.org/2026/01/22/Rust-1.93.0/"
+        },
+        {
+          "title": "Announcing Rust 1.95.0",
+          "url": "https://blog.rust-lang.org/2026/04/16/Rust-1.95.0/"
+        },
+        {
+          "title": "Announcing Rust 1.99.1",
+          "url": "https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/"
+        }
+      ],
+      "status": "completed",
+      "type": "cf_gears:web_search_call"
+    },
+    "output_index": 0,
+    "sequence_number": 3,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "rs_req_test_1",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 1,
+    "sequence_number": 4,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_1",
+    "output_index": 1,
+    "sequence_number": 5,
+    "type": "response.reasoning.delta"
+  },
+  {
+    "content_index": 0,
+    "delta": "",
+    "item_id": "rs_req_test_1",
+    "output_index": 1,
+    "sequence_number": 6,
+    "type": "response.reasoning.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "text": "",
+          "type": "reasoning_text"
+        }
+      ],
+      "encrypted_content": "CAQSggoKEAgTGAI4AUIIdGhpbmtpbmcSDIjX1SnKAZn/TcrdVRoMIQQBAgm4TUs/Gm9PIjCbUgObVFtOOJCI+Tfnvc4TeU+JJobDsrNymUNHgYY15TeSLixC99j4dLcAPSWsYIwqnwkjp4wz5dgkCgUosUSwZMa+ZZOHjCSAiImlfxo4IZj9OWCod22saDP1en3Abi0i6NAiqitGZ3HfLIE6Er6o/+od0Chvq01xoptsZ61H8j6ODjs9r+Z2u4O+oipZ44EqG/whS9xsPj//ZVJ89on2aJE0vDYCIVDQP48/GuiT3sBYPVRrwr1P37xiDrl4xjH2GCvyB1r+9xgkyYd2kQHgRUAbFTAYIEt1gqKnT1OjHDOwnrJaGyZ5bWKCyeKBn1IjQWHbXe2tIIVf+vVBCEx899ekVO73Ci9FQrvVyLk1r4iSv1KltPm24nLayluTSetotJ0Qne7EjHZZzM5U783cWmTnrgUlgeDnkEkC88VbFbBqkbwlsQObfUxo1ZoOnl9kGA5x7QWN2uH+uskRg0hTTrtpLt/5kvGlER8j5gKYUGp08gxMhFCLJPVK1LIJGBx3kyOZUZ8yevlzl4iudJhJHXlWXwjQx5YulPcuzQ31J0vUZSGzhR04nvyrX22gJmrVHopGMENH3JvQRuXVYfsQ1U2UNUTxN8aUTCs55UFZEb0ISaX46wrB+ke+O3wCG2lRuOu/yz5JF0tre0gujjmJvdzNVz4n8Ci+4M6JZvXrJhlqX0i5Hz0qy/55kMNomHgN1tl6A6sz9sBhm4iiHw+J3O9GW62dQjAgr1hjYE3eA0TE0+rRJ3YbnZ2mYI00CjBnAmrMcCinr/ZMKJR0BRdNbLVp7sKmLCjbaSVsexkS9/BMyIP9sUo8i5fCe6keB45NLcB/Rs+G3JYzvIAuihjOXBqMr/9hmciQrAy9ZFTg0FGifkO943UgGbeUf4G6k8E2XDooewWQjFWj7QrgL/92vCOxXigciEnWnd0Ixsyl3c+VllfmsHg/pbam4lFN5SkHwo8Fk58K5wX9VPSu2g7aaLUKdXOAgUYW5ciGDj4+N7nnEEasReqIgqMq/+YFnPA0t4bMNCwDlmT+QsYi4FlVyMcwS+L+u1c/PCkVaOQ8sLChXUMBMucrV/AgNcDvXLiA56vdD2T4NvK82eKz0juk4NXMzles/2Im4vDUBDZ9cC288J5ipFaBXO5j6C10xAfJilcwj+W2BXkEnNXCVq6Rl1RbMWfySbb9EGJ9A4bObTYlFOjIIVzl9fkp8Yh7ObSsbPdmshsOcaKsN6dujFJz9TGeSacAm96YBiI9eH5i/4OARrtylbqPb33+E9TE69ZU0iiJE7b6qKktnKHu27BYHvBphd3qGSERASaavSHmxaP5DXOBF9jIo+bATys0+i7Apew598dVgAnj2kGvbl1WJ9vAK5DiRtYLYc3vR+7eh2Et1ojQ2wWpVEtQxmmgohWZJJL+fKuXfyvX4h1jQQxE009cwPFKUcXfCCJ1Va9r1eh+hb/csNjn3eyRjXRo7tGx74S9lhTiETOQVNRT+HK2W6lwDlnJsYCUBUUKgfi6TAz4cNqujCSX2TsR5W71jB3cU5OoT8d/csPukCDfC6xwyQN4phm+VoYB3nbR8rqBobJ16N6A6X6z5jLOOiw/Fg+Gt2fZQzNiycuX7A2lzzRePu6q/bv5CpnQnwDjZdZ71LbxGAE=",
+      "id": "rs_req_test_1",
+      "summary": [],
+      "type": "reasoning"
+    },
+    "output_index": 1,
+    "sequence_number": 7,
+    "type": "response.output_item.done"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_2",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 2,
+    "sequence_number": 8,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 9,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 10,
+    "text": "The newest stable release",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 11,
+    "text": " is Rust 1.100",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 12,
+    "text": ".0, which",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 13,
+    "text": " the Rust team sh",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 14,
+    "text": "ipped on November 12, ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 15,
+    "text": "2026,",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 16,
+    "text": " according to the ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 17,
+    "text": "The newest stable release is Rust 1.100.0, which the Rust team shipped on November 12, 2026, according to the ",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [],
+      "text": "The newest stable release is Rust 1.100.0, which the Rust team shipped on November 12, 2026, according to the ",
+      "type": "output_text"
+    },
+    "sequence_number": 18,
+    "type": "response.content_part.done"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 19,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 20,
+    "text": "official Rust blog announc",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 21,
+    "text": "ement for",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 22,
+    "text": " that",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 23,
+    "text": " version",
+    "type": "response.output_text.delta"
+  },
+  {
+    "annotation": {
+      "end_index": 48,
+      "start_index": 0,
+      "title": "Announcing Rust 1.100.0",
+      "type": "url_citation",
+      "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+    },
+    "annotation_index": 0,
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 24,
+    "type": "response.output_text.annotation.added"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 25,
+    "text": "official Rust blog announcement for that version",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 1,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [
+        {
+          "end_index": 48,
+          "start_index": 0,
+          "title": "Announcing Rust 1.100.0",
+          "type": "url_citation",
+          "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+        }
+      ],
+      "text": "official Rust blog announcement for that version",
+      "type": "output_text"
+    },
+    "sequence_number": 26,
+    "type": "response.content_part.done"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 27,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 28,
+    "text": ".",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "sequence_number": 29,
+    "text": ".",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 2,
+    "item_id": "msg_req_test_2",
+    "output_index": 2,
+    "part": {
+      "annotations": [],
+      "text": ".",
+      "type": "output_text"
+    },
+    "sequence_number": 30,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "The newest stable release is Rust 1.100.0, which the Rust team shipped on November 12, 2026, according to the ",
+          "type": "output_text"
+        },
+        {
+          "annotations": [
+            {
+              "end_index": 48,
+              "start_index": 0,
+              "title": "Announcing Rust 1.100.0",
+              "type": "url_citation",
+              "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+            }
+          ],
+          "text": "official Rust blog announcement for that version",
+          "type": "output_text"
+        },
+        {
+          "annotations": [],
+          "text": ".",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_2",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 2,
+    "sequence_number": 31,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 1024,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "id": "ws_req_test_0",
+          "queries": [
+            "latest stable Rust version"
+          ],
+          "results": [
+            {
+              "title": "Rust Release Notes",
+              "url": "https://doc.rust-lang.org/beta/releases.html"
+            },
+            {
+              "title": "Announcing Rust 1.100.0",
+              "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+            },
+            {
+              "title": "Announcing Rust 1.99.0",
+              "url": "https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/"
+            },
+            {
+              "title": "Announcing Rust 1.97.0",
+              "url": "https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"
+            },
+            {
+              "title": "The Rust Release Announcements",
+              "url": "https://blog.rust-lang.org/releases/"
+            },
+            {
+              "title": "Announcing Rust 1.96.0",
+              "url": "https://blog.rust-lang.org/2026/05/28/Rust-1.96.0/"
+            },
+            {
+              "title": "Announcing Rust 1.98.0",
+              "url": "https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/"
+            },
+            {
+              "title": "Announcing Rust 1.93.0",
+              "url": "https://blog.rust-lang.org/2026/01/22/Rust-1.93.0/"
+            },
+            {
+              "title": "Announcing Rust 1.95.0",
+              "url": "https://blog.rust-lang.org/2026/04/16/Rust-1.95.0/"
+            },
+            {
+              "title": "Announcing Rust 1.99.1",
+              "url": "https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/"
+            }
+          ],
+          "status": "completed",
+          "type": "cf_gears:web_search_call"
+        },
+        {
+          "content": [
+            {
+              "text": "",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "CAQSggoKEAgTGAI4AUIIdGhpbmtpbmcSDIjX1SnKAZn/TcrdVRoMIQQBAgm4TUs/Gm9PIjCbUgObVFtOOJCI+Tfnvc4TeU+JJobDsrNymUNHgYY15TeSLixC99j4dLcAPSWsYIwqnwkjp4wz5dgkCgUosUSwZMa+ZZOHjCSAiImlfxo4IZj9OWCod22saDP1en3Abi0i6NAiqitGZ3HfLIE6Er6o/+od0Chvq01xoptsZ61H8j6ODjs9r+Z2u4O+oipZ44EqG/whS9xsPj//ZVJ89on2aJE0vDYCIVDQP48/GuiT3sBYPVRrwr1P37xiDrl4xjH2GCvyB1r+9xgkyYd2kQHgRUAbFTAYIEt1gqKnT1OjHDOwnrJaGyZ5bWKCyeKBn1IjQWHbXe2tIIVf+vVBCEx899ekVO73Ci9FQrvVyLk1r4iSv1KltPm24nLayluTSetotJ0Qne7EjHZZzM5U783cWmTnrgUlgeDnkEkC88VbFbBqkbwlsQObfUxo1ZoOnl9kGA5x7QWN2uH+uskRg0hTTrtpLt/5kvGlER8j5gKYUGp08gxMhFCLJPVK1LIJGBx3kyOZUZ8yevlzl4iudJhJHXlWXwjQx5YulPcuzQ31J0vUZSGzhR04nvyrX22gJmrVHopGMENH3JvQRuXVYfsQ1U2UNUTxN8aUTCs55UFZEb0ISaX46wrB+ke+O3wCG2lRuOu/yz5JF0tre0gujjmJvdzNVz4n8Ci+4M6JZvXrJhlqX0i5Hz0qy/55kMNomHgN1tl6A6sz9sBhm4iiHw+J3O9GW62dQjAgr1hjYE3eA0TE0+rRJ3YbnZ2mYI00CjBnAmrMcCinr/ZMKJR0BRdNbLVp7sKmLCjbaSVsexkS9/BMyIP9sUo8i5fCe6keB45NLcB/Rs+G3JYzvIAuihjOXBqMr/9hmciQrAy9ZFTg0FGifkO943UgGbeUf4G6k8E2XDooewWQjFWj7QrgL/92vCOxXigciEnWnd0Ixsyl3c+VllfmsHg/pbam4lFN5SkHwo8Fk58K5wX9VPSu2g7aaLUKdXOAgUYW5ciGDj4+N7nnEEasReqIgqMq/+YFnPA0t4bMNCwDlmT+QsYi4FlVyMcwS+L+u1c/PCkVaOQ8sLChXUMBMucrV/AgNcDvXLiA56vdD2T4NvK82eKz0juk4NXMzles/2Im4vDUBDZ9cC288J5ipFaBXO5j6C10xAfJilcwj+W2BXkEnNXCVq6Rl1RbMWfySbb9EGJ9A4bObTYlFOjIIVzl9fkp8Yh7ObSsbPdmshsOcaKsN6dujFJz9TGeSacAm96YBiI9eH5i/4OARrtylbqPb33+E9TE69ZU0iiJE7b6qKktnKHu27BYHvBphd3qGSERASaavSHmxaP5DXOBF9jIo+bATys0+i7Apew598dVgAnj2kGvbl1WJ9vAK5DiRtYLYc3vR+7eh2Et1ojQ2wWpVEtQxmmgohWZJJL+fKuXfyvX4h1jQQxE009cwPFKUcXfCCJ1Va9r1eh+hb/csNjn3eyRjXRo7tGx74S9lhTiETOQVNRT+HK2W6lwDlnJsYCUBUUKgfi6TAz4cNqujCSX2TsR5W71jB3cU5OoT8d/csPukCDfC6xwyQN4phm+VoYB3nbR8rqBobJ16N6A6X6z5jLOOiw/Fg+Gt2fZQzNiycuX7A2lzzRePu6q/bv5CpnQnwDjZdZ71LbxGAE=",
+          "id": "rs_req_test_1",
+          "summary": [],
+          "type": "reasoning"
+        },
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "The newest stable release is Rust 1.100.0, which the Rust team shipped on November 12, 2026, according to the ",
+              "type": "output_text"
+            },
+            {
+              "annotations": [
+                {
+                  "end_index": 48,
+                  "start_index": 0,
+                  "title": "Announcing Rust 1.100.0",
+                  "type": "url_citation",
+                  "url": "https://blog.rust-lang.org/2026/11/12/Rust-1.100.0/"
+                }
+              ],
+              "text": "official Rust blog announcement for that version",
+              "type": "output_text"
+            },
+            {
+              "annotations": [],
+              "text": ".",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_2",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9ppZJ5GRg5wXxg9Bokx",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "allowed_domains": [
+            "rust-lang.org"
+          ],
+          "max_uses": 1,
+          "search_context_size": "high",
+          "type": "cf_gears:web_search",
+          "user_location": {
+            "city": "Berlin",
+            "country": "DE",
+            "timezone": "Europe/Berlin",
+            "type": "approximate"
+          }
+        }
+      ],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 16928,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 388,
+        "output_tokens_details": {
+          "reasoning_tokens": 262
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 16928,
+          "output_tokens": 388,
+          "output_tokens_details": {
+            "thinking_tokens": 262
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 1
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 17316
+      }
+    },
+    "sequence_number": 32,
+    "type": "response.completed"
+  }
+]

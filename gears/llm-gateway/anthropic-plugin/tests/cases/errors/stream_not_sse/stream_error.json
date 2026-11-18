@@ -1,0 +1,5 @@
+{
+  "code": "provider_error",
+  "message": "provider_error: provider did not return an event stream",
+  "provider_request_id": "req_synthetic_sync"
+}

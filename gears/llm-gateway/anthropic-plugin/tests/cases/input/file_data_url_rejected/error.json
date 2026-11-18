@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: expected a base64 data URI: data:<media type>;base64,<data>",
+  "param": "input[0].content[0]"
+}

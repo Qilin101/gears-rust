@@ -1,0 +1,36 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Who maintains the Rust language?"
+    },
+    {
+      "type": "cf_gears:web_search_call",
+      "id": "ws_1",
+      "status": "completed",
+      "queries": [
+        "rust maintainers"
+      ],
+      "results": []
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The Rust Project.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Repeat your previous answer exactly."
+    }
+  ]
+}

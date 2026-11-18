@@ -1,0 +1,26 @@
+{
+  "model": "claude",
+  "max_output_tokens": 2048,
+  "input": "Extract the city: I live in Berlin.",
+  "reasoning": {
+    "effort": "low"
+  },
+  "text": {
+    "format": {
+      "type": "json_schema",
+      "name": "city",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ]
+      }
+    }
+  }
+}

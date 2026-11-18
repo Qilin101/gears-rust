@@ -1,0 +1,33 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "What is the opposite of hot?",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "system": [
+    {
+      "text": "You are a terse assistant.",
+      "type": "text"
+    },
+    {
+      "text": "Always answer in upper case.",
+      "type": "text"
+    },
+    {
+      "text": "End every answer with an exclamation mark.",
+      "type": "text"
+    },
+    {
+      "text": "Answer with one word.",
+      "type": "text"
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "max_tokens": 512,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Extract the person: John Smith, john@example.com, +1 555 0100, 42 years old, tags: vip; scores 1, 2 and 3; no other contact; lives in Berlin.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "output_config": {
+    "format": {
+      "schema": {
+        "$defs": {
+          "address": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/address"
+          },
+          "age": {
+            "description": "{maximum: 150, minimum: 0}",
+            "type": "integer"
+          },
+          "contact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "email": {
+            "format": "email",
+            "type": "string"
+          },
+          "name": {
+            "description": "{minLength: 1}",
+            "type": "string"
+          },
+          "phone": {
+            "description": "{format: phone, pattern: ^[0-9+ ]+$}",
+            "type": "string"
+          },
+          "scores": {
+            "description": "{maxItems: 5, minItems: 3}",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "phone",
+          "age",
+          "tags",
+          "scores",
+          "contact",
+          "address"
+        ],
+        "type": "object"
+      },
+      "type": "json_schema"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json",
+    "request-id": "req_synthetic_error",
+    "retry-after": "30",
+    "retry-after-ms": "1500"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "rate_limit_error",
+      "message": "Rate limited."
+    },
+    "request_id": "req_synthetic_error"
+  }
+}

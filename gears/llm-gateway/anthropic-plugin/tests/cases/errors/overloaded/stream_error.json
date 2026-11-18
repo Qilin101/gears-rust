@@ -1,0 +1,7 @@
+{
+  "code": "provider_unavailable",
+  "message": "provider_unavailable: Overloaded",
+  "provider_code": "overloaded_error",
+  "provider_message": "Overloaded",
+  "provider_request_id": "req_synthetic_error"
+}

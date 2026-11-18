@@ -1,0 +1,12 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "function_call",
+      "call_id": "c",
+      "name": "f",
+      "arguments": "{bad"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "What text does this PDF contain? Quote it.",
+          "type": "text"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+          },
+          "title": "dummy.pdf",
+          "type": "document"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5"
+}

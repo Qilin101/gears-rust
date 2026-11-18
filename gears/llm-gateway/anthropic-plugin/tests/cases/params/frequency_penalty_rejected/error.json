@@ -1,0 +1,5 @@
+{
+  "code": "unsupported_parameter",
+  "message": "unsupported parameter: frequency_penalty",
+  "param": "frequency_penalty"
+}

@@ -1,0 +1,549 @@
+[
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 512,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "name": "person",
+          "schema": {
+            "$defs": {
+              "address": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            },
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/address"
+              },
+              "age": {
+                "maximum": 150,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "contact": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "email": {
+                "format": "email",
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "phone": {
+                "format": "phone",
+                "pattern": "^[0-9+ ]+$",
+                "type": "string"
+              },
+              "scores": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 5,
+                "minItems": 3,
+                "type": "array"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "email",
+              "phone",
+              "age",
+              "tags",
+              "scores",
+              "contact",
+              "address"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 0,
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "completed_at": null,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 512,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "in_progress",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "name": "person",
+          "schema": {
+            "$defs": {
+              "address": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            },
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/address"
+              },
+              "age": {
+                "maximum": 150,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "contact": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "email": {
+                "format": "email",
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "phone": {
+                "format": "phone",
+                "pattern": "^[0-9+ ]+$",
+                "type": "string"
+              },
+              "scores": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 5,
+                "minItems": 3,
+                "type": "array"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "email",
+              "phone",
+              "age",
+              "tags",
+              "scores",
+              "contact",
+              "address"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": null
+    },
+    "sequence_number": 1,
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "in_progress",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 2,
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "",
+      "type": "output_text"
+    },
+    "sequence_number": 3,
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 4,
+    "text": "{\"",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 5,
+    "text": "address\":",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 6,
+    "text": " {\"city\": \"Berl",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 7,
+    "text": "in\"}, \"age\": ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 8,
+    "text": "42, \"contact\": null,",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 9,
+    "text": " \"email\": \"john@example.",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 10,
+    "text": "com\", \"name\": \"John",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 11,
+    "text": " Smith\", \"phone\": \"",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 12,
+    "text": "+1 555 0100\",",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 13,
+    "text": " \"scores\": [1, ",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 14,
+    "text": "2, 3], \"tags",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 15,
+    "text": "\": [\"vip\"]}",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "sequence_number": 16,
+    "text": "{\"address\": {\"city\": \"Berlin\"}, \"age\": 42, \"contact\": null, \"email\": \"john@example.com\", \"name\": \"John Smith\", \"phone\": \"+1 555 0100\", \"scores\": [1, 2, 3], \"tags\": [\"vip\"]}",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": 0,
+    "item_id": "msg_req_test_0",
+    "output_index": 0,
+    "part": {
+      "annotations": [],
+      "text": "{\"address\": {\"city\": \"Berlin\"}, \"age\": 42, \"contact\": null, \"email\": \"john@example.com\", \"name\": \"John Smith\", \"phone\": \"+1 555 0100\", \"scores\": [1, 2, 3], \"tags\": [\"vip\"]}",
+      "type": "output_text"
+    },
+    "sequence_number": 17,
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        {
+          "annotations": [],
+          "text": "{\"address\": {\"city\": \"Berlin\"}, \"age\": 42, \"contact\": null, \"email\": \"john@example.com\", \"name\": \"John Smith\", \"phone\": \"+1 555 0100\", \"scores\": [1, 2, 3], \"tags\": [\"vip\"]}",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_req_test_0",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    "output_index": 0,
+    "sequence_number": 18,
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "completed_at": 0,
+      "created_at": 0,
+      "error": null,
+      "frequency_penalty": 0.0,
+      "id": "req_test",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": 512,
+      "max_tool_calls": null,
+      "metadata": null,
+      "model": "claude",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "{\"address\": {\"city\": \"Berlin\"}, \"age\": 42, \"contact\": null, \"email\": \"john@example.com\", \"name\": \"John Smith\", \"phone\": \"+1 555 0100\", \"scores\": [1, 2, 3], \"tags\": [\"vip\"]}",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_req_test_0",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "parallel_tool_calls": true,
+      "presence_penalty": 0.0,
+      "prompt_cache_key": null,
+      "provider_details": {
+        "provider_request_id": "req_011Ch9pmZxgL8GTRkXb4DqWy",
+        "stop_reason": "end_turn"
+      },
+      "reasoning": {},
+      "safety_identifier": null,
+      "service_tier": "auto",
+      "status": "completed",
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "name": "person",
+          "schema": {
+            "$defs": {
+              "address": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            },
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/address"
+              },
+              "age": {
+                "maximum": 150,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "contact": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "email": {
+                "format": "email",
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "phone": {
+                "format": "phone",
+                "pattern": "^[0-9+ ]+$",
+                "type": "string"
+              },
+              "scores": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 5,
+                "minItems": 3,
+                "type": "array"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "email",
+              "phone",
+              "age",
+              "tags",
+              "scores",
+              "contact",
+              "address"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_logprobs": 0,
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {
+        "complete": true,
+        "cost": "0",
+        "estimated": false,
+        "input_tokens": 683,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 86,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "provider_raw": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "inference_geo": "global",
+          "input_tokens": 683,
+          "output_tokens": 86,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "total_tokens": 769
+      }
+    },
+    "sequence_number": 19,
+    "type": "response.completed"
+  }
+]

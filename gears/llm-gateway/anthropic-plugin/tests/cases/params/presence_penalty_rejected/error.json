@@ -1,0 +1,5 @@
+{
+  "code": "unsupported_parameter",
+  "message": "unsupported parameter: presence_penalty",
+  "param": "presence_penalty"
+}

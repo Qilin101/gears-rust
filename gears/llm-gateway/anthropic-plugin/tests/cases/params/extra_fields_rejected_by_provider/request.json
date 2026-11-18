@@ -1,0 +1,9 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": "Reply with exactly: Hello!",
+  "extra_fields": {
+    "top_k": 5,
+    "max_tokens": 32
+  }
+}

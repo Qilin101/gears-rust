@@ -1,0 +1,5 @@
+{
+  "model": "claude",
+  "max_output_tokens": 256,
+  "input": "Extract the city: I live in Berlin."
+}

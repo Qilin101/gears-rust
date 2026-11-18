@@ -1,0 +1,52 @@
+{
+  "model": "claude",
+  "max_output_tokens": 128,
+  "tools": [
+    {
+      "type": "function",
+      "name": "get_weather",
+      "description": "Current weather for a city.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "What is the weather in Paris?"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Let me check.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "toolu_conformance_1",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_conformance_1",
+      "output": "18 degrees Celsius, sunny"
+    }
+  ]
+}

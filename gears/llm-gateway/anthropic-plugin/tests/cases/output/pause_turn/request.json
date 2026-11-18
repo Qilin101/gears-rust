@@ -1,0 +1,10 @@
+{
+  "model": "claude",
+  "max_output_tokens": 1024,
+  "input": "Search the web for the latest Rust release.",
+  "tools": [
+    {
+      "type": "cf_gears:web_search"
+    }
+  ]
+}

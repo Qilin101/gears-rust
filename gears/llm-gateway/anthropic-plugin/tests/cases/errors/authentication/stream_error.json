@@ -1,0 +1,7 @@
+{
+  "code": "authentication_failed",
+  "message": "authentication_failed: invalid x-api-key",
+  "provider_code": "authentication_error",
+  "provider_message": "invalid x-api-key",
+  "provider_request_id": "req_011Ch9ph9G2RrvzzGpi3dr4Y"
+}

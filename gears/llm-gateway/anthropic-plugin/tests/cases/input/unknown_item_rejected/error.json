@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: input item type \"openai:web_search_call\" is not supported by the Anthropic provider",
+  "param": "input[0]"
+}

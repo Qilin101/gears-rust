@@ -1,0 +1,5 @@
+{
+  "code": "validation_error",
+  "message": "validation error: schema must have type, anyOf, oneOf, allOf, enum, or const",
+  "param": "text.format.schema"
+}

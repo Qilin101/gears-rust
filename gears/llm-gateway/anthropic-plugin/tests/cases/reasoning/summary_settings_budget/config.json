@@ -1,0 +1,10 @@
+{
+  "settings": {
+    "thinking": {
+      "type": "enabled",
+      "budget_tokens": 1024,
+      "display": null
+    }
+  },
+  "synthetic": true
+}

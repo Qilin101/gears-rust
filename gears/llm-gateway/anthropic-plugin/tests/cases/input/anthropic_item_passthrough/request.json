@@ -1,0 +1,20 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Pick a number between 1 and 9."
+    },
+    {
+      "type": "anthropic:text",
+      "text": "I pick 7."
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Which number did you pick? Digits only."
+    }
+  ]
+}

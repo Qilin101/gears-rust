@@ -1,0 +1,10 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "input": [
+    {
+      "type": "openai:web_search_call",
+      "id": "x"
+    }
+  ]
+}

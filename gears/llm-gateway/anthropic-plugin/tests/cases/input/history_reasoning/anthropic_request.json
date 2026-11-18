@@ -1,0 +1,44 @@
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "A bat and a ball cost 1.10 in total. The bat costs 1.00 more than the ball. How much is the ball? Answer with the number only.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "CAQShgUKEAgTGAI4AUIIdGhpbmtpbmcSDCHl5+LblxP4udHxGxoML0YU8dX710IyV/s1IjCkadiPPgzn59ltnjlS3WoO+sA+QS8AlaR10uroovccOaHC7aCdZvmTzp6L93P5yaQqowS+ZiNV/f/6vEJ0WU3qvLhyqpWslG8TTxnYBLngKiM0nPJ004NO0AJYIC6yvMwmkssS4Nsae3ED98LKTd16xXyPaFSfZ/KlCZvWEddhiKvyK1Z1kai/nSliKzeHi+ibYk0PdrTDErriD4JB2m1/tdwxUwHnCRdQOs/StCfPTEqV47PPJgJ/nEVUWvOhiGGmaUVIAnmDubWhJJDzX7YD6EzcLwj+sY6FrglQFTPpeU1QWF+lqlkeGDnQDH3aBgi9a+TjenT0ax1ilB+bo4Nv62KEpNF+Otr+EdtguTO/sIOR/7gaLK5c3i8ePuUq0bsT/keTnORb0bvyioBcQLmDUY4O9Hh0ZaszY/+foOJ8vCQvKQTTMlNd26s6W1ESQ/04AL6yHjbb1lwHIpbd8MAInkx7g3OXS3Pnx7G7kudPxDi5dU2Fh46JMdpUg6blgJH8A5ZjeTGQGh0QgcwXTqZQAeZBkjTaDsMGkLf43p7q3z3wMWawTJZsAUj/7/st7Uv5B2RbmUyy1jQrPCwayALvr87MBUAmAHTqhQ+1qDl3v8+JfnIgfN7vXqF1HJcYvbwqhk3fxZeqH8XJ7HWZdxQW+uoku56hJ19ONyEgJoF5vbKZOG/IHfwvfoe9a/TCT3dXO5YovcDcJbp3Zdox2cbzVV4ZBBrqERHr4ktAf9UgAdJk5/e1tL70VsfgPh2J750Fund64/l/II/awRdiGDR11a9tt3ilGAE=",
+          "thinking": "",
+          "type": "thinking"
+        },
+        {
+          "text": "0.05",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Now double that number. Answer with the number only.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-haiku-5-5",
+  "output_config": {
+    "effort": "high"
+  },
+  "thinking": {
+    "type": "adaptive"
+  }
+}
