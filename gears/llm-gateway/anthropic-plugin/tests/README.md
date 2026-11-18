@@ -37,7 +37,7 @@ A case without `anthropic_request.json` is rejected before anything is sent and 
 - `model` — `ModelInfoV1` fields merged over the defaults, e.g. `{"provider_model_id": "..."}`.
 - `modes` — `["sync"]` or `["stream"]`; both when absent.
 - `synthetic` — the reply files are hand-written because the real API cannot be made to produce them
-  (429, 529, refusal, a cut stream). The recorder skips these cases.
+  on demand (429, 529, refusal, a cut stream, a cache write). The recorder skips these cases.
 - `record` — recorder options: `warmup` sends the request twice and keeps the second reply,
   `expect_error` marks a 4xx reply as intended, `api_key` overrides the key.
 

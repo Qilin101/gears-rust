@@ -1,0 +1,7 @@
+{
+  "model": "claude",
+  "max_output_tokens": 64,
+  "prompt_cache_key": "conformance-cache",
+  "instructions": "You are a warehouse assistant.",
+  "input": "Reply with exactly: Hello!"
+}
