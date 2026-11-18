@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use http::{HeaderValue, Method};
+use http::header::{ACCEPT, CONTENT_TYPE};
+use http::{Method, Uri};
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
     LlmGatewayProviderPluginClientV1, MediaInputMode, ProviderCallCtx, ProviderErrorCategory,
@@ -15,7 +15,6 @@ use llm_gateway_sdk::{
 };
 use oagw_sdk::sse::{ServerEventsResponse, ServerEventsStream};
 use oagw_sdk::{Body, ServiceGatewayClientV1};
-use secrecy::ExposeSecret;
 use tokio_util::sync::CancellationToken;
 use toolkit_security::SecurityContext;
 
@@ -24,7 +23,9 @@ use crate::request::{self, Target};
 use crate::response::{self, Envelope};
 use crate::settings::AnthropicProviderSettingsV1;
 use crate::stream;
-use crate::wire::{DEFAULT_ANTHROPIC_VERSION, MESSAGES_PATH, Message, StreamEvent};
+use crate::wire::{
+    DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, MESSAGES_PATH, Message, StreamEvent,
+};
 
 const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
 const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
@@ -33,10 +34,10 @@ const EVENT_STREAM: &str = "text/event-stream";
 
 /// Provider plugin for the Anthropic Messages API (`POST /v1/messages`).
 ///
-/// Sends every request through OAGW to the model's upstream alias
-/// (`provider_settings.oagw_alias`). The API key from [`ProviderCallCtx`] is
-/// sent as `Authorization: Bearer`; without a key no auth header is sent and
-/// OAGW is expected to authenticate the upstream call.
+/// Sends every request through OAGW to the model's destination: `base_url`,
+/// or [`DEFAULT_BASE_URL`] when the model has none; its host and port name the
+/// OAGW upstream alias. No credential is sent: the OAGW upstream authenticates
+/// the call. A model with a `secret_ref` fails with `credentials_unavailable`.
 #[derive(Clone)]
 pub struct AnthropicPlugin {
     gateway: Arc<dyn ServiceGatewayClientV1>,
@@ -72,6 +73,10 @@ impl AnthropicPlugin {
             .provider_settings()
             .map_err(|e| LlmGatewayError::internal_from("model is not an Anthropic model", e))?;
         let info = &call.model_info;
+        // OAGW cannot yet be told which credential to use.
+        if info.secret_ref.is_some() {
+            return Err(LlmGatewayError::CredentialsUnavailable);
+        }
         let target = Target {
             provider_model_id: &info.provider_model_id,
             max_output_tokens: info.context_window.max_output_tokens,
@@ -83,7 +88,7 @@ impl AnthropicPlugin {
             .to_body()
             .and_then(|b| serde_json::to_vec(&b))
             .map_err(|e| LlmGatewayError::internal_from("failed to serialize the request", e))?;
-        let http_request = http_request(&settings, call, payload, stream)?;
+        let http_request = http_request(&settings, info.base_url.as_deref(), payload, stream)?;
 
         let response = with_cancel(
             &call.cancel,
@@ -176,7 +181,7 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
 
 fn http_request(
     settings: &AnthropicProviderSettingsV1,
-    call: &ProviderCallCtx,
+    base_url: Option<&str>,
     payload: Vec<u8>,
     stream: bool,
 ) -> Result<http::Request<Body>, LlmGatewayError> {
@@ -187,24 +192,34 @@ fn http_request(
     };
     let mut builder = http::Request::builder()
         .method(Method::POST)
-        .uri(format!("/{}/{MESSAGES_PATH}", settings.oagw_alias))
+        .uri(destination(base_url)?)
         .header(CONTENT_TYPE, JSON)
         .header(ACCEPT, if stream { EVENT_STREAM } else { JSON })
         .header(ANTHROPIC_VERSION_HEADER, version);
     if !settings.anthropic_beta.is_empty() {
         builder = builder.header(ANTHROPIC_BETA_HEADER, settings.anthropic_beta.join(","));
     }
-    if let Some(key) = &call.api_key {
-        let mut value =
-            HeaderValue::try_from(format!("Bearer {}", key.expose_secret())).map_err(|_| {
-                LlmGatewayError::internal("provider API key is not a valid header value")
-            })?;
-        value.set_sensitive(true);
-        builder = builder.header(AUTHORIZATION, value);
-    }
     builder
         .body(Body::Bytes(payload.into()))
         .map_err(|e| LlmGatewayError::internal_from("failed to build the provider request", e))
+}
+
+/// OAGW proxy path of the Messages endpoint for the model's `base_url`:
+/// `/{alias}{path prefix}/v1/messages`. The alias is the host, with the port
+/// unless it is 80 or 443.
+fn destination(base_url: Option<&str>) -> Result<String, LlmGatewayError> {
+    let invalid = || LlmGatewayError::internal("model base_url is not a valid URL");
+    let url: Uri = base_url
+        .unwrap_or(DEFAULT_BASE_URL)
+        .parse()
+        .map_err(|_| invalid())?;
+    let host = url.host().filter(|h| !h.is_empty()).ok_or_else(invalid)?;
+    let alias = match url.port_u16() {
+        Some(port) if port != 80 && port != 443 => format!("{host}:{port}"),
+        _ => host.to_owned(),
+    };
+    let prefix = url.path().trim_end_matches('/');
+    Ok(format!("/{alias}{prefix}/{MESSAGES_PATH}"))
 }
 
 /// Run `future` unless the request is cancelled first.

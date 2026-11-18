@@ -4,10 +4,7 @@ use crate::settings::AnthropicOutputConfig;
 use super::*;
 
 fn settings() -> AnthropicProviderSettingsV1 {
-    AnthropicProviderSettingsV1 {
-        oagw_alias: "anthropic".to_owned(),
-        ..AnthropicProviderSettingsV1::default()
-    }
+    AnthropicProviderSettingsV1::default()
 }
 
 fn body(value: Value) -> CreateResponseBody {

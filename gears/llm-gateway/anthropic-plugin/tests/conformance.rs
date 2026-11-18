@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use toolkit_security::SecurityContext;
 
-use support::{API_KEY, Case, FakeGateway, Mode, REQUEST_ID, Recorded, Reply, check, normalize};
+use support::{Case, FakeGateway, Mode, REQUEST_ID, Recorded, Reply, check, normalize};
 
 const CONFIG: &str = "config.json";
 const REQUEST: &str = "request.json";
@@ -41,8 +41,7 @@ async fn run(case: &Case, mode: Mode, reply: Reply) -> Run {
     let gateway = FakeGateway::new(reply);
     let plugin = AnthropicPlugin::new(gateway.clone());
     let ctx = SecurityContext::anonymous();
-    let call = ProviderCallCtx::new(case.model_info(), REQUEST_ID, CancellationToken::new())
-        .with_api_key(API_KEY.to_owned().into());
+    let call = ProviderCallCtx::new(case.model_info(), REQUEST_ID, CancellationToken::new());
     let request = case
         .json(REQUEST)
         .unwrap_or_else(|| panic!("{}/{REQUEST} is missing", case.name));
@@ -151,7 +150,11 @@ fn check_sent(case: &Case, mode: Mode, sent: Recorded, failures: &mut Vec<String
     };
 
     expect("method", Some(sent.method.as_str()), Some("POST"));
-    expect("uri", Some(&sent.uri), Some("/anthropic/v1/messages"));
+    expect(
+        "uri",
+        Some(&sent.uri),
+        Some("/api.anthropic.com/v1/messages"),
+    );
     expect("accept", header("accept"), Some(accept));
     expect(
         "content-type",
@@ -164,11 +167,7 @@ fn check_sent(case: &Case, mode: Mode, sent: Recorded, failures: &mut Vec<String
         Some(version),
     );
     expect("anthropic-beta", header("anthropic-beta"), beta.as_deref());
-    expect(
-        "authorization",
-        header("authorization"),
-        Some(&format!("Bearer {API_KEY}")),
-    );
+    expect("authorization", header("authorization"), None);
     if stream != stream_flag {
         failures.push(format!(
             "{} ({mode:?}): stream: expected {stream_flag:?}, got {stream:?}",

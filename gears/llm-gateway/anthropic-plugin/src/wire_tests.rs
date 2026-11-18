@@ -87,6 +87,21 @@ fn non_web_search_server_tool_stays_raw() {
 }
 
 #[test]
+fn usage_counts_read_server_tool_use() {
+    let counts = UsageCounts::from_raw(&json!({
+        "input_tokens": 4,
+        "server_tool_use": { "web_search_requests": 2, "web_fetch_requests": 0 }
+    }));
+    assert_eq!(counts.input_tokens, Some(4));
+    assert_eq!(
+        counts.server_tool_use,
+        Some(ServerToolUse {
+            web_search_requests: 2
+        })
+    );
+}
+
+#[test]
 fn stream_events_decode() {
     let event = |data: &str| {
         StreamEvent::from_server_event(ServerEvent {

@@ -1,6 +1,8 @@
 // Created: 2026-11-09 by Constructor Tech
 use std::fmt::Write;
 
+use http::header::AUTHORIZATION;
+
 use serde_json::{Value, json};
 
 use super::*;
@@ -63,7 +65,6 @@ fn model_info(settings: &Value) -> model_registry_sdk::ModelInfoV1 {
 
 fn settings(beta: &[&str]) -> Value {
     json!({
-        "oagw_alias": "anthropic",
         "anthropic_version": "",
         "anthropic_beta": beta,
         "max_tokens": null,
@@ -77,16 +78,18 @@ fn settings(beta: &[&str]) -> Value {
     })
 }
 
-fn call(api_key: Option<&str>, beta: &[&str]) -> ProviderCallCtx {
-    let call = ProviderCallCtx::new(
+fn call(beta: &[&str]) -> ProviderCallCtx {
+    ProviderCallCtx::new(
         model_info(&settings(beta)),
         "req_1",
         CancellationToken::new(),
-    );
-    match api_key {
-        Some(key) => call.with_api_key(key.to_owned().into()),
-        None => call,
-    }
+    )
+}
+
+fn call_to(base_url: &str) -> ProviderCallCtx {
+    let mut call = call(&[]);
+    call.model_info.base_url = Some(base_url.to_owned());
+    call
 }
 
 fn request() -> CreateResponseBody {
@@ -278,7 +281,7 @@ async fn sync_call_sends_messages_request_and_maps_response() {
     let resource = plugin
         .create_response(
             &SecurityContext::anonymous(),
-            &call(Some("sk-test"), &["beta-a", "beta-b"]),
+            &call(&["beta-a", "beta-b"]),
             request(),
         )
         .await
@@ -286,9 +289,8 @@ async fn sync_call_sends_messages_request_and_maps_response() {
 
     let sent = gateway.last();
     assert_eq!(sent.method, Method::POST);
-    assert_eq!(sent.uri, "/anthropic/v1/messages");
-    assert_eq!(sent.headers[AUTHORIZATION], "Bearer sk-test");
-    assert!(sent.headers[AUTHORIZATION].is_sensitive());
+    assert_eq!(sent.uri, "/api.anthropic.com/v1/messages");
+    assert!(sent.headers.get(AUTHORIZATION).is_none());
     assert_eq!(
         sent.headers[ANTHROPIC_VERSION_HEADER],
         DEFAULT_ANTHROPIC_VERSION
@@ -317,16 +319,66 @@ async fn sync_call_sends_messages_request_and_maps_response() {
 }
 
 #[tokio::test]
-async fn no_api_key_sends_no_auth_header() {
+async fn no_beta_flags_send_no_beta_header() {
     let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
     let plugin = AnthropicPlugin::new(gateway.clone());
     plugin
-        .create_response(&SecurityContext::anonymous(), &call(None, &[]), request())
+        .create_response(&SecurityContext::anonymous(), &call(&[]), request())
         .await
         .unwrap();
-    let sent = gateway.last();
-    assert!(sent.headers.get(AUTHORIZATION).is_none());
-    assert!(sent.headers.get(ANTHROPIC_BETA_HEADER).is_none());
+    assert!(gateway.last().headers.get(ANTHROPIC_BETA_HEADER).is_none());
+}
+
+#[tokio::test]
+async fn request_goes_to_the_model_base_url() {
+    let cases = [
+        (
+            "https://llm.example.com:8443/proxy/",
+            "/llm.example.com:8443/proxy/v1/messages",
+        ),
+        (
+            "https://llm.example.com:443",
+            "/llm.example.com/v1/messages",
+        ),
+        ("https://llm.example.com", "/llm.example.com/v1/messages"),
+    ];
+    for (base_url, uri) in cases {
+        let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+        let plugin = AnthropicPlugin::new(gateway.clone());
+        plugin
+            .create_response(&SecurityContext::anonymous(), &call_to(base_url), request())
+            .await
+            .unwrap();
+        assert_eq!(gateway.last().uri, uri, "{base_url}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_base_url_is_an_internal_error() {
+    for base_url in ["not a url", "/v1"] {
+        let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+        let plugin = AnthropicPlugin::new(gateway.clone());
+        let err = plugin
+            .create_response(&SecurityContext::anonymous(), &call_to(base_url), request())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "internal", "{base_url}");
+        assert!(gateway.recorded.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn model_with_secret_ref_is_not_sent() {
+    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+    let plugin = AnthropicPlugin::new(gateway.clone());
+    let mut call = call(&[]);
+    call.model_info.secret_ref = Some("anthropic-key".to_owned());
+    let err = plugin
+        .create_response(&SecurityContext::anonymous(), &call, request())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "credentials_unavailable");
+    assert!(gateway.recorded.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -340,7 +392,7 @@ async fn http_error_is_normalized() {
     });
     let plugin = AnthropicPlugin::new(gateway);
     let err = plugin
-        .create_response(&SecurityContext::anonymous(), &call(None, &[]), request())
+        .create_response(&SecurityContext::anonymous(), &call(&[]), request())
         .await
         .unwrap_err();
     assert_eq!(err.code(), "rate_limited");
@@ -363,7 +415,7 @@ async fn streaming_call_translates_events() {
     });
     let plugin = AnthropicPlugin::new(gateway.clone());
     let events: Vec<_> = plugin
-        .create_response_stream(&SecurityContext::anonymous(), &call(None, &[]), request())
+        .create_response_stream(&SecurityContext::anonymous(), &call(&[]), request())
         .await
         .unwrap()
         .collect()
@@ -393,7 +445,7 @@ async fn streaming_error_response_is_an_outer_error() {
     });
     let plugin = AnthropicPlugin::new(gateway);
     let err = plugin
-        .create_response_stream(&SecurityContext::anonymous(), &call(None, &[]), request())
+        .create_response_stream(&SecurityContext::anonymous(), &call(&[]), request())
         .await
         .err()
         .unwrap();
@@ -404,7 +456,7 @@ async fn streaming_error_response_is_an_outer_error() {
 async fn cancelled_call_does_not_reach_the_provider() {
     let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
     let plugin = AnthropicPlugin::new(gateway.clone());
-    let call = call(None, &[]);
+    let call = call(&[]);
     call.cancel.cancel();
     let err = plugin
         .create_response(&SecurityContext::anonymous(), &call, request())
@@ -421,7 +473,7 @@ async fn embeddings_are_not_supported() {
     }));
     let req = EmbeddingRequest::new("m", llm_gateway_sdk::EmbeddingInput::Single("x".to_owned()));
     let err = plugin
-        .create_embedding(&SecurityContext::anonymous(), &call(None, &[]), req)
+        .create_embedding(&SecurityContext::anonymous(), &call(&[]), req)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "capability_not_supported");

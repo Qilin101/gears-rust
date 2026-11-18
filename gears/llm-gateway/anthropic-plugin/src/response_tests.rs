@@ -30,7 +30,8 @@ fn message(content: &Value, stop_reason: &str) -> Message {
             "output_tokens": 20,
             "cache_creation_input_tokens": 3,
             "cache_read_input_tokens": 5,
-            "output_tokens_details": { "thinking_tokens": 7 }
+            "output_tokens_details": { "thinking_tokens": 7 },
+            "server_tool_use": { "web_search_requests": 2 }
         }
     }))
     .unwrap()
@@ -76,15 +77,16 @@ fn text_and_tool_use_become_message_and_function_call() {
 }
 
 #[test]
-fn usage_counts_cache_tokens_as_input() {
+fn usage_reports_cache_reasoning_and_web_search_counts() {
     let resource = to_resource(&request(), &envelope(), message(&json!([]), "end_turn")).unwrap();
     let usage = resource.usage.unwrap();
     assert_eq!(usage.input_tokens, 18);
     assert_eq!(usage.output_tokens, 20);
     assert_eq!(usage.total_tokens, 38);
     assert_eq!(usage.input_tokens_details.cached_tokens, 5);
+    assert_eq!(usage.input_tokens_details.cache_write_tokens, 3);
     assert_eq!(usage.output_tokens_details.reasoning_tokens, 7);
-    assert_eq!(usage.cost, Decimal::ZERO);
+    assert_eq!(usage.web_search_calls, 2);
     assert!(usage.complete);
     assert_eq!(
         usage.provider_raw.unwrap()["cache_read_input_tokens"],

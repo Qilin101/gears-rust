@@ -8,7 +8,6 @@ const TYPE_ID: &str = "gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~";
 
 fn document() -> serde_json::Value {
     json!({
-        "oagw_alias": "anthropic",
         "anthropic_version": "2026-10-21",
         "anthropic_beta": ["files-api-2025-04-14"],
         "max_tokens": 4096,
@@ -35,7 +34,12 @@ fn schema_is_registered_with_settings_properties() {
         .find(|e| e.type_id == TYPE_ID)
         .expect("Anthropic provider type registered in the GTS inventory");
     let schema = (entry.schema_fn)();
-    for property in ["oagw_alias", "anthropic_beta", "thinking", "output_config"] {
+    for property in [
+        "anthropic_version",
+        "anthropic_beta",
+        "thinking",
+        "output_config",
+    ] {
         assert!(schema.contains(property), "{property} missing: {schema}");
     }
 }
@@ -43,7 +47,7 @@ fn schema_is_registered_with_settings_properties() {
 #[test]
 fn narrows_settings_document() {
     let settings = gts::try_narrow::<AnthropicProviderSettingsV1>(TYPE_ID, document()).unwrap();
-    assert_eq!(settings.oagw_alias, "anthropic");
+    assert_eq!(settings.anthropic_version, "2026-10-21");
     assert_eq!(settings.max_tokens, Some(4096));
     assert_eq!(
         settings.service_tier,

@@ -54,7 +54,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 30 | Anthropic built-in tools | Allowing built-in tools per model | Not supported by LLM Gateway | Model Registry has no per-model allow-list for provider tools, and `ProviderPluginCapabilities` has no tool-namespace field. |
 | 31 | Other tools | `cf_gears:image_generation` | Not supported by Anthropic | Rejected with `capability_not_supported`. |
 | 32 | Other tools | Other tool types | Not supported by the plugin | An unknown type or another provider's prefix is rejected with `validation_error`, `param` `tools[<i>]`. |
-| 33 | `cf_gears:web_search` | Web search tool | Supported | → `web_search_20250305` with `allowed_domains`, `blocked_domains`, `max_uses`, `user_location`. Anthropic does not accept `allowed_domains` and `blocked_domains` together. |
+| 33 | `cf_gears:web_search` | Web search tool | Supported | → `web_search_20250305` with `allowed_domains`, `blocked_domains`, `max_uses`, `user_location`. Anthropic does not accept `allowed_domains` and `blocked_domains` together. Searches made → `usage.web_search_calls`. |
 | 34 | `cf_gears:web_search` | Other web search options | Not supported by Anthropic | Unsupported parameter, named `tools[<i>].<option>`. |
 | 35 | `cf_gears:web_search` | Resuming a paused search turn | Not supported by LLM Gateway | `pause_turn` maps to `incomplete` (see 12), and web search items are dropped from the input (see 24). |
 | 36 | Tool choice | `auto`, `required`, `none`, named function | Supported | → `auto`, `any`, `none`, `tool`. Sent only when the request has tools; falls back to the settings `tool_choice`. `required` or a named function without tools, or a name that is not a function tool, is rejected with `validation_error`. With parallel calls allowed, a named choice can still yield further calls. |
@@ -84,7 +84,7 @@ parameter: it is rejected with `unsupported_parameter`, or with
 | 60 | Truncation | `truncation: auto` | Not supported by Anthropic | Unsupported parameter. |
 | 61 | Cache settings | Prompt caching | Supported | A `prompt_cache_key` → top-level `cache_control: ephemeral`. Cache-read tokens → `usage.input_tokens_details.cached_tokens`. |
 | 62 | Cache settings | Cache TTL and breakpoint placement | Not supported by LLM Gateway | `prompt_cache_key` is the only cache field. |
-| 63 | Cache settings | Cache-creation token count | Not supported by LLM Gateway | Available only in `usage.provider_raw`. |
+| 63 | Cache settings | Cache-creation token count | Supported | Cache-creation tokens → `usage.input_tokens_details.cache_write_tokens`. |
 | 64 | Stop words | Stop words per request | Not supported by LLM Gateway | `CreateResponseBody` has no `stop` field, and the response has no field for the matched sequence. |
 | 65 | Stop words | Stop words per model | Supported | Settings `stop_sequences` → `stop_sequences`. |
 | 66 | Extra fields | Forwarding `extra_fields` | Supported | Each entry is added to the top level of the request body. An entry for a field the plugin builds (`model`, `messages`, `max_tokens`, `stream`, `system`, `tools`, `tool_choice`, `thinking`, `output_config`, ...) or for `container` is rejected with `validation_error`, `param` `extra_fields.<key>`. |

@@ -2,7 +2,7 @@
 //! Anthropic provider type: the shape of `provider_settings` for models whose
 //! provider has this `gts_type`.
 //!
-//! Holds the OAGW upstream alias, API headers, and Messages API defaults the
+//! Holds the API headers and the Messages API defaults the
 //! request leaves unset. Pricing is the generic `ModelInfoV1.cost`.
 
 use model_registry_sdk::ProviderTypeV1;
@@ -99,11 +99,9 @@ pub struct AnthropicOutputConfig {
     base = ProviderTypeV1,
     type_id = gts_id!("cf.genai.model.provider.v1~cf.genai._.anthropic.v1~"),
     description = "Anthropic provider settings (Messages API)",
-    properties = "oagw_alias,anthropic_version,anthropic_beta,max_tokens,stop_sequences,system,inference_geo,service_tier,thinking,tool_choice,output_config"
+    properties = "anthropic_version,anthropic_beta,max_tokens,stop_sequences,system,inference_geo,service_tier,thinking,tool_choice,output_config"
 )]
 pub struct AnthropicProviderSettingsV1 {
-    /// OAGW upstream alias the plugin sends provider calls through.
-    pub oagw_alias: String,
     /// `anthropic-version` header; empty uses the plugin default.
     pub anthropic_version: String,
     /// `anthropic-beta` flags.

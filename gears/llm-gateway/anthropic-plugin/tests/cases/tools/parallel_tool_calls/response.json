@@ -92,6 +92,7 @@
     "estimated": false,
     "input_tokens": 474,
     "input_tokens_details": {
+      "cache_write_tokens": 0,
       "cached_tokens": 0
     },
     "output_tokens": 96,
@@ -114,6 +115,7 @@
       "service_tier": "standard",
       "speed": "standard"
     },
-    "total_tokens": 570
+    "total_tokens": 570,
+    "web_search_calls": 0
   }
 }

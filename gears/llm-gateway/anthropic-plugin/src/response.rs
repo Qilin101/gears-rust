@@ -16,7 +16,6 @@ use llm_gateway_sdk::{
     ToolChoice, ToolChoiceMode, TruncationStrategy, UrlCitation, Usage, WebSearchCallOutput,
     WebSearchResult,
 };
-use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
 use crate::request::ANTHROPIC_PREFIX;
@@ -253,28 +252,30 @@ pub fn status_for(stop_reason: Option<&str>) -> (ResponseStatus, Option<Incomple
 }
 
 /// Usage from a raw Anthropic `usage` object; `reported` is false for an
-/// estimate from an interrupted stream. Cost is not computed yet.
+/// estimate from an interrupted stream. The core sets the cost.
 #[must_use]
 pub fn usage(raw: &Value, reported: bool) -> Usage {
     let counts = UsageCounts::from_raw(raw);
     let cache_read = counts.cache_read_input_tokens.unwrap_or_default();
+    let cache_write = counts.cache_creation_input_tokens.unwrap_or_default();
     let input = counts
         .input_tokens
         .unwrap_or_default()
-        .saturating_add(counts.cache_creation_input_tokens.unwrap_or_default())
+        .saturating_add(cache_write)
         .saturating_add(cache_read);
     let output = counts.output_tokens.unwrap_or_default();
     let usage = if reported {
-        Usage::reported(input, output, Decimal::ZERO)
+        Usage::reported(input, output)
     } else if input == 0 && output == 0 {
         Usage::unknown()
     } else {
-        Usage::estimated(input, output, Decimal::ZERO)
+        Usage::estimated(input, output)
     };
     usage
         .with_details(
             InputTokensDetails {
                 cached_tokens: cache_read,
+                cache_write_tokens: cache_write,
             },
             OutputTokensDetails {
                 reasoning_tokens: counts
@@ -282,6 +283,12 @@ pub fn usage(raw: &Value, reported: bool) -> Usage {
                     .map(|d| d.thinking_tokens)
                     .unwrap_or_default(),
             },
+        )
+        .with_web_search_calls(
+            counts
+                .server_tool_use
+                .map(|s| s.web_search_requests)
+                .unwrap_or_default(),
         )
         .with_provider_raw(raw.clone())
 }

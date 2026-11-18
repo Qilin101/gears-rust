@@ -13,7 +13,6 @@ use toolkit_security::SecurityContext;
 
 /// Request id of every call; output item ids derive from it.
 pub const REQUEST_ID: &str = "req_test";
-pub const API_KEY: &str = "sk-test";
 pub const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 
 // ---------------------------------------------------------------------------
@@ -278,7 +277,6 @@ impl Case {
 
     pub fn settings(&self) -> Value {
         let mut settings = json!({
-            "oagw_alias": "anthropic",
             "anthropic_version": "",
             "anthropic_beta": [],
             "max_tokens": null,

@@ -11,9 +11,11 @@ provider type is `gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~`.
   the message or SSE stream back.
 - `create_embedding` returns `capability_not_supported`.
 
-Cost in AI credits is not computed yet (`usage.cost` is `0`); pricing comes from
-the generic `ModelInfoV1.cost`. Gear
-registration (GTS plugin instance, scoped ClientHub client) is not wired yet.
+The plugin reports usage counts (input, output, cache read and write, reasoning
+tokens, web search calls) and leaves `usage.cost` at `0`; the Gateway core
+prices the call from `ModelInfoV1.cost`. Pass-through (`forward_passthrough`)
+is not implemented yet. Gear registration (GTS plugin instance, scoped
+ClientHub client) is not wired yet.
 
 ## Provider settings
 
@@ -21,7 +23,6 @@ The crate defines the provider type `AnthropicProviderSettingsV1`, derived
 from Model Registry's `ProviderTypeV1`; it is the shape of a model's
 `provider_settings`:
 
-- `oagw_alias` — OAGW upstream alias; requests go to `/{oagw_alias}/v1/messages`.
 - `anthropic_version` — `anthropic-version` header (defaults to `2026-10-21`).
 - `anthropic_beta` — joined into the `anthropic-beta` header.
 - Inference defaults (`max_tokens`, `stop_sequences`, `system`, `thinking`, `tool_choice`, `output_config`, …)
@@ -29,11 +30,17 @@ from Model Registry's `ProviderTypeV1`; it is the shape of a model's
 
 ## OAGW upstream
 
-The provider API key from `ProviderCallCtx` is sent as
-`Authorization: Bearer <key>`; without a key no auth header is sent and the
-upstream must authenticate the call itself. OAGW strips caller headers by
-default, so the Anthropic upstream must allow passthrough of `authorization`,
-`anthropic-version`, `anthropic-beta`, and `accept`.
+The destination is the model's `base_url`, or `https://api.anthropic.com` when
+it is absent. Its host names the OAGW upstream alias, with the port appended
+unless it is 80 or 443; a path prefix is kept. Requests go to
+`/{alias}{prefix}/v1/messages`.
+
+The plugin sends no credential: the OAGW upstream must authenticate the call
+itself. A model with a `secret_ref` fails with `credentials_unavailable` and
+nothing is sent, until OAGW can be told which credential to use.
+
+OAGW strips caller headers by default, so the upstream must allow passthrough
+of `anthropic-version`, `anthropic-beta`, and `accept`.
 
 ## Mapping notes
 

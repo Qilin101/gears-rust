@@ -15,7 +15,10 @@ use crate::settings::{AnthropicOutputEffort, AnthropicServiceTier, AnthropicThin
 /// API version sent when the model settings leave `anthropic_version` empty.
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2026-10-21";
 
-/// Path of the Messages endpoint under the OAGW upstream alias.
+/// Destination of a model without a `base_url`.
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// Path of the Messages endpoint under the model's destination.
 pub const MESSAGES_PATH: &str = "v1/messages";
 
 /// Server tool name of Anthropic web search.
@@ -244,6 +247,8 @@ pub struct UsageCounts {
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default)]
     pub output_tokens_details: Option<OutputTokensDetails>,
+    #[serde(default)]
+    pub server_tool_use: Option<ServerToolUse>,
 }
 
 impl UsageCounts {
@@ -259,6 +264,13 @@ impl UsageCounts {
 pub struct OutputTokensDetails {
     #[serde(default)]
     pub thinking_tokens: u64,
+}
+
+/// `usage.server_tool_use`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub struct ServerToolUse {
+    #[serde(default)]
+    pub web_search_requests: u64,
 }
 
 /// A response content block, decoded by `type`.
