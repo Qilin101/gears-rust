@@ -27,8 +27,6 @@ pub const ANTHROPIC_PREFIX: &str = "anthropic:";
 /// Web search options forwarded from `cf_gears:web_search` to Anthropic.
 const WEB_SEARCH_OPTIONS: [&str; 3] = ["blocked_domains", "max_uses", "user_location"];
 
-const PDF_MEDIA_TYPE: &str = "application/pdf";
-
 /// The resolved model the request is built for.
 #[derive(Debug, Clone, Copy)]
 pub struct Target<'a> {
@@ -423,11 +421,14 @@ pub fn passthrough(value: &Value) -> Option<Value> {
 struct Conversation {
     system: Vec<ContentBlockParam>,
     messages: Vec<MessageParam>,
+    /// Whether the last message ends with the content of a `message` item.
+    ends_with_message_item: bool,
 }
 
 impl Conversation {
     /// Append a block, merging it into the last message when the role matches.
     fn push(&mut self, role: Role, block: ContentBlockParam) {
+        self.ends_with_message_item = false;
         match self.messages.last_mut() {
             Some(last) if last.role == role => last.content.push(block),
             _ => self.messages.push(MessageParam {
@@ -435,6 +436,25 @@ impl Conversation {
                 content: vec![block],
             }),
         }
+    }
+
+    /// Append the content of a `message` item. It joins the last message of
+    /// the same role unless that one already ends with a `message` item:
+    /// consecutive message items stay separate messages.
+    fn push_message(&mut self, role: Role, blocks: Vec<ContentBlockParam>) {
+        if blocks.is_empty() {
+            return;
+        }
+        match self.messages.last_mut() {
+            Some(last) if last.role == role && !self.ends_with_message_item => {
+                last.content.extend(blocks);
+            }
+            _ => self.messages.push(MessageParam {
+                role,
+                content: blocks,
+            }),
+        }
+        self.ends_with_message_item = true;
     }
 
     fn add_item(&mut self, item: &InputItem, index: usize) -> Result<(), LlmGatewayError> {
@@ -487,10 +507,8 @@ impl Conversation {
         let param = format!("input[{index}].content");
         let blocks = content_blocks(&message.content, &param)?;
         match message.role {
-            InputRole::User => blocks.into_iter().for_each(|b| self.push(Role::User, b)),
-            InputRole::Assistant => blocks
-                .into_iter()
-                .for_each(|b| self.push(Role::Assistant, b)),
+            InputRole::User => self.push_message(Role::User, blocks),
+            InputRole::Assistant => self.push_message(Role::Assistant, blocks),
             InputRole::System | InputRole::Developer => {
                 if blocks
                     .iter()
@@ -596,7 +614,7 @@ fn content_part(
 fn image_block(image: &InputImage, param: &str) -> Result<ContentBlockParam, LlmGatewayError> {
     if let Some(url) = &image.image_url {
         return Ok(ContentBlockParam::Image {
-            source: media_source(url, None, param)?,
+            source: media_source(url, param)?,
         });
     }
     if image.file_id.is_some() {
@@ -612,9 +630,9 @@ fn image_block(image: &InputImage, param: &str) -> Result<ContentBlockParam, Llm
 
 fn document_block(file: &InputFile, param: &str) -> Result<ContentBlockParam, LlmGatewayError> {
     let source = if let Some(data) = &file.file_data {
-        media_source(data, Some(PDF_MEDIA_TYPE), param)?
+        data_uri(data, param)?
     } else if let Some(url) = &file.file_url {
-        media_source(url, None, param)?
+        media_source(url, param)?
     } else if file.file_id.is_some() {
         return Err(LlmGatewayError::capability_not_supported(
             "input_file file_id",
@@ -631,40 +649,46 @@ fn document_block(file: &InputFile, param: &str) -> Result<ContentBlockParam, Ll
     })
 }
 
-/// Source for a data URI, an http(s) URL, or — when `raw_base64_type` is set
-/// — bare base64 data of that media type.
-fn media_source(
-    value: &str,
-    raw_base64_type: Option<&str>,
-    param: &str,
-) -> Result<MediaSource, LlmGatewayError> {
-    if let Some(rest) = value.strip_prefix("data:") {
-        let (media_type, data) = rest
-            .split_once(',')
-            .and_then(|(header, data)| Some((header.strip_suffix(";base64")?, data)))
-            .ok_or_else(|| {
-                LlmGatewayError::validation_param("only base64 data URIs are supported", param)
-            })?;
-        return Ok(MediaSource::Base64 {
-            media_type: media_type.to_owned(),
-            data: data.to_owned(),
-        });
+/// Source for a base64 data URI or an http(s) URL.
+fn media_source(value: &str, param: &str) -> Result<MediaSource, LlmGatewayError> {
+    if value.starts_with("data:") {
+        return data_uri(value, param);
     }
     if value.starts_with("https://") || value.starts_with("http://") {
         return Ok(MediaSource::Url {
             url: value.to_owned(),
         });
     }
-    match raw_base64_type {
-        Some(media_type) => Ok(MediaSource::Base64 {
+    Err(LlmGatewayError::validation_param(
+        "expected a data URI or an http(s) URL",
+        param,
+    ))
+}
+
+/// Source for `data:<media type>;base64,<data>`.
+fn data_uri(value: &str, param: &str) -> Result<MediaSource, LlmGatewayError> {
+    value
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(','))
+        .and_then(|(header, data)| Some((header.strip_suffix(";base64")?, data)))
+        .filter(|(media_type, data)| media_type.contains('/') && is_base64(data))
+        .map(|(media_type, data)| MediaSource::Base64 {
             media_type: media_type.to_owned(),
-            data: value.to_owned(),
-        }),
-        None => Err(LlmGatewayError::validation_param(
-            "expected a data URI or an http(s) URL",
-            param,
-        )),
-    }
+            data: data.to_owned(),
+        })
+        .ok_or_else(|| {
+            LlmGatewayError::validation_param(
+                "expected a base64 data URI: data:<media type>;base64,<data>",
+                param,
+            )
+        })
+}
+
+fn is_base64(data: &str) -> bool {
+    !data.is_empty()
+        && data
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 
 #[cfg(test)]
