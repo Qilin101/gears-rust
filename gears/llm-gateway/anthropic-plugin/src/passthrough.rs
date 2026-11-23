@@ -1,7 +1,7 @@
 // Created: 2026-11-18 by Constructor Tech
-//! Anthropic pass-through: forwards a native `POST /v1/messages` request and
-//! relays the native response or SSE stream, with the generic usage read
-//! from it.
+//! Anthropic pass-through: forwards a native `POST /v1/messages` or
+//! `POST /v1/messages/count_tokens` request and relays the native response or
+//! SSE stream, with the generic usage read from it.
 
 use futures::StreamExt;
 use http::response::Parts;
@@ -19,15 +19,16 @@ use crate::client::{
     version, with_cancel,
 };
 use crate::settings::AnthropicProviderSettingsV1;
+use crate::wire::{COUNT_TOKENS_PATH, MESSAGES_PATH};
 use crate::{error, guard, response, stream};
 
-/// The only endpoint forwarded on the pass-through route.
-pub const MESSAGES_ENDPOINT: &str = "/v1/messages";
+/// The endpoints forwarded on the pass-through route.
+const ENDPOINTS: [&str; 2] = [MESSAGES_PATH, COUNT_TOKENS_PATH];
 
 const CAPABILITY: &str = "anthropic_passthrough";
 const MODEL: &str = "model";
 
-/// Forward a native Messages request. See
+/// Forward a native Messages or token counting request. See
 /// [`llm_gateway_sdk::LlmGatewayProviderPluginClientV1::forward_passthrough`].
 pub async fn forward(
     gateway: &dyn ServiceGatewayClientV1,
@@ -35,7 +36,7 @@ pub async fn forward(
     call: &ProviderCallCtx,
     req: PassthroughRequest,
 ) -> Result<PassthroughResponse, LlmGatewayError> {
-    if req.api != PassthroughApi::Anthropic || req.path != MESSAGES_ENDPOINT {
+    if req.api != PassthroughApi::Anthropic || !ENDPOINTS.contains(&req.path.as_str()) {
         return Err(LlmGatewayError::capability_not_supported(CAPABILITY));
     }
     guard::check_request(&req.body)?;
@@ -50,6 +51,7 @@ pub async fn forward(
     }
 
     let PassthroughRequest {
+        path,
         stream,
         headers,
         mut body,
@@ -72,12 +74,11 @@ pub async fn forward(
     let version = header_values(&headers, ANTHROPIC_VERSION_HEADER)
         .next()
         .unwrap_or_else(|| version(&settings));
-    let beta = header_values(&headers, ANTHROPIC_BETA_HEADER)
-        .collect::<Vec<_>>()
-        .join(",");
+    let beta = guard::beta_header(header_values(&headers, ANTHROPIC_BETA_HEADER));
     let request = http_request(
+        &path,
         version,
-        (!beta.is_empty()).then_some(beta.as_str()),
+        beta.as_deref(),
         info.base_url.as_deref(),
         payload,
         stream,

@@ -2,7 +2,7 @@
   "settings": {
     "anthropic_version": "2023-06-01",
     "anthropic_beta": [
-      "context-1m-2025-08-07"
+      "interleaved-thinking-2025-05-14"
     ]
   }
 }

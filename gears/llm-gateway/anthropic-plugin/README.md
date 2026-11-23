@@ -25,7 +25,8 @@ from Model Registry's `ProviderTypeV1`; it is the shape of a model's
 `provider_settings`:
 
 - `anthropic_version` — `anthropic-version` header (defaults to `2026-10-21`).
-- `anthropic_beta` — joined into the `anthropic-beta` header.
+- `anthropic_beta` — joined into the `anthropic-beta` header; flags outside
+  the [beta allowlist](#beta-allowlist) are dropped.
 - Inference defaults (`max_tokens`, `stop_sequences`, `system`, `thinking`, `tool_choice`, `output_config`, …)
   apply when the request leaves the field unset.
 
@@ -45,14 +46,16 @@ of `anthropic-version`, `anthropic-beta`, and `accept`.
 
 ## Pass-through
 
-The plugin declares one pass-through endpoint, `POST /v1/messages` (metered).
-`/v1/messages/count_tokens` is not forwarded.
+The plugin declares two pass-through endpoints: `POST /v1/messages`
+(metered) and `POST /v1/messages/count_tokens` (not metered: its response
+carries no usage).
 
 - The body is sent as received, with `model` replaced by the model's
   `provider_model_id`; the response and the `message_start` event get the
   Gateway model identifier back. Provider settings defaults are not applied.
 - `anthropic-version` and `anthropic-beta` come from the request; without an
-  `anthropic-version` the model's setting or the default is sent. The model's
+  `anthropic-version` the model's setting or the default is sent. Flags
+  outside the [beta allowlist](#beta-allowlist) are dropped. The model's
   `anthropic_beta` setting is not added.
 - A provider error response is relayed with its status and body.
 - Usage is read from the response, or from `message_start` and
@@ -70,6 +73,33 @@ path of the field as `param`; nothing is sent:
 
 Subtrees the consumer defines are not scanned: `input_schema`, `metadata`,
 `output_config.format.schema`, and the `input` of `tool_use` blocks.
+
+The guard applies to both pass-through endpoints.
+
+### Beta allowlist
+
+`anthropic-beta` flags are forwarded only when allowlisted, on the
+pass-through header and from the model's `anthropic_beta` setting; any other
+flag is dropped. Allowlisted flags enable features that keep no state at
+Anthropic, call no other model or service, and are priced at the model's
+rates:
+
+- `compact-2026-01-12`, `compact-2026-09-04`
+- `computer-use-2025-01-24`, `computer-use-2025-11-24`
+- `context-management-2025-06-27`
+- `effort-2025-11-24`
+- `fine-grained-tool-streaming-2025-05-14`
+- `inline-tools-2026-09-15`
+- `interleaved-thinking-2025-05-14`
+- `mid-conversation-output-config-2026-07-01`,
+  `mid-conversation-system-clear-at-2026-08-21`,
+  `mid-conversation-tool-changes-2026-07-01`
+- `output-128k-2025-02-19`
+- `structured-outputs-2025-11-13`
+- `task-budgets-2026-03-13`
+- `thinking-binding-controls-2026-08-01`
+- `thinking-display-updates-2026-08-18`
+- `token-efficient-tools-2025-02-19`
 
 ## Mapping notes
 

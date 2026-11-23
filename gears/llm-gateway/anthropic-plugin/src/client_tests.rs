@@ -281,7 +281,11 @@ async fn sync_call_sends_messages_request_and_maps_response() {
     let resource = plugin
         .create_response(
             &SecurityContext::anonymous(),
-            &call(&["beta-a", "beta-b"]),
+            &call(&[
+                "interleaved-thinking-2025-05-14",
+                "files-api-2025-04-14",
+                "effort-2025-11-24",
+            ]),
             request(),
         )
         .await
@@ -295,7 +299,10 @@ async fn sync_call_sends_messages_request_and_maps_response() {
         sent.headers[ANTHROPIC_VERSION_HEADER],
         DEFAULT_ANTHROPIC_VERSION
     );
-    assert_eq!(sent.headers[ANTHROPIC_BETA_HEADER], "beta-a,beta-b");
+    assert_eq!(
+        sent.headers[ANTHROPIC_BETA_HEADER],
+        "interleaved-thinking-2025-05-14,effort-2025-11-24"
+    );
     assert_eq!(sent.headers[ACCEPT], JSON);
     assert_eq!(
         sent.body,
@@ -319,14 +326,19 @@ async fn sync_call_sends_messages_request_and_maps_response() {
 }
 
 #[tokio::test]
-async fn no_beta_flags_send_no_beta_header() {
-    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
-    let plugin = AnthropicPlugin::new(gateway.clone());
-    plugin
-        .create_response(&SecurityContext::anonymous(), &call(&[]), request())
-        .await
-        .unwrap();
-    assert!(gateway.last().headers.get(ANTHROPIC_BETA_HEADER).is_none());
+async fn no_allowed_beta_flags_send_no_beta_header() {
+    for beta in [
+        &[][..],
+        &["files-api-2025-04-14", "code-execution-2025-08-25"],
+    ] {
+        let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+        let plugin = AnthropicPlugin::new(gateway.clone());
+        plugin
+            .create_response(&SecurityContext::anonymous(), &call(beta), request())
+            .await
+            .unwrap();
+        assert!(gateway.last().headers.get(ANTHROPIC_BETA_HEADER).is_none());
+    }
 }
 
 #[tokio::test]
@@ -525,7 +537,7 @@ fn json_of(response: PassthroughResponse) -> llm_gateway_sdk::PassthroughJsonRes
 }
 
 #[test]
-fn declares_messages_passthrough_only() {
+fn declares_messages_and_count_tokens_passthrough() {
     let plugin = AnthropicPlugin::new(FakeGateway::new(|| {
         json_response(200, &[], &message_json())
     }));
@@ -533,7 +545,10 @@ fn declares_messages_passthrough_only() {
     assert_eq!(passthrough.api, PassthroughApi::Anthropic);
     assert_eq!(
         passthrough.endpoints,
-        vec![PassthroughEndpoint::metered("/v1/messages")]
+        vec![
+            PassthroughEndpoint::metered("/v1/messages"),
+            PassthroughEndpoint::not_metered("/v1/messages/count_tokens"),
+        ]
     );
 }
 
@@ -543,8 +558,11 @@ async fn passthrough_forwards_the_native_body_and_maps_the_model_back() {
         FakeGateway::new(|| json_response(200, &[("request-id", "req_a")], &message_json()));
     let req = native_request()
         .with_header("anthropic-version", "2023-06-01")
-        .with_header("anthropic-beta", "beta-a")
-        .with_header("anthropic-beta", "beta-b");
+        .with_header(
+            "anthropic-beta",
+            "interleaved-thinking-2025-05-14, files-api-2025-04-14",
+        )
+        .with_header("anthropic-beta", "effort-2025-11-24");
     let response = json_of(
         forward(&gateway, &call(&["settings-beta"]), req)
             .await
@@ -556,7 +574,10 @@ async fn passthrough_forwards_the_native_body_and_maps_the_model_back() {
     assert_eq!(sent.uri, "/api.anthropic.com/v1/messages");
     assert!(sent.headers.get(AUTHORIZATION).is_none());
     assert_eq!(sent.headers[ANTHROPIC_VERSION_HEADER], "2023-06-01");
-    assert_eq!(sent.headers[ANTHROPIC_BETA_HEADER], "beta-a,beta-b");
+    assert_eq!(
+        sent.headers[ANTHROPIC_BETA_HEADER],
+        "interleaved-thinking-2025-05-14,effort-2025-11-24"
+    );
     assert_eq!(sent.headers[ACCEPT], JSON);
     let mut expected = native_request().body;
     expected["model"] = json!("claude-sonnet-5-5");
@@ -596,9 +617,12 @@ async fn passthrough_rejects_before_sending() {
     paid.body["tools"] = json!([{ "type": "web_search_20250305", "name": "web_search" }]);
     let mut no_model = native_request();
     no_model.body.as_object_mut().unwrap().remove("model");
-    let count_tokens = PassthroughRequest::new(
+    let mut stateful_count = count_tokens_request();
+    stateful_count.body["messages"][0]["content"] =
+        json!([{ "type": "document", "source": { "type": "file", "file_id": "file_1" } }]);
+    let batches = PassthroughRequest::new(
         PassthroughApi::Anthropic,
-        "/v1/messages/count_tokens",
+        "/v1/messages/batches",
         native_request().body,
     );
     let openai = PassthroughRequest::new(
@@ -610,7 +634,12 @@ async fn passthrough_rejects_before_sending() {
         (stateful, "capability_not_supported", Some("container")),
         (paid, "capability_not_supported", Some("tools[0]")),
         (no_model, "validation_error", Some("model")),
-        (count_tokens, "capability_not_supported", None),
+        (
+            stateful_count,
+            "capability_not_supported",
+            Some("messages[0].content[0].source"),
+        ),
+        (batches, "capability_not_supported", None),
         (openai, "capability_not_supported", None),
     ];
     for (req, code, param) in cases {
@@ -620,6 +649,39 @@ async fn passthrough_rejects_before_sending() {
         assert_eq!(err.to_response_error().param.as_deref(), param);
         assert!(gateway.recorded.lock().unwrap().is_empty());
     }
+}
+
+fn count_tokens_request() -> PassthroughRequest {
+    let mut body = native_request().body;
+    body.as_object_mut().unwrap().remove("max_tokens");
+    PassthroughRequest::new(PassthroughApi::Anthropic, "/v1/messages/count_tokens", body)
+}
+
+#[tokio::test]
+async fn passthrough_forwards_count_tokens_without_usage() {
+    let counted = json!({ "input_tokens": 12 });
+    let reply = counted.clone();
+    let gateway = FakeGateway::new(move || json_response(200, &[("request-id", "req_c")], &reply));
+    let response = json_of(
+        forward(&gateway, &call(&[]), count_tokens_request())
+            .await
+            .unwrap(),
+    );
+
+    let sent = gateway.last();
+    assert_eq!(sent.uri, "/api.anthropic.com/v1/messages/count_tokens");
+    assert_eq!(sent.headers[ACCEPT], JSON);
+    let mut expected = count_tokens_request().body;
+    expected["model"] = json!("claude-sonnet-5-5");
+    assert_eq!(sent.body, expected);
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, counted);
+    assert!(response.usage.is_none());
+    assert_eq!(
+        response.details.provider_request_id.as_deref(),
+        Some("req_c")
+    );
 }
 
 #[tokio::test]

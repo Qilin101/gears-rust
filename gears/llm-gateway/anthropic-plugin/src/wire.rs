@@ -19,7 +19,10 @@ pub const DEFAULT_ANTHROPIC_VERSION: &str = "2026-10-21";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Path of the Messages endpoint under the model's destination.
-pub const MESSAGES_PATH: &str = "v1/messages";
+pub const MESSAGES_PATH: &str = "/v1/messages";
+
+/// Path of the token counting endpoint under the model's destination.
+pub const COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 
 /// Server tool name of Anthropic web search.
 pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";

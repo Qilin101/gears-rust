@@ -126,7 +126,9 @@ pub trait LlmGatewayProviderPluginClientV1: Send + Sync {
     ///    and for streaming requests usage in the stream when the provider
     ///    sends it only on request;
     /// 3. builds the provider headers itself (protocol headers from the
-    ///    request, the credential named by `secret_ref` through OAGW) and
+    ///    request, with beta values outside its allowlist of stateless
+    ///    features dropped, the credential named by `secret_ref` through
+    ///    OAGW) and
     ///    sends the native body through OAGW to the model's destination;
     /// 4. returns the native response or stream with `model` replaced back,
     ///    and the generic usage read from it (cost left at 0 for the core).

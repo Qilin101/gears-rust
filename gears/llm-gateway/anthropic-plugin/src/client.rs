@@ -21,13 +21,15 @@ use tokio_util::sync::CancellationToken;
 use toolkit_security::SecurityContext;
 
 use crate::error;
+use crate::guard;
 use crate::passthrough;
 use crate::request::{self, Target};
 use crate::response::{self, Envelope};
 use crate::settings::AnthropicProviderSettingsV1;
 use crate::stream;
 use crate::wire::{
-    DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, MESSAGES_PATH, Message, StreamEvent,
+    COUNT_TOKENS_PATH, DEFAULT_ANTHROPIC_VERSION, DEFAULT_BASE_URL, MESSAGES_PATH, Message,
+    StreamEvent,
 };
 
 pub const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
@@ -92,8 +94,9 @@ impl AnthropicPlugin {
             .to_body()
             .and_then(|b| serde_json::to_vec(&b))
             .map_err(|e| LlmGatewayError::internal_from("failed to serialize the request", e))?;
-        let beta = (!settings.anthropic_beta.is_empty()).then(|| settings.anthropic_beta.join(","));
+        let beta = guard::beta_header(settings.anthropic_beta.iter().map(String::as_str));
         let http_request = http_request(
+            MESSAGES_PATH,
             version(&settings),
             beta.as_deref(),
             info.base_url.as_deref(),
@@ -127,7 +130,10 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
             .with_web_search()
             .with_passthrough(PassthroughCapability::new(
                 PassthroughApi::Anthropic,
-                vec![PassthroughEndpoint::metered(passthrough::MESSAGES_ENDPOINT)],
+                vec![
+                    PassthroughEndpoint::metered(MESSAGES_PATH),
+                    PassthroughEndpoint::not_metered(COUNT_TOKENS_PATH),
+                ],
             ))
     }
 
@@ -215,7 +221,9 @@ pub fn version(settings: &AnthropicProviderSettingsV1) -> &str {
     }
 }
 
+/// A request to `path` (e.g. [`MESSAGES_PATH`]) of the model's destination.
 pub fn http_request(
+    path: &str,
     version: &str,
     beta: Option<&str>,
     base_url: Option<&str>,
@@ -224,7 +232,7 @@ pub fn http_request(
 ) -> Result<http::Request<Body>, LlmGatewayError> {
     let mut builder = http::Request::builder()
         .method(Method::POST)
-        .uri(destination(base_url)?)
+        .uri(destination(base_url, path)?)
         .header(CONTENT_TYPE, JSON)
         .header(ACCEPT, if stream { EVENT_STREAM } else { JSON })
         .header(ANTHROPIC_VERSION_HEADER, version);
@@ -236,10 +244,10 @@ pub fn http_request(
         .map_err(|e| LlmGatewayError::internal_from("failed to build the provider request", e))
 }
 
-/// OAGW proxy path of the Messages endpoint for the model's `base_url`:
-/// `/{alias}{path prefix}/v1/messages`. The alias is the host, with the port
-/// unless it is 80 or 443.
-fn destination(base_url: Option<&str>) -> Result<String, LlmGatewayError> {
+/// OAGW proxy path of the endpoint `path` for the model's `base_url`:
+/// `/{alias}{path prefix}{path}`. The alias is the host, with the port unless
+/// it is 80 or 443.
+fn destination(base_url: Option<&str>, path: &str) -> Result<String, LlmGatewayError> {
     let invalid = || LlmGatewayError::internal("model base_url is not a valid URL");
     let url: Uri = base_url
         .unwrap_or(DEFAULT_BASE_URL)
@@ -251,7 +259,7 @@ fn destination(base_url: Option<&str>) -> Result<String, LlmGatewayError> {
         _ => host.to_owned(),
     };
     let prefix = url.path().trim_end_matches('/');
-    Ok(format!("/{alias}{prefix}/{MESSAGES_PATH}"))
+    Ok(format!("/{alias}{prefix}{path}"))
 }
 
 /// Run `future` unless the request is cancelled first.

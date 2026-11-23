@@ -150,8 +150,9 @@ pub struct PassthroughRequest {
     /// from the body. Selects [`PassthroughResponse::Stream`].
     pub stream: bool,
     /// Provider protocol headers to pass on (`anthropic-version`,
-    /// `anthropic-beta`, `OpenAI-Beta`), names lowercase, beta values already
-    /// filtered by the core's allowlist. The consumer's `Authorization` and
+    /// `anthropic-beta`, `OpenAI-Beta`), names lowercase, beta values as the
+    /// consumer sent them; the plugin keeps only the beta values its
+    /// allowlist admits. The consumer's `Authorization` and
     /// `x-api-key` are never among them.
     pub headers: Vec<(String, String)>,
     /// The provider-native JSON body.

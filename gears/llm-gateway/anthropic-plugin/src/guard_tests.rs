@@ -150,3 +150,18 @@ fn a_single_value_is_checked_under_its_path() {
     );
     check_value(&json!({ "type": "text", "text": "file_id" }), "input[0]").unwrap();
 }
+
+#[test]
+fn only_allowed_beta_flags_are_kept() {
+    assert_eq!(
+        beta_header([
+            "interleaved-thinking-2025-05-14, files-api-2025-04-14",
+            "mcp-client-2025-11-20",
+            "effort-2025-11-24",
+        ])
+        .as_deref(),
+        Some("interleaved-thinking-2025-05-14,effort-2025-11-24")
+    );
+    assert_eq!(beta_header(["skills-2025-10-02", ""]), None);
+    assert_eq!(beta_header([]), None);
+}
