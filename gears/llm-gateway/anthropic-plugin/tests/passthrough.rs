@@ -7,8 +7,8 @@
 #[allow(dead_code)]
 mod support;
 
-use anthropic_plugin::AnthropicPlugin;
 use futures::StreamExt;
+use llm_gateway_anthropic_plugin::AnthropicPlugin;
 use llm_gateway_sdk::{
     LlmGatewayProviderPluginClientV1, PassthroughApi, PassthroughRequest, PassthroughResponse,
     ProviderCallCtx,

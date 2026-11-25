@@ -105,13 +105,13 @@ struct Recorded {
 }
 
 /// Fake OAGW: records the proxied request and answers with a canned response.
-struct FakeGateway {
+pub struct FakeGateway {
     respond: Box<dyn Fn() -> http::Response<Body> + Send + Sync>,
     recorded: std::sync::Mutex<Vec<Recorded>>,
 }
 
 impl FakeGateway {
-    fn new(respond: impl Fn() -> http::Response<Body> + Send + Sync + 'static) -> Arc<Self> {
+    pub fn new(respond: impl Fn() -> http::Response<Body> + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             respond: Box::new(respond),
             recorded: std::sync::Mutex::new(Vec::new()),

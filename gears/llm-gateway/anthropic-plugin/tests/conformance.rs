@@ -7,8 +7,8 @@ mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anthropic_plugin::AnthropicPlugin;
 use futures::StreamExt;
+use llm_gateway_anthropic_plugin::AnthropicPlugin;
 use llm_gateway_sdk::{CreateResponseBody, LlmGatewayProviderPluginClientV1, ProviderCallCtx};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;

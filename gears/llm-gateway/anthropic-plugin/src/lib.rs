@@ -10,7 +10,9 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod client;
+pub mod config;
 mod error;
+pub mod gear;
 mod guard;
 mod passthrough;
 mod request;
@@ -21,4 +23,5 @@ mod stream;
 mod wire;
 
 pub use client::AnthropicPlugin;
+pub use gear::AnthropicPluginGear;
 pub use settings::AnthropicProviderSettingsV1;

@@ -306,4 +306,4 @@ pub fn malformed_response(provider_request_id: Option<&str>, message: &str) -> L
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "client_tests.rs"]
-mod client_tests;
+pub mod client_tests;

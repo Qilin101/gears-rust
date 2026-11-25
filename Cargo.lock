@@ -3624,22 +3624,28 @@ dependencies = [
 name = "cf-gears-llm-gateway-anthropic-plugin"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "cf-gears-llm-gateway-sdk",
  "cf-gears-model-registry-sdk",
+ "cf-gears-oagw",
  "cf-gears-oagw-sdk",
+ "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-security",
+ "cf-gears-types-registry-sdk",
  "futures",
  "gts",
  "http",
+ "inventory",
  "schemars 1.2.3",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 

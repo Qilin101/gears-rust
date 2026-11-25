@@ -15,8 +15,24 @@ provider type is `gts.cf.genai.model.provider.v1~cf.genai._.anthropic.v1~`.
 
 The plugin reports usage counts (input, output, cache read and write, reasoning
 tokens, web search calls) and leaves `usage.cost` at `0`; the Gateway core
-prices the call from `ModelInfoV1.cost`. Gear registration (GTS plugin
-instance, scoped ClientHub client) is not wired yet.
+prices the call from `ModelInfoV1.cost`.
+
+## Gear
+
+`AnthropicPluginGear` (`llm-gateway-anthropic-plugin`, depends on `oagw`)
+publishes the plugin instance
+`gts.cf.toolkit.plugins.plugin.v1~cf.llmgw.provider.plugin.v1~cf.builtin.anthropic.plugin.v1`
+(`provider_type` = the Anthropic provider type, `tool_namespace` = `anthropic`)
+and, once it is admitted, binds the scoped `LlmGatewayProviderPluginClientV1`
+client to it.
+
+```yaml
+gears:
+  llm-gateway-anthropic-plugin:
+    config:
+      vendor: "constructorfabric"  # default
+      priority: 100                # default; lower wins
+```
 
 ## Provider settings
 

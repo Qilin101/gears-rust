@@ -1,0 +1,30 @@
+gdl_version = "1.0"
+
+# Every GDL field: https://github.com/constructorfabric/gearbox/blob/main/docs/gdl.md
+#
+# Gearbox product metadata for the LLM Gateway Anthropic Plugin.
+#
+# Fills llm-gateway's extension point (`LlmGatewayProviderPluginClientV1`),
+# declared by `implements`. This plugin's vendor and priority are read from
+# source.
+
+gear(
+    deps = ["oagw"],
+    source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/llm-gateway/anthropic-plugin"),
+    maturity = "preview",
+    name = "LLM Gateway Anthropic Plugin",
+    description = "LLM Gateway provider plugin for the Anthropic Messages API.",
+    category = "gen-ai",
+
+    package = cargo(
+        crate_name = "cf-gears-llm-gateway-anthropic-plugin",
+        lib = "llm_gateway_anthropic_plugin",
+        path = ".",
+    ),
+
+    # The point this plugin implements, by the GTS spec its host declares. No
+    # `sdk`: the host's SDK is the host's.
+    implements = "cf.llmgw.provider.plugin.v1~",
+
+    config_schema = config(exposes = ["vendor", "priority"]),
+)
