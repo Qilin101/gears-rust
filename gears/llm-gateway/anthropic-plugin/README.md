@@ -54,7 +54,7 @@ unless it is 80 or 443; a path prefix is kept. Requests go to
 `/{alias}{prefix}/v1/messages`.
 
 The plugin sends no credential: the OAGW upstream must authenticate the call
-itself. A model with a `secret_ref` fails with `credentials_unavailable` and
+itself, sending the Anthropic API key in the `x-api-key` header. A model with a `secret_ref` fails with `credentials_unavailable` and
 nothing is sent, until OAGW can be told which credential to use.
 
 OAGW strips caller headers by default, so the upstream must allow passthrough

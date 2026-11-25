@@ -148,6 +148,53 @@ fn gateway_unavailable_keeps_retry_after() {
 }
 
 #[test]
+fn unknown_target_host_is_unapproved_destination() {
+    let err = UpstreamScope::invalid_argument()
+        .with_field_violation(
+            "x-target-host",
+            "no endpoint for host",
+            oagw_sdk::field::UNKNOWN_TARGET_HOST,
+        )
+        .create();
+    assert!(matches!(
+        from_gateway(err),
+        LlmGatewayError::UnapprovedDestination
+    ));
+}
+
+#[test]
+fn unreachable_upstream_secret_is_credentials_unavailable() {
+    let err = UpstreamScope::failed_precondition()
+        .with_precondition_violation(
+            "auth.config.secret_ref",
+            "secret is not provisioned",
+            oagw_sdk::precondition::STATE,
+        )
+        .create();
+    assert!(matches!(
+        from_gateway(err),
+        LlmGatewayError::CredentialsUnavailable
+    ));
+}
+
+#[test]
+fn other_precondition_failure_is_internal() {
+    let err = UpstreamScope::failed_precondition()
+        .with_precondition_violation("STATE_DRIFT", "state is stale", "STATE")
+        .create();
+    assert_eq!(from_gateway(err).code(), "internal");
+}
+
+#[test]
+fn oversized_body_is_invalid_request() {
+    let err = UpstreamScope::out_of_range("body too big")
+        .with_field_violation("body", "exceeds limit", oagw_sdk::field::PAYLOAD_TOO_LARGE)
+        .create();
+    let (category, _) = provider_parts(from_gateway(err));
+    assert_eq!(category, ProviderErrorCategory::InvalidRequest);
+}
+
+#[test]
 fn unmodeled_gateway_error_is_internal() {
     let err = CanonicalError::internal("boom").create();
     assert_eq!(from_gateway(err).code(), "internal");

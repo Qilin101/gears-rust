@@ -128,7 +128,10 @@ the type is unknown or the body is not an Anthropic error:
   request, is `provider_error`.
 - A stream that breaks off or ends before `message_stop` fails with
   `provider_unavailable`.
-- OAGW failures: a missing route or upstream, or a denied destination, is
-  `unapproved_destination`; OAGW rate limiting is `rate_limited`; a timeout or
+- OAGW failures: a missing route or upstream, a denied destination, or a
+  target host the upstream does not serve is `unapproved_destination`; an
+  upstream credential that is not provisioned or not shared with the tenant is
+  `credentials_unavailable`; a body over the OAGW size limit is
+  `invalid_request`; OAGW rate limiting is `rate_limited`; a timeout or
   unavailable upstream is `provider_unavailable`; failed upstream
   authentication is `authentication_failed`.

@@ -5,6 +5,7 @@ use http::{HeaderMap, StatusCode};
 use llm_gateway_sdk::{LlmGatewayError, ProviderErrorCategory, ProviderFailure};
 use oagw_sdk::ServiceGatewayError;
 use oagw_sdk::gts::Resource;
+use oagw_sdk::precondition;
 use toolkit_canonical_errors::CanonicalError;
 
 use crate::wire::{ErrorBody, ErrorObject};
@@ -13,6 +14,10 @@ use crate::wire::{ErrorBody, ErrorObject};
 const REQUEST_ID_HEADER: &str = "request-id";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
 
+/// `subject` of the OAGW precondition violation for an upstream credential
+/// that is not provisioned or not shared with the tenant.
+const SECRET_REF_SUBJECT: &str = "auth.config.secret_ref";
+
 /// Map an OAGW `proxy_request` failure.
 pub fn from_gateway(err: CanonicalError) -> LlmGatewayError {
     match ServiceGatewayError::from(err) {
@@ -20,7 +25,20 @@ pub fn from_gateway(err: CanonicalError) -> LlmGatewayError {
             resource: Resource::Upstream | Resource::Route,
             ..
         }
-        | ServiceGatewayError::PermissionDenied { .. } => LlmGatewayError::UnapprovedDestination,
+        | ServiceGatewayError::PermissionDenied { .. }
+        | ServiceGatewayError::InvalidTargetHost { .. } => LlmGatewayError::UnapprovedDestination,
+        ServiceGatewayError::FailedPrecondition {
+            precondition_type,
+            subject,
+            ..
+        } if precondition_type == precondition::STATE && subject == SECRET_REF_SUBJECT => {
+            LlmGatewayError::CredentialsUnavailable
+        }
+        ServiceGatewayError::PayloadTooLarge { .. } => gateway_provider(
+            ProviderErrorCategory::InvalidRequest,
+            "request body too large for the outbound gateway",
+            None,
+        ),
         ServiceGatewayError::RateLimited { retry_after_secs } => gateway_provider(
             ProviderErrorCategory::RateLimited,
             "rate limited by the outbound gateway",
