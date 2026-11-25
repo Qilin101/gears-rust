@@ -854,6 +854,49 @@ pub struct DeleteOutcome {
     pub tombstoned_edges: u64,
 }
 
+/// How a purge treats the node it finds (gears-rust #5906).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PurgeOptions {
+    /// Purge only a node that is already soft-deleted, and refuse a live one
+    /// with a conflict: a purge that must never take a live node, such as a
+    /// sweep of the tombstones deletes left. On its own it does not make a
+    /// retry safe where a key can be written again: it tells a live node from
+    /// a tombstone, not one node from another, so a retry still removes a
+    /// later node under the key that was itself soft-deleted. Bind the purge
+    /// to its node with `expected_created_at` for that.
+    pub only_tombstoned: bool,
+    /// Purge only the node created at this instant -- its envelope's
+    /// `created_at`, which is set at insert and never changes -- and refuse
+    /// any other with a conflict. This binds a purge to one node rather than
+    /// to whatever holds the key: a retry after an unknown outcome then meets
+    /// either nothing (it landed) or a different node it must not touch,
+    /// live or tombstoned, which `only_tombstoned` alone cannot tell apart.
+    /// Read it from any read of the node before deleting it.
+    ///
+    /// The comparison is of two timestamps at the store's precision
+    /// (microseconds in the built-in store), taken from the clock of the
+    /// process that inserted each node; it is not a unique instance
+    /// identity. A later node under the key is created after the purge of
+    /// the earlier one, so the two differ unless a clock ran backwards
+    /// between them by exactly their distance. An identity that cannot
+    /// repeat is tracked in gears-rust #5944.
+    pub expected_created_at: Option<time::OffsetDateTime>,
+}
+
+/// Outcome of a purge: what was removed for good (gears-rust #5194).
+///
+/// `purged_nodes` is 0 when no node, live or tombstoned, was stored under
+/// the key: a purge is idempotent, and purging what is not there is not an
+/// error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PurgeOutcome {
+    pub revision: GraphRevision,
+    pub purged_nodes: u64,
+    /// Every edge incident to the node, live, tombstoned and analysis edges
+    /// alike: an erasure outranks a conclusion drawn about what it erases.
+    pub purged_edges: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Node read / projection
 // ---------------------------------------------------------------------------
@@ -940,6 +983,29 @@ pub struct NodeRow {
     /// also the only carrier of the observed revision: the page wrapper is
     /// the platform's and has no member for one.
     pub envelope: ElementEnvelope,
+}
+
+/// One page of the edges incident to a node (`list_node_edges`).
+///
+/// The edges a hub carries past `node_read_max_adjacency` are listed here in
+/// full, a page at a time, in the order of their storage id. An edge is listed
+/// only when both its endpoints are visible to the caller, the rule the edge
+/// read follows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeEdgesRequest {
+    pub node_key: NodeKey,
+    /// `Outgoing` lists edges whose source is the node, `Incoming` those whose
+    /// destination is, `Either` (the default) both.
+    pub direction: Option<Direction>,
+    /// GTS patterns the edge type must match; empty matches every type.
+    pub edge_type_patterns: Vec<String>,
+    /// Discriminators the edge must carry one of; empty matches every edge,
+    /// and an edge without a discriminator never matches a non-empty list.
+    pub discriminators: Vec<String>,
+    /// Page size, at most `edge_list_max_page` (the default too).
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page of the same listing.
+    pub cursor: Option<String>,
 }
 
 /// A page of results with an opaque continuation token bound to the observed
@@ -1132,6 +1198,10 @@ pub struct EdgeRef {
     /// derived from it but is opaque, so this is the only way a traversal
     /// caller learns which of several same-typed relations an edge is.
     pub discriminator: Option<String>,
+    /// The edge's payload, when the request asked for it
+    /// (`include_edge_payload`); `None` otherwise. Read in one statement for
+    /// the whole answer and counted against `response_max_bytes`.
+    pub payload: Option<serde_json::Value>,
 }
 
 /// Label filter placeholder (labels are not shipped in this iteration; the
@@ -1164,6 +1234,9 @@ pub struct TraverseRequest {
     /// hop's edge budget nor the walk's node budget. At most 1 000 values;
     /// a longer list is refused as `limit_exceeded`.
     pub edge_discriminators: Vec<String>,
+    /// Return each traversed edge's payload on its `EdgeRef`, in one read for
+    /// the whole answer rather than one edge read per edge.
+    pub include_edge_payload: bool,
 }
 
 /// Bounded neighborhood projection request.
@@ -1176,6 +1249,8 @@ pub struct NeighborhoodRequest {
     /// Which way every hop follows an edge; `None` is `Either`
     /// (see `TraverseRequest::direction`).
     pub direction: Option<Direction>,
+    /// Return each edge's payload on its `EdgeRef`, as on `TraverseRequest`.
+    pub include_edge_payload: bool,
 }
 
 /// Traversal / neighborhood response.
@@ -1292,6 +1367,10 @@ pub struct StoreCapabilities {
     pub labels: bool,
     pub chunks: bool,
     pub topology: bool,
+    /// Tenant offboarding: fencing, the background deletion and the record.
+    /// A store that declares it implements every offboarding method of
+    /// `GraphStoreV1`; the gear fences nothing on a store that does not.
+    pub offboarding: bool,
 }
 
 /// What an engine implementation provides beyond one-hop expansion.
@@ -1299,6 +1378,121 @@ pub struct StoreCapabilities {
 pub struct EngineCapabilities {
     pub shortest_path: bool,
     pub match_pattern: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Tenant offboarding
+// ---------------------------------------------------------------------------
+
+/// The platform's deletion generation for a tenant: positive, by
+/// construction, so no path to the store can record one the contract says
+/// cannot exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeletionGeneration(i64);
+
+impl DeletionGeneration {
+    /// `None` for zero or a negative value.
+    #[must_use]
+    pub fn new(value: i64) -> Option<Self> {
+        (value > 0).then_some(Self(value))
+    }
+
+    #[must_use]
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// Starting a tenant's offboarding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OffboardRequest {
+    /// The platform's deletion generation for the tenant, when the caller has
+    /// one. Recorded as given and not checked against a ledger yet: the
+    /// ledger that would issue it does not exist, and accepting it now keeps
+    /// the call unchanged when it does. The first call's value stands; a
+    /// repeated call does not replace it.
+    pub deletion_generation: Option<DeletionGeneration>,
+}
+
+/// Rows offboarding removed, per kind of tenant-keyed state, summed over
+/// every step that ran. Non-exhaustive: chunks, labels and the audit record
+/// are kinds still to come.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OffboardingCounts {
+    pub edges: u64,
+    pub nodes: u64,
+    pub types: u64,
+    /// Scope-replacement registry rows.
+    pub scopes: u64,
+    /// Idempotency receipts.
+    pub receipts: u64,
+    /// Source-namespace ownership rows.
+    pub namespaces: u64,
+    /// Per-tenant metadata rows, the revision counter among them.
+    pub meta: u64,
+}
+
+impl OffboardingCounts {
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.edges
+            + self.nodes
+            + self.types
+            + self.scopes
+            + self.receipts
+            + self.namespaces
+            + self.meta
+    }
+
+    /// Add `other` to these counts.
+    pub fn add(&mut self, other: &Self) {
+        self.edges += other.edges;
+        self.nodes += other.nodes;
+        self.types += other.types;
+        self.scopes += other.scopes;
+        self.receipts += other.receipts;
+        self.namespaces += other.namespaces;
+        self.meta += other.meta;
+    }
+}
+
+/// The last failed deletion step: what kind of failure, and when. The class
+/// is a stable name (`GraphStoreError::class`), never a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OffboardingFailure {
+    pub class: String,
+    pub at: OffsetDateTime,
+}
+
+/// A tenant's offboarding: the permanent record that it was fenced and,
+/// once every row is gone, when the deletion finished.
+///
+/// The record outlives the tenant's data on purpose. It is what keeps the
+/// tenant fenced after the deletion, so a late write cannot recreate it,
+/// and what lets a repeated call answer "done". It holds the tenant's id and
+/// the dates, nothing of the tenant's content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TenantOffboarding {
+    pub tenant_id: TenantId,
+    pub deletion_generation: Option<DeletionGeneration>,
+    /// When the tenant was fenced; every operation for it is refused since.
+    pub fenced_at: OffsetDateTime,
+    /// When the last row was removed. `None` while the deletion runs.
+    pub completed_at: Option<OffsetDateTime>,
+    pub removed: OffboardingCounts,
+    /// Deletion steps that failed in a row since the last one that did not.
+    /// Non-zero means the deletion is stuck, not merely running.
+    pub failures: u32,
+    /// The last failed step, while `failures` is not zero.
+    pub last_failure: Option<OffboardingFailure>,
+}
+
+impl TenantOffboarding {
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.completed_at.is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -43,12 +43,10 @@ pub struct Endpoint {
     #[serde(default)]
     pub scheme: Scheme,
     pub host: String,
-    #[serde(default = "default_port")]
-    pub port: u16,
-}
-
-fn default_port() -> u16 {
-    443
+    /// TCP port. Defaults to the scheme's port when omitted: 80 for `http`,
+    /// 443 otherwise. Responses always carry the stored port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -214,6 +212,47 @@ pub enum RateLimitStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// CircuitBreakerConfig
+// ---------------------------------------------------------------------------
+
+/// Upstream circuit breaker. Omitted fields take the ADR-0005 defaults;
+/// unknown fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CircuitBreakerConfig {
+    #[serde(default)]
+    pub sharing: SharingMode,
+    #[serde(default = "default_true")]
+    #[schema(default = true)]
+    pub enabled: bool,
+    /// Consecutive failures that open the circuit.
+    #[serde(default = "default_failure_threshold")]
+    #[schema(default = 5, minimum = 1, maximum = 1000)]
+    pub failure_threshold: u32,
+    /// Seconds the circuit stays open before probes go through.
+    #[serde(default = "default_timeout_seconds")]
+    #[schema(default = 30, minimum = 1, maximum = 86400)]
+    pub timeout_seconds: u32,
+    /// Probes let through at once after the timeout; all must succeed to
+    /// close the circuit.
+    #[serde(default = "default_success_threshold")]
+    #[schema(default = 3, minimum = 1, maximum = 100)]
+    pub success_threshold: u32,
+}
+
+fn default_failure_threshold() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_FAILURE_THRESHOLD
+}
+
+fn default_timeout_seconds() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_TIMEOUT_SECONDS
+}
+
+fn default_success_threshold() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_SUCCESS_THRESHOLD
+}
+
+// ---------------------------------------------------------------------------
 // CorsConfig
 // ---------------------------------------------------------------------------
 
@@ -331,6 +370,8 @@ pub struct CreateUpstreamRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<CorsConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -352,6 +393,8 @@ pub struct UpdateUpstreamRequest {
     pub plugins: Option<PluginsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<CorsConfig>,
     pub tags: Vec<String>,
@@ -417,6 +460,8 @@ pub struct UpstreamResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors: Option<CorsConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -469,10 +514,11 @@ impl From<Scheme> for domain::Scheme {
 
 impl From<Endpoint> for domain::Endpoint {
     fn from(v: Endpoint) -> Self {
+        let scheme = domain::Scheme::from(v.scheme);
         Self {
-            scheme: v.scheme.into(),
+            scheme,
             host: v.host,
-            port: v.port,
+            port: v.port.unwrap_or_else(|| scheme.default_port()),
         }
     }
 }
@@ -607,7 +653,21 @@ impl From<RateLimitConfig> for domain::RateLimitConfig {
             strategy: v.strategy.into(),
             cost: v.cost,
             response_headers: v.response_headers,
-            pool_owner_id: None,
+            shared_pool: None,
+            limit_owner_id: None,
+        }
+    }
+}
+
+impl From<CircuitBreakerConfig> for domain::CircuitBreakerConfig {
+    fn from(v: CircuitBreakerConfig) -> Self {
+        Self {
+            sharing: v.sharing.into(),
+            enabled: v.enabled,
+            failure_threshold: v.failure_threshold,
+            timeout_seconds: v.timeout_seconds,
+            success_threshold: v.success_threshold,
+            owner_id: None,
         }
     }
 }
@@ -758,7 +818,7 @@ impl From<domain::Endpoint> for Endpoint {
         Self {
             scheme: v.scheme.into(),
             host: v.host,
-            port: v.port,
+            port: Some(v.port),
         }
     }
 }
@@ -897,6 +957,18 @@ impl From<domain::RateLimitConfig> for RateLimitConfig {
     }
 }
 
+impl From<domain::CircuitBreakerConfig> for CircuitBreakerConfig {
+    fn from(v: domain::CircuitBreakerConfig) -> Self {
+        Self {
+            sharing: v.sharing.into(),
+            enabled: v.enabled,
+            failure_threshold: v.failure_threshold,
+            timeout_seconds: v.timeout_seconds,
+            success_threshold: v.success_threshold,
+        }
+    }
+}
+
 impl From<domain::BudgetConfig> for BudgetConfig {
     fn from(v: domain::BudgetConfig) -> Self {
         Self {
@@ -1027,6 +1099,7 @@ impl From<CreateUpstreamRequest> for domain::CreateUpstreamRequest {
             headers: r.headers.map(Into::into),
             plugins: r.plugins.map(Into::into),
             rate_limit: r.rate_limit.map(Into::into),
+            circuit_breaker: r.circuit_breaker.map(Into::into),
             cors: r.cors.map(Into::into),
             tags: r.tags,
             enabled: r.enabled,
@@ -1044,6 +1117,7 @@ impl From<UpdateUpstreamRequest> for domain::UpdateUpstreamRequest {
             headers: r.headers.map(Into::into),
             plugins: r.plugins.map(Into::into),
             rate_limit: r.rate_limit.map(Into::into),
+            circuit_breaker: r.circuit_breaker.map(Into::into),
             cors: r.cors.map(Into::into),
             tags: r.tags,
             enabled: r.enabled,
@@ -1100,3 +1174,7 @@ impl toolkit::api::api_dto::ResponseApiDto for RouteResponse {}
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+#[path = "dto_tests.rs"]
+mod dto_tests;

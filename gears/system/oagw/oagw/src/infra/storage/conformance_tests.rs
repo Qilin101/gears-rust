@@ -108,6 +108,7 @@ macro_rules! conformance_suite {
             case_find_matching_falls_back_to_ancestor_upstream,
             case_find_matching_longest_prefix_wins,
             case_find_matching_higher_priority_wins,
+            case_find_matching_prefix_on_segment_boundary,
             case_find_matching_skips_disabled_grpc_and_method_mismatch,
             case_tags_and_methods_keep_canonical_order,
             case_tags_and_aliases_compare_byte_wise,
@@ -235,6 +236,7 @@ fn upstream(tenant_id: Uuid, alias: &str) -> Upstream {
         headers: None,
         plugins: None,
         rate_limit: None,
+        circuit_breaker: None,
         cors: None,
         tags: vec![],
         managed_by: ManagedBy::Api,
@@ -260,7 +262,8 @@ fn rate_limit() -> RateLimitConfig {
         cost: 2,
         response_headers: false,
         // Merge-time only, never stored.
-        pool_owner_id: None,
+        shared_pool: None,
+        limit_owner_id: None,
     }
 }
 
@@ -332,6 +335,14 @@ fn full_upstream(tenant_id: Uuid, alias: &str) -> Upstream {
             ],
         }),
         rate_limit: Some(rate_limit()),
+        circuit_breaker: Some(crate::domain::model::CircuitBreakerConfig {
+            sharing: SharingMode::Inherit,
+            enabled: true,
+            failure_threshold: 5,
+            timeout_seconds: 30,
+            success_threshold: 3,
+            owner_id: None,
+        }),
         cors: Some(cors(SharingMode::Inherit)),
         tags: strings(&["ai", "llm"]),
         ..upstream(tenant_id, alias)
@@ -566,6 +577,11 @@ async fn case_upstream_round_trip_all_fields(f: &Fixture) {
         burst: None,
         ..rate_limit()
     });
+    if let Some(cb) = updated.circuit_breaker.as_mut() {
+        cb.sharing = SharingMode::Enforce;
+        cb.enabled = false;
+        cb.failure_threshold = 1;
+    }
     updated.cors = None;
     updated.tags = strings(&["llm"]);
 
@@ -1388,6 +1404,55 @@ async fn case_find_matching_higher_priority_wins(f: &Fixture) {
     assert_eq!(
         find(f, &[tenant], &[up.id], "POST", "/v1/x").await.unwrap(),
         high
+    );
+}
+
+/// A route prefix covers whole path segments only (#4979).
+async fn case_find_matching_prefix_on_segment_boundary(f: &Fixture) {
+    let tenant = Uuid::new_v4();
+    let up = add_upstream(f, upstream(tenant, "api")).await;
+    let v1 = add_route(f, http_route(tenant, up.id, "/v1", 0)).await;
+    let chat = add_route(f, http_route(tenant, up.id, "/v1/chat", 0)).await;
+
+    assert_eq!(
+        find(f, &[tenant], &[up.id], "POST", "/v1/chat/x")
+            .await
+            .unwrap(),
+        chat
+    );
+    // `/v1/chatty` is under `/v1`, not under `/v1/chat`.
+    assert_eq!(
+        find(f, &[tenant], &[up.id], "POST", "/v1/chatty")
+            .await
+            .unwrap(),
+        v1
+    );
+    assert_not_found(find(f, &[tenant], &[up.id], "POST", "/v10").await);
+
+    // An encoded `/` after the prefix still ends the segment.
+    assert_eq!(
+        find(f, &[tenant], &[up.id], "POST", "/v1/chat%2Fx")
+            .await
+            .unwrap(),
+        chat
+    );
+    // `/v1%2Fchat` is `/v1/chat` to an upstream that decodes `%2F`: it is
+    // refused rather than reaching `/v1/chat` under `/v1`.
+    for path in ["/v1%2Fchat", "/v1%5Cchat/x"] {
+        assert!(
+            matches!(
+                find(f, &[tenant], &[up.id], "POST", path).await,
+                Err(RepositoryError::SeparatorBypass)
+            ),
+            "{path}"
+        );
+    }
+    // With no narrower route to bypass, it stays under `/v1`.
+    assert_eq!(
+        find(f, &[tenant], &[up.id], "POST", "/v1%2Fother")
+            .await
+            .unwrap(),
+        v1
     );
 }
 

@@ -10,17 +10,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use graph_storage_sdk::models::Direction;
 use graph_storage_sdk::models::{
     AdjacencyEntry, AdjacencySide, AdmissionBasis, ComponentReadiness, DeleteOutcome,
-    DeleteRequest, EdgeKey, EdgeView, ElementEnvelope, GraphRevision, GtsTypeId, IngestOutcome,
-    IngestRequest, ItemError, ItemFamily, ItemOutcome, NodeId, NodeKey, NodeRow, NodeView,
-    OnExisting, Page, ProjectionRequest, ReadSnapshot, RegisteredType, SchemaDiagnostic,
-    SearchMode, SearchRequest, SearchResponse, SourceNamespaceOwner, StoreCapabilities, Subject,
-    TopologyPage, TopologyRequest, TypeChange, TypeChangeState, TypeIdSet, TypeOutcome, TypeQuery,
-    TypeRecord, TypeRegistration, TypeRegistrationOptions,
+    DeleteRequest, DeletionGeneration, EdgeKey, EdgeView, ElementEnvelope, GraphRevision,
+    GtsTypeId, IngestOutcome, IngestRequest, ItemError, ItemFamily, ItemOutcome, NodeId, NodeKey,
+    NodeRow, NodeView, OffboardingCounts, OffboardingFailure, OnExisting, Page, ProjectionRequest,
+    ReadSnapshot, RegisteredType, SchemaDiagnostic, SearchMode, SearchRequest, SearchResponse,
+    SourceNamespaceOwner, StoreCapabilities, Subject, TenantId, TenantOffboarding, TopologyPage,
+    TopologyRequest, TypeChange, TypeChangeState, TypeIdSet, TypeOutcome, TypeQuery, TypeRecord,
+    TypeRegistration, TypeRegistrationOptions,
 };
 use graph_storage_sdk::plugin_api::{
-    EmbeddingPlan, EmbeddingState, GraphStoreError, GraphStoreV1, StoreCtx, VectorArm,
+    EmbeddingPlan, EmbeddingState, GraphStoreError, GraphStoreV1, NodeEdgesPage, NodeEdgesQuery,
+    StoreCtx, VectorArm,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -60,6 +63,10 @@ struct FakeNode {
 
 #[derive(Clone)]
 struct FakeEdge {
+    /// Allocated from the counter node ids come from, so edges are ordered
+    /// by insertion as the built-in store's `bigserial` orders them -- the
+    /// order the edge listing pages in.
+    id: i64,
     key: String,
     type_id: String,
     src: i64,
@@ -194,7 +201,7 @@ struct TenantData {
 
 pub struct FakeGraphStore {
     epoch: i64,
-    tenants: Mutex<BTreeMap<Uuid, Tenant>>,
+    tenants: Mutex<Tenants>,
     /// Internal ids are unique across the whole store, not per tenant, like
     /// the `PostgreSQL` sequence they stand in for. Per-tenant counters would
     /// hand two tenants the same id, and a case that hydrates by a foreign id
@@ -221,6 +228,59 @@ pub struct FakeGraphStore {
     /// What `node_types` answers: the types, `Unsupported` as a store that
     /// never implemented the optional method would, or a failure.
     node_types_answer: NodeTypesAnswer,
+    /// A tenant whose deletion steps fail: the one failure the worker's
+    /// handling of a stuck deletion needs.
+    failing_offboarding: Mutex<Option<FailingOffboarding>>,
+    /// What `capabilities().offboarding` declares; without it, every
+    /// offboarding method refuses, as the trait's defaults do.
+    offboarding: bool,
+    /// Offboarding calls refused for want of the capability: the gear asks
+    /// such a store none.
+    refused_offboarding: std::sync::atomic::AtomicU64,
+    /// Reads of every fenced tenant, and how they go: the in-memory set's
+    /// cases need a store that is slow or fails.
+    fence_reads: FenceReads,
+}
+
+/// How [`FakeGraphStore`] answers `all_fenced_tenant_ids`.
+#[derive(Debug, Default)]
+struct FenceReads {
+    count: std::sync::atomic::AtomicU64,
+    failing: std::sync::atomic::AtomicBool,
+    delay: Mutex<std::time::Duration>,
+}
+
+/// A tenant whose deletion steps fail once its first `succeed_first` have run.
+#[derive(Clone, Copy, Debug)]
+struct FailingOffboarding {
+    tenant: Uuid,
+    /// Steps that still run before the failures start.
+    succeed_first: u64,
+    /// Steps that failed.
+    attempts: u64,
+}
+
+/// Every tenant's data, and the offboarding records that outlive it, under
+/// one lock: a write and a fence are ordered as on the built-in store, and
+/// there is no second lock to take in the wrong order. A write reaches a
+/// tenant's data only through [`Tenants::writable`], which refuses a fenced
+/// tenant; reads go to `by_id`.
+#[derive(Default)]
+struct Tenants {
+    by_id: BTreeMap<Uuid, Tenant>,
+    offboardings: BTreeMap<Uuid, TenantOffboarding>,
+}
+
+impl Tenants {
+    /// A tenant's data to write to, created on first use, or `TenantFenced`.
+    /// The caller holds the lock, so no fence can land between this check
+    /// and the write.
+    fn writable(&mut self, tenant: Uuid) -> Result<&mut Tenant, GraphStoreError> {
+        if self.offboardings.contains_key(&tenant) {
+            return Err(GraphStoreError::TenantFenced { tenant });
+        }
+        Ok(self.by_id.entry(tenant).or_default())
+    }
 }
 
 /// The three things `node_types` can answer, so a test can see the service
@@ -243,7 +303,7 @@ impl FakeGraphStore {
     pub fn new() -> Self {
         Self {
             epoch: 1,
-            tenants: Mutex::new(BTreeMap::new()),
+            tenants: Mutex::new(Tenants::default()),
             next_id: std::sync::atomic::AtomicI64::new(0),
             max_chain_depth: 3,
             declines_snapshots: false,
@@ -252,6 +312,10 @@ impl FakeGraphStore {
             rows_hydrated: std::sync::atomic::AtomicU64::new(0),
             hydrate_calls: std::sync::atomic::AtomicU64::new(0),
             node_types_answer: NodeTypesAnswer::Typed,
+            failing_offboarding: Mutex::new(None),
+            offboarding: true,
+            refused_offboarding: std::sync::atomic::AtomicU64::new(0),
+            fence_reads: FenceReads::default(),
         }
     }
 
@@ -272,6 +336,86 @@ impl FakeGraphStore {
         Self {
             node_types_answer: NodeTypesAnswer::Failing,
             ..Self::new()
+        }
+    }
+
+    /// A store that does not declare offboarding, as one built before it
+    /// would.
+    #[must_use]
+    pub fn without_offboarding() -> Self {
+        Self {
+            offboarding: false,
+            ..Self::new()
+        }
+    }
+
+    /// Make every deletion step for `tenant` fail as `Unavailable`.
+    pub fn fail_offboarding_of(&self, tenant: Uuid) {
+        self.fail_offboarding_of_after(tenant, 0);
+    }
+
+    /// Let `steps` deletion steps of `tenant` run, then fail every later
+    /// one, as [`Self::fail_offboarding_of`] does.
+    pub fn fail_offboarding_of_after(&self, tenant: Uuid, steps: u64) {
+        if let Ok(mut failing) = self.failing_offboarding.lock() {
+            *failing = Some(FailingOffboarding {
+                tenant,
+                succeed_first: steps,
+                attempts: 0,
+            });
+        }
+    }
+
+    /// How many deletion steps failed for the failing tenant.
+    #[must_use]
+    pub fn failed_offboarding_attempts(&self) -> u64 {
+        self.failing_offboarding
+            .lock()
+            .ok()
+            .and_then(|failing| failing.map(|failing| failing.attempts))
+            .unwrap_or(0)
+    }
+
+    /// How many times every fenced tenant was read.
+    #[must_use]
+    pub fn fence_reads(&self) -> u64 {
+        self.fence_reads
+            .count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make every read of the fenced tenants fail, or answer again.
+    pub fn fail_fence_reads(&self, failing: bool) {
+        self.fence_reads
+            .failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make every read of the fenced tenants take `delay` first.
+    pub fn delay_fence_reads(&self, delay: std::time::Duration) {
+        if let Ok(mut held) = self.fence_reads.delay.lock() {
+            *held = delay;
+        }
+    }
+
+    /// How many offboarding calls this store refused because it does not
+    /// declare offboarding.
+    #[must_use]
+    pub fn refused_offboarding_calls(&self) -> u64 {
+        self.refused_offboarding
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Refuse an offboarding call when the store does not declare it.
+    fn offboards(&self) -> Result<(), GraphStoreError> {
+        if self.offboarding {
+            Ok(())
+        } else {
+            self.refused_offboarding
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(GraphStoreError::Unsupported {
+                what: "tenant offboarding",
+            })
         }
     }
 
@@ -371,6 +515,7 @@ impl GraphStoreV1 for FakeGraphStore {
             labels: false,
             chunks: false,
             topology: false,
+            offboarding: self.offboarding,
         }
     }
 
@@ -391,7 +536,12 @@ impl GraphStoreV1 for FakeGraphStore {
             });
         }
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.entry(ctx.tenant).or_default();
+        // A dry run writes nothing, so it has nothing to fence.
+        let tenant = if options.dry_run {
+            tenants.by_id.entry(ctx.tenant).or_default()
+        } else {
+            tenants.writable(ctx.tenant)?
+        };
 
         // Atomic: analyze and decide everything before storing anything.
         let mut prepared = Vec::new();
@@ -556,6 +706,7 @@ impl GraphStoreV1 for FakeGraphStore {
     ) -> Result<Vec<SourceNamespaceOwner>, GraphStoreError> {
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
         Ok(tenants
+            .by_id
             .get(&ctx.tenant)
             .map(|tenant| tenant.namespaces.values().cloned().collect())
             .unwrap_or_default())
@@ -573,7 +724,7 @@ impl GraphStoreV1 for FakeGraphStore {
             });
         }
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.entry(ctx.tenant).or_default();
+        let tenant = tenants.writable(ctx.tenant)?;
         let now = OffsetDateTime::now_utc();
         let previous = tenant
             .namespaces
@@ -604,6 +755,7 @@ impl GraphStoreV1 for FakeGraphStore {
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
         tenants
+            .by_id
             .get(&ctx.tenant)
             .and_then(|t| t.types.get(id).cloned())
             .ok_or(GraphStoreError::NotFound)
@@ -615,7 +767,7 @@ impl GraphStoreV1 for FakeGraphStore {
         query: TypeQuery,
     ) -> Result<Page<TypeRecord>, GraphStoreError> {
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(Page {
                 items: Vec::new(),
                 next_cursor: None,
@@ -639,7 +791,7 @@ impl GraphStoreV1 for FakeGraphStore {
         patterns: &[String],
     ) -> Result<TypeIdSet, GraphStoreError> {
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(TypeIdSet::default());
         };
         Ok(TypeIdSet(
@@ -659,7 +811,7 @@ impl GraphStoreV1 for FakeGraphStore {
         embedding: EmbeddingPlan,
     ) -> Result<IngestOutcome, GraphStoreError> {
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.entry(ctx.tenant).or_default();
+        let tenant = tenants.writable(ctx.tenant)?;
         let request_hash = identity::ingest_request_hash(&req);
 
         // Tenant- *and* producer-scoped, as the protocol says: two producers
@@ -882,7 +1034,7 @@ impl GraphStoreV1 for FakeGraphStore {
         req: DeleteRequest,
     ) -> Result<DeleteOutcome, GraphStoreError> {
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.entry(ctx.tenant).or_default();
+        let tenant = tenants.writable(ctx.tenant)?;
 
         let (nodes, edges) = match req {
             DeleteRequest::Node(key) => {
@@ -935,6 +1087,47 @@ impl GraphStoreV1 for FakeGraphStore {
         })
     }
 
+    async fn purge_node(
+        &self,
+        ctx: &StoreCtx<'_>,
+        key: NodeKey,
+        options: graph_storage_sdk::models::PurgeOptions,
+    ) -> Result<graph_storage_sdk::models::PurgeOutcome, GraphStoreError> {
+        let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
+        let tenant = tenants.writable(ctx.tenant)?;
+        // Live or tombstoned, as the built-in store: both hold the key.
+        let Some(position) = tenant.nodes.iter().position(|n| n.key == key) else {
+            return Ok(graph_storage_sdk::models::PurgeOutcome {
+                revision: self.revision_of(tenant),
+                purged_nodes: 0,
+                purged_edges: 0,
+            });
+        };
+        if let Some(expected) = options.expected_created_at
+            && tenant.nodes[position].audit.created_at != expected
+        {
+            return Err(crate::infra::store::purge::another_instance(
+                &key,
+                expected,
+                tenant.nodes[position].audit.created_at,
+            ));
+        }
+        if options.only_tombstoned && !tenant.nodes[position].deleted {
+            return Err(live_under_only_tombstoned(&key));
+        }
+        let id = tenant.nodes[position].id;
+        let before = tenant.edges.len();
+        tenant.edges.retain(|edge| edge.src != id && edge.dst != id);
+        let purged_edges = (before - tenant.edges.len()) as u64;
+        tenant.nodes.remove(position);
+        tenant.revision += 1;
+        Ok(graph_storage_sdk::models::PurgeOutcome {
+            revision: self.revision_of(tenant),
+            purged_nodes: 1,
+            purged_edges,
+        })
+    }
+
     async fn begin_read(&self, ctx: &StoreCtx<'_>) -> Result<ReadSnapshot, GraphStoreError> {
         assert!(
             !self.declines_snapshots,
@@ -942,7 +1135,7 @@ impl GraphStoreV1 for FakeGraphStore {
              the declaration is the contract, not a hint"
         );
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.entry(ctx.tenant).or_default();
+        let tenant = tenants.by_id.entry(ctx.tenant).or_default();
         let id = Uuid::now_v7();
         let data = snapshot_data(tenant);
         let revision = self.revision_of(tenant);
@@ -952,7 +1145,7 @@ impl GraphStoreV1 for FakeGraphStore {
 
     async fn end_read(&self, snapshot: ReadSnapshot) -> Result<(), GraphStoreError> {
         let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        for tenant in tenants.values_mut() {
+        for tenant in tenants.by_id.values_mut() {
             tenant.snapshots.remove(&snapshot.id);
         }
         Ok(())
@@ -964,7 +1157,7 @@ impl GraphStoreV1 for FakeGraphStore {
                 .revision_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let observed = tenants.get(&ctx.tenant).map_or(
+        let observed = tenants.by_id.get(&ctx.tenant).map_or(
             GraphRevision {
                 source_epoch: self.epoch,
                 revision: 0,
@@ -987,7 +1180,10 @@ impl GraphStoreV1 for FakeGraphStore {
             return Err(GraphStoreError::NotFound);
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.get(&ctx.tenant).ok_or(GraphStoreError::NotFound)?;
+        let tenant = tenants
+            .by_id
+            .get(&ctx.tenant)
+            .ok_or(GraphStoreError::NotFound)?;
         let (nodes, edges, revision) = visible(tenant, ctx);
         let node = nodes
             .iter()
@@ -1043,6 +1239,89 @@ impl GraphStoreV1 for FakeGraphStore {
         ))
     }
 
+    async fn list_node_edges(
+        &self,
+        ctx: &StoreCtx<'_>,
+        query: &NodeEdgesQuery,
+    ) -> Result<NodeEdgesPage, GraphStoreError> {
+        if !scope_admits(ctx.scope, ctx.tenant) {
+            return Err(GraphStoreError::NotFound);
+        }
+        let tenants = self.tenants.lock().map_err(|_| poisoned())?;
+        let tenant = tenants
+            .by_id
+            .get(&ctx.tenant)
+            .ok_or(GraphStoreError::NotFound)?;
+        let (nodes, edges, revision) = visible(tenant, ctx);
+        let live: BTreeMap<i64, &FakeNode> = nodes
+            .iter()
+            .filter(|n| !n.deleted)
+            .map(|n| (n.id, n))
+            .collect();
+        let node = live
+            .values()
+            .find(|n| n.key == query.node_key)
+            .ok_or(GraphStoreError::NotFound)?;
+        let mut scanned: Vec<&FakeEdge> = edges
+            .iter()
+            .filter(|e| !e.deleted)
+            .filter(|e| match query.direction {
+                Direction::Outgoing => e.src == node.id,
+                Direction::Incoming => e.dst == node.id,
+                Direction::Either => e.src == node.id || e.dst == node.id,
+            })
+            .filter(|e| query.after.is_none_or(|after| e.id > after))
+            .filter(|e| {
+                query
+                    .edge_types
+                    .as_ref()
+                    .is_none_or(|set| set.contains(&e.type_id))
+            })
+            .filter(|e| {
+                query.discriminators.is_empty()
+                    || e.discriminator
+                        .as_ref()
+                        .is_some_and(|d| query.discriminators.contains(d))
+            })
+            .collect();
+        scanned.sort_by_key(|e| e.id);
+        let limit = query.limit.max(1) as usize;
+        let more = scanned.len() > limit;
+        scanned.truncate(limit);
+        let next_after = if more {
+            scanned.last().map(|e| e.id)
+        } else {
+            None
+        };
+        let observed = GraphRevision {
+            source_epoch: self.epoch,
+            revision,
+        };
+        let items = scanned
+            .into_iter()
+            .filter_map(|edge| {
+                let src = live.get(&edge.src)?;
+                let dst = live.get(&edge.dst)?;
+                Some(EdgeView {
+                    edge_key: edge.key.clone(),
+                    edge_type_id: edge.type_id.clone(),
+                    src: src.key.clone(),
+                    dst: dst.key.clone(),
+                    discriminator: edge.discriminator.clone(),
+                    payload: edge.payload.clone(),
+                    envelope: edge
+                        .audit
+                        .envelope(edge.key.clone(), ctx.tenant, None, observed),
+                })
+            })
+            .collect();
+        Ok(NodeEdgesPage {
+            items,
+            next_after,
+            revision: observed,
+        })
+    }
+
     async fn get_edge(
         &self,
         ctx: &StoreCtx<'_>,
@@ -1052,7 +1331,10 @@ impl GraphStoreV1 for FakeGraphStore {
             return Err(GraphStoreError::NotFound);
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let tenant = tenants.get(&ctx.tenant).ok_or(GraphStoreError::NotFound)?;
+        let tenant = tenants
+            .by_id
+            .get(&ctx.tenant)
+            .ok_or(GraphStoreError::NotFound)?;
         let (nodes, edges, revision) = visible(tenant, ctx);
         let edge = edges
             .iter()
@@ -1092,7 +1374,7 @@ impl GraphStoreV1 for FakeGraphStore {
             return Ok(Vec::new());
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(Vec::new());
         };
         let (nodes, _, revision) = visible(tenant, ctx);
@@ -1132,7 +1414,7 @@ impl GraphStoreV1 for FakeGraphStore {
             return Ok(Vec::new());
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(Vec::new());
         };
         let (nodes, _, _) = visible(tenant, ctx);
@@ -1165,7 +1447,7 @@ impl GraphStoreV1 for FakeGraphStore {
         // test (a document retrieved by its own text) has to mean the same
         // thing here as against the database.
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Err(GraphStoreError::NotFound);
         };
         let (nodes, _, revision) = visible(tenant, ctx);
@@ -1260,7 +1542,7 @@ impl GraphStoreV1 for FakeGraphStore {
             });
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Err(GraphStoreError::NotFound);
         };
         let (selected, revision) = listed(tenant, ctx, &req)?;
@@ -1313,7 +1595,7 @@ impl GraphStoreV1 for FakeGraphStore {
             });
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Err(GraphStoreError::NotFound);
         };
         let (selected, revision) = listed(tenant, ctx, &req)?;
@@ -1342,7 +1624,7 @@ impl GraphStoreV1 for FakeGraphStore {
             return Ok(Vec::new());
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(Vec::new());
         };
         let (nodes, _, _) = visible(tenant, ctx);
@@ -1366,7 +1648,7 @@ impl GraphStoreV1 for FakeGraphStore {
             return Ok(keys.iter().map(|_| None).collect());
         }
         let tenants = self.tenants.lock().map_err(|_| poisoned())?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(keys.iter().map(|_| None).collect());
         };
         let (nodes, _, _) = visible(tenant, ctx);
@@ -1387,6 +1669,218 @@ impl GraphStoreV1 for FakeGraphStore {
             })
             .collect())
     }
+
+    async fn fence_tenant(
+        &self,
+        ctx: &StoreCtx<'_>,
+        deletion_generation: Option<DeletionGeneration>,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        self.offboards()?;
+        let tenant = ctx.tenant;
+        if tenant.is_nil() {
+            return Err(GraphStoreError::InvalidQuery {
+                what: "the nil tenant holds the deployment's own state and cannot be offboarded"
+                    .to_owned(),
+            });
+        }
+        let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
+        Ok(tenants
+            .offboardings
+            .entry(tenant)
+            .or_insert_with(|| TenantOffboarding {
+                tenant_id: tenant,
+                deletion_generation,
+                fenced_at: OffsetDateTime::now_utc(),
+                completed_at: None,
+                removed: OffboardingCounts::default(),
+                failures: 0,
+                last_failure: None,
+            })
+            .clone())
+    }
+
+    async fn tenant_offboarding(
+        &self,
+        ctx: &StoreCtx<'_>,
+    ) -> Result<Option<TenantOffboarding>, GraphStoreError> {
+        self.offboards()?;
+        Ok(self
+            .tenants
+            .lock()
+            .map_err(|_| poisoned())?
+            .offboardings
+            .get(&ctx.tenant)
+            .cloned())
+    }
+
+    async fn fenced_tenants(&self, ctx: &StoreCtx<'_>) -> Result<Vec<TenantId>, GraphStoreError> {
+        self.offboards()?;
+        Ok(self
+            .tenants
+            .lock()
+            .map_err(|_| poisoned())?
+            .offboardings
+            .values()
+            .filter(|record| !record.is_complete() && scope_admits(ctx.scope, record.tenant_id))
+            .map(|record| record.tenant_id)
+            .collect())
+    }
+
+    async fn all_fenced_tenant_ids(&self) -> Result<Vec<TenantId>, GraphStoreError> {
+        self.offboards()?;
+        self.fence_reads
+            .count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let delay = *self.fence_reads.delay.lock().map_err(|_| poisoned())?;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if self
+            .fence_reads
+            .failing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(GraphStoreError::Unavailable {
+                reason: "a failure the test asked for".to_owned(),
+            });
+        }
+        Ok(self
+            .tenants
+            .lock()
+            .map_err(|_| poisoned())?
+            .offboardings
+            .keys()
+            .copied()
+            .collect())
+    }
+
+    async fn offboard_step(
+        &self,
+        tenant: TenantId,
+        batch: std::num::NonZeroU64,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        self.offboards()?;
+        if let Some(failing) = self
+            .failing_offboarding
+            .lock()
+            .map_err(|_| poisoned())?
+            .as_mut()
+            .filter(|failing| failing.tenant == tenant)
+        {
+            if failing.succeed_first > 0 {
+                failing.succeed_first -= 1;
+            } else {
+                failing.attempts += 1;
+                return Err(GraphStoreError::Unavailable {
+                    reason: "a failure the test asked for".to_owned(),
+                });
+            }
+        }
+        let batch = usize::try_from(batch.get()).unwrap_or(usize::MAX);
+        let mut guard = self.tenants.lock().map_err(|_| poisoned())?;
+        let Tenants {
+            by_id,
+            offboardings,
+        } = &mut *guard;
+        let record = offboardings
+            .get_mut(&tenant)
+            .ok_or(GraphStoreError::NotFound)?;
+        if record.is_complete() {
+            return Ok(record.clone());
+        }
+        // One kind per step and at most `batch` rows of it, in the built-in
+        // store's order, so a test sees the deletion take the same steps on
+        // either store.
+        let removed = by_id.get_mut(&tenant).map(|data| {
+            if !data.edges.is_empty() {
+                let n = data.edges.len().min(batch);
+                data.edges.drain(..n);
+                counted(|counts| counts.edges = n as u64)
+            } else if !data.nodes.is_empty() {
+                let n = data.nodes.len().min(batch);
+                data.nodes.drain(..n);
+                counted(|counts| counts.nodes = n as u64)
+            } else if !data.types.is_empty() {
+                let gone: Vec<String> = data.types.keys().take(batch).cloned().collect();
+                for id in &gone {
+                    data.types.remove(id);
+                    data.index_kinds.remove(id);
+                }
+                counted(|counts| counts.types = gone.len() as u64)
+            } else if !data.scopes.is_empty() {
+                let gone: Vec<_> = data.scopes.keys().take(batch).cloned().collect();
+                for key in &gone {
+                    data.scopes.remove(key);
+                }
+                counted(|counts| counts.scopes = gone.len() as u64)
+            } else if !data.receipts.is_empty() {
+                let gone: Vec<_> = data.receipts.keys().take(batch).cloned().collect();
+                for key in &gone {
+                    data.receipts.remove(key);
+                }
+                counted(|counts| counts.receipts = gone.len() as u64)
+            } else if !data.namespaces.is_empty() {
+                let gone: Vec<_> = data.namespaces.keys().take(batch).cloned().collect();
+                for key in &gone {
+                    data.namespaces.remove(key);
+                }
+                counted(|counts| counts.namespaces = gone.len() as u64)
+            } else {
+                // The revision and the snapshots are left: the tenant's
+                // metadata, which goes with its entry below.
+                counted(|counts| counts.meta = 1)
+            }
+        });
+        if removed.is_some_and(|counts| counts.meta > 0) {
+            by_id.remove(&tenant);
+        }
+        match removed {
+            Some(counts) => record.removed.add(&counts),
+            None => record.completed_at = Some(OffsetDateTime::now_utc()),
+        }
+        record.failures = 0;
+        record.last_failure = None;
+        Ok(record.clone())
+    }
+
+    async fn record_offboarding_failure(
+        &self,
+        tenant: TenantId,
+        error: &GraphStoreError,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        self.offboards()?;
+        let mut tenants = self.tenants.lock().map_err(|_| poisoned())?;
+        let record = tenants
+            .offboardings
+            .get_mut(&tenant)
+            .ok_or(GraphStoreError::NotFound)?;
+        record.failures = record.failures.saturating_add(1);
+        record.last_failure = Some(OffboardingFailure {
+            class: error.class().to_owned(),
+            at: OffsetDateTime::now_utc(),
+        });
+        Ok(record.clone())
+    }
+
+    async fn pending_offboardings(&self) -> Result<Vec<TenantOffboarding>, GraphStoreError> {
+        self.offboards()?;
+        let tenants = self.tenants.lock().map_err(|_| poisoned())?;
+        let mut pending: Vec<TenantOffboarding> = tenants
+            .offboardings
+            .values()
+            .filter(|record| !record.is_complete())
+            .cloned()
+            .collect();
+        pending.sort_by_key(|record| record.fenced_at);
+        Ok(pending)
+    }
+}
+
+/// Counts with one kind set: `OffboardingCounts` is non-exhaustive.
+fn counted(set: impl FnOnce(&mut OffboardingCounts)) -> OffboardingCounts {
+    let mut counts = OffboardingCounts::default();
+    set(&mut counts);
+    counts
 }
 
 /// The rows a projection lists, in its order, and the revision it observed:
@@ -1486,7 +1980,7 @@ impl graph_storage_sdk::plugin_api::GraphEngineV1 for FakeGraphEngine {
         let tenants = self.store.tenants.lock().map_err(|_| {
             graph_storage_sdk::plugin_api::GraphEngineError::Internal("poisoned".into())
         })?;
-        let Some(tenant) = tenants.get(&ctx.tenant) else {
+        let Some(tenant) = tenants.by_id.get(&ctx.tenant) else {
             return Ok(graph_storage_sdk::plugin_api::ExpandResponse {
                 reached: Vec::new(),
                 degrees: Vec::new(),
@@ -1541,6 +2035,7 @@ impl graph_storage_sdk::plugin_api::GraphEngineV1 for FakeGraphEngine {
                 src: src.key.clone(),
                 dst: dst.key.clone(),
                 discriminator: edge.discriminator.clone(),
+                payload: None,
             });
         }
         reached.sort_unstable();
@@ -2585,7 +3080,9 @@ fn apply_edge(
             ItemOutcome::Updated
         }
         None => {
+            *state.next_id += 1;
             edges.push(FakeEdge {
+                id: *state.next_id,
                 key: edge_key,
                 type_id: spec.type_id.clone(),
                 src,
@@ -2656,9 +3153,10 @@ fn replace_scope(
     let owner = (replace.attribute.clone(), replace.value.clone());
     let dropped: Vec<i64> = nodes
         .iter()
+        // Tombstoned members included: a tombstone keeps its payload and
+        // vector, and a replacement is the scope's erasure (gears-rust #5194).
         .filter(|node| {
-            !node.deleted
-                && managed_node_types.contains(&node.type_id)
+            managed_node_types.contains(&node.type_id)
                 && !written.contains(node.key.as_str())
                 && node
                     .payload
@@ -2693,10 +3191,12 @@ fn replace_scope(
     // A tombstoned edge is a deleted conclusion and must not keep a departing
     // node alive on its behalf; left in place it would make the scope stop
     // converging, permanently. Purged with the node, as the built-in store
-    // purges it.
+    // purges it, and counted with the other removed edges: a row left.
+    let before = edges.len();
     edges.retain(|edge| {
         !(edge.deleted && (dropped.contains(&edge.src) || dropped.contains(&edge.dst)))
     });
+    tally.counts.scope_removed_edges += (before - edges.len()) as u64;
 
     let referenced: BTreeSet<i64> = edges.iter().flat_map(|edge| [edge.src, edge.dst]).collect();
     let before = nodes.len();
@@ -2952,6 +3452,16 @@ mod eval {
             }
         }
         Ordering::Equal
+    }
+}
+
+/// The refusal both stores give a live node under `only_tombstoned`.
+fn live_under_only_tombstoned(key: &str) -> GraphStoreError {
+    GraphStoreError::Conflict {
+        reason: format!(
+            "node `{key}` is live and the purge asked for a tombstoned one only; soft-delete \
+             it first, or purge without only_tombstoned"
+        ),
     }
 }
 

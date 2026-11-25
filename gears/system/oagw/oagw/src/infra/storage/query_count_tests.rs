@@ -17,10 +17,10 @@ use super::registry_row_db_repo::DbRegistryRowRepo;
 use super::route_db_repo::DbRouteRepo;
 use super::testing::recorded_sqlite;
 use super::upstream_db_repo::DbUpstreamRepo;
-use crate::domain::gts_helpers::{HTTP_PROTOCOL_ID, TIMEOUT_GUARD_PLUGIN_ID};
+use crate::domain::gts_helpers::{HTTP_PROTOCOL_ID, REQUIRED_HEADERS_GUARD_PLUGIN_ID};
 use crate::domain::model::{
     CreateUpstreamRequest, Endpoint, HttpMatch, HttpMethod, ListQuery, ManagedBy, MatchRules,
-    PathSuffixMode, PluginBinding, PluginsConfig, Route, Scheme, Server, SharingMode,
+    PathSuffixMode, PluginBinding, PluginsConfig, ProxyTarget, Route, Scheme, Server, SharingMode,
     UpdateUpstreamRequest, Upstream,
 };
 use crate::domain::repo::{
@@ -106,6 +106,7 @@ fn upstream(tenant_id: Uuid, alias: &str) -> Upstream {
         headers: None,
         plugins: Some(plugins()),
         rate_limit: None,
+        circuit_breaker: None,
         cors: None,
         tags: vec!["a".into(), "b".into()],
         managed_by: ManagedBy::Api,
@@ -116,8 +117,11 @@ fn plugins() -> PluginsConfig {
     PluginsConfig {
         sharing: SharingMode::Private,
         items: vec![PluginBinding {
-            plugin_ref: TIMEOUT_GUARD_PLUGIN_ID.into(),
-            config: HashMap::from([("timeout_ms".to_owned(), "500".to_owned())]),
+            plugin_ref: REQUIRED_HEADERS_GUARD_PLUGIN_ID.into(),
+            config: HashMap::from([(
+                "required_request_headers".to_owned(),
+                "x-request-id".to_owned(),
+            )]),
         }],
     }
 }
@@ -299,8 +303,18 @@ async fn service_resolution(tags: Tags) -> (usize, usize, Vec<String>, Vec<Strin
         .expect("security context");
     r.recorder.clear();
 
-    let (effective, route) = cp
-        .resolve_proxy_target(&ctx, "api", "POST", "/v1/chat", tags)
+    let ProxyTarget {
+        upstream: effective,
+        route,
+        ..
+    } = cp
+        .resolve_proxy_target(
+            &crate::domain::services::ProxyGrant::for_tests(ctx.clone()),
+            "api",
+            "POST",
+            "/v1/chat",
+            tags,
+        )
         .await
         .unwrap();
     let tag_reads = r
@@ -653,6 +667,7 @@ async fn create_and_update_upstream_selects(ancestors: usize) -> (usize, usize) 
         headers: None,
         plugins: None,
         rate_limit: None,
+        circuit_breaker: None,
         cors: None,
         tags: vec![],
         enabled: true,
@@ -694,6 +709,7 @@ async fn create_and_update_upstream_selects(ancestors: usize) -> (usize, usize) 
         headers: leaf.headers.clone(),
         plugins: leaf.plugins.clone(),
         rate_limit: leaf.rate_limit.clone(),
+        circuit_breaker: leaf.circuit_breaker.clone(),
         cors: leaf.cors.clone(),
         tags: vec!["updated".into()],
         enabled: leaf.enabled,

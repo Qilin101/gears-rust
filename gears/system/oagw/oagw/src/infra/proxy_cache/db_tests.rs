@@ -73,6 +73,7 @@ fn unchanged(upstream: &Upstream) -> UpdateUpstreamRequest {
         headers: upstream.headers.clone(),
         plugins: upstream.plugins.clone(),
         rate_limit: upstream.rate_limit.clone(),
+        circuit_breaker: upstream.circuit_breaker.clone(),
         cors: upstream.cors.clone(),
         tags: upstream.tags.clone(),
         enabled: upstream.enabled,
@@ -82,7 +83,7 @@ fn unchanged(upstream: &Upstream) -> UpdateUpstreamRequest {
 /// Auth that descendants inherit, which shares the upstream with them.
 fn shared_auth() -> Option<AuthConfig> {
     Some(AuthConfig {
-        plugin_type: "noop".into(),
+        plugin_type: crate::domain::gts_helpers::NOOP_AUTH_PLUGIN_ID.into(),
         sharing: SharingMode::Inherit,
         config: None,
     })
@@ -767,7 +768,7 @@ async fn a_write_on_one_replica_is_seen_on_another(hub: &ClientHub) {
             &Unattended,
             upstreams,
             &routes,
-            root,
+            Some(root),
         )
         .await
         .unwrap();
@@ -847,7 +848,7 @@ async fn a_reconcile_run_waits_for_the_change_log_once() {
         &Unattended,
         &upstreams,
         &routes,
-        root,
+        Some(root),
     )
     .await
     .unwrap();
@@ -1290,6 +1291,7 @@ impl Model {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             enabled: self.rng.random_bool(0.8),

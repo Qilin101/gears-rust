@@ -87,7 +87,7 @@ The gear follows the standard ToolKit gear anatomy: an SDK crate exposing a type
 | `p1` | `cpt-cf-graph-storage-fr-tenant-isolation` | Every entity is tenant-scoped through SecureORM; traversal recursion, search arms, and the analytics topology surface carry the tenant predicate |
 | `p1` | `cpt-cf-graph-storage-fr-access-control` | Shared PolicyEnforcer-backed application service for REST and ClientHub; PDP-checked permissions (ontology admin, ingest, query, delete, label attach/detach) declared as GTS instances; resource-level enforcement per the Authorization Model (induced authorized subgraph, arm-level scoping, anti-enumeration) |
 | `p1` | `cpt-cf-graph-storage-fr-source-ownership` | Source namespaces bound to producer principals in a tenant-scoped registry; `node.source_namespace` / `node.owner_principal` written once and compared on every upsert; transfer is an audited administrative flow (§ Authorization Model) |
-| `p2` | `cpt-cf-graph-storage-fr-tenant-offboarding` | Deletion generation from the control-plane ledger; fence, cancel, delete tenant-keyed state, acknowledge; unreconciled tenants quarantined and readiness withheld (§ Tenant Offboarding and Deletion Monotonicity) |
+| `p2` | `cpt-cf-graph-storage-fr-tenant-offboarding` | Deletion generation from the control-plane ledger; fence, cancel, delete tenant-keyed state, acknowledge; unreconciled tenants quarantined and readiness withheld (§ Tenant Offboarding and Deletion Monotonicity). Built without the ledger: a platform-confirmed fence, a background deletion and a permanent record |
 | `p1` | `cpt-cf-graph-storage-fr-snapshot-identity` | `(source_epoch, graph_revision)` is the snapshot identity in continuation tokens, cache keys, job identity and plugin cursors; epoch rotated before readiness after restore (§ Read Consistency Contract) |
 | `p1` | `cpt-cf-graph-storage-fr-audit-envelope` | Gear-assigned envelope (tenant, key, timestamps, tombstone, acting subject per verb) on every element read, read-only on write and described by the OpenAPI schema rather than by the registered GTS type (§ API element envelope) |
 | `p1` | `cpt-cf-graph-storage-fr-rest-api` | Versioned REST under `/api/graph-storage/v1` with OpenAPI schemas, RFC-9457 problems, documented limits |
@@ -219,7 +219,7 @@ The graph stores what queries need: names, indexed attributes, vectorizable text
 
 - [ ] `p1` - **ID**: `cpt-cf-graph-storage-principle-provenance-survives-resync`
 
-Re-importing source data is always safe: scope replacement removes only static content, and analysis-originated nodes and edges — identified by provenance — persist across it.
+Re-importing source data is always safe: scope replacement removes only static content, and live analysis-originated nodes and edges — identified by provenance — persist across it. A *tombstoned* analysis edge incident to a node the replacement removes goes with it: it is a conclusion someone already deleted, and left in place its row would keep the node from leaving and the scope from converging (§ Soft Delete Contract).
 
 #### Tenant-Scoped by Construction
 
@@ -1119,10 +1119,11 @@ The public surfaces are defined in the PRD as `cpt-cf-graph-storage-interface-re
 | `GET` | `/api/graph-storage/v1/nodes:count` | How many nodes the projection lists for the same `type_pattern` and `$filter`; exact up to `projection_count_max`, `capped` past it | p1 |
 | `DELETE` | `/api/graph-storage/v1/nodes/{node_key}` | Soft-delete a node and its incident edges | p1 |
 | `GET` | `/api/graph-storage/v1/edges/{edge_key}` | One edge with its payload and audit envelope | p1 |
+| `GET` | `/api/graph-storage/v1/nodes/{node_key}/edges` | A node's edges with payloads and envelopes, a page at a time: `direction`, `edge_type_pattern`, `discriminator` (both repeatable), `limit`, `cursor` -- plain query parameters, as on `/types` | p1 |
 | `DELETE` | `/api/graph-storage/v1/edges/{edge_key}` | Soft-delete one edge | p1 |
 | `POST` | `/api/graph-storage/v1/search` | Lexical, vector or hybrid search | p1 |
-| `POST` | `/api/graph-storage/v1/graph/traverse` | Seeded, depth-bounded traversal | p1 |
-| `POST` | `/api/graph-storage/v1/graph/neighborhood` | Bounded neighborhood projection | p1 |
+| `POST` | `/api/graph-storage/v1/graph/traverse` | Seeded, depth-bounded traversal; `include_edge_payload` returns each edge's payload on its reference | p1 |
+| `POST` | `/api/graph-storage/v1/graph/neighborhood` | Bounded neighborhood projection; `include_edge_payload` as on traversal | p1 |
 | `GET`/`POST` | `/api/graph-storage/v1/labels` | List / create tenant labels | p2 |
 | `PATCH`/`DELETE` | `/api/graph-storage/v1/labels/{label_id}` | Update / delete a label | p2 |
 | `POST`/`DELETE` | `/api/graph-storage/v1/nodes/{node_key}/labels` | Attach / detach labels on a node | p2 |
@@ -1159,7 +1160,30 @@ because each was answerable more than one way:
   A single combined budget would be the wrong instrument here — spent on the
   outgoing side it would hide the incoming one entirely, and the caller could
   not tell a node nothing references from a truncated answer. The startup size
-  invariant is sized for both sides accordingly.
+  invariant is sized for both sides accordingly. The adjacency has no cursor;
+  a hub's full edge set is the edge listing's (below).
+- **A node's edges are listed by keyset over the edge's storage id**
+  (`GET /nodes/{node_key}/edges`, `list_node_edges`). A page scans at most
+  `limit` incident edges past the cursor and returns those whose both
+  endpoints the caller may see -- the edge read's rule -- so a page can be
+  short or empty and still carry a cursor; only a null `next_cursor` ends the
+  listing. The cursor is `<source_epoch>.<id>.<fingerprint>`, the
+  fingerprint an FNV-1a of the node key, the direction and the sorted
+  patterns and discriminators as the caller sent them, and a cursor
+  presented with any of them changed is refused with `invalid_argument`. A
+  cursor from another epoch is refused with `failed_precondition` and reason
+  `STALE_CURSOR` (§ Read Consistency Contract): its id names a row on an
+  abandoned timeline. The revision is not bound, as the projection's is not
+  (below): each page reports the revision it observed. Binding the patterns rather than the
+  resolved type set means a type registered between pages does not void the
+  cursor; its edges appear on the pages still to come. Each side of the node
+  is one ordered statement over `(tenant_id, src_node_id | dst_node_id, id)`
+  partial on `deleted_at IS NULL` (migration m0013), merged by id for
+  `either`: an `OR` across the two columns cannot use either index for the
+  order, and on a stand table of 2 million edges the planner then walked the
+  primary key, 120 to 220 ms a page of a 10 000-edge hub, against 0.1 ms per
+  side with the index. The page size is `edge_list_max_page`, also the
+  default; the listing authorizes as a node read.
 - **Asking what an edit costs is its own operation.** `POST /types/compatibility`
   could have been a `dry_run` flag on `POST /types`, and was not, for two
   reasons: a dry run is a *read* and should not need the permission a write
@@ -1265,7 +1289,16 @@ would have broken no test — a requirement nothing can observe is a requirement
 nothing checks. Topology references stay what they are: `EdgeRef` in a
 traversal and `AdjacencyEntry` in a node read carry a key, a type, two
 endpoints and the discriminator, and the key is the one the edge read
-accepts. The discriminator is on the reference because the key is opaque: a
+accepts. The one addition is the payload, which `EdgeRef` carries when the
+walk was asked for it (`include_edge_payload`): a consumer that weighs or
+labels the edges it draws otherwise read every edge after the walk, one
+request each. The payloads are read after the walk and its endpoint
+filtering, in pieces the remaining `response_max_bytes` is guaranteed to hold
+at `item_max_bytes` apiece -- the pieces node hydration uses -- and charged to
+the same budget, so carrying them can cut the answer and report
+`response_bytes`. An edge whose payload no longer reads by then (tombstoned
+or hidden between the hop and the read) is left out. The envelope stays off
+the reference; an edge's envelope is the edge read's and the listing's. The discriminator is on the reference because the key is opaque: a
 consumer that stores several relations under one edge type (one verb, told
 apart by discriminator) otherwise learns which relation an edge is only by
 reading every edge.
@@ -1934,7 +1967,7 @@ Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by mi
 
 The gear creates no property graph: `m0002` is a no-op, and `m0010` drops `kb` from a database that an earlier release created on a PostgreSQL 19 beta.
 
-**Found while building the prototype: which tables the migrations create.** `gts_type`, `node`, `edge`, `source_namespace_owner`, `graph_meta`, `ingest_idempotency`, `scope_registry` and `embedding_space`. `chunk`, `label`, `label_assignment` and `ingest_audit` are specified below and not created: chunking, labels and the audit record are deferred (README § Known limitations).
+**Found while building the prototype: which tables the migrations create.** `gts_type`, `node`, `edge`, `source_namespace_owner`, `graph_meta`, `ingest_idempotency`, `scope_registry`, `embedding_space` and `tenant_offboarding`. `chunk`, `label`, `label_assignment` and `ingest_audit` are specified below and not created: chunking, labels and the audit record are deferred (README § Known limitations).
 
 `tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (graph-analytics ADR-0002); this gear reads it for annotation only.
 
@@ -2185,6 +2218,24 @@ reconciliation, never automatic re-execution.
 
 Replacement transactions lock this row exclusively. Ordinary ingests do not lock it at all — the platform's secure ORM exposes no row-locking surface, so the shared mode the Concurrent Ingest Protocol describes is not available to them — and what keeps a replacement from undoing a concurrent ordinary write is instead that its removals re-check scope membership in the removing statement (Concurrent Ingest Protocol, point 3).
 
+#### Table: tenant_offboarding
+
+**ID**: `cpt-cf-graph-storage-dbtable-tenant-offboarding`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| tenant_id | UUID | The offboarded tenant; **PK** |
+| deletion_generation | BIGINT | The generation the call carried, if any; recorded, not checked |
+| fenced_at | TIMESTAMPTZ | When the tenant was fenced |
+| completed_at | TIMESTAMPTZ | When its last row was removed; NULL while the deletion runs |
+| removed | JSONB | Rows removed so far, per kind; a kind this build does not know is kept as written, a value that is not a count is corruption |
+| failures | INTEGER | Failed steps in a row; reset by a step that runs |
+| last_failure / last_failure_at | TEXT / TIMESTAMPTZ | The error class of the last failed step, and when |
+
+Its presence fences the tenant (§ Tenant Offboarding and Deletion Monotonicity),
+so it is never deleted. A partial index on `fenced_at WHERE completed_at IS NULL`
+answers the worker's question, which deletions are still running.
+
 #### Table: ingest_audit
 
 **ID**: `cpt-cf-graph-storage-dbtable-ingest-audit`
@@ -2322,10 +2373,50 @@ its chunks, its labels and its provenance stay in place.
    and deleting the node takes its edges with it (rule 2). Held by
    `a_deleted_edge_is_revived_by_the_next_upsert` against both stores.
 
-Undelete and a retention job that hard-deletes past a configurable window are
-p2. They are separated deliberately: the tombstone is reversible and cheap,
-while purge has to decide cascade ordering, key reuse and index reconciliation,
-and none of those need to block v1.
+**Purge removes for good** (gears-rust #5194). `DELETE /nodes/{node_key}?mode=purge`,
+`GraphStorageClientV1::purge_node`, authorized as its own action `purge`, removes
+a node -- live or tombstoned -- and every edge incident to it in one transaction:
+the edges first, static, analysis, live and tombstoned alike, because the
+endpoint foreign keys are `ON DELETE RESTRICT` and an erasure outranks a
+conclusion drawn about what it erases; then the node. The edges are deleted in
+the node's own tenant, not under the caller's scope, which can name resources
+by id (a node's id is not its edges') or carry no tenant constraint at all. The key is free again,
+the revision advances once, and a key with no stored node is no change: the
+SDK answers `purged_nodes: 0` and REST answers `204` either way, so a retry after
+an unknown outcome is answered as the first call was -- **as long as the key is
+not written again in between**: a purge frees the key, and a retry finds
+whatever node holds it by then. Where keys are reused (a profile root keyed by
+subject, a mirror node keyed by its source identity), soft-delete first and
+purge with `only_tombstoned` (`PurgeOptions`, `?only_tombstoned=true`): a
+tombstoned key cannot be reused, and a live node under it is refused with
+`409`, so a late retry meets a conflict instead of erasing a new node. That
+still lets a retry erase a later node that was itself soft-deleted in
+between; `expected_created_at` (`?expected_created_at=`) closes it, binding
+the purge to the node created at that instant -- the envelope's
+`created_at`, set at insert and never changed -- and refusing any other node
+under the key with `409`, live or tombstoned. It compares timestamps at the
+store's precision, taken from the inserting process's clock, and is not a
+unique instance identity: two nodes under one key are separated by a purge,
+so they match only if a clock ran backwards between them by exactly their
+distance. An identity that cannot repeat, for delete and purge alike, is
+tracked in [#5944](https://github.com/constructorfabric/gears-rust/issues/5944).
+Random keys need neither. An edge another batch
+attaches between the two statements makes the node delete fail on the foreign
+key, a conflict the caller retries. Purge is the way to erase the tombstones
+deletes left: rule 4's key comes back with it, and rule 5's index entries go
+with the row. What the gear removes is the rows; dead tuples until `VACUUM`,
+WAL and backups follow the deployment's retention, so "gone from all storage
+within N days" is a deployment property, not this call's.
+
+**A scope replacement removes tombstoned members too.** A tombstone keeps its
+payload, search text and vector, and an empty replacement is the scope's
+erasure, so a member deleted before it is removed with the live ones -- the
+same rules apply, a live analysis edge still keeps its endpoint. Tombstoned edges
+removed with a departing node count in `scope_removed_edges` and move the
+revision like any other removal.
+
+Undelete and a retention job that purges tombstones past a configurable window
+remain p2; the job needs a window and a key-reuse policy of its own.
 
 ### Closed Enum Contract
 
@@ -2438,6 +2529,7 @@ Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, re
 | Ingest | graph node | write | edges authorize via both endpoints; chunks via parent node; scope replacement via owned scope; reference nodes additionally authorize against the source-namespace owner |
 | Node read | graph node | read | chunks, labels and adjacency via the node's scope; unauthorized key follows the anti-enumeration contract |
 | Delete | graph node (+ edge via endpoints) | delete | incident edges follow the node; a caller authorized for the node is authorized for the cascade |
+| Purge | graph node (+ edge via endpoints) | purge | as delete, and every incident edge goes, analysis edges included. `purge` does not imply `read`, as `delete` does not: an erasure identity need not see the content it erases. The answer discloses only whether a node was stored under the key and how many edges it had; a policy that wants erasers to hold `read` too grants the two together |
 | Labels (registry) | graph type | admin | none (tenant-level) — labels are deferred; the row is the intended binding |
 | Labels (attach / detach) | graph node, graph edge | label | authorized on the target object, not on the label; distinct from ingest write — deferred with labels; the `label` action and the edge resource are declared and unused |
 | Search | graph node | read | resource predicate inside all four arms before UNION/ranking/LIMIT; chunk rows authorize through their parent node; folding, counts, snippets, fusion inputs, pagination, and hydration re-apply the same scope |
@@ -2447,7 +2539,7 @@ A constraint that cannot be represented in SQL for the target entity fails close
 
 **GTS pattern resolution is shared, and never text matching.** Two pattern filters meet over the same type column on one request: the caller's type-family filter and the `resource_type` of the permission that authorized them, which may itself be a GTS wildcard pattern. Both resolve through `GtsIdPattern` — the platform's single definition of the semantics, including the implicit derived-type coverage a bare base identifier already carries — to a set of interned type ids, and the request's effective type set is the intersection of the two sets. No pattern is compiled into SQL text, so there is no `LIKE` escaping surface to get wrong and no second wildcard dialect to drift from the first (`guidelines/GTS.md` §5.1). Admission is the one deliberate exception and is enforced as such: a permission over a pattern must authorize registering a type that does not exist yet, so type registration and ingest match the pattern against the requested identifier directly rather than against the resolved set.
 
-**No path is exempt, and nothing is short-circuited by local state.** The decision for `(caller, ResourceType, action)` is resolved from the PDP on every request — `GET` as well as `POST`, the in-process ClientHub path as well as REST, and again when search or traversal rows are hydrated rather than only when the candidate set is produced. The caches the gear keeps hold schemas, effective traits and interned type ids; none of them holds an authorization decision, and a `(tenant, GTS type)` row already existing locally confers nothing on the caller who asks for it next.
+**No path is exempt, and nothing is short-circuited by local state.** The decision for `(caller, ResourceType, action)` is resolved from the PDP on every request — `GET` as well as `POST`, the in-process ClientHub path as well as REST, and again when search or traversal rows are hydrated rather than only when the candidate set is produced. The caches the gear keeps hold schemas, effective traits and interned type ids; none of them holds an authorization decision, and a `(tenant, GTS type)` row already existing locally confers nothing on the caller who asks for it next. The in-memory set of fenced tenants (§ Tenant Offboarding) is local state too, and it only refuses: it is consulted after the PDP decided and never admits what the PDP did not.
 
 **Decision caching.** The gear caches no PDP decision across requests in v1. One decision is resolved per request per `(ResourceType, action)` and reused across that request's own stages — search arms, folding, hydration — so the staleness window is a single request and a revoked grant stops applying on the caller's next call. Cross-request caching is postponed on a dependency, not on effort: a TTL alone buys throughput at the price of a window in which a revoked permission still works, and the platform PEP publishes no invalidation signal to close it. When it is introduced it requires a revocation epoch or decision version from the authorization side, keyed per principal, and its window becomes part of this contract rather than an implementation detail.
 
@@ -2564,7 +2656,7 @@ output-affecting semantics can never serve an old result under new semantics.
 
 ### Tenant Offboarding and Deletion Monotonicity
 
-**Status, found while building the prototype: not built.** No deletion generation is accepted or fenced; readiness reports `TENANT_RECONCILIATION` as `NotImplemented`, and the protocol below is the target (`fr-tenant-offboarding`).
+**Status: built without the ledger.** The fence, the deletion and the record of it are built; the deletion generation is recorded and not checked, and reconciliation after a restore is not built, so readiness still reports `TENANT_RECONCILIATION` as `NotImplemented`. The protocol below is the target (`fr-tenant-offboarding`); [What this build does](#what-this-build-does-without-the-ledger) says step by step how far the build goes.
 
 Every byte this gear owns lives inside its PostgreSQL database, which makes
 deletion the one operation a restore can undo. Offboard a tenant at epoch `E2`,
@@ -2613,6 +2705,151 @@ The ledger itself is a platform dependency (PRD § 10), not something this gear
 defines; what the gear owns is accepting a generation, fencing, deleting,
 acknowledging, and refusing to become ready while a generation is unsatisfied.
 
+#### What this build does, without the ledger
+
+**Who may start it, and what has to be true first.** `POST
+/graph-storage/v1/tenants/{tenant_id}/offboarding`, or
+`GraphStorageClientV1::offboard_tenant`. It needs its own permission,
+`tenant_offboard` on the resource `gts.cf.core.graph.tenant.v1~`, which no
+other permission implies, and the grant must name the tenant: the PDP is asked
+about it as a named tenant in `RootOnly` mode (§ Authorization Model). A refusal
+is `not_found`, as for any named tenant. The permission alone does not start a
+deletion that cannot be undone. Until the ledger exists, the gear asks the
+platform's tenant resolver and goes on only for a tenant whose status is
+`Deleted`. A live tenant is refused with `failed_precondition` /
+`TENANT_NOT_DELETED`; one the resolver does not know -- never created, removed
+for good, or not visible to the caller, which the resolver does not tell apart
+-- with `failed_precondition` / `TENANT_UNKNOWN`, since waiting will not change
+it. The question is bounded by what is left of the request's deadline; a
+deployment with no resolver, or one that is down, refuses with `unavailable`.
+The resolver returns a deleted tenant until account management removes it for
+good, and a named-tenant grant still resolves for it in that window. A tenant
+already fenced answers its record without asking again. A tenant removed for
+good before anyone offboarded it here has no path yet: its graph needs an
+operator.
+
+**Which stores.** A store declares offboarding in its capabilities, and one
+that does implements every offboarding method; the gear refuses to fence on a
+store that does not (`unimplemented`), since it could neither keep the fence nor
+delete the rows, and asks such a store nothing about fences. The trait's
+defaults refuse with `Unsupported`, so a store that declares the capability and
+misses a method fails loudly instead of answering that nobody is fenced. The
+conformance suite holds every store to the read path's listings as well as to
+the deletion. A client scoped to one tenant refuses to offboard another.
+
+**Step 1, in part.** The call takes an optional `deletion_generation`, which
+must be positive (a type that cannot hold anything else), and records it. Nothing checks it: there is no ledger to check
+it against. The first call's value stands.
+
+**Step 2, the fence.** A row in `tenant_offboarding` fences its tenant. Every
+operation for it answers `failed_precondition` / `TENANT_FENCED` once the policy
+has decided, so a caller the policy refuses learns nothing about the tenant.
+
+The request path does not ask the store. A fence is permanent and only ever
+added, so each replica holds the set of fenced tenants in memory, and the
+gear's background task reads it again from the store every ten seconds, with a
+timeout; a fence made on a replica is in its own set at once. A fence made on
+another replica is therefore honoured on the read path about ten seconds after
+it committed; a write is refused at its commit whatever the set holds (below).
+A failed background read keeps the last set, and is logged at `error` once it
+keeps failing. A set not read successfully for thirty seconds -- the store
+keeps failing, or no background read has run yet -- is not trusted: a request
+reads it itself, with the same timeout, and is refused when that fails, so a
+stale set never serves for long. A store that does not offboard runs neither
+the background read nor the worker.
+
+A read without a named tenant keeps the policy's scope, a parent's subtree
+included, so it could reach a child being offboarded. When that scope reaches
+beyond the caller's own tenant, it loses the fenced tenants before the store
+serves the read. The hierarchy policy lists a subtree's tenants, so it is
+narrowed exactly. A scope that cannot be narrowed in memory -- unconstrained,
+a subtree resolved in the database, a tenant value that is no UUID -- is
+checked against the store under that scope, and refused as `TENANT_FENCED`
+while it reaches a deletion under way (the policy enforcer refuses such scopes
+before they reach the gear today, so this is a fallback). A write that is
+already running when the fence lands must not commit either, or it would
+recreate rows behind the deleter. The tenant's revision row is the one
+every write already updates when it changes state, so every write transaction
+ends by taking that row and then reading the fence, and the fence takes the same
+row before it writes itself. Whichever comes first, nothing commits for the
+tenant after its fence:
+
+- The write takes the row first. The fence waits, the write sees no fence and
+  commits, and its rows are there for the deletion, which starts only after the
+  fence committed.
+- The fence takes the row first. The write waits, then reads the committed fence
+  (a new statement under read committed, so a new snapshot) and rolls back.
+
+A write whose own revision bump took the row already -- an ingest that changed
+state, a soft delete, a purge -- only reads the fence again; any other write
+takes the row first. A write that fails for a tenant fenced since it started,
+on a type the deletion already removed, say, answers `TENANT_FENCED` rather
+than what it tripped over. Every write transaction -- ingest, soft delete,
+purge, type registration, namespace transfer -- runs inside one wrapper that
+does this. One that wrote nothing, such as a replayed ingest, does not take
+the row but still reads the fence, so a replica whose set is stale does not
+answer it as a success.
+
+The fence itself first reads whether the tenant is fenced already and answers
+that record without taking the row: a deletion step holds the record's row
+while it removes `graph_meta`, the revision row among it, so a second fence
+must not take the two in the opposite order. A tenant not fenced yet has no
+step running; the fence takes the row, reads again in case another fence
+committed meanwhile, and only then writes. The PostgreSQL conformance lane holds the row open and runs both
+orders for ingest, soft delete, purge, type registration and namespace
+transfer, races two first fences, and asks for the fence again while the
+deletion runs.
+
+**Step 3, not as written.** Nothing is cancelled: a write still running when the
+fence lands is refused at its commit instead (step 2), which has the same effect
+on the data. This build has no index builds, backfills, re-embedding or analytics
+jobs to cancel.
+
+**Step 4.** A worker in every replica (the gear's lifecycle task) removes the
+rows of each fenced tenant whose deletion has not finished, in batches of `offboarding_batch` rows (default 1 000) per transaction, with a
+pass every `offboarding_interval_secs` (default 10). It works one kind of row
+per transaction, in an order the foreign keys admit: edges (their endpoints are
+`ON DELETE RESTRICT`), nodes, types, scope registry, idempotency receipts,
+source-namespace ownership, then `graph_meta`. Tombstones and nodes still held
+by analysis edges go too: an erasure outranks a conclusion. `embedding_space`
+holds only nil-tenant rows, and the nil tenant cannot be offboarded. `chunk`,
+`label`, `label_assignment` and `ingest_audit` are not in the schema (§ 3.7).
+Each step takes the record's row first, so two replicas working on one tenant
+run one after the other, and a restart picks the work up again from the store.
+Each step is bounded by `offboarding_step_timeout_secs` (default 60) and stops
+at shutdown, and a tenant gets at most a thousand steps per pass before the
+worker moves on, so one large or stuck tenant does not hold up the others. A
+failed step is noted on the record (a failure count and the error's class,
+never its message); the tenant then waits the interval doubled per failure, up
+to an hour, before it is tried again, and its failures log at `error` from the
+fifth on. The note is bounded by the step timeout and stops at shutdown, as a
+timed-out step may still hold the record's row. The worker also remembers the
+failures it saw itself, so the backoff and the escalation hold when the
+database is too sick to take the note. A
+record that does not decode is logged at `error` and skipped, never allowed to
+stop the other tenants' deletions. Each pass starts at a random pending tenant
+and passes are spread by up to a tenth of the interval, so replicas drift
+apart; a pass with anything pending logs a summary at `info`. The worker
+acts for no caller, so its statements run under scopes it builds for the tenant
+rather than one a policy returned; so does the background read of the fenced
+tenants, across tenants. Giving both the gear's own service identity is open.
+
+**Step 5, read rather than pushed.** There is no lifecycle owner to notify. The
+record's `completed_at` is the acknowledgement, with the rows removed per kind,
+and the caller reads it with `GET` on the same path. A non-zero `failures` on it
+tells a stuck deletion from a running one. Construct's retention job,
+the first caller, asks until it reports `completed`.
+
+**Step 6, not built.** Without the ledger, restoring a backup taken before the
+offboarding brings the tenant back, record and all, and nothing notices. That is
+the gap the ledger closes, and why readiness keeps `TENANT_RECONCILIATION` as
+`NotImplemented`.
+
+**What stays.** The record (`tenant_offboarding`): the tenant's id, the
+generation, when it was fenced, when the deletion finished, and the counts. None
+of the tenant's content. It is what keeps the tenant fenced after its rows are
+gone, so a late write cannot recreate it, and what a repeated call answers.
+
 ### Error Model
 
 One authoritative chain classifies every failure: `DomainError -> CanonicalError -> REST Problem` and the same `CanonicalError` on the SDK path. REST and ClientHub never classify the same failure differently; the mapping lives in the domain layer, and adapters only render it.
@@ -2637,6 +2874,8 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 | Filter on an attribute whose index is not `active` | `failed_precondition` | `INDEX_NOT_ACTIVE` | Drop the filter or wait for the build; never retry unchanged in a loop |
 | Write under a source namespace owned by another producer | `permission_denied` | `SOURCE_NAMESPACE_FORBIDDEN` | Never retry; request ownership transfer |
 | Tenant fenced by offboarding or pending deletion reconciliation | `failed_precondition` | `TENANT_FENCED` | Never retry; the tenant is being removed |
+| Offboarding asked for a tenant the platform has not marked deleted | `failed_precondition` | `TENANT_NOT_DELETED` | Never retry unchanged; the platform deletes the tenant first |
+| Offboarding asked for a tenant the platform does not know | `failed_precondition` | `TENANT_UNKNOWN` | Never retry; a tenant removed for good needs an operator |
 | Unauthorized or unknown resource | `not_found` | `NOT_FOUND` | Indistinguishable by contract (anti-enumeration) |
 | Durable corruption detected | `data_loss` | `PROJECTION_CORRUPT`, `STORE_CORRUPT` | Operator action; never retry |
 | Unexpected internal failure | `unknown` | `INTERNAL` | Retry once, then escalate |
@@ -2653,10 +2892,10 @@ receives; the reasons listed for them above (`NOT_FOUND`,
 `CAPABILITY_UNSUPPORTED`, `DEADLINE`, `CANCELLED`, `DEPENDENCY_UNAVAILABLE`,
 `STORE_CORRUPT`, `INTERNAL`) name the meaning and are not a field to match on
 until the platform grows one. Separately, `QUEUE_FULL`, `MEMORY_POOL_BUSY`,
-`TENANT_CONCURRENCY`, `INDEX_NOT_ACTIVE`, `TENANT_FENCED`, `PROJECTION_CORRUPT`
-and `PROJECTION_STALE` belong to features this iteration defers (the admission
-layer, the index-activation lifecycle, tenant offboarding, analytics
-projections) and are produced by nothing yet. One reason reaches callers from
+`TENANT_CONCURRENCY`, `INDEX_NOT_ACTIVE`, `PROJECTION_CORRUPT` and
+`PROJECTION_STALE` belong to features this iteration defers (the admission
+layer, the index-activation lifecycle, analytics projections) and are produced
+by nothing yet. One reason reaches callers from
 the platform rather than this vocabulary: a malformed continuation token on the
 projection answers `invalid_argument` / `INVALID_CURSOR` from the OData
 extractor.
@@ -2887,6 +3126,7 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Traversal edges scanned | `traversal_max_edges_scanned` | 100,000 | 1 – 10,000,000 | Engine, **per hop** (see below) |
 | Search arm limit | `search_max_arm_limit` | 50 | 1 – 500 | Admission |
 | Projection page size | `projection_max_page` | 200 | 1 – 1,000 | Admission |
+| Edge listing page size, and its default | `edge_list_max_page` | 200 | 1 – 1,000 | Admission; sized against `response_max_bytes` at startup as the projection page is |
 | Rows a listing count counts exactly | `projection_count_max` | 10,000 | 1 – 1,000,000 | Store; past it the count is the ceiling with `capped` |
 | Interactive statement deadline | `deadline_interactive` | 10 s | 1 – 60 s | DB `statement_timeout` + cancellation token |
 | Per-tenant concurrent ingest batches | `tenant_max_ingest` | 4 | 1 – 64 | Admission |
@@ -2925,7 +3165,7 @@ Every rejection carries the limit name, the configured bound, and the requested 
 `ingest_max_nodes`, `ingest_max_edges`, `payload_max_bytes`, `item_max_bytes`,
 `node_read_max_adjacency`, `traversal_max_depth`, `traversal_max_nodes`,
 `traversal_max_frontier`, `traversal_max_edges_scanned`, `search_max_arm_limit`,
-`projection_max_page` and the interactive deadline are configuration keys with
+`projection_max_page`, `edge_list_max_page` and the interactive deadline are configuration keys with
 the defaults above; four hard ranges differ from the table, deliberately —
 `traversal_max_frontier` admits 1 (a test needs a frontier of one),
 `traversal_max_edges_scanned` runs to 10,000,000, `deadline_interactive_secs`
@@ -3045,8 +3285,8 @@ which is not part of the ontology) to the `toolkit-gts` inventory
 (`graph_storage_sdk::gts`), as the other gears publish their type schemas: the
 ontology is the public contract producers derive from, and a process that links
 only the SDK publishes it too. The gear submits its permission instances (one
-`AuthzPermissionV1` per resource and action the PEP checks: node read, write
-and delete; type read and admin; `src/gts.rs`). Every permission's resource
+`AuthzPermissionV1` per resource and action the PEP checks: node read, write,
+delete and purge; type read and admin; tenant offboard; `src/gts.rs`). Every permission's resource
 type is therefore in the registry, which the policy-engine requires of a policy
 naming it without a wildcard. types-registry seeds the inventory at its own startup,
 so producers can derive types and administrators can grant permissions before

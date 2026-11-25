@@ -44,21 +44,36 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+impl Scheme {
+    /// The port an endpoint of this scheme uses when none is given:
+    /// 80 for `http`, 443 for the TLS schemes.
+    #[must_use]
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https | Self::Wss | Self::Wt | Self::Grpc => 443,
+        }
+    }
+}
+
 impl Endpoint {
     /// Generate the alias contribution for this endpoint.
-    /// Standard ports (80, 443) are omitted; non-standard ports are appended as `:port`.
+    /// The scheme's default port is omitted; any other port is appended as
+    /// `:port` (`https` on 80 keeps it).
     #[must_use]
     pub fn alias_contribution(&self) -> String {
-        if is_standard_port(self.port) {
+        if self.is_standard_port() {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
         }
     }
-}
 
-fn is_standard_port(port: u16) -> bool {
-    port == 80 || port == 443
+    /// Whether the port is the default for the scheme.
+    #[must_use]
+    pub fn is_standard_port(&self) -> bool {
+        self.port == self.scheme.default_port()
+    }
 }
 
 /// Container for upstream server endpoints.
@@ -210,6 +225,50 @@ pub enum RateLimitStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// CircuitBreakerConfig
+// ---------------------------------------------------------------------------
+
+/// Circuit breaker of an upstream. Each OAGW replica keeps its own breaker
+/// state; nothing is shared between replicas. [`Default`] gives the
+/// ADR-0005 defaults, which the REST API and types-registry provisioning
+/// apply to omitted fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    pub sharing: SharingMode,
+    /// `false` keeps the configuration but sends every request through.
+    pub enabled: bool,
+    /// Consecutive failures that open the circuit. 1 to 1000.
+    pub failure_threshold: u32,
+    /// Seconds the circuit stays open before probes go through. 1 to 86400
+    /// (a day).
+    pub timeout_seconds: u32,
+    /// Probes that must all succeed to close the circuit again; also how many
+    /// run at once. 1 to 100.
+    pub success_threshold: u32,
+}
+
+impl CircuitBreakerConfig {
+    /// Default [`failure_threshold`](Self::failure_threshold).
+    pub const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
+    /// Default [`timeout_seconds`](Self::timeout_seconds).
+    pub const DEFAULT_TIMEOUT_SECONDS: u32 = 30;
+    /// Default [`success_threshold`](Self::success_threshold).
+    pub const DEFAULT_SUCCESS_THRESHOLD: u32 = 3;
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            sharing: SharingMode::Private,
+            enabled: true,
+            failure_threshold: Self::DEFAULT_FAILURE_THRESHOLD,
+            timeout_seconds: Self::DEFAULT_TIMEOUT_SECONDS,
+            success_threshold: Self::DEFAULT_SUCCESS_THRESHOLD,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PluginBinding / PluginsConfig
 // ---------------------------------------------------------------------------
 
@@ -336,6 +395,7 @@ pub struct Upstream {
     pub headers: Option<HeadersConfig>,
     pub plugins: Option<PluginsConfig>,
     pub rate_limit: Option<RateLimitConfig>,
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     pub cors: Option<CorsConfig>,
     pub tags: Vec<String>,
 }
@@ -373,6 +433,7 @@ pub struct CreateUpstreamRequest {
     headers: Option<HeadersConfig>,
     plugins: Option<PluginsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    circuit_breaker: Option<CircuitBreakerConfig>,
     cors: Option<CorsConfig>,
     tags: Vec<String>,
     enabled: bool,
@@ -389,6 +450,7 @@ impl CreateUpstreamRequest {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             enabled: true,
@@ -416,6 +478,9 @@ impl CreateUpstreamRequest {
     pub fn rate_limit(&self) -> Option<&RateLimitConfig> {
         self.rate_limit.as_ref()
     }
+    pub fn circuit_breaker(&self) -> Option<&CircuitBreakerConfig> {
+        self.circuit_breaker.as_ref()
+    }
     pub fn cors(&self) -> Option<&CorsConfig> {
         self.cors.as_ref()
     }
@@ -435,6 +500,7 @@ pub struct CreateUpstreamRequestBuilder {
     headers: Option<HeadersConfig>,
     plugins: Option<PluginsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    circuit_breaker: Option<CircuitBreakerConfig>,
     cors: Option<CorsConfig>,
     tags: Vec<String>,
     enabled: bool,
@@ -461,6 +527,10 @@ impl CreateUpstreamRequestBuilder {
         self.rate_limit = Some(rate_limit);
         self
     }
+    pub fn circuit_breaker(mut self, circuit_breaker: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = Some(circuit_breaker);
+        self
+    }
     pub fn cors(mut self, cors: CorsConfig) -> Self {
         self.cors = Some(cors);
         self
@@ -482,6 +552,7 @@ impl CreateUpstreamRequestBuilder {
             headers: self.headers,
             plugins: self.plugins,
             rate_limit: self.rate_limit,
+            circuit_breaker: self.circuit_breaker,
             cors: self.cors,
             tags: self.tags,
             enabled: self.enabled,
@@ -500,6 +571,7 @@ pub struct UpdateUpstreamRequest {
     headers: Option<HeadersConfig>,
     plugins: Option<PluginsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    circuit_breaker: Option<CircuitBreakerConfig>,
     cors: Option<CorsConfig>,
     tags: Vec<String>,
     enabled: bool,
@@ -516,6 +588,7 @@ impl UpdateUpstreamRequest {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             enabled: true,
@@ -543,6 +616,9 @@ impl UpdateUpstreamRequest {
     pub fn rate_limit(&self) -> Option<&RateLimitConfig> {
         self.rate_limit.as_ref()
     }
+    pub fn circuit_breaker(&self) -> Option<&CircuitBreakerConfig> {
+        self.circuit_breaker.as_ref()
+    }
     pub fn cors(&self) -> Option<&CorsConfig> {
         self.cors.as_ref()
     }
@@ -562,6 +638,7 @@ pub struct UpdateUpstreamRequestBuilder {
     headers: Option<HeadersConfig>,
     plugins: Option<PluginsConfig>,
     rate_limit: Option<RateLimitConfig>,
+    circuit_breaker: Option<CircuitBreakerConfig>,
     cors: Option<CorsConfig>,
     tags: Vec<String>,
     enabled: bool,
@@ -588,6 +665,10 @@ impl UpdateUpstreamRequestBuilder {
         self.rate_limit = Some(rate_limit);
         self
     }
+    pub fn circuit_breaker(mut self, circuit_breaker: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = Some(circuit_breaker);
+        self
+    }
     pub fn cors(mut self, cors: CorsConfig) -> Self {
         self.cors = Some(cors);
         self
@@ -609,6 +690,7 @@ impl UpdateUpstreamRequestBuilder {
             headers: self.headers,
             plugins: self.plugins,
             rate_limit: self.rate_limit,
+            circuit_breaker: self.circuit_breaker,
             cors: self.cors,
             tags: self.tags,
             enabled: self.enabled,
@@ -830,6 +912,21 @@ impl UpdateRouteRequestBuilder {
 mod tests {
     use super::*;
 
+    /// ADR-0005 defaults.
+    #[test]
+    fn circuit_breaker_defaults() {
+        assert_eq!(
+            CircuitBreakerConfig::default(),
+            CircuitBreakerConfig {
+                sharing: SharingMode::Private,
+                enabled: true,
+                failure_threshold: 5,
+                timeout_seconds: 30,
+                success_threshold: 3,
+            }
+        );
+    }
+
     #[test]
     fn alias_standard_port_omitted() {
         let ep = Endpoint {
@@ -841,13 +938,38 @@ mod tests {
     }
 
     #[test]
-    fn alias_port_80_omitted() {
+    fn alias_http_port_80_omitted() {
         let ep = Endpoint {
-            scheme: Scheme::Https,
+            scheme: Scheme::Http,
             host: "example.com".into(),
             port: 80,
         };
         assert_eq!(ep.alias_contribution(), "example.com");
+    }
+
+    /// Only the scheme's own default port is dropped (#4979).
+    #[test]
+    fn alias_keeps_the_other_schemes_default_port() {
+        let https_80 = Endpoint {
+            scheme: Scheme::Https,
+            host: "example.com".into(),
+            port: 80,
+        };
+        assert_eq!(https_80.alias_contribution(), "example.com:80");
+        let http_443 = Endpoint {
+            scheme: Scheme::Http,
+            host: "example.com".into(),
+            port: 443,
+        };
+        assert_eq!(http_443.alias_contribution(), "example.com:443");
+    }
+
+    #[test]
+    fn default_port_per_scheme() {
+        assert_eq!(Scheme::Http.default_port(), 80);
+        for scheme in [Scheme::Https, Scheme::Wss, Scheme::Wt, Scheme::Grpc] {
+            assert_eq!(scheme.default_port(), 443, "{scheme:?}");
+        }
     }
 
     #[test]

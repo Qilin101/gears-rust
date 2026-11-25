@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
+use crate::domain::plugin::credentials::{CREDENTIAL_KEYS, CredentialRef};
+
 // ---------------------------------------------------------------------------
 // Shared enums
 // ---------------------------------------------------------------------------
@@ -41,6 +43,18 @@ pub enum Scheme {
     Grpc,
 }
 
+impl Scheme {
+    /// The port an endpoint of this scheme uses when none is given:
+    /// 80 for `http`, 443 for the TLS schemes.
+    #[must_use]
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https | Self::Wss | Self::Wt | Self::Grpc => 443,
+        }
+    }
+}
+
 /// A single upstream endpoint (scheme + host + port).
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +75,7 @@ impl Endpoint {
     /// - HTTPS / WSS / WT / gRPC: 443
     #[must_use]
     pub fn is_standard_port(&self) -> bool {
-        match self.scheme {
-            Scheme::Http => self.port == 80,
-            Scheme::Https | Scheme::Wss | Scheme::Wt | Scheme::Grpc => self.port == 443,
-        }
+        self.port == self.scheme.default_port()
     }
 
     /// The normalized host: brackets stripped (IPv6), lowercased, trailing dots stripped.
@@ -118,6 +129,22 @@ pub struct AuthConfig {
     pub sharing: SharingMode,
     /// Plugin-specific configuration (flat key-value pairs; schema varies by plugin).
     pub config: Option<HashMap<String, String>>,
+}
+
+impl AuthConfig {
+    /// The credential references this config holds: the value of every
+    /// [`CREDENTIAL_KEYS`] key present, in that order, whatever the plugin.
+    /// Other keys are not references and are not resolved.
+    pub fn credential_refs(&self) -> impl Iterator<Item = CredentialRef<'_>> {
+        let config = self.config.as_ref();
+        CREDENTIAL_KEYS.iter().filter_map(move |key| {
+            let value = config?.get(key.key)?;
+            Some(CredentialRef {
+                field: key.field,
+                value,
+            })
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,10 +228,50 @@ pub struct RateLimitConfig {
     pub cost: u32,
     /// Whether to emit `X-RateLimit-*` response headers.
     pub response_headers: bool,
-    /// Upstream ID of the shared-pool owner. Populated during hierarchical merge
-    /// when `budget.mode == Shared` — causes all children to share one token
-    /// bucket keyed to the pool owner. Not user-facing (never serialized).
-    pub pool_owner_id: Option<Uuid>,
+    /// The shared budget this limit draws on, set by the hierarchical merge
+    /// when an upstream in the chain has `budget.mode == Shared`. Not
+    /// user-facing (never serialized).
+    pub shared_pool: Option<SharedPool>,
+    /// Whose limit this is: the upstream whose level set the effective
+    /// config. Set by the hierarchical merge and never stored; the proxy adds
+    /// it to the upstream bucket key when it is not the selected upstream, so
+    /// tenants resolving different limits on one upstream get separate
+    /// buckets.
+    pub limit_owner_id: Option<Uuid>,
+}
+
+/// A `budget.mode = shared` pool: every tenant whose limit is merged from the
+/// owner draws on one bucket of `total` requests per `window`, next to its
+/// own scoped bucket.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedPool {
+    /// Upstream that defines the budget.
+    pub owner_id: Uuid,
+    /// `budget.total` of the owner.
+    pub total: u32,
+    /// The owner's `sustained.window`.
+    pub window: Window,
+    /// The owner's algorithm.
+    pub algorithm: RateLimitAlgorithm,
+}
+
+impl SharedPool {
+    /// The pool `rate_limit` defines, owned by `owner_id`, if its budget is
+    /// shared.
+    #[must_use]
+    pub fn defined_by(owner_id: Uuid, rate_limit: &RateLimitConfig) -> Option<Self> {
+        let budget = rate_limit.budget.as_ref()?;
+        if budget.mode != BudgetMode::Shared {
+            return None;
+        }
+        Some(Self {
+            owner_id,
+            total: budget.total?,
+            window: rate_limit.sustained.window,
+            algorithm: rate_limit.algorithm,
+        })
+    }
 }
 
 /// Algorithm used to enforce a rate limit.
@@ -304,6 +371,41 @@ pub enum RateLimitStrategy {
     Queue,
     /// Let excess requests through in a degraded mode.
     Degrade,
+}
+
+// ---------------------------------------------------------------------------
+// CircuitBreakerConfig
+// ---------------------------------------------------------------------------
+
+/// Circuit breaker of an upstream (`cpt-cf-oagw-adr-circuit-breaker`). Each
+/// replica keeps its own breaker state.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    /// How the configuration is shared with descendant tenants.
+    pub sharing: SharingMode,
+    /// Whether requests go through the breaker.
+    pub enabled: bool,
+    /// Consecutive failures that open the circuit.
+    pub failure_threshold: u32,
+    /// Seconds the circuit stays open before probes go through.
+    pub timeout_seconds: u32,
+    /// Probes let through at once after the timeout; all must succeed to
+    /// close the circuit.
+    pub success_threshold: u32,
+    /// The upstream whose level set the effective config. Set by the
+    /// hierarchical merge and never stored; tenants that resolve different
+    /// configs on one upstream get separate breakers.
+    pub owner_id: Option<Uuid>,
+}
+
+impl CircuitBreakerConfig {
+    /// Largest `failure_threshold`.
+    pub const MAX_FAILURE_THRESHOLD: u32 = 1_000;
+    /// Largest `success_threshold`, which is also the number of concurrent
+    /// half-open probes. `timeout_seconds` is capped by
+    /// [`MAX_PROXY_TIMEOUT_SECS`](crate::config::MAX_PROXY_TIMEOUT_SECS).
+    pub const MAX_SUCCESS_THRESHOLD: u32 = 100;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,12 +607,56 @@ pub struct Upstream {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.
     pub tags: Vec<String>,
     /// Who owns the upstream (API or types registry).
     pub managed_by: ManagedBy,
+}
+
+/// What the proxy resolves a request to.
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct ProxyTarget {
+    /// The effective upstream: the tenant merge, with the route's and the
+    /// shadowed routes' plugins, CORS and tags. Its rate limit is the
+    /// upstreams' only.
+    pub upstream: Upstream,
+    /// The matched route. Its rate limit is checked on its own bucket.
+    pub route: Route,
+    /// The enforced rate limits of the ancestor routes `route` shadows,
+    /// root-first (`inst-merge-2a`).
+    pub shadowed_route_limits: Vec<ShadowedRouteLimit>,
+    /// The caller's tenant chain, `[self, parent, ..., root]`, for the
+    /// per-request secret owner-chain guard (ADR-0022).
+    pub tenant_chain: Vec<Uuid>,
+    /// The tenant of the upstream whose auth config is in effect after the
+    /// hierarchical merge (`inst-merge-3a0`).
+    pub auth_owner_tenant_id: Uuid,
+}
+
+#[cfg(test)]
+impl ProxyTarget {
+    /// The upstream and route, for tests that need only those.
+    pub fn into_parts(self) -> (Upstream, Route) {
+        (self.upstream, self.route)
+    }
+}
+
+/// The enforced rate limit of an ancestor's route that a descendant's route
+/// shadows: on each upstream above the matched route's, the route its owner
+/// would select for the request. The proxy checks it on that route's own
+/// bucket, as if it had matched, so it does not change the upstream bucket.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowedRouteLimit {
+    /// The shadowed route.
+    pub route_id: Uuid,
+    /// Its rate limit, `sharing: enforce`.
+    pub rate_limit: RateLimitConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +705,8 @@ pub struct CreateUpstreamRequest {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.
@@ -585,6 +733,8 @@ pub struct UpdateUpstreamRequest {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.

@@ -29,13 +29,14 @@ PROXY_SCHEMA = "gts.cf.core.oagw.proxy.v1~"
 HTTP_PROTOCOL_ID = "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1"
 GRPC_PROTOCOL_ID = "gts.cf.core.oagw.protocol.v1~cf.core.oagw.grpc.v1"
 
-# Auth plugin instances (6)
+# Auth plugin instances (7)
 NOOP_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.noop.v1"
 APIKEY_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1"
 BASIC_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.basic.v1"
 BEARER_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.bearer.v1"
 OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred.v1"
 OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_basic.v1"
+AWS_SIGV4_AUTH_PLUGIN_ID = "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.aws_sigv4.v1"
 
 # Guard plugin instances (3)
 TIMEOUT_GUARD_PLUGIN_ID = "gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1"
@@ -58,7 +59,7 @@ OAGW_INSTANCES = [
     HTTP_PROTOCOL_ID, GRPC_PROTOCOL_ID,
     NOOP_AUTH_PLUGIN_ID, APIKEY_AUTH_PLUGIN_ID, BASIC_AUTH_PLUGIN_ID,
     BEARER_AUTH_PLUGIN_ID, OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
-    OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID,
+    OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID, AWS_SIGV4_AUTH_PLUGIN_ID,
     TIMEOUT_GUARD_PLUGIN_ID, CORS_GUARD_PLUGIN_ID, REQUIRED_HEADERS_GUARD_PLUGIN_ID,
     LOGGING_TRANSFORM_PLUGIN_ID, METRICS_TRANSFORM_PLUGIN_ID,
     REQUEST_ID_TRANSFORM_PLUGIN_ID,
@@ -384,6 +385,77 @@ def assert_problem(
     if detail_contains is not None:
         assert detail_contains in (body.get("detail") or ""), body
     return body
+
+
+# A fixed W3C traceparent: a request that sends it gets a `trace_id` in its
+# Problem Details body whatever the server's tracing setup.
+TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+def traced(headers: dict) -> dict:
+    """``headers`` plus :data:`TRACEPARENT`."""
+    return {**headers, "traceparent": TRACEPARENT}
+
+
+def assert_problem_body(resp: httpx.Response, expected: dict) -> None:
+    """Assert ``resp`` is a Problem Details response produced by OAGW's
+    Management API whose body is exactly ``expected`` plus a ``trace_id``.
+
+    Send the request with :func:`traced` headers. ``trace_id`` is only checked
+    to be a W3C trace id: with server-side tracing it is the server span's.
+    """
+    assert resp.status_code == expected["status"], (
+        f"expected {expected['status']}, got {resp.status_code}: {resp.text[:500]}"
+    )
+    ct = resp.headers.get("content-type", "")
+    assert ct.startswith("application/problem+json"), f"content-type {ct!r}: {resp.text[:300]}"
+    assert resp.headers.get("x-oagw-error-source") is None, resp.headers
+    body = resp.json()
+    trace_id = body.pop("trace_id", None)
+    assert isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{32}", trace_id), resp.text
+    assert body == expected, resp.text
+
+
+def assert_gateway_problem_body(resp: httpx.Response, expected: dict) -> None:
+    """Assert ``resp`` is a Problem Details response the proxy produced
+    (``X-OAGW-Error-Source: gateway``) whose body is exactly ``expected``
+    plus a ``trace_id``. Send the request with :func:`traced` headers."""
+    assert resp.status_code == expected["status"], (
+        f"expected {expected['status']}, got {resp.status_code}: {resp.text[:500]}"
+    )
+    ct = resp.headers.get("content-type", "")
+    assert ct.startswith("application/problem+json"), f"content-type {ct!r}: {resp.text[:300]}"
+    assert resp.headers.get("x-oagw-error-source") == "gateway", resp.headers
+    body = resp.json()
+    trace_id = body.pop("trace_id", None)
+    assert isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{32}", trace_id), resp.text
+    assert body == expected, resp.text
+
+
+def service_unavailable(status: int, instance: str, retry_after: int, reason: str) -> dict:
+    """The gateway's 502/503 body: canonical ``service_unavailable`` with a
+    retry hint and a reason."""
+    return {
+        "type": err_type("service_unavailable"),
+        "title": "Service Unavailable",
+        "status": status,
+        "detail": "Service temporarily unavailable",
+        "instance": instance,
+        "context": {"retry_after_seconds": retry_after, "reason": reason},
+    }
+
+
+def credential_not_found(instance: str) -> dict:
+    """The gateway's 401 for a secret the upstream's auth config references
+    that is missing or not accessible."""
+    return {
+        "type": err_type("unauthenticated"),
+        "title": "Unauthenticated",
+        "status": 401,
+        "detail": "Authentication required",
+        "instance": instance,
+        "context": {"reason": "AUTH_CREDENTIAL_NOT_FOUND"},
+    }
 
 
 # ---------------------------------------------------------------------------

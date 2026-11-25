@@ -54,6 +54,7 @@ pub const UNKNOWN_TARGET_HOST: &str = "UNKNOWN_TARGET_HOST";
 /// `reason` codes are target-host codes — everything else falls through
 /// to [`crate::ServiceGatewayError::Validation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TargetHostCode {
     /// `x-target-host` header is required but missing for a
     /// multi-endpoint upstream that needs explicit endpoint selection.
@@ -87,6 +88,62 @@ impl TargetHostCode {
             Self::Missing => MISSING_TARGET_HOST,
             Self::Invalid => INVALID_TARGET_HOST,
             Self::Unknown => UNKNOWN_TARGET_HOST,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secret-reference header (per-request credential, ADR-0022)
+// ---------------------------------------------------------------------------
+
+/// The [`crate::SECRET_REF_HEADER`] value is empty, malformed, repeated or
+/// holds more than one reference.
+pub const INVALID_SECRET_REF: &str = "INVALID_SECRET_REF";
+
+/// The request carries [`crate::SECRET_REF_HEADER`], but the upstream's
+/// effective auth is not the API-key plugin in `request_ref` mode.
+pub const SECRET_REF_NOT_ALLOWED: &str = "SECRET_REF_NOT_ALLOWED";
+
+/// The upstream is in `request_ref` mode with no default secret, and the
+/// request carries no [`crate::SECRET_REF_HEADER`].
+pub const SECRET_REF_REQUIRED: &str = "SECRET_REF_REQUIRED";
+
+/// Typed view of the three [`crate::SECRET_REF_HEADER`] field-violation
+/// codes. The projection in `crate::error` uses [`Self::from_wire`] to
+/// populate [`crate::ServiceGatewayError::InvalidSecretRef`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SecretRefCode {
+    /// See [`INVALID_SECRET_REF`].
+    Invalid,
+    /// See [`SECRET_REF_NOT_ALLOWED`].
+    NotAllowed,
+    /// See [`SECRET_REF_REQUIRED`].
+    Required,
+}
+
+impl SecretRefCode {
+    /// Project a wire `field_violations[].reason` string into the typed
+    /// discriminator. Returns `None` for any value that is not one of the
+    /// three secret-reference codes.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            INVALID_SECRET_REF => Some(Self::Invalid),
+            SECRET_REF_NOT_ALLOWED => Some(Self::NotAllowed),
+            SECRET_REF_REQUIRED => Some(Self::Required),
+            _ => None,
+        }
+    }
+
+    /// Render the discriminator back to its wire `reason` string.
+    /// Inverse of [`Self::from_wire`].
+    #[must_use]
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Invalid => INVALID_SECRET_REF,
+            Self::NotAllowed => SECRET_REF_NOT_ALLOWED,
+            Self::Required => SECRET_REF_REQUIRED,
         }
     }
 }
@@ -164,6 +221,10 @@ pub const INVALID_PROXY_PATH: &str = "INVALID_PROXY_PATH";
 /// The request URI lacks an upstream alias segment (e.g. raw `/`).
 pub const MISSING_ALIAS: &str = "MISSING_ALIAS";
 
+/// Reading the request body failed for a reason other than its size, for
+/// example the client aborted the upload.
+pub const BODY_READ_FAILED: &str = "BODY_READ_FAILED";
+
 /// The route does not allow query parameters but the request supplied
 /// one or more.
 pub const QUERY_NOT_ALLOWED: &str = "QUERY_NOT_ALLOWED";
@@ -179,6 +240,15 @@ pub const UNSUPPORTED_SCHEME: &str = "UNSUPPORTED_SCHEME";
 /// The configured upstream endpoint uses `http://` in a configuration
 /// that requires TLS — refused by SSRF protection.
 pub const HTTP_UPSTREAM_FORBIDDEN: &str = "HTTP_UPSTREAM_FORBIDDEN";
+
+/// The configuration names something OAGW does not implement yet: a
+/// catalog-only, custom or unknown plugin, or an unsupported setting.
+pub const NOT_IMPLEMENTED: &str = "NOT_IMPLEMENTED";
+
+/// A list query parameter OAGW does not support (`$filter`, `$orderby`, or
+/// any key other than the documented ones). Same code as the platform's
+/// `OData` extractor uses.
+pub const UNSUPPORTED_QUERY_PARAM: &str = "UNSUPPORTED_QUERY_PARAM";
 
 /// `Content-Length` header is present but fails numeric parsing or is
 /// inconsistent with the body.
@@ -202,6 +272,21 @@ mod tests {
             assert_eq!(TargetHostCode::from_wire(wire), Some(expected.clone()));
             assert_eq!(expected.as_wire(), wire);
         }
+    }
+
+    /// SREF-SDK-006: every secret-reference code round-trips.
+    #[test]
+    fn secret_ref_code_round_trips() {
+        for (wire, expected) in [
+            (INVALID_SECRET_REF, SecretRefCode::Invalid),
+            (SECRET_REF_NOT_ALLOWED, SecretRefCode::NotAllowed),
+            (SECRET_REF_REQUIRED, SecretRefCode::Required),
+        ] {
+            assert_eq!(SecretRefCode::from_wire(wire), Some(expected));
+            assert_eq!(expected.as_wire(), wire);
+        }
+        assert!(SecretRefCode::from_wire(INVALID_TARGET_HOST).is_none());
+        assert!(SecretRefCode::from_wire("").is_none());
     }
 
     #[test]

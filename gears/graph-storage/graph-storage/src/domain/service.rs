@@ -9,12 +9,13 @@ use std::sync::Arc;
 use authz_resolver_sdk::pep::PolicyEnforcer;
 use graph_storage_sdk::models::{
     DeleteOutcome, DeleteRequest, Direction, EdgeKey, EdgeView, GraphRevision, GtsTypeId,
-    IngestOutcome, IngestRequest, ItemError, ItemFamily, NeighborhoodRequest, NodeCount, NodeKey,
-    NodeRow, NodeView, OnExisting, Page, ProjectionRequest, RegisteredType, RemainingBudget,
-    SearchMode, SearchRequest, SearchResponse, TraversalResponse, TraverseRequest, TypeIdSet,
-    TypeKind, TypeQuery, TypeRecord, TypeRegistration, TypeRegistrationOptions,
+    IngestOutcome, IngestRequest, ItemError, ItemFamily, NeighborhoodRequest, NodeCount,
+    NodeEdgesRequest, NodeKey, NodeRow, NodeView, OnExisting, Page, ProjectionRequest,
+    RegisteredType, RemainingBudget, SearchMode, SearchRequest, SearchResponse, TraversalResponse,
+    TraverseRequest, TypeIdSet, TypeKind, TypeQuery, TypeRecord, TypeRegistration,
+    TypeRegistrationOptions,
 };
-use graph_storage_sdk::plugin_api::{GraphEngineV1, GraphStoreV1, StoreCtx};
+use graph_storage_sdk::plugin_api::{GraphEngineV1, GraphStoreV1, NodeEdgesQuery, StoreCtx};
 use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
@@ -25,6 +26,7 @@ use crate::domain::diagnostics::logged;
 use crate::domain::embedding;
 use crate::domain::embedding::EmbeddingCoordinator;
 use crate::domain::error::DomainError;
+use crate::domain::offboarding::{FencedTenants, NoTenantDirectory, TenantDirectory, TenantState};
 use crate::domain::traversal::{Retention, WalkPlan, walk};
 use crate::domain::{admission, authz, identity, ontology};
 
@@ -35,6 +37,12 @@ pub struct GraphServices {
     engine: Arc<dyn GraphEngineV1>,
     enforcer: PolicyEnforcer,
     embedding: EmbeddingCoordinator,
+    /// Asked before a tenant is fenced; refuses every offboarding until one
+    /// is wired.
+    tenants: Arc<dyn TenantDirectory>,
+    /// The fenced tenants, which the request path checks instead of the
+    /// store.
+    fenced: Arc<FencedTenants>,
 }
 
 /// One authorized call: the compiled scope plus the derived per-call context
@@ -75,7 +83,24 @@ impl GraphServices {
             engine,
             enforcer,
             embedding,
+            tenants: Arc::new(NoTenantDirectory),
+            fenced: Arc::new(FencedTenants::default()),
         }
+    }
+
+    /// Hold the fenced tenants in `fenced` rather than a set of its own: a
+    /// test reads them again at once.
+    #[must_use]
+    pub fn with_fenced_tenants(mut self, fenced: Arc<FencedTenants>) -> Self {
+        self.fenced = fenced;
+        self
+    }
+
+    /// Wire the directory offboarding asks whether a tenant is deleted.
+    #[must_use]
+    pub fn with_tenant_directory(mut self, tenants: Arc<dyn TenantDirectory>) -> Self {
+        self.tenants = tenants;
+        self
     }
 
     #[must_use]
@@ -83,7 +108,68 @@ impl GraphServices {
         &self.config
     }
 
+    /// Authorize a call about a tenant that is not being offboarded: the
+    /// fence refuses every operation for a fenced tenant, reads included,
+    /// after the policy decided -- a caller the policy refuses learns nothing
+    /// about the tenant, fenced or not.
+    ///
+    /// The fenced tenants come from memory ([`FencedTenants`]), not from the
+    /// store: a fence made on another replica is honoured here about the
+    /// set's refresh after it committed, and a write's own transaction checks
+    /// the fence at commit whatever the set holds. A set too old to trust is
+    /// read again here, and the call refused when that fails.
+    ///
+    /// A read without a named tenant keeps the policy's scope, a subtree
+    /// included, so it could reach a child tenant that is being offboarded.
+    /// When the scope reaches beyond the caller's own tenant, it loses the
+    /// fenced tenants. A scope this gear cannot narrow in memory is checked
+    /// against the store -- under that scope, so only tenants it reaches --
+    /// and refused as fenced while it reaches a deletion under way; one that
+    /// reaches none is served as it is.
     async fn authorize(
+        &self,
+        call: impl Into<Call<'_>>,
+        resource: &authz_resolver_sdk::pep::ResourceType,
+        action: &str,
+    ) -> Result<Authorized, DomainError> {
+        let call: Call<'_> = call.into();
+        let named = call.tenant.is_some();
+        let mut auth = self.authorize_any(call, resource, action).await?;
+        // A store that does not offboard has fenced nobody.
+        if !self.store.capabilities().offboarding {
+            return Ok(auth);
+        }
+        let fenced = self.fenced.current(self.store.as_ref()).await?;
+        if fenced.is_empty() {
+            return Ok(auth);
+        }
+        if fenced.contains(&auth.tenant) {
+            return Err(DomainError::TenantFenced {
+                tenant: auth.tenant,
+            });
+        }
+        if !named && action == authz::actions::READ && !authz::only(&auth.scope, auth.tenant) {
+            if let Some(narrowed) = authz::without_tenants(&auth.scope, &fenced) {
+                auth.scope = narrowed;
+            } else {
+                // A scope this gear cannot narrow in memory: the store says
+                // which of the deletions under way it reaches, and a scope
+                // that reaches one is refused until the deletion finishes.
+                let running = self
+                    .store
+                    .fenced_tenants(&Self::store_ctx(&auth, None))
+                    .await?;
+                if let Some(&first) = running.first() {
+                    return Err(DomainError::TenantFenced { tenant: first });
+                }
+            }
+        }
+        Ok(auth)
+    }
+
+    /// Authorize without the fence: for offboarding itself, which has to
+    /// answer about a fenced tenant.
+    async fn authorize_any(
         &self,
         call: impl Into<Call<'_>>,
         resource: &authz_resolver_sdk::pep::ResourceType,
@@ -130,6 +216,115 @@ impl GraphServices {
             budget: auth.budget,
             cancel: CancellationToken::new(),
         }
+    }
+
+    // --- tenant offboarding -------------------------------------------------
+
+    /// Start offboarding `tenant`, or answer the one already under way.
+    ///
+    /// The tenant is named, and the policy must grant `offboard` on it as
+    /// that tenant (`RootOnly`, as every named-tenant call). A tenant already
+    /// fenced answers its record without asking the platform again: the
+    /// fence is permanent, and the platform may have removed the tenant for
+    /// good since. Otherwise the platform must say the tenant is deleted --
+    /// the permission alone does not start a deletion that cannot be undone.
+    /// The worker removes the rows; this call only fences.
+    pub async fn offboard_tenant(
+        &self,
+        ctx: &toolkit_security::SecurityContext,
+        tenant: uuid::Uuid,
+        request: graph_storage_sdk::models::OffboardRequest,
+    ) -> Result<graph_storage_sdk::models::TenantOffboarding, DomainError> {
+        let auth = self
+            .authorize_any(
+                Call::in_tenant(ctx, tenant),
+                &authz::tenant_resource(),
+                authz::actions::OFFBOARD,
+            )
+            .await?;
+        // A store that does not offboard would accept nothing it could then
+        // enforce: no fence on reads, no deletion. Refuse before asking the
+        // platform.
+        if !self.store.capabilities().offboarding {
+            return Err(DomainError::Unsupported {
+                what: "tenant offboarding".to_owned(),
+            });
+        }
+        let store_ctx = Self::store_ctx(&auth, None);
+        if let Some(record) = self.store.tenant_offboarding(&store_ctx).await? {
+            self.fenced.add(tenant);
+            return Ok(record);
+        }
+        self.confirm_deleted(ctx, tenant, auth.budget.remaining())
+            .await?;
+        let record = self
+            .store
+            .fence_tenant(&store_ctx, request.deletion_generation)
+            .await?;
+        // This replica's requests see the fence at once; the others at their
+        // next read of the fenced tenants.
+        self.fenced.add(tenant);
+        tracing::info!(
+            subject_id = %ctx.subject_id(),
+            subject_tenant = %ctx.subject_tenant_id(),
+            tenant = %tenant,
+            deletion_generation = ?record.deletion_generation,
+            "offboarding: the tenant is fenced and its graph will be removed"
+        );
+        Ok(record)
+    }
+
+    /// Go on only for a tenant the platform says is deleted.
+    async fn confirm_deleted(
+        &self,
+        ctx: &toolkit_security::SecurityContext,
+        tenant: uuid::Uuid,
+        within: std::time::Duration,
+    ) -> Result<(), DomainError> {
+        match self.tenants.state(ctx, tenant, within).await? {
+            TenantState::Deleted => Ok(()),
+            TenantState::Live => {
+                tracing::info!(
+                    subject_id = %ctx.subject_id(),
+                    tenant = %tenant,
+                    "offboarding: refused, the platform has not marked the tenant deleted"
+                );
+                Err(DomainError::TenantNotDeleted { tenant })
+            }
+            TenantState::Unknown => {
+                tracing::warn!(
+                    subject_id = %ctx.subject_id(),
+                    tenant = %tenant,
+                    "offboarding: refused, the platform does not know the tenant; if it was \
+                     removed for good, its graph here needs an operator"
+                );
+                Err(DomainError::TenantUnknown { tenant })
+            }
+        }
+    }
+
+    /// The tenant's offboarding record. `NotFound` when it was never
+    /// offboarded, exactly as when the caller may not ask.
+    pub async fn tenant_offboarding(
+        &self,
+        ctx: &toolkit_security::SecurityContext,
+        tenant: uuid::Uuid,
+    ) -> Result<graph_storage_sdk::models::TenantOffboarding, DomainError> {
+        let auth = self
+            .authorize_any(
+                Call::in_tenant(ctx, tenant),
+                &authz::tenant_resource(),
+                authz::actions::OFFBOARD,
+            )
+            .await?;
+        // A store that does not offboard never offboarded the tenant.
+        if !self.store.capabilities().offboarding {
+            return Err(DomainError::NotFound);
+        }
+        self.store
+            .tenant_offboarding(&Self::store_ctx(&auth, None))
+            .await?
+            .ok_or(DomainError::NotFound)
     }
 
     // --- ontology -----------------------------------------------------------
@@ -828,6 +1023,24 @@ impl GraphServices {
             .await?)
     }
 
+    /// Remove a node and every edge incident to it for good (gears-rust
+    /// #5194). Authorized as `purge`, pinned to one tenant like every write.
+    pub async fn purge_node(
+        &self,
+        call: impl Into<Call<'_>>,
+        node_key: &NodeKey,
+        options: graph_storage_sdk::models::PurgeOptions,
+    ) -> Result<graph_storage_sdk::models::PurgeOutcome, DomainError> {
+        let auth = self
+            .authorize(call, &authz::node_resource(), authz::actions::PURGE)
+            .await?;
+        admission::admit_identifier(&self.config, "node_key", node_key)?;
+        Ok(self
+            .store
+            .purge_node(&Self::store_ctx(&auth, None), node_key.clone(), options)
+            .await?)
+    }
+
     pub async fn delete_edge(
         &self,
         call: impl Into<Call<'_>>,
@@ -884,6 +1097,78 @@ impl GraphServices {
             .store
             .get_edge(&Self::store_ctx(&auth, None), edge_key)
             .await?)
+    }
+
+    /// One page of the edges incident to a node, both endpoints visible.
+    ///
+    /// The page is `request.limit` edges at most, by default and at most
+    /// `edge_list_max_page`; the cursor is bound to the node, the direction
+    /// and the filters, and refused under any other.
+    pub async fn list_node_edges(
+        &self,
+        call: impl Into<Call<'_>>,
+        request: NodeEdgesRequest,
+    ) -> Result<Page<EdgeView>, DomainError> {
+        let auth = self
+            .authorize(call, &authz::node_resource(), authz::actions::READ)
+            .await?;
+        admission::admit_node_edges(&self.config, &request)?;
+        let limit = request.limit.unwrap_or(self.config.edge_list_max_page);
+        let direction = request.direction.unwrap_or(Direction::Either);
+        let identity = admission::edge_listing_identity(
+            &request.node_key,
+            direction,
+            &request.edge_type_patterns,
+            &request.discriminators,
+        );
+        let position = request
+            .cursor
+            .as_deref()
+            .map(|cursor| admission::edge_cursor_position(cursor, &identity))
+            .transpose()?;
+        let after = position.map(|(_, after)| after);
+        let edge_types = self
+            .resolve_patterns(&auth, &request.edge_type_patterns)
+            .await?;
+        let page = self
+            .store
+            .list_node_edges(
+                &Self::store_ctx(&auth, None),
+                &NodeEdgesQuery {
+                    node_key: request.node_key,
+                    direction,
+                    edge_types,
+                    discriminators: request.discriminators,
+                    after,
+                    limit,
+                },
+            )
+            .await?;
+        // A cursor carries the epoch it was minted on (DESIGN § Read
+        // Consistency Contract): a position on an abandoned timeline names an
+        // id the restored store may have given to another edge. The revision
+        // is not bound -- the built-in store cannot serve an older one, and a
+        // listing that failed on every write would never finish under ingest
+        // -- so each page reports the revision it observed instead.
+        if let Some((epoch, _)) = position
+            && epoch != page.revision.source_epoch
+        {
+            return Err(DomainError::StaleCursor {
+                message: format!(
+                    "the cursor was minted on source epoch {epoch} and the store is on epoch {}; \
+                     start the listing again without a cursor",
+                    page.revision.source_epoch
+                ),
+            });
+        }
+        let epoch = page.revision.source_epoch;
+        Ok(Page {
+            items: page.items,
+            next_cursor: page
+                .next_after
+                .map(|after| admission::edge_cursor(epoch, after, &identity)),
+            revision: page.revision,
+        })
     }
 
     pub async fn project_nodes(
@@ -1037,7 +1322,12 @@ impl GraphServices {
             .resolve_patterns(&auth, &request.node_type_patterns)
             .await?;
 
-        self.walk_and_hydrate(&auth, &request.seeds, plan, node_types, true)
+        let output = WalkOutput {
+            node_types,
+            include_phantoms: true,
+            edge_payloads: request.include_edge_payload,
+        };
+        self.walk_and_hydrate(&auth, &request.seeds, plan, output)
             .await
     }
 
@@ -1067,8 +1357,12 @@ impl GraphServices {
             retention: Retention::Degree,
         };
         let seeds = vec![request.root.clone()];
-        self.walk_and_hydrate(&auth, &seeds, plan, None, request.include_phantoms)
-            .await
+        let output = WalkOutput {
+            node_types: None,
+            include_phantoms: request.include_phantoms,
+            edge_payloads: request.include_edge_payload,
+        };
+        self.walk_and_hydrate(&auth, &seeds, plan, output).await
     }
 
     /// Resolve GTS patterns to a registered-type set (never SQL text).
@@ -1092,8 +1386,7 @@ impl GraphServices {
         auth: &Authorized,
         seeds: &[NodeKey],
         plan: WalkPlan,
-        node_types: Option<TypeIdSet>,
-        include_phantoms: bool,
+        output: WalkOutput,
     ) -> Result<TraversalResponse, DomainError> {
         // Two paths, chosen by what the store declares.
         //
@@ -1114,7 +1407,7 @@ impl GraphServices {
         if !self.store.capabilities().snapshots {
             let before = self.store.revision(&snapshot_ctx).await?;
             let mut result = self
-                .walk_without_snapshot(auth, seeds, plan, node_types, include_phantoms)
+                .walk_without_snapshot(auth, seeds, plan, output)
                 .await?;
             let after = self.store.revision(&snapshot_ctx).await?;
             result.consistent_snapshot = before == after;
@@ -1124,7 +1417,7 @@ impl GraphServices {
 
         let snapshot = self.store.begin_read(&snapshot_ctx).await?;
         let result = self
-            .walk_under_snapshot(auth, seeds, plan, node_types, include_phantoms, &snapshot)
+            .walk_under_snapshot(auth, seeds, plan, output, &snapshot)
             .await;
         // Releasing the snapshot must never mask the walk's own outcome, so a
         // failure to close is logged rather than returned.
@@ -1144,15 +1437,14 @@ impl GraphServices {
         auth: &Authorized,
         seeds: &[NodeKey],
         plan: WalkPlan,
-        node_types: Option<TypeIdSet>,
-        include_phantoms: bool,
+        output: WalkOutput,
     ) -> Result<TraversalResponse, DomainError> {
         let revision = self.store.revision(&Self::store_ctx(auth, None)).await?;
         let standin = graph_storage_sdk::models::ReadSnapshot {
             id: uuid::Uuid::now_v7(),
             revision,
         };
-        self.walk_under_snapshot(auth, seeds, plan, node_types, include_phantoms, &standin)
+        self.walk_under_snapshot(auth, seeds, plan, output, &standin)
             .await
     }
 
@@ -1161,10 +1453,14 @@ impl GraphServices {
         auth: &Authorized,
         seeds: &[NodeKey],
         plan: WalkPlan,
-        node_types: Option<TypeIdSet>,
-        include_phantoms: bool,
+        output: WalkOutput,
         snapshot: &graph_storage_sdk::models::ReadSnapshot,
     ) -> Result<TraversalResponse, DomainError> {
+        let WalkOutput {
+            node_types,
+            include_phantoms,
+            edge_payloads,
+        } = output;
         let ctx = Self::store_ctx(auth, Some(snapshot));
 
         let resolved = self.store.resolve_node_ids(&ctx, seeds).await?;
@@ -1337,7 +1633,7 @@ impl GraphServices {
         // nodes, and it is returned when both are visible.
         let surviving: std::collections::BTreeSet<&str> =
             nodes.iter().map(|view| view.node_key.as_str()).collect();
-        let mut edges: Vec<_> = result
+        let edges: Vec<_> = result
             .edges
             .iter()
             .filter(|edge| {
@@ -1355,17 +1651,9 @@ impl GraphServices {
         // that way: an edge without its endpoints is a line drawn to nothing,
         // while a node without some of its edges is simply a node with fewer
         // edges.
-        edges.retain(|edge| {
-            if over_bytes {
-                return false;
-            }
-            spent = spent.saturating_add(edge_bytes(edge));
-            if spent > budget {
-                over_bytes = true;
-                return false;
-            }
-            true
-        });
+        let (edges, over_bytes) = self
+            .charge_edges(&ctx, edges, edge_payloads, &mut spent, over_bytes)
+            .await?;
 
         let truncated = if over_bytes {
             Some(graph_storage_sdk::models::TruncationReason::ResponseBytes)
@@ -1382,6 +1670,66 @@ impl GraphServices {
             truncated,
             revision: snapshot.revision,
         })
+    }
+
+    /// Charge the walk's edges to the response budget after its nodes, and
+    /// carry their payloads when asked. Returns the edges kept and whether
+    /// the budget was crossed (already crossed by the nodes, or here).
+    async fn charge_edges(
+        &self,
+        ctx: &StoreCtx<'_>,
+        mut edges: Vec<graph_storage_sdk::models::EdgeRef>,
+        edge_payloads: bool,
+        spent: &mut u64,
+        mut over_bytes: bool,
+    ) -> Result<(Vec<graph_storage_sdk::models::EdgeRef>, bool), DomainError> {
+        let budget = self.config.response_max_bytes;
+        let item_ceiling = u64::from(self.config.item_max_bytes).max(1);
+        // Payloads, when asked for, are read the way node rows are: in
+        // pieces the remaining budget is guaranteed to hold, so an answer
+        // that runs out of bytes stops reading at the first piece that
+        // crosses it rather than after every payload of the walk. An edge
+        // whose payload the store no longer returns -- removed or hidden
+        // between the hop that found it and this read -- is left out, as a
+        // node that vanished before hydration is.
+        if edge_payloads && !over_bytes {
+            let mut kept = Vec::with_capacity(edges.len());
+            let mut pending = std::collections::VecDeque::from(edges);
+            'pieces: while !pending.is_empty() {
+                let take =
+                    budgeted_piece(budget.saturating_sub(*spent), item_ceiling).min(pending.len());
+                let piece: Vec<_> = pending.drain(..take).collect();
+                let keys: Vec<EdgeKey> = piece.iter().map(|edge| edge.edge_key.clone()).collect();
+                let mut payloads = self.store.edge_payloads(ctx, &keys).await?;
+                for mut edge in piece {
+                    let Some(payload) = payloads.remove(&edge.edge_key) else {
+                        continue;
+                    };
+                    edge.payload = Some(payload);
+                    *spent = spent.saturating_add(edge_bytes(&edge));
+                    if *spent > budget {
+                        over_bytes = true;
+                        break 'pieces;
+                    }
+                    kept.push(edge);
+                }
+            }
+            edges = kept;
+        } else {
+            edges.retain(|edge| {
+                if over_bytes {
+                    return false;
+                }
+                *spent = spent.saturating_add(edge_bytes(edge));
+                if *spent > budget {
+                    over_bytes = true;
+                    return false;
+                }
+                true
+            });
+        }
+
+        Ok((edges, over_bytes))
     }
 
     /// Which of the result's types are phantom-family.
@@ -1414,6 +1762,16 @@ impl GraphServices {
         }
         phantom
     }
+}
+
+/// What a walk's answer keeps and carries, as opposed to how far it walks
+/// (`WalkPlan`).
+struct WalkOutput {
+    /// Past the seeds, only nodes of these types; `None` keeps every type.
+    node_types: Option<TypeIdSet>,
+    include_phantoms: bool,
+    /// Read each returned edge's payload onto its reference.
+    edge_payloads: bool,
 }
 
 /// The most rows one traversal hydration piece asks for, whatever the budget
@@ -1522,7 +1880,8 @@ fn row_bytes(row: &NodeRow) -> u64 {
         .saturating_add(name.as_ref().map_or(0, |name| name.len() as u64))
 }
 
-/// What one traversed edge costs to carry: five caller-controlled strings.
+/// What one traversed edge costs to carry: five caller-controlled strings,
+/// and the payload when the request asked for it.
 fn edge_bytes(edge: &graph_storage_sdk::models::EdgeRef) -> u64 {
     let graph_storage_sdk::models::EdgeRef {
         edge_key,
@@ -1530,10 +1889,16 @@ fn edge_bytes(edge: &graph_storage_sdk::models::EdgeRef) -> u64 {
         src,
         dst,
         discriminator,
+        payload,
     } = edge;
-    (edge_key.len()
-        + edge_type_id.len()
-        + src.len()
-        + dst.len()
-        + discriminator.as_ref().map_or(0, String::len)) as u64
+    let payload = payload.as_ref().map_or(0, |value| {
+        serde_json::to_vec(value).map_or(u64::MAX, |bytes| bytes.len() as u64)
+    });
+    payload.saturating_add(
+        (edge_key.len()
+            + edge_type_id.len()
+            + src.len()
+            + dst.len()
+            + discriminator.as_ref().map_or(0, String::len)) as u64,
+    )
 }

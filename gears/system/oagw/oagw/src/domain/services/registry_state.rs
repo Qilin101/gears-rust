@@ -23,13 +23,14 @@ use uuid::Uuid;
 
 use super::RegistryProvisioner;
 use super::registry_reconcile::{
-    CALL_TIMEOUT, CallTimedOut, ProvisioningCounts, RunControl, bounded, log_counts,
-    reconcile_registry,
+    CALL_TIMEOUT, CallTimedOut, ProvisioningCounts, RunControl, bounded, instance_tenant,
+    log_counts, reconcile_registry,
 };
 use crate::domain::model::{
-    AuthConfig, BudgetConfig, BurstConfig, CorsConfig, CreateRouteRequest, CreateUpstreamRequest,
-    Endpoint, GrpcMatch, HeadersConfig, HttpMatch, MatchRules, PluginBinding, PluginsConfig,
-    RateLimitConfig, RequestHeaderRules, ResponseHeaderRules, Server, SustainedRate,
+    AuthConfig, BudgetConfig, BurstConfig, CircuitBreakerConfig, CorsConfig, CreateRouteRequest,
+    CreateUpstreamRequest, Endpoint, GrpcMatch, HeadersConfig, HttpMatch, MatchRules,
+    PluginBinding, PluginsConfig, RateLimitConfig, RequestHeaderRules, ResponseHeaderRules, Server,
+    SustainedRate,
 };
 use crate::domain::ports::OagwMetricsPort;
 use crate::domain::ports::metric_labels::provisioning_outcome;
@@ -50,37 +51,65 @@ use crate::domain::type_provisioning::{ProvisionedRoute, ProvisionedUpstream};
 /// its bits, enums by their variant names, and instances are sorted by
 /// `(tenant_id, id)`, so neither listing order nor `HashMap` order matters.
 /// SHA-256 comes from the toolkit-security facade and its selected backend.
+///
+/// An instance that names no tenant is hashed under the root tenant, as the
+/// reconcile writes it; without a resolved root that is an error.
 pub(crate) fn content_hash(
     upstreams: &[ProvisionedUpstream],
     routes: &[ProvisionedRoute],
-    root_tenant_id: Uuid,
-) -> String {
+    root_tenant_id: Option<Uuid>,
+) -> anyhow::Result<String> {
+    content_hash_of(env!("CARGO_PKG_VERSION"), upstreams, routes, root_tenant_id)
+}
+
+/// [`content_hash`] for OAGW version `version`.
+fn content_hash_of(
+    version: &str,
+    upstreams: &[ProvisionedUpstream],
+    routes: &[ProvisionedRoute],
+    root_tenant_id: Option<Uuid>,
+) -> anyhow::Result<String> {
     let mut e = Encoder(Sha256::new());
     e.str("oagw-registry-content-v1");
-    e.str(env!("CARGO_PKG_VERSION"));
+    e.str(version);
 
-    let key = |tenant: Option<Uuid>, id: Option<Uuid>| (tenant.unwrap_or(root_tenant_id), id);
-    let mut upstreams: Vec<&ProvisionedUpstream> = upstreams.iter().collect();
-    upstreams.sort_by_key(|u| key(u.tenant_id, u.request.id));
+    let mut upstreams = upstreams
+        .iter()
+        .map(|u| {
+            Ok((
+                instance_tenant(u.tenant_id, root_tenant_id)?,
+                u.request.id,
+                u,
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    upstreams.sort_by_key(|(tenant, id, _)| (*tenant, *id));
     e.len(upstreams.len());
-    for ProvisionedUpstream { tenant_id, request } in upstreams {
-        let (tenant, id) = key(*tenant_id, request.id);
+    for (tenant, id, u) in upstreams {
         e.uuid(tenant);
         e.opt(id.as_ref(), |e, id| e.uuid(*id));
-        e.upstream(request);
+        e.upstream(&u.request);
     }
-    let mut routes: Vec<&ProvisionedRoute> = routes.iter().collect();
-    routes.sort_by_key(|r| key(r.tenant_id, r.request.id));
+    let mut routes = routes
+        .iter()
+        .map(|r| {
+            Ok((
+                instance_tenant(r.tenant_id, root_tenant_id)?,
+                r.request.id,
+                r,
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    routes.sort_by_key(|(tenant, id, _)| (*tenant, *id));
     e.len(routes.len());
-    for ProvisionedRoute { tenant_id, request } in routes {
-        let (tenant, id) = key(*tenant_id, request.id);
+    for (tenant, id, r) in routes {
         e.uuid(tenant);
         e.opt(id.as_ref(), |e, id| e.uuid(*id));
-        e.route(request);
+        e.route(&r.request);
     }
 
     let digest = e.0.finalize();
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    Ok(digest.as_ref().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The canonical encoder behind [`content_hash`].
@@ -165,6 +194,7 @@ impl Encoder {
             headers,
             plugins,
             rate_limit,
+            circuit_breaker,
             cors,
             tags,
             enabled,
@@ -181,6 +211,7 @@ impl Encoder {
         self.opt(headers.as_ref(), Self::headers);
         self.opt(plugins.as_ref(), Self::plugins);
         self.opt(rate_limit.as_ref(), Self::rate_limit);
+        self.opt(circuit_breaker.as_ref(), Self::circuit_breaker);
         self.opt(cors.as_ref(), Self::cors);
         self.strs(tags);
         self.bool(*enabled);
@@ -264,7 +295,8 @@ impl Encoder {
             strategy,
             cost,
             response_headers,
-            pool_owner_id: _, // set by the hierarchical merge, never by provisioning
+            shared_pool: _,    // set by the hierarchical merge, never by provisioning
+            limit_owner_id: _, // likewise
         } = r;
         self.variant(sharing);
         self.variant(algorithm);
@@ -287,6 +319,22 @@ impl Encoder {
         self.variant(strategy);
         self.u64(u64::from(*cost));
         self.bool(*response_headers);
+    }
+
+    fn circuit_breaker(&mut self, c: &CircuitBreakerConfig) {
+        let CircuitBreakerConfig {
+            sharing,
+            enabled,
+            failure_threshold,
+            timeout_seconds,
+            success_threshold,
+            owner_id: _, // set by the hierarchical merge, never by provisioning
+        } = c;
+        self.variant(sharing);
+        self.bool(*enabled);
+        self.u64(u64::from(*failure_threshold));
+        self.u64(u64::from(*timeout_seconds));
+        self.u64(u64::from(*success_threshold));
     }
 
     fn cors(&mut self, c: &CorsConfig) {
@@ -474,9 +522,9 @@ pub(crate) async fn gated_reconcile(
     cancel: &CancellationToken,
     upstreams: &[ProvisionedUpstream],
     routes: &[ProvisionedRoute],
-    root_tenant_id: Uuid,
+    root_tenant_id: Option<Uuid>,
 ) -> anyhow::Result<RunOutcome> {
-    let hash = content_hash(upstreams, routes, root_tenant_id);
+    let hash = content_hash(upstreams, routes, root_tenant_id)?;
     let mut waited = false;
     let acquired_at = loop {
         let stored = bounded("reading the registry state", gate.state.read())

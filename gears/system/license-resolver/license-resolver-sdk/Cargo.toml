@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-license-resolver-sdk"
-version = "0.2.5"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -38,12 +38,13 @@ toolkit-security = { workspace = true }
 
 # Emitted into the generated REST client (rest-client).
 toolkit-http = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
 # Emitted into the generated server route registration (rest-server).
 axum = { workspace = true, optional = true }
 
 [features]
 # Generated REST client (`LicenseResolverApiRestClient` + resolving wrapper).
-rest-client = ["toolkit-contract/rest-client", "dep:toolkit-http"]
+rest-client = ["toolkit-contract/rest-client", "dep:toolkit-http", "dep:secrecy"]
 # Generated server route registration, used by the license-resolver gear.
 rest-server = ["toolkit-contract/rest-server", "dep:axum"]
 

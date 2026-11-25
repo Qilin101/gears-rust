@@ -10,10 +10,11 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::SecurityContext;
 
 use crate::models::{
-    DeleteOutcome, EdgeKey, GraphRevision, GtsTypeId, IngestOutcome, IngestRequest,
-    NeighborhoodRequest, NodeCount, NodeKey, NodeRow, NodeView, Page, RegisteredType,
-    SearchRequest, SearchResponse, TraversalResponse, TraverseRequest, TypeQuery, TypeRecord,
-    TypeRegistration, TypeRegistrationOptions,
+    DeleteOutcome, EdgeKey, EdgeView, GraphRevision, GtsTypeId, IngestOutcome, IngestRequest,
+    NeighborhoodRequest, NodeCount, NodeEdgesRequest, NodeKey, NodeRow, NodeView, OffboardRequest,
+    Page, PurgeOptions, PurgeOutcome, RegisteredType, SearchRequest, SearchResponse,
+    TenantOffboarding, TraversalResponse, TraverseRequest, TypeQuery, TypeRecord, TypeRegistration,
+    TypeRegistrationOptions,
 };
 
 /// Object-safe client for in-process consumption by other gears (version 1).
@@ -44,6 +45,11 @@ use crate::models::{
 ///   `SERIALIZATION`, or `IDEMPOTENCY_MISMATCH`. Re-read and retry.
 /// - `failed_precondition` — `STALE_GENERATION`, `IDEMPOTENCY_KEY_EXPIRED`,
 ///   `SCOPE_UNSERVABLE`, `EMBEDDING_SPACE_MISMATCH`. Not retryable unchanged.
+///   `TENANT_FENCED`, from any method: the tenant is being offboarded, or a
+///   read's scope reaches one that is and cannot be narrowed around it;
+///   never retry for that tenant. From offboarding, `TENANT_NOT_DELETED`
+///   (the platform has not deleted the tenant) and `TENANT_UNKNOWN` (the
+///   platform does not know it).
 /// - `unavailable` — a dependency is down: the PDP, the database, the
 ///   embedding provider. Retry later.
 /// - `deadline_exceeded`, `cancelled` — the operation ran out of the budget
@@ -151,7 +157,69 @@ pub trait GraphStorageClientV1: Send + Sync {
         edge_key: &EdgeKey,
     ) -> Result<DeleteOutcome, CanonicalError>;
 
+    /// Remove a node and every edge incident to it for good: the rows are
+    /// deleted, not tombstoned, and the key is free again (gears-rust #5194).
+    ///
+    /// It takes a live node or one already soft-deleted, so the tombstones a
+    /// `delete_node` left can be erased afterwards. A key with no stored node
+    /// is a success with `purged_nodes: 0`, so a retry after an unknown
+    /// outcome does not fail. That retry is safe only while the key cannot
+    /// be written again in between: a purge frees the key, and a retry finds
+    /// whatever node holds it by then. Where keys are reused, purge with
+    /// `options.expected_created_at` -- the node's envelope `created_at` --
+    /// which refuses any other node under the key with a conflict;
+    /// `options.only_tombstoned` refuses a live one only. Analysis edges go with the node: an erasure
+    /// outranks a conclusion. Authorized as its own action, `purge`, not as
+    /// `delete`. Dead tuples, WAL and backups follow the deployment's
+    /// retention, not this call.
+    ///
+    /// The provided implementation refuses as `unimplemented`, so other
+    /// implementations of this trait keep compiling.
+    async fn purge_node(
+        &self,
+        ctx: &SecurityContext,
+        node_key: &NodeKey,
+        options: PurgeOptions,
+    ) -> Result<PurgeOutcome, CanonicalError> {
+        let _ = (ctx, node_key, options);
+        Err(no_target::unimplemented(
+            "this GraphStorageClientV1 implementation does not support purge",
+        ))
+    }
+
     // --- read -------------------------------------------------------------
+
+    /// One live edge with its payload and envelope, when both its endpoints
+    /// are visible. The read REST has as `GET /edges/{edge_key}`.
+    ///
+    /// The provided implementation refuses as `unimplemented`, so other
+    /// implementations of this trait keep compiling.
+    async fn get_edge(
+        &self,
+        ctx: &SecurityContext,
+        edge_key: &EdgeKey,
+    ) -> Result<EdgeView, CanonicalError> {
+        let _ = (ctx, edge_key);
+        Err(no_target::unimplemented(
+            "this GraphStorageClientV1 implementation does not support the edge read",
+        ))
+    }
+
+    /// One page of the edges incident to a node, with payloads and envelopes:
+    /// a hub's edges in full, past `node_read_max_adjacency`. Continue with
+    /// the page's `next_cursor`.
+    ///
+    /// The provided implementation refuses as `unimplemented`.
+    async fn list_node_edges(
+        &self,
+        ctx: &SecurityContext,
+        request: NodeEdgesRequest,
+    ) -> Result<Page<EdgeView>, CanonicalError> {
+        let _ = (ctx, request);
+        Err(no_target::unimplemented(
+            "this GraphStorageClientV1 implementation does not support the edge listing",
+        ))
+    }
 
     /// Node by key with payload and bounded bidirectional adjacency.
     /// `adjacency_limit = None` uses the configured default.
@@ -216,6 +284,49 @@ pub trait GraphStorageClientV1: Send + Sync {
     /// The caller-visible `(source_epoch, graph_revision)` identity.
     async fn revision(&self, ctx: &SecurityContext) -> Result<GraphRevision, CanonicalError>;
 
+    // --- tenant offboarding -------------------------------------------------
+
+    /// Start removing everything this gear holds for `tenant`, or continue.
+    ///
+    /// Only a tenant the platform has marked deleted is accepted
+    /// (`failed_precondition` otherwise), and only by a caller granted the
+    /// tenant's `offboard` permission, named for that tenant. The first call
+    /// fences the tenant -- every other operation for it answers
+    /// `failed_precondition` / `TENANT_FENCED` from then on -- and the gear
+    /// deletes its rows in the background. The answer is the record as it
+    /// stands; a repeated call is safe and answers the same record, done or
+    /// not. It cannot be undone.
+    ///
+    /// The tenant is the argument. On a client scoped with
+    /// [`in_tenant`](Self::in_tenant) it must be the scoped tenant, or the
+    /// call is refused as `invalid_argument`: an irreversible deletion does
+    /// not pick between two tenants it was told about.
+    ///
+    /// The provided implementation answers `unimplemented`, so an
+    /// implementation without offboarding -- a test double, say -- keeps
+    /// compiling.
+    async fn offboard_tenant(
+        &self,
+        ctx: &SecurityContext,
+        tenant: uuid::Uuid,
+        request: OffboardRequest,
+    ) -> Result<TenantOffboarding, CanonicalError> {
+        let _ = (ctx, tenant, request);
+        Err(offboarding_unsupported())
+    }
+
+    /// The tenant's offboarding record: `not_found` when it was never
+    /// offboarded or the caller may not ask. Same permission, and the same
+    /// rule for a scoped client, as [`offboard_tenant`](Self::offboard_tenant).
+    async fn tenant_offboarding(
+        &self,
+        ctx: &SecurityContext,
+        tenant: uuid::Uuid,
+    ) -> Result<TenantOffboarding, CanonicalError> {
+        let _ = (ctx, tenant);
+        Err(offboarding_unsupported())
+    }
+
     // --- tenancy ----------------------------------------------------------
 
     /// A client whose every call is about `tenant` rather than the caller's
@@ -239,6 +350,17 @@ pub trait GraphStorageClientV1: Send + Sync {
         let _ = tenant;
         std::sync::Arc::new(no_target::NoTargetTenant)
     }
+}
+
+#[toolkit_canonical_errors::resource_error(gts_id!("cf.core.graph.tenant.v1~"))]
+struct OffboardingError;
+
+/// What the provided offboarding methods answer.
+fn offboarding_unsupported() -> CanonicalError {
+    OffboardingError::unimplemented(
+        "this GraphStorageClientV1 implementation does not support tenant offboarding",
+    )
+    .create()
 }
 
 // In this file rather than its own: the trait's provided `in_tenant` names
@@ -271,11 +393,14 @@ mod no_target {
     /// implementation that cannot honour a target tenant.
     pub struct NoTargetTenant;
 
+    /// An `unimplemented` answer of the graph node resource, for a provided
+    /// method an implementation of the client trait does not override.
+    pub fn unimplemented(detail: &str) -> CanonicalError {
+        TargetTenantError::unimplemented(detail.to_owned()).create()
+    }
+
     fn refused() -> CanonicalError {
-        TargetTenantError::unimplemented(
-            "this GraphStorageClientV1 implementation does not support a target tenant",
-        )
-        .create()
+        unimplemented("this GraphStorageClientV1 implementation does not support a target tenant")
     }
 
     #[async_trait]

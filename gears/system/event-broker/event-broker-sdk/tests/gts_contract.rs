@@ -102,10 +102,11 @@ fn a_bodyless_derived_event_registers_without_requiring_data() {
     let mut event = json!({
         "id": Uuid::nil(),
         "type": NotificationV1::TYPE_ID,
-        "tenant_id": Uuid::nil(),
+        "subject_tenant": Uuid::nil(),
         "source": "test",
         "subject": "order",
         "subject_type": OrderPlacedV1::TYPE_ID,
+        "subject_owner": null,
         "occurred_at": "2026-11-06T00:00:00Z",
         "partition": 0,
         "sequence": 1,

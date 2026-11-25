@@ -113,8 +113,8 @@ The hardest constraint here is not any single field but the rule connecting them
 4. [x] - `p1` - DB: SELECT the target category WHERE id = {category_id} - `inst-decl-create-4`
 5. [x] - `p1` - **IF** the category does not exist → **RETURN** `404` - `inst-decl-create-5`
 6. [x] - `p1` - Invoke setting instance key construction using `value_type_id`, `vendor`, the category's slug, and the leaf `name` - `inst-decl-create-6`
-7. [x] - `p1` - **IF** any segment violates the GTS grammar → **RETURN** `400` naming the offending segment; **IF** `display_name` is present and not `null` **AND**, after trimming, it is empty, longer than 256 Unicode characters or contains a control character → **RETURN** `400` naming the field; an explicit `null` counts as unsupplied, and the trimmed value is what the rest of the flow stores - `inst-decl-create-7`
-8. [x] - `p1` - Resolve the value type's trait set through the Type Validator trait - `inst-decl-create-8`
+7. [x] - `p1` - **IF** any segment violates the GTS grammar → **RETURN** `400` naming the offending segment; **IF** `display_name` is present and not `null` **AND**, after trimming, it is empty, longer than 256 Unicode characters or contains a control character → **RETURN** `400` naming the field; an explicit `null` counts as unsupplied, and the trimmed value is what the rest of the flow stores; **IF** `description` is present and longer than 4096 Unicode characters → **RETURN** `400` naming the field with the code `declaration_description_length`, before the path is looked up, so a create, a revive and an evolution refuse it the same way - `inst-decl-create-7`
+8. [x] - `p1` - Check through the Type Validator trait that `value_type_id` names a value type — **IF** it is a type under `gts.cf.core.settings.` outside the catalogue `type_*` (the abstract setting base, a declared setting's key) or a type whose own schema is marked `x-gts-abstract` → **RETURN** `400` `not_a_value_type` naming `value_type_id`; **IF** the type is registered but its schema does not build into a validator, as when it refers to a type outside its own parent chain → **RETURN** `400` `value_type_unsupported` naming `value_type_id` — then resolve the value type's trait set through the same trait - `inst-decl-create-8`
 9. [x] - `p1` - Invoke classification and secret-trait derivation using the resolved traits and any author-supplied `data_classification` - `inst-decl-create-9`
 10. [x] - `p1` - **IF** derivation rejects the combination → **RETURN** `400` - `inst-decl-create-10`
 11. [x] - `p1` - **IF** `has_secret_trait` is true **AND** `default_value` is non-empty → **RETURN** `400`, because a secret setting has no secret default; an empty value still has to be a value of the type, which the next step decides - `inst-decl-create-11`
@@ -161,6 +161,7 @@ The hardest constraint here is not any single field but the rule connecting them
 13. [x] - `p1` - DB: UPDATE setting_declarations SET {supplied metadata} (an explicit `null` clears a nullable field — `display_name`, `description`, `domain_affinity`, `licence_feature` — and an absent field is unchanged, and a supplied `display_name` is stored trimmed), `updated_at` = now(), and `last_change_at` = now() only when a field that changes what a reader is served changed — classification, step-up, anonymous exposure, licence feature, domain affinity; a description, display name or mode edit leaves the definition recency alone — WHERE id = {id} AND `updated_at` = {the version the tag was compared against}; **IF** no row matched → **RETURN** `412`; invalidate the local cache for the key — inside the transaction and again once it commits, as retire does — since the cached effective value carries the declaration's classification and domain affinity - `inst-decl-update-13`
 14. [x] - `p1` - Emit a declaration-updated audit record with pre-image and post-image - `inst-decl-update-14`
 15. [x] - `p1` - **RETURN** `200` with the updated declaration and a refreshed ETag - `inst-decl-update-15`
+16. [x] - `p1` - On every exit of this flow, **IF** step 10 required a step-up → count `settings_step_up_total` by `operation` `update` and `result`: `verified`, `service_principal` for a non-interactive caller, or the refusal code - `inst-decl-update-16`
 
 ### Retire Declaration
 
@@ -191,6 +192,7 @@ The hardest constraint here is not any single field but the rule connecting them
 12. [x] - `p1` - Invalidate the local cache for the affected scopes and publish the cache-invalidation and declaration-retired signals - `inst-decl-retire-12`
 13. [x] - `p1` - Emit a declaration-retired audit record carrying pre-images - `inst-decl-retire-13`
 14. [x] - `p1` - **RETURN** `200` with the retired declaration; this is a soft delete, not a `204` removal - `inst-decl-retire-14`
+15. [x] - `p1` - On every exit of this flow, **IF** step 4 verified a step-up → count that verification on `settings_step_up_total` by `operation` `retire` and `result`: `verified`, `service_principal` for a non-interactive caller, or the refusal code - `inst-decl-retire-15`
 
 ### Reactivate Declaration
 
@@ -224,6 +226,7 @@ The hardest constraint here is not any single field but the rule connecting them
 14. [x] - `p1` - Invalidate the local cache for the affected scopes, since retained values re-enter resolution - `inst-decl-react-10`
 15. [x] - `p1` - Emit a declaration-reactivated audit record - `inst-decl-react-11`
 16. [x] - `p1` - **RETURN** `200` with the revived declaration - `inst-decl-react-12`
+17. [x] - `p1` - On every exit of this flow, **IF** step 10 verified a step-up → count that verification on `settings_step_up_total` by `operation` `reactivate` and `result`: `verified`, `service_principal` for a non-interactive caller, or the refusal code - `inst-decl-react-17`
 
 ### Report a Revival
 
@@ -328,6 +331,7 @@ A purge's duration grows with the number of Credential Store entries it releases
 6. [x] - `p1` - Mint the next free major: one above the highest major the path has ever used, retired ones included, composed as `<vendor>.settings.<category>.<name>.vN~` - `inst-decl-evolve-5`
 7. [x] - `p1` - In one transaction: retire the active predecessor and record it; insert the successor at the new key — its own GTS setting type registered first, its create recorded; copy every predecessor value to it at the same scope under an update lock, carrying `set_by` and `set_by_tenant` unchanged, re-validating each against the new value type and flagging what fails `needs_review` with its detail, never coercing or dropping it - `inst-decl-evolve-6`
 8. [x] - `p1` - Invalidate the local cache for both keys, and **RETURN** `200` with the successor and `evolved: true` - `inst-decl-evolve-7`
+9. [x] - `p1` - On every exit of this flow, **IF** step 4 verified a step-up → count that verification on `settings_step_up_total` by `operation` `evolve` and `result`: `verified`, `service_principal` for a non-interactive caller, or the refusal code - `inst-decl-evolve-9`
 
 ### Declare Dependency Group
 
@@ -406,7 +410,7 @@ A purge's duration grows with the number of Credential Store entries it releases
 
 **Steps**:
 1. [x] - `p1` - **FOR EACH** field present in the request - `inst-decl-mutcls-1`
-   1. [x] - `p1` - **IF** the field is `display_name`, `description`, `mode`, `domain_affinity`, or `licence_feature`, or it tightens a gate — sets `requires_step_up` true or `anonymous_exposable` false → classify as immediate; a `display_name` must be `null` or a string of 1..256 Unicode characters after trimming with no control character, and any other shape, length or content → **RETURN** `400` naming the field - `inst-decl-mutcls-2`
+   1. [x] - `p1` - **IF** the field is `display_name`, `description`, `mode`, `domain_affinity`, or `licence_feature`, or it tightens a gate — sets `requires_step_up` true or `anonymous_exposable` false → classify as immediate; a `display_name` must be `null` or a string of 1..256 Unicode characters after trimming with no control character, a `description` must be `null` or a string of at most 4096 Unicode characters, and any other shape, length or content → **RETURN** `400` naming the field - `inst-decl-mutcls-2`
    2. [x] - `p1` - **IF** the field is `default_value`, the value type, or `scope_class` → classify as immutable, because each would change a live setting's resolution without any gate - `inst-decl-mutcls-3`
    3. [x] - `p1` - **IF** the field is `data_classification` **AND** the change tightens from `public` toward `pii` → classify as immediate - `inst-decl-mutcls-4`
    4. [x] - `p1` - **IF** the field is `data_classification` **AND** the change loosens from `pii` toward `public` → classify as step-up-gated, because it un-masks content previously withheld - `inst-decl-mutcls-5`
@@ -527,7 +531,7 @@ The system **MUST** derive `has_secret_trait` from the value type's resolved tra
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-dod-setting-declarations-mutation-classes`
 
-The system **MUST** partition declaration changes into descriptive metadata (`display_name`, `description`, `mode`, `domain_affinity`, `licence_feature`) applied immediately under `update` permission plus `If-Match` — the write itself conditional on the version the tag was compared against — behavior-affecting fields rejected as immutable, and behavior-affecting actions gated by credential step-up. `data_classification` tightening **MUST** be immediate while loosening **MUST** require step-up. No declaration edit may change a live setting's effective resolution without a gate, and an unrecognized field **MUST** be treated as immutable rather than immediate. A metadata change **MUST** evict the key's cached effective values, so a reclassification masks on the next read rather than when the cache TTL runs out.
+The system **MUST** partition declaration changes into descriptive metadata (`display_name`, `description`, `mode`, `domain_affinity`, `licence_feature`) applied immediately under `update` permission plus `If-Match` — the write itself conditional on the version the tag was compared against — behavior-affecting fields rejected as immutable, and behavior-affecting actions gated by credential step-up. `data_classification` tightening **MUST** be immediate while loosening **MUST** require step-up. No declaration edit may change a live setting's effective resolution without a gate, and an unrecognized field **MUST** be treated as immutable rather than immediate. A metadata change **MUST** evict the key's cached effective values, so a reclassification masks on the next read rather than when the cache TTL runs out. A step-up-gated update **MUST** count its verification on `settings_step_up_total` by `operation` `update` and `result`.
 
 **Implements**:
 - `cpt-cf-settings-service-algo-setting-declarations-mutation-class`
@@ -543,7 +547,7 @@ The system **MUST** partition declaration changes into descriptive metadata (`di
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-dod-setting-declarations-lifecycle`
 
-Retire **MUST** be an immediate soft delete setting `status` to `retired` in one transaction with cache invalidation and signal publication, **MUST** require credential step-up, and **MUST** retain every stored value while excluding the declaration from resolution. Reactivation **MUST** be expressed as re-declaring the key, also step-up gated; every retained value **MUST** be re-validated against the value type before it goes live, and the re-declaration **MUST** be refused when it flips the secret trait, changes the Scope Class or names a different value type — the setting's own GTS type is registered with its value type, and the Types Registry does not replace a registered type. Evolution **MUST** be expressed as re-declaring an active setting with a different value type, Schema Default or scope class, step-up gated: it **MUST** insert the next free major under a new key and type, copy and re-validate every value of the active major, and retire that major, all in one transaction, and **MUST** refuse a request matching the active declaration, a contributed declaration, and a new value type across the secret boundary. None of these actions goes through the value write path, and none deletes values. The copy of every value on evolution **MUST** carry its `set_by` and `set_by_tenant` unchanged.
+Retire **MUST** be an immediate soft delete setting `status` to `retired` in one transaction with cache invalidation and signal publication, **MUST** require credential step-up, and **MUST** retain every stored value while excluding the declaration from resolution. Reactivation **MUST** be expressed as re-declaring the key, also step-up gated; every retained value **MUST** be re-validated against the value type before it goes live, and the re-declaration **MUST** be refused when it flips the secret trait, changes the Scope Class or names a different value type — the setting's own GTS type is registered with its value type, and the Types Registry does not replace a registered type. Evolution **MUST** be expressed as re-declaring an active setting with a different value type, Schema Default or scope class, step-up gated: it **MUST** insert the next free major under a new key and type, copy and re-validate every value of the active major, and retire that major, all in one transaction, and **MUST** refuse a request matching the active declaration, a contributed declaration, and a new value type across the secret boundary. None of these actions goes through the value write path, and none deletes values. The copy of every value on evolution **MUST** carry its `set_by` and `set_by_tenant` unchanged. Every step-up verification of a retire, a reactivate or an evolution **MUST** be counted on `settings_step_up_total` by `operation` (`retire`, `reactivate`, `evolve`) and `result`, as the value path counts its own.
 
 **Implements**:
 - `cpt-cf-settings-service-flow-setting-declarations-retire`
@@ -711,6 +715,8 @@ The system **MUST** emit an audit record through the Audit Emitter for every dec
 - [x] Re-declaring an active setting with a different value type evolves it: `200` with `evolved: true`, the next major created and active, every value copied and re-validated with failures flagged `needs_review`, the previous major retired
 - [x] A later shape change evolves the active major, not a retired one, and a repeat of a request that matches the active declaration returns `409` without minting a major
 - [x] An evolution without step-up, of a contributed declaration, or across the secret boundary is refused and leaves the active declaration and its values untouched
+- [x] A declaration action by a non-interactive caller that requires step-up counts `service_principal`
+- [x] A metadata update that needs no step-up counts nothing on `settings_step_up_total`
 - [x] Re-declaring a key that is already `active` returns `409`
 - [ ] A Dependency Group naming a key that resolves to no active declaration returns `400`
 - [ ] An attempt to edit an existing Dependency Group or its constraint in place is rejected
@@ -746,4 +752,4 @@ The system **MUST** emit an audit record through the Audit Emitter for every dec
 - [x] A purge racing a revive of the same declaration lets exactly one win and never deletes an active declaration
 - [x] A revive that loses the race to a purge answers `404`, never `500`
 - [x] A purge racing a value write that stores a secret leaves no Credential Store entry unreleased
-- [x] Retire, reactivate, evolve, a step-up-gated metadata update and purge each count their step-up outcome in `settings_step_up_total` under their own operation
+- [x] Retire, reactivate, evolve, a step-up-gated metadata update and purge each count their step-up outcome in `settings_step_up_total` under their own operation — `verified` with a valid assertion, the refusal code without one

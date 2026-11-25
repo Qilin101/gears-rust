@@ -146,6 +146,10 @@ pub struct GraphStorageConfig {
     /// reports the cut.
     pub response_max_bytes: u64,
     pub node_read_max_adjacency: u32,
+    /// The largest page `list_node_edges` returns, and its default size. The
+    /// listing is how a caller reads a hub's edges past
+    /// `node_read_max_adjacency`.
+    pub edge_list_max_page: u32,
     pub traversal_max_depth: u8,
     pub traversal_max_nodes: u32,
     pub traversal_max_frontier: u32,
@@ -206,6 +210,17 @@ pub struct GraphStorageConfig {
     /// Offending node keys a refusal lists. Enough to see the pattern, not
     /// enough to make the refusal itself a data export.
     pub type_update_max_reported_rows: u32,
+    /// Rows the offboarding worker removes per transaction. Small enough
+    /// that one step holds its locks briefly, large enough that a tenant of a
+    /// million rows goes in minutes.
+    pub offboarding_batch: u32,
+    /// Seconds between the offboarding worker's passes. A fenced tenant
+    /// waits at most this long before its deletion starts.
+    pub offboarding_interval_secs: u64,
+    /// Seconds one deletion step may take before it counts as failed: long
+    /// enough for a batch behind a slow lock, short enough that a stuck step
+    /// does not hold the worker.
+    pub offboarding_step_timeout_secs: u64,
 }
 
 impl Default for GraphStorageConfig {
@@ -232,6 +247,7 @@ impl Default for GraphStorageConfig {
             ingest_max_bytes: 64 * 1024 * 1024,
             response_max_bytes: 64 * 1024 * 1024,
             node_read_max_adjacency: 100,
+            edge_list_max_page: 200,
             traversal_max_depth: 5,
             traversal_max_nodes: 1_000,
             traversal_max_frontier: 10_000,
@@ -246,6 +262,9 @@ impl Default for GraphStorageConfig {
             type_migration_max_rows: 25_000,
             type_update_batch: 2_000,
             type_update_max_reported_rows: 50,
+            offboarding_batch: 1_000,
+            offboarding_interval_secs: 10,
+            offboarding_step_timeout_secs: 60,
         }
     }
 }
@@ -488,6 +507,9 @@ impl GraphStorageConfig {
         }
         for (what, count) in [
             ("projection_max_page", u64::from(self.projection_max_page)),
+            // An edge in the listing carries its payload, which ingest bounds
+            // by the same item ceiling a node's does.
+            ("edge_list_max_page", u64::from(self.edge_list_max_page)),
             // Both arms of a hybrid search, fused.
             (
                 "search_max_arm_limit x 2",
@@ -509,6 +531,7 @@ impl GraphStorageConfig {
     /// What one request may ask the graph to read.
     fn check_graph_ranges(&self, errors: &mut Vec<String>) {
         check_range!(errors, self, node_read_max_adjacency, 1u32, 1_000u32);
+        check_range!(errors, self, edge_list_max_page, 1u32, 1_000u32);
         check_range!(errors, self, traversal_max_depth, 1u8, 8u8);
         check_range!(errors, self, traversal_max_nodes, 1u32, 10_000u32);
         check_range!(errors, self, traversal_max_frontier, 1u32, 100_000u32);
@@ -528,7 +551,27 @@ impl GraphStorageConfig {
         check_range!(errors, self, type_update_max_rows, 1u32, 5_000_000u32);
         check_range!(errors, self, type_migration_max_rows, 1u32, 1_000_000u32);
         check_range!(errors, self, type_update_batch, 100u32, 10_000u32);
+        check_range!(errors, self, offboarding_batch, 10u32, 10_000u32);
+        check_range!(errors, self, offboarding_interval_secs, 1u64, 3_600u64);
+        check_range!(errors, self, offboarding_step_timeout_secs, 1u64, 600u64);
         check_range!(errors, self, type_update_max_reported_rows, 1u32, 1_000u32);
+    }
+
+    /// How the offboarding worker deletes.
+    pub fn offboarding_worker(&self) -> anyhow::Result<crate::domain::offboarding::WorkerSettings> {
+        let batch = std::num::NonZeroU64::new(u64::from(self.offboarding_batch))
+            .ok_or_else(|| anyhow::anyhow!("graph-storage.offboarding_batch must not be 0"))?;
+        crate::domain::offboarding::WorkerSettings::new(
+            batch,
+            std::time::Duration::from_secs(self.offboarding_interval_secs),
+            std::time::Duration::from_secs(self.offboarding_step_timeout_secs),
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "graph-storage.offboarding_interval_secs and offboarding_step_timeout_secs must \
+                 not be 0"
+            )
+        })
     }
 
     /// The interactive deadline as a duration.
@@ -541,6 +584,51 @@ impl GraphStorageConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offboarding_worker_bounds_are_enforced_on_both_sides() {
+        type Set = fn(&mut GraphStorageConfig);
+        let with = |set: Set| {
+            let mut config = GraphStorageConfig::default();
+            set(&mut config);
+            config.validate()
+        };
+        let refused: [(Set, &str); 6] = [
+            (|c| c.offboarding_batch = 9, "offboarding_batch"),
+            (|c| c.offboarding_batch = 10_001, "offboarding_batch"),
+            (
+                |c| c.offboarding_interval_secs = 0,
+                "offboarding_interval_secs",
+            ),
+            (
+                |c| c.offboarding_interval_secs = 3_601,
+                "offboarding_interval_secs",
+            ),
+            (
+                |c| c.offboarding_step_timeout_secs = 0,
+                "offboarding_step_timeout_secs",
+            ),
+            (
+                |c| c.offboarding_step_timeout_secs = 601,
+                "offboarding_step_timeout_secs",
+            ),
+        ];
+        for (set, key) in refused {
+            let refused = with(set).expect_err("refused at startup");
+            assert!(refused.to_string().contains(key), "{key}: {refused}");
+        }
+        let accepted: [Set; 6] = [
+            |c| c.offboarding_batch = 10,
+            |c| c.offboarding_batch = 10_000,
+            |c| c.offboarding_interval_secs = 1,
+            |c| c.offboarding_interval_secs = 3_600,
+            |c| c.offboarding_step_timeout_secs = 1,
+            |c| c.offboarding_step_timeout_secs = 600,
+        ];
+        for set in accepted {
+            with(set).expect("a bound itself is accepted");
+        }
+    }
 
     #[test]
     fn defaults_pass_validation() {

@@ -21,11 +21,13 @@ use crate::domain::error::DomainError;
 use crate::domain::odata::Listing;
 use crate::domain::precondition;
 use crate::infra::storage::clock::{now, stamp_after};
+use crate::infra::storage::db_error::db_error;
 use crate::infra::storage::declaration_odata_mapper::DeclarationODataMapper;
+use crate::infra::storage::entity::category;
 use crate::infra::storage::entity::declaration::{self, Entity as DeclarationEntity};
 use crate::infra::storage::entity::tenant_permission;
 use crate::infra::storage::listing::list_counted;
-use crate::infra::storage::text_match::{Dialect, TextMatch};
+use crate::infra::storage::text_match::{Dialect, TextMatch, matchable_categories};
 use crate::infra::storage::value_repo;
 use settings_service_sdk::odata::DeclarationFilterField;
 
@@ -92,15 +94,7 @@ fn map_write_error(err: &toolkit_db::secure::ScopeError) -> DomainError {
                     .to_owned(),
         }
     } else {
-        DomainError::Internal {
-            diagnostic: err.to_string(),
-        }
-    }
-}
-
-fn db_error(err: impl std::fmt::Display) -> DomainError {
-    DomainError::Internal {
-        diagnostic: err.to_string(),
+        db_error(err)
     }
 }
 
@@ -473,9 +467,7 @@ impl DeclarationRepository for DeclarationRepo {
             .scope_with(scope)
             .one(conn)
             .await
-            .map_err(|err| DomainError::Internal {
-                diagnostic: err.to_string(),
-            })?;
+            .map_err(db_error)?;
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-read:p1:inst-decl-read-6
         Ok(found.map(to_domain))
     }
@@ -631,14 +623,46 @@ impl DeclarationRepository for DeclarationRepo {
             // @cpt-end:cpt-cf-settings-service-flow-value-resolution-admin-browse:p1:inst-vr-browse-11
         };
 
+        // The category names of the candidates whose text matched, for the
+        // attribution of the match: one read per batch, over the categories
+        // the name predicate above could reach and no other. Categories are
+        // platform-global, as the search reads them for its breadcrumbs; the
+        // domain visibility is the restriction.
+        let mut category_ids: Vec<Uuid> = page
+            .items
+            .iter()
+            .filter(|m| matched.contains(&m.id))
+            .map(|m| m.category_id)
+            .collect();
+        category_ids.sort_unstable();
+        category_ids.dedup();
+        let category_names: HashMap<Uuid, String> = if category_ids.is_empty() {
+            HashMap::new()
+        } else {
+            matchable_categories(visibility)
+                .filter(category::Column::Id.is_in(category_ids))
+                .secure()
+                .scope_with(&AccessScope::allow_all())
+                .all(conn)
+                .await
+                .map_err(db_error)?
+                .into_iter()
+                .map(|c| (c.id, c.name))
+                .collect()
+        };
+
         let filter_hash = query.filter_hash.as_deref();
         let mut items = Vec::with_capacity(page.items.len());
         for model in page.items {
             let position = row_position(&model, &order, filter_hash)?;
             let text_matched = matched.contains(&model.id);
+            let category_name = text_matched
+                .then(|| category_names.get(&model.category_id).cloned())
+                .flatten();
             items.push(BrowseCandidate {
                 declaration: to_domain(model),
                 text_matched,
+                category_name,
                 position,
             });
         }
@@ -744,6 +768,45 @@ impl DeclarationRepository for DeclarationRepo {
         }
         Ok(tallies)
     }
+
+    async fn count_by_source_status<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+    ) -> Result<HashMap<(String, String), u64>, DomainError> {
+        let rows = DeclarationEntity::find()
+            .secure()
+            .scope_with(scope)
+            .project_all(conn, |q| {
+                q.select_only()
+                    .column(declaration::Column::Source)
+                    .column(declaration::Column::Status)
+                    .column_as(Expr::col(declaration::Column::Id).count(), "n")
+                    .group_by(declaration::Column::Source)
+                    .group_by(declaration::Column::Status)
+                    .into_model::<SourceStatusRow>()
+            })
+            .await
+            .map_err(db_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    (row.source, row.status),
+                    u64::try_from(row.n).unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+}
+
+/// One group of the inventory: the declarations sharing a source and a status,
+/// and how many there are.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct SourceStatusRow {
+    source: String,
+    status: String,
+    n: i64,
 }
 
 /// One group of the tally: the declarations of a category sharing a mode and

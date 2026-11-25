@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "cf-api-contracts"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "cf-api-contracts-consumer"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "cf-chat-engine"
-version = "0.3.14"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-account-management"
-version = "0.13.1"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-account-management-sdk"
-version = "0.9.1"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-api-gateway"
-version = "0.7.4"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1816,6 +1816,7 @@ dependencies = [
  "cf-gears-system-sdks",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gateway",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-http",
@@ -1827,6 +1828,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures-core",
+ "futures-util",
  "glob",
  "governor",
  "http",
@@ -1856,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authn-resolver"
-version = "0.3.2"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1877,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authn-resolver-sdk"
-version = "0.3.43"
+version = "0.3.46"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -1894,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver"
-version = "0.4.2"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1919,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-authz-resolver-sdk"
-version = "0.6.5"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2075,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-bss-ledger-sdk"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "cf-gears-bss-money",
@@ -2349,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-bss-rate-provider"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2370,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-bss-rate-provider-ecb-plugin"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2392,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-bss-rate-provider-http-json-plugin"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2418,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-bss-rate-provider-sdk"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2467,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-clickhouse-usage-collector-plugin"
-version = "0.1.6"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2507,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster"
-version = "0.4.4"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2554,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster-conformance"
-version = "0.3.14"
+version = "0.3.17"
 dependencies = [
  "async-trait",
  "cf-gears-cluster-sdk",
@@ -2566,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-cluster-sdk"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2600,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-construct"
-version = "0.1.6"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2608,11 +2610,13 @@ dependencies = [
  "bytes",
  "cf-gears-authz-resolver",
  "cf-gears-authz-resolver-sdk",
+ "cf-gears-cluster-sdk",
  "cf-gears-construct-sdk",
  "cf-gears-graph-storage",
  "cf-gears-graph-storage-sdk",
  "cf-gears-oagw-sdk",
  "cf-gears-settings-service-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-db",
@@ -2640,6 +2644,8 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -2654,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-construct-sdk"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "cf-gears-graph-storage-sdk",
@@ -2674,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-credstore"
-version = "0.7.2"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2712,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-credstore-sdk"
-version = "0.2.23"
+version = "0.2.26"
 dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
@@ -2777,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-event-broker"
-version = "0.6.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2793,6 +2799,8 @@ dependencies = [
  "cf-gears-postgres-event-broker-plugin",
  "cf-gears-sqlite-event-broker-plugin",
  "cf-gears-standalone-cluster-plugin",
+ "cf-gears-static-authz-plugin",
+ "cf-gears-tenant-resolver-sdk",
  "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
@@ -2804,7 +2812,9 @@ dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-stable-hash",
+ "cf-gears-toolkit-taskward",
  "cf-gears-toolkit-utils",
+ "cf-gears-tr-authz-plugin",
  "cf-gears-types-registry-sdk",
  "chrono",
  "criterion",
@@ -2871,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-event-broker-sdk"
-version = "0.6.0"
+version = "0.7.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3009,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-parser"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3042,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-parser-sdk"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3052,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-storage"
-version = "0.4.6"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3103,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-file-storage-sdk"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-gts",
@@ -3125,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-firebase-authn-plugin"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3154,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-flight-control"
-version = "0.1.6"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "cf-gears-api-gateway",
@@ -3174,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-github-mirror"
-version = "0.2.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3258,7 +3268,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-github-mirror-sdk"
-version = "0.3.1"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -3273,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-graph-storage"
-version = "0.3.2"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3303,10 +3313,13 @@ dependencies = [
  "hex",
  "http",
  "jsonschema 0.60.2",
+ "rand 0.10.3",
  "sea-orm",
  "sea-orm-migration",
  "serde",
+ "serde_html_form",
  "serde_json",
+ "strum 0.28.0",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.21",
@@ -3322,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-graph-storage-onnx-embedding-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-graph-storage-sdk",
@@ -3339,7 +3352,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-graph-storage-remote-embedding-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-graph-storage-sdk",
@@ -3357,7 +3370,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-graph-storage-sdk"
-version = "0.3.1"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
@@ -3376,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-grpc-hub"
-version = "0.5.2"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3405,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-kafka-event-broker-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-event-broker-backend-bench",
@@ -3431,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-keycloak-idp-plugin"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3472,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-le-default-evaluator"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "cf-gears-license-enforcement-sdk",
  "cf-gears-license-resolver-sdk",
@@ -3485,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-le-issue-admission-plugin"
-version = "0.1.2"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "cf-gears-license-enforcement-sdk",
@@ -3499,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-license-enforcement"
-version = "0.1.2"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3526,6 +3539,7 @@ dependencies = [
  "hex",
  "http",
  "inventory",
+ "jsonschema 0.60.2",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -3542,7 +3556,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-license-enforcement-sdk"
-version = "0.2.2"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -3569,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-license-resolver"
-version = "0.2.2"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3595,12 +3609,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-test",
  "uuid",
 ]
 
 [[package]]
 name = "cf-gears-license-resolver-sdk"
-version = "0.2.5"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3612,6 +3627,7 @@ dependencies = [
  "cf-gears-toolkit-security",
  "gts",
  "schemars 1.2.3",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3651,7 +3667,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-llm-gateway-sdk"
-version = "0.3.1"
+version = "0.3.4"
 dependencies = [
  "async-trait",
  "cf-gears-model-registry-sdk",
@@ -3670,7 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-memory-event-broker-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-event-broker-backend-bench",
@@ -3687,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-mini-chat"
-version = "0.5.5"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3743,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-mini-chat-sdk"
-version = "0.10.31"
+version = "0.10.34"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -3807,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-model-registry-sdk"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
@@ -3826,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-mysql-event-broker-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-event-broker-backend-bench",
@@ -3852,7 +3868,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-nodes-registry"
-version = "0.1.49"
+version = "0.1.52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3874,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-nodes-registry-sdk"
-version = "0.1.32"
+version = "0.1.34"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
@@ -3887,7 +3903,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-noop-usage-collector-plugin"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3909,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-oagw"
-version = "0.8.1"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3937,6 +3953,7 @@ dependencies = [
  "cf-gears-toolkit-http",
  "cf-gears-toolkit-http-proxy",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-resilience",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-utils",
  "cf-gears-types-registry",
@@ -3945,6 +3962,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "gts",
+ "h2",
  "heck 0.5.0",
  "http",
  "http-body-util",
@@ -3957,6 +3975,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "proptest",
  "psl",
  "rand 0.10.3",
@@ -3976,14 +3995,16 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-test",
+ "unicode-normalization",
  "url",
  "utoipa",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "cf-gears-oagw-sdk"
-version = "0.5.18"
+version = "0.7.0"
 dependencies = [
  "async-openai",
  "async-trait",
@@ -4009,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-oidc-authn-plugin"
-version = "0.5.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4118,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-postgres-event-broker-plugin"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "cf-gears-event-broker-backend-bench",
@@ -4147,7 +4168,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-quota-enforcement"
-version = "0.5.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4194,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-quota-enforcement-engine-cel"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "cel-core",
  "cf-gears-quota-enforcement-sdk",
@@ -4205,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-quota-enforcement-engine-most-restrictive"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "cf-gears-quota-enforcement-sdk",
  "serde_json",
@@ -4214,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-quota-enforcement-sdk"
-version = "0.5.2"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -4242,9 +4263,10 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-quota-enforcement-storage-plugin"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "cf-gears-quota-enforcement-sdk",
@@ -4275,7 +4297,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-resource-group"
-version = "0.4.11"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4291,13 +4313,10 @@ dependencies = [
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
- "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
- "gts",
  "http",
  "http-body-util",
  "inventory",
- "jsonschema 0.60.2",
  "opentelemetry",
  "opentelemetry_sdk",
  "sea-orm",
@@ -4318,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-resource-group-sdk"
-version = "0.3.10"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
@@ -4336,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-rg-tr-plugin"
-version = "0.2.2"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4393,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-service-discovery"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4404,11 +4423,15 @@ dependencies = [
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
+ "futures-util",
  "http",
+ "humantime-serde",
  "inventory",
+ "parking_lot",
  "secrecy",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tonic",
@@ -4421,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-settings-service"
-version = "0.3.1"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4445,6 +4468,7 @@ dependencies = [
  "cf-gears-toolkit-security",
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
+ "figment",
  "fnv",
  "futures-util",
  "gts",
@@ -4452,6 +4476,7 @@ dependencies = [
  "inventory",
  "jsonschema 0.60.2",
  "opentelemetry",
+ "opentelemetry_sdk",
  "regex",
  "sea-orm",
  "sea-orm-migration",
@@ -4473,7 +4498,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-settings-service-sdk"
-version = "0.2.3"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
@@ -4493,7 +4518,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-simple-user-settings"
-version = "0.3.5"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4523,7 +4548,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-simple-user-settings-sdk"
-version = "0.2.5"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -4536,7 +4561,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-single-tenant-tr-plugin"
-version = "0.1.46"
+version = "0.1.49"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4556,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-sqlite-event-broker-plugin"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "cf-gears-event-broker-backend-bench",
@@ -4578,7 +4603,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-standalone-cluster-plugin"
-version = "0.2.14"
+version = "0.2.17"
 dependencies = [
  "async-trait",
  "cf-gears-cluster-sdk",
@@ -4591,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-authn-plugin"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4613,7 +4638,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-authz-plugin"
-version = "0.2.1"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4634,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-credstore-plugin"
-version = "0.2.21"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4654,7 +4679,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-idp-plugin"
-version = "0.1.24"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4679,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-license-plugin"
-version = "0.1.11"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4701,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-static-tr-plugin"
-version = "0.2.1"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4721,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-system-sdk-directory"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4736,14 +4761,14 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-system-sdks"
-version = "0.1.52"
+version = "0.1.54"
 dependencies = [
  "cf-gears-system-sdk-directory",
 ]
 
 [[package]]
 name = "cf-gears-tenant-resolver"
-version = "0.2.2"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4765,7 +4790,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-tenant-resolver-sdk"
-version = "0.4.11"
+version = "0.4.14"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit",
@@ -4792,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-timescaledb-usage-collector-plugin"
-version = "0.3.6"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4824,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit"
-version = "0.13.1"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4855,6 +4880,7 @@ dependencies = [
  "futures-util",
  "gts",
  "http",
+ "humantime",
  "inventory",
  "nix 0.31.3",
  "opentelemetry",
@@ -4893,7 +4919,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-auth"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4923,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-canonical-errors"
-version = "0.10.1"
+version = "0.10.3"
 dependencies = [
  "axum",
  "cf-gears-toolkit-canonical-errors-macro",
@@ -4940,7 +4966,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-canonical-errors-macro"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "gts-id",
  "proc-macro-crate",
@@ -4951,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-contract"
-version = "0.4.6"
+version = "0.5.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4982,6 +5008,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tonic",
  "tower",
  "tracing",
@@ -4993,7 +5020,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-contract-macros"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-crate",
@@ -5019,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-contract-protogen"
-version = "0.1.15"
+version = "0.1.18"
 dependencies = [
  "cf-gears-toolkit-contract",
  "heck 0.5.0",
@@ -5032,7 +5059,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-db"
-version = "0.17.4"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5081,7 +5108,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-db-macros"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -5092,7 +5119,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-durable-execution"
-version = "0.1.4"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "apalis",
@@ -5128,7 +5155,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-gateway"
-version = "0.2.13"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5139,6 +5166,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body-util",
+ "humantime",
  "matchit 0.9.2",
  "parking_lot",
  "serde_json",
@@ -5151,7 +5179,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-gts"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cf-gears-toolkit-gts-declarations-fixture",
@@ -5177,7 +5205,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-gts-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-gts-declarations-fixture",
@@ -5195,7 +5223,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-http"
-version = "0.9.0"
+version = "0.9.2"
 dependencies = [
  "bytes",
  "cf-gears-toolkit-security",
@@ -5236,7 +5264,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-http-middleware"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "axum",
  "cf-gears-toolkit-canonical-errors",
@@ -5252,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-http-proxy"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5285,7 +5313,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-k8s-auth"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "cf-gears-toolkit-security",
  "k8s-openapi",
@@ -5346,7 +5374,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-odata"
-version = "0.10.3"
+version = "0.10.5"
 dependencies = [
  "base64 0.22.1",
  "bigdecimal",
@@ -5401,7 +5429,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-resilience"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cf-gears-toolkit-utils",
  "opentelemetry",
@@ -5418,7 +5446,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-sdk"
-version = "0.7.17"
+version = "0.7.19"
 dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-odata-macros",
@@ -5440,7 +5468,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-security"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -5505,7 +5533,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-transport-grpc"
-version = "0.9.3"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "cf-gears-toolkit-security",
@@ -5541,7 +5569,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-tr-authz-plugin"
-version = "0.1.27"
+version = "0.1.30"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5564,7 +5592,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-types-registry"
-version = "0.6.2"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5613,7 +5641,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-types-registry-sdk"
-version = "0.5.2"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5643,7 +5671,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-usage-collector"
-version = "0.5.5"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5681,7 +5709,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-usage-collector-sdk"
-version = "0.3.20"
+version = "0.3.23"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -5704,7 +5732,7 @@ dependencies = [
 
 [[package]]
 name = "cf-k8s-cluster-plugin"
-version = "0.1.8"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5736,7 +5764,7 @@ dependencies = [
 
 [[package]]
 name = "cf-postgres-cluster-plugin"
-version = "0.5.5"
+version = "0.5.8"
 dependencies = [
  "async-trait",
  "cf-gears-cluster",
@@ -5765,7 +5793,7 @@ dependencies = [
 
 [[package]]
 name = "cf-redis-cluster-plugin"
-version = "0.2.3"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "cf-gears-cluster",
@@ -7223,9 +7251,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -7574,9 +7602,9 @@ dependencies = [
 
 [[package]]
 name = "gts"
-version = "0.16.2"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "289c22c51cf505ecca932eb353f1520433601880f3280ce703d3e9a1a6d860e2"
+checksum = "5c824a099e928f044acf72573d524eee05207f94016a24f716b41cc7434b4c0d"
 dependencies = [
  "gts-id",
  "jsonschema 0.58.6",
@@ -7613,9 +7641,9 @@ dependencies = [
 
 [[package]]
 name = "gts-id"
-version = "0.16.2"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aade508c4cc6c00137fd264283618f265f68f0acf339f59e3c3c2dd687e3678f"
+checksum = "67f195ed8a7cff465b13aacf6081583795f4f8acc883bbd0dd3144223bb133b0"
 dependencies = [
  "thiserror 2.0.21",
  "uuid",
@@ -7623,9 +7651,9 @@ dependencies = [
 
 [[package]]
 name = "gts-macros"
-version = "0.16.2"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74896b5163d8afcefef50aae098a6bc4bc002050a5c38278ff96353a33b36f1e"
+checksum = "6b1de42e966037f78cf63a47fdf1828fee003aee0544716390d11d3b3c80d8d3"
 dependencies = [
  "gts-id",
  "proc-macro2",
@@ -7789,7 +7817,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello"
-version = "0.1.5"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14220,9 +14248,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

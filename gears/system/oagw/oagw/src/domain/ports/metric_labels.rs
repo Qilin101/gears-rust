@@ -27,14 +27,20 @@ pub mod key {
     pub const STATUS_CODE: &str = "http.response.status_code";
     /// `DomainError` variant name.
     pub const ERROR_TYPE: &str = "error_type";
-    /// Pipeline phase for duration histogram (`total`, `resolve`, `auth`; future: `guard`, `upstream`, …).
+    /// Where the injected API key came from (`config`, `request_ref`;
+    /// ADR-0022). `unknown` before the upstream resolves.
+    pub const CREDENTIAL_MODE: &str = "credential_mode";
+    /// Pipeline phase for duration histogram (`total`, `resolve`, `auth`, `sign`; future: `guard`, `upstream`, …).
     pub const PHASE: &str = "phase";
     /// Registry instance kind (`upstream`, `route`).
     pub const KIND: &str = "kind";
     /// Why the registry reconcile skipped or kept an instance.
     pub const REASON: &str = "reason";
-    /// How a registry reconcile run ended.
+    /// How a registry reconcile run, a response body or a WebSocket
+    /// session ended.
     pub const OUTCOME: &str = "outcome";
+    /// The rate-limit bucket a request was checked against.
+    pub const BUCKET: &str = "bucket";
     /// The proxy configuration cache section (`alias`, `route`).
     pub const MAP: &str = "map";
     /// How a proxy configuration cache lookup was served.
@@ -226,6 +232,67 @@ impl CacheEviction {
     }
 }
 
+/// The rate-limit bucket a request was checked against (`bucket` label of
+/// `rate_limit_usage_ratio` and `rate_limit_exceeded_total`).
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitBucket {
+    /// The matched route's own limit.
+    Route,
+    /// The enforced limit of an ancestor route the matched route shadows.
+    /// Several shadowed routes share this series.
+    ShadowedRoute,
+    /// The upstream's limit.
+    Upstream,
+    /// The shared budget's pool.
+    Pool,
+}
+
+impl RateLimitBucket {
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Route => "route",
+            Self::ShadowedRoute => "shadowed_route",
+            Self::Upstream => "upstream",
+            Self::Pool => "pool",
+        }
+    }
+}
+
+/// How a response body or a WebSocket session ended (`outcome` label of
+/// `stream_duration_seconds` and `websocket_session_duration_seconds`).
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOutcome {
+    /// The body reached its end (EOF or its `Content-Length`), or the client
+    /// closed the session.
+    Completed,
+    /// The body or the session ended with an error: an upstream failure or
+    /// drop, or an idle timeout.
+    Error,
+    /// The gateway's stop ended it. Kept apart from `error` so a rolling
+    /// deploy does not show as an error spike.
+    Shutdown,
+    /// Dropped before its end: the client went away, or the WebSocket
+    /// bridge task was dropped or panicked.
+    Cancelled,
+}
+
+impl StreamOutcome {
+    /// The label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Error => "error",
+            Self::Shutdown => "shutdown",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Where a proxy configuration change came from (`source` label of
 /// `proxy_cache_changes_total`).
 pub mod cache_change_source {
@@ -285,16 +352,24 @@ pub mod cache_publish_failure {
 
 /// Pipeline phase labels (`phase` label).
 pub mod phase {
-    /// End-to-end proxy_request duration.
+    /// Request start to the response head (or the gateway error); the body
+    /// is in `stream_duration_seconds`.
     pub const TOTAL: &str = "total";
     /// Time spent inside the auth plugin (`execute_auth_plugin`).
     pub const AUTH: &str = "auth";
     /// Time spent resolving the upstream and route (`resolve_proxy_target`).
     pub const RESOLVE: &str = "resolve";
+    /// Time spent in the auth plugin's signing phase (ADR-0023), recorded
+    /// only for a plugin that signs.
+    pub const SIGN: &str = "sign";
 }
 
 /// Sentinel for sites that observe a request before host/path resolution.
 pub const UNKNOWN: &str = "unknown";
+
+/// `error_type` of a request whose future, or grant, was dropped before its
+/// response head.
+pub const CANCELLED: &str = "Cancelled";
 
 /// Sentinel for non-standard HTTP methods (per OTel HTTP semconv).
 ///

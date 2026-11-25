@@ -10,8 +10,8 @@ mod support;
 use futures::StreamExt;
 use llm_gateway_anthropic_plugin::AnthropicPlugin;
 use llm_gateway_sdk::{
-    LlmGatewayProviderPluginClientV1, PassthroughApi, PassthroughRequest, PassthroughResponse,
-    ProviderCallCtx,
+    LlmGatewayProviderPluginClientV1, PassthroughApi, PassthroughMethod, PassthroughRequest,
+    PassthroughResponse, ProviderCallCtx,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -46,8 +46,13 @@ fn native_request(case: &Case, stream: bool) -> Option<PassthroughRequest> {
         body["stream"] = json!(true);
     }
     Some(
-        PassthroughRequest::new(PassthroughApi::Anthropic, "/v1/messages", body)
-            .with_stream(stream),
+        PassthroughRequest::new(
+            PassthroughApi::Anthropic,
+            PassthroughMethod::Post,
+            "/v1/messages",
+        )
+        .with_body(body)
+        .with_stream(stream),
     )
 }
 
@@ -101,7 +106,7 @@ async fn sync_replies_are_relayed() {
         else {
             continue;
         };
-        let native = req.body.clone();
+        let native = req.body.clone().expect("native body");
         let (sent, response) = forward(&case, req, Reply::from_file(&meta, None)).await;
         let PassthroughResponse::Json(response) = response else {
             panic!("{}: expected a JSON response", case.name);

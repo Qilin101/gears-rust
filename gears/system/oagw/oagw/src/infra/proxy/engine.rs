@@ -20,7 +20,7 @@ use toolkit_http_proxy::{
 };
 use tracing::{debug, warn};
 
-use crate::domain::error::DomainError;
+use crate::domain::error::{Dispatch, DomainError};
 use crate::domain::model::{Endpoint, Scheme};
 use crate::domain::services::SelectedEndpoint;
 use crate::domain::ssrf::SsrfGuard;
@@ -146,7 +146,7 @@ impl ProxyEngine {
         &self,
         selected: &SelectedEndpoint,
         instance: &str,
-    ) -> Result<Target, DomainError> {
+    ) -> Result<Target, TargetError> {
         let ep = &selected.endpoint;
         let addr = match selected.resolved_addr {
             Some(addr) => addr,
@@ -155,29 +155,41 @@ impl ProxyEngine {
         Ok(target_for(ep, addr))
     }
 
-    async fn resolve(&self, ep: &Endpoint, instance: &str) -> Result<SocketAddr, DomainError> {
+    async fn resolve(&self, ep: &Endpoint, instance: &str) -> Result<SocketAddr, TargetError> {
+        // Both failures look the same on the wire: the client learns nothing
+        // about the SSRF policy.
+        let link_unavailable = || DomainError::LinkUnavailable {
+            detail: "upstream connection error".into(),
+            instance: instance.to_string(),
+            dispatch: Dispatch::NotSent,
+        };
         let addrs = self.resolver.resolve(&ep.host, ep.port).await.map_err(|e| {
             warn!(host = %ep.host, port = ep.port, error = %e, "DNS resolution failed after retries");
-            DomainError::LinkUnavailable {
-                detail: "upstream connection error".into(),
-                instance: instance.to_string(),
-            }
+            TargetError::Unreachable(link_unavailable())
         })?;
-        first_permitted_addr(&self.ssrf_guard, &ep.host, addrs).map_err(|why| {
-            match why {
-                NoPermittedAddr::NoneResolved => {
-                    warn!(host = %ep.host, port = ep.port, "DNS returned no usable addresses");
-                }
-                NoPermittedAddr::Refused(reason) => {
-                    warn!(host = %ep.host, port = ep.port, reason, "SSRF policy refused every resolved address");
-                }
+        first_permitted_addr(&self.ssrf_guard, &ep.host, addrs).map_err(|why| match why {
+            NoPermittedAddr::NoneResolved => {
+                warn!(host = %ep.host, port = ep.port, "DNS returned no usable addresses");
+                TargetError::Unreachable(link_unavailable())
             }
-            DomainError::LinkUnavailable {
-                detail: "upstream connection error".into(),
-                instance: instance.to_string(),
+            NoPermittedAddr::Refused(reason) => {
+                warn!(host = %ep.host, port = ep.port, reason, "SSRF policy refused every resolved address");
+                TargetError::Refused(link_unavailable())
             }
         })
     }
+}
+
+/// Why [`ProxyEngine::target`] has no address to connect to. Both carry the
+/// error the client gets; the circuit breaker tells them apart.
+#[derive(Debug)]
+pub(crate) enum TargetError {
+    /// The host did not resolve, or resolved to nothing: the upstream is
+    /// unreachable.
+    Unreachable(DomainError),
+    /// The SSRF policy refused every resolved address: the gateway's policy,
+    /// not the upstream.
+    Refused(DomainError),
 }
 
 /// Map an endpoint and its address onto an engine target.
@@ -198,58 +210,73 @@ pub(crate) fn target_for(ep: &Endpoint, addr: SocketAddr) -> Target {
         .with_policy(policy)
 }
 
-/// Map an engine failure onto the OAGW error model.
+/// Map an engine failure onto the OAGW error model. The dispatch stage
+/// comes from the error ([`dispatch_of_error`]), not from the variant.
 pub(crate) fn map_proxy_error(err: &ProxyError, instance: &str) -> DomainError {
     let instance = instance.to_string();
-    debug!(kind = %err.kind(), error = %err, "upstream exchange failed");
-    match err.kind() {
+    let kind = err.kind();
+    debug!(kind = %kind, error = %err, "upstream exchange failed");
+    let dispatch = dispatch_of_error(err);
+    match kind {
         ErrorKind::ConnectTimeout => DomainError::ConnectionTimeout {
             detail: "upstream connection timed out".into(),
             instance,
+            dispatch,
         },
         ErrorKind::ReadTimeout => DomainError::RequestTimeout {
             detail: "upstream read timed out".into(),
             instance,
+            dispatch,
         },
         ErrorKind::WriteTimeout => DomainError::RequestTimeout {
             detail: "upstream write timed out".into(),
             instance,
+            dispatch,
         },
         ErrorKind::Http2 => DomainError::ProtocolError {
             detail: "upstream HTTP/2 error".into(),
             instance,
+            dispatch,
         },
         ErrorKind::Read => DomainError::StreamAborted {
             detail: "upstream stream read error".into(),
             instance,
+            dispatch,
         },
         ErrorKind::Write => DomainError::StreamAborted {
             detail: "upstream stream write error".into(),
             instance,
+            dispatch,
         },
         ErrorKind::ConnectNoRoute => DomainError::LinkUnavailable {
             detail: "no route to upstream host".into(),
             instance,
+            dispatch,
         },
         ErrorKind::Connect => DomainError::LinkUnavailable {
             detail: "upstream connection error".into(),
             instance,
+            dispatch,
         },
         ErrorKind::ConnectionClosed => DomainError::DownstreamError {
             detail: "upstream connection closed (peer disconnect)".into(),
             instance,
+            dispatch,
         },
         ErrorKind::ConnectRefused => DomainError::DownstreamError {
             detail: "upstream connection refused".into(),
             instance,
+            dispatch,
         },
         ErrorKind::TlsHandshake | ErrorKind::TlsHandshakeTimeout => DomainError::DownstreamError {
             detail: "upstream TLS handshake failed".into(),
             instance,
+            dispatch,
         },
         ErrorKind::InvalidCertificate => DomainError::DownstreamError {
             detail: "upstream certificate invalid".into(),
             instance,
+            dispatch,
         },
         ErrorKind::InvalidRequest => DomainError::Validation {
             field: "request",
@@ -264,8 +291,57 @@ pub(crate) fn map_proxy_error(err: &ProxyError, instance: &str) -> DomainError {
         _ => DomainError::DownstreamError {
             detail: "upstream sent an invalid response".into(),
             instance,
+            dispatch,
         },
     }
+}
+
+/// Whether `err` may have sent the request: by its kind ([`dispatch_of`]),
+/// unless the engine resent the request after a first attempt the upstream
+/// may have processed. Then even a connect failure of the resend may have
+/// sent it.
+pub(crate) fn dispatch_of_error(err: &ProxyError) -> Dispatch {
+    if err.earlier_attempt_may_have_been_processed() {
+        Dispatch::MaybeSent
+    } else {
+        dispatch_of(err.kind())
+    }
+}
+
+/// Whether an engine failure of `kind` may have sent the request. Only the
+/// connect and TLS kinds ([`is_connect_kind`]) and the requests the engine
+/// refuses before sending are not sent; every other kind, and any kind the
+/// engine adds later, may have sent it.
+pub(crate) fn dispatch_of(kind: ErrorKind) -> Dispatch {
+    if is_connect_kind(kind) || matches!(kind, ErrorKind::InvalidRequest | ErrorKind::Configuration)
+    {
+        Dispatch::NotSent
+    } else {
+        Dispatch::MaybeSent
+    }
+}
+
+/// Whether `err` means the last attempt made no connection to the
+/// upstream, so the client's pace played no part. A resend's connect
+/// failure counts too: the upstream is unreachable either way.
+pub(crate) fn is_connect_failure(err: &ProxyError) -> bool {
+    is_connect_kind(err.kind())
+}
+
+/// The connect and TLS kinds: the engine failed before the first byte of
+/// the request was written. The one list both [`dispatch_of`] and
+/// [`is_connect_failure`] use.
+fn is_connect_kind(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectTimeout
+            | ErrorKind::ConnectRefused
+            | ErrorKind::ConnectNoRoute
+            | ErrorKind::Connect
+            | ErrorKind::TlsHandshakeTimeout
+            | ErrorKind::TlsHandshake
+            | ErrorKind::InvalidCertificate
+    )
 }
 
 /// Adapt an engine response body to the SDK body stream.

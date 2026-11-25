@@ -506,17 +506,22 @@ fn reports_streaming_and_web_search_capabilities() {
 // Pass-through
 // ---------------------------------------------------------------------------
 
+fn native_body() -> Value {
+    json!({
+        "model": "anthropic::claude",
+        "max_tokens": 16,
+        "metadata": { "user_id": "u1" },
+        "messages": [{ "role": "user", "content": "Hi" }]
+    })
+}
+
+fn post(path: &str, body: Value) -> PassthroughRequest {
+    PassthroughRequest::new(PassthroughApi::Anthropic, PassthroughMethod::Post, path)
+        .with_body(body)
+}
+
 fn native_request() -> PassthroughRequest {
-    PassthroughRequest::new(
-        PassthroughApi::Anthropic,
-        "/v1/messages",
-        json!({
-            "model": "anthropic::claude",
-            "max_tokens": 16,
-            "metadata": { "user_id": "u1" },
-            "messages": [{ "role": "user", "content": "Hi" }]
-        }),
-    )
+    post("/v1/messages", native_body())
 }
 
 async fn forward(
@@ -546,9 +551,20 @@ fn declares_messages_and_count_tokens_passthrough() {
     assert_eq!(
         passthrough.endpoints,
         vec![
-            PassthroughEndpoint::metered("/v1/messages"),
-            PassthroughEndpoint::not_metered("/v1/messages/count_tokens"),
+            PassthroughEndpoint::metered(PassthroughMethod::Post, "/v1/messages"),
+            PassthroughEndpoint::not_metered(PassthroughMethod::Post, "/v1/messages/count_tokens"),
         ]
+    );
+}
+
+#[tokio::test]
+async fn passthrough_forwards_the_query_string() {
+    let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
+    let req = native_request().with_query("beta=true");
+    forward(&gateway, &call(&[]), req).await.unwrap();
+    assert_eq!(
+        gateway.last().uri,
+        "/api.anthropic.com/v1/messages?beta=true"
     );
 }
 
@@ -579,7 +595,7 @@ async fn passthrough_forwards_the_native_body_and_maps_the_model_back() {
         "interleaved-thinking-2025-05-14,effort-2025-11-24"
     );
     assert_eq!(sent.headers[ACCEPT], JSON);
-    let mut expected = native_request().body;
+    let mut expected = native_body();
     expected["model"] = json!("claude-sonnet-5-5");
     assert_eq!(sent.body, expected);
 
@@ -611,36 +627,57 @@ async fn passthrough_without_protocol_headers_uses_the_default_version() {
 
 #[tokio::test]
 async fn passthrough_rejects_before_sending() {
-    let mut stateful = native_request();
-    stateful.body["container"] = json!("cnt_1");
-    let mut paid = native_request();
-    paid.body["tools"] = json!([{ "type": "web_search_20250305", "name": "web_search" }]);
-    let mut no_model = native_request();
-    no_model.body.as_object_mut().unwrap().remove("model");
-    let mut stateful_count = count_tokens_request();
-    stateful_count.body["messages"][0]["content"] =
+    let mut stateful = native_body();
+    stateful["container"] = json!("cnt_1");
+    let mut paid = native_body();
+    paid["tools"] = json!([{ "type": "web_search_20250305", "name": "web_search" }]);
+    let mut no_model = native_body();
+    no_model.as_object_mut().unwrap().remove("model");
+    let mut stateful_count = count_tokens_body();
+    stateful_count["messages"][0]["content"] =
         json!([{ "type": "document", "source": { "type": "file", "file_id": "file_1" } }]);
-    let batches = PassthroughRequest::new(
-        PassthroughApi::Anthropic,
-        "/v1/messages/batches",
-        native_request().body,
-    );
+    let batches = post("/v1/messages/batches", native_body());
     let openai = PassthroughRequest::new(
         PassthroughApi::OpenAi,
+        PassthroughMethod::Post,
         "/v1/messages",
-        native_request().body,
+    )
+    .with_body(native_body());
+    let get = PassthroughRequest::new(
+        PassthroughApi::Anthropic,
+        PassthroughMethod::Get,
+        "/v1/messages",
+    );
+    let no_body = PassthroughRequest::new(
+        PassthroughApi::Anthropic,
+        PassthroughMethod::Post,
+        "/v1/messages",
     );
     let cases = [
-        (stateful, "capability_not_supported", Some("container")),
-        (paid, "capability_not_supported", Some("tools[0]")),
-        (no_model, "validation_error", Some("model")),
         (
-            stateful_count,
+            post("/v1/messages", stateful),
+            "capability_not_supported",
+            Some("container"),
+        ),
+        (
+            post("/v1/messages", paid),
+            "capability_not_supported",
+            Some("tools[0]"),
+        ),
+        (
+            post("/v1/messages", no_model),
+            "validation_error",
+            Some("model"),
+        ),
+        (
+            post("/v1/messages/count_tokens", stateful_count),
             "capability_not_supported",
             Some("messages[0].content[0].source"),
         ),
         (batches, "capability_not_supported", None),
         (openai, "capability_not_supported", None),
+        (get, "capability_not_supported", None),
+        (no_body, "validation_error", Some("model")),
     ];
     for (req, code, param) in cases {
         let gateway = FakeGateway::new(|| json_response(200, &[], &message_json()));
@@ -651,10 +688,14 @@ async fn passthrough_rejects_before_sending() {
     }
 }
 
-fn count_tokens_request() -> PassthroughRequest {
-    let mut body = native_request().body;
+fn count_tokens_body() -> Value {
+    let mut body = native_body();
     body.as_object_mut().unwrap().remove("max_tokens");
-    PassthroughRequest::new(PassthroughApi::Anthropic, "/v1/messages/count_tokens", body)
+    body
+}
+
+fn count_tokens_request() -> PassthroughRequest {
+    post("/v1/messages/count_tokens", count_tokens_body())
 }
 
 #[tokio::test]
@@ -671,7 +712,7 @@ async fn passthrough_forwards_count_tokens_without_usage() {
     let sent = gateway.last();
     assert_eq!(sent.uri, "/api.anthropic.com/v1/messages/count_tokens");
     assert_eq!(sent.headers[ACCEPT], JSON);
-    let mut expected = count_tokens_request().body;
+    let mut expected = count_tokens_body();
     expected["model"] = json!("claude-sonnet-5-5");
     assert_eq!(sent.body, expected);
 
@@ -757,8 +798,6 @@ async fn passthrough_stream_relays_native_events() {
     }
     // Events without a model are relayed byte for byte.
     assert_eq!(relayed[1].data, events[1].to_string());
-    let texts: Vec<_> = relayed.iter().map(|e| e.output_text.as_str()).collect();
-    assert_eq!(texts, ["", "", "", "Hi!", "{\"a\"", "", "", ""]);
     let usages: Vec<_> = relayed.iter().filter_map(|e| e.usage.as_ref()).collect();
     assert_eq!(usages.len(), 1);
     assert_eq!(usages[0].total_tokens, 5);

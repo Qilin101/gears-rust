@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use authz_resolver_sdk::PolicyEnforcer;
 use credstore_sdk::{
     CredStoreClientV1, CredStoreError, SecretRef, SecretValue, SharingMode, WritePrecondition,
 };
@@ -20,9 +19,9 @@ use settings_service_sdk::gts::VALUE_SCHEMA;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::api::authz::{self, resource};
+use crate::api::authz::{Permission, PermissionEnforcer};
 use crate::domain::error::DomainError;
-use crate::domain::ports::{SecretManager, SecretResolveGate};
+use crate::domain::ports::{SecretManager, SecretResolveGate, SecurityMetrics};
 
 /// The name the gear's store namespace and principal derive from.
 const NAMESPACE_NAME: &[u8] = b"urn:constructorfabric:gears:settings-service";
@@ -247,16 +246,17 @@ impl SecretManager for CredStoreSecretManager {
 }
 
 /// The per-setting gate of the machine path: `read` on the value resource
-/// naming the declaration, decided by the `PolicyEnforcer`.
+/// naming the declaration, decided through the gear's `PermissionEnforcer`.
 pub struct PepSecretGate {
-    enforcer: Arc<PolicyEnforcer>,
+    enforcer: Arc<PermissionEnforcer>,
+    metrics: Arc<dyn SecurityMetrics>,
 }
 
 impl PepSecretGate {
-    /// Gate over the gear's enforcer.
+    /// Gate over the gear's enforcer, its refusals counted on `metrics`.
     #[must_use]
-    pub fn new(enforcer: Arc<PolicyEnforcer>) -> Self {
-        Self { enforcer }
+    pub fn new(enforcer: Arc<PermissionEnforcer>, metrics: Arc<dyn SecurityMetrics>) -> Self {
+        Self { enforcer, metrics }
     }
 }
 
@@ -267,15 +267,15 @@ impl SecretResolveGate for PepSecretGate {
         ctx: &SecurityContext,
         declaration_id: Uuid,
     ) -> Result<(), DomainError> {
-        authz::access_scope(
-            &self.enforcer,
-            ctx,
-            &resource::VALUE,
-            "read",
-            Some(declaration_id),
-        )
-        .await
-        .map(|_| ())
+        self.enforcer
+            .access_scope(
+                self.metrics.as_ref(),
+                ctx,
+                Permission::ValueRead,
+                Some(declaration_id),
+            )
+            .await
+            .map(|_| ())
     }
 }
 

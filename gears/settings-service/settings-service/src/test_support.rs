@@ -9,6 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry_sdk::metrics::data::{
+    AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics,
+};
+use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 use settings_service_sdk::SettingKey;
@@ -21,6 +26,11 @@ use uuid::Uuid;
 use crate::audit::{AuditRecord, AuditSink};
 use crate::domain::contribution::SettingTypeRegistrar;
 use crate::domain::error::DomainError;
+use crate::domain::metric_labels::{
+    AuditKind, AuthzReason, ChangeType, DeclarationSource, LookupResult, Operation, Outcome,
+    ReadSource, ResolveFailure, RetentionResult, ScopeClass, ScopeKind, SecretUseResult,
+    StepUpResult,
+};
 use crate::domain::platform_scope::PlatformScope;
 use crate::domain::ports::StepUpOperation;
 use crate::domain::resolution::{Subtree, TenantHierarchy};
@@ -72,6 +82,22 @@ impl FakeSource {
     pub fn with_type(mut self, id: &str, schema: Value) -> Self {
         let schema = GtsTypeSchema::try_new(GtsTypeId::new(id), schema, None, None)
             .expect("fixture schema is a valid root type");
+        self.schemas.insert(id.to_owned(), schema);
+        self
+    }
+
+    /// A type derived from one this source already holds: the parent is the
+    /// id minus its last segment, as the registry chains a derived type.
+    pub fn with_derived_type(mut self, id: &str, schema: Value) -> Self {
+        let parent = GtsTypeSchema::derive_parent_type_id(id).expect("a derived type id");
+        let parent = self
+            .schemas
+            .get(parent.as_ref())
+            .cloned()
+            .expect("the parent is registered first");
+        let schema =
+            GtsTypeSchema::try_new(GtsTypeId::new(id), schema, None, Some(Arc::new(parent)))
+                .expect("fixture schema is a valid derived type");
         self.schemas.insert(id.to_owned(), schema);
         self
     }
@@ -190,6 +216,39 @@ pub struct FixedScope(pub Uuid);
 impl PlatformScope for FixedScope {
     async fn root_tenant(&self) -> Result<Uuid, DomainError> {
         Ok(self.0)
+    }
+}
+
+/// A platform scope with a fixed root tenant that can stop answering: the
+/// Tenant Resolver going away from under a read.
+pub struct SwitchableScope {
+    root: Uuid,
+    down: std::sync::atomic::AtomicBool,
+}
+
+impl SwitchableScope {
+    pub fn new(root: Uuid) -> Self {
+        Self {
+            root,
+            down: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Fail every `root_tenant` from now on.
+    pub fn go_down(&self) {
+        self.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl PlatformScope for SwitchableScope {
+    async fn root_tenant(&self) -> Result<Uuid, DomainError> {
+        if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DomainError::Unavailable {
+                detail: "tenant resolver down".to_owned(),
+            });
+        }
+        Ok(self.root)
     }
 }
 
@@ -325,6 +384,9 @@ pub struct FakeHierarchy {
     pub standalone: Mutex<HashSet<Uuid>>,
     pub chain_calls: std::sync::atomic::AtomicUsize,
     pub unavailable: std::sync::atomic::AtomicBool,
+    /// Fail every `chain` call with the resolver's own fault rather than an
+    /// outage: a dependency answering with something broken.
+    pub broken: std::sync::atomic::AtomicBool,
     /// How many of the next `chain` calls fail as unavailable before the
     /// resolver answers again: a transient outage, not a standing one.
     pub failing_chains: std::sync::atomic::AtomicUsize,
@@ -354,6 +416,12 @@ impl FakeHierarchy {
     pub fn with_standalone(self, id: Uuid) -> Self {
         self.standalone.lock().expect("lock").insert(id);
         self
+    }
+
+    /// Make every `chain` call fail as an internal fault of the resolver.
+    pub fn set_broken(&self, broken: bool) {
+        self.broken
+            .store(broken, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_unavailable(&self, unavailable: bool) {
@@ -461,6 +529,11 @@ impl TenantHierarchy for FakeHierarchy {
                 detail: "tenant resolver down".to_owned(),
             });
         }
+        if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DomainError::Internal {
+                diagnostic: "tenant resolver answered with something broken".to_owned(),
+            });
+        }
         if let Some(hook) = self.on_chain.lock().expect("lock").take() {
             hook();
         }
@@ -555,8 +628,67 @@ pub const SECRET: &str = "gts.cf.core.settings.type_secret_string.v1~";
 /// credentials: classified `pii`, held inline, masked without the entitlement.
 pub const TEXT: &str = "gts.cf.core.settings.type_plain_text.v1~";
 
+/// A setting some administrator already declared: a GTS type of its own,
+/// derived from the abstract base, and not a value type.
+pub const DECLARED_SETTING: &str =
+    "gts.cf.core.settings.setting_type.v1~acme.settings.network.already_declared.v1~";
+/// A value type a module registered in its own namespace.
+pub const MODULE_TYPE: &str = "gts.acme.demo.values.retry_limit.v1~";
+
+/// A module's type whose schema refers to another type by `gts://` outside
+/// its own parent chain: registered, and not buildable into a validator.
+pub const REFERRING_TYPE: &str = "gts.acme.demo.values.wrapper.v1~";
+
+/// The schema of [`REFERRING_TYPE`].
+pub fn referring_type_schema() -> Value {
+    json!({
+        "$id": format!("gts://{REFERRING_TYPE}"),
+        "type": "object",
+        "properties": { "inner": { "$ref": format!("gts://{MODULE_TYPE}") } }
+    })
+}
+
+/// Ids that are not GTS type ids: a bare word, and an instance id — a type id
+/// names its type up to a trailing `~`, and neither ends in one.
+pub const NOT_TYPE_IDS: [&str; 2] = [
+    "string",
+    "gts.acme.demo.values.retry_limit.v1~acme.demo.values.default.v1",
+];
+
+/// The types registry's own test client, holding the boolean catalogue type.
+/// It answers an id that is not a type id as the registry does — a refusal of
+/// the argument, where [`FakeSource`] only knows presence and absence.
+pub fn registry_client() -> Arc<dyn types_registry_sdk::TypesRegistryClient> {
+    let boolean = GtsTypeSchema::try_new(
+        GtsTypeId::new(BOOL),
+        json!({ "$id": format!("gts://{BOOL}"), "type": "boolean" }),
+        None,
+        None,
+    )
+    .expect("fixture schema is a valid root type");
+    Arc::new(
+        types_registry_sdk::testing::MockTypesRegistryClient::new().with_type_schemas([boolean]),
+    )
+}
+
+/// The catalogue the resolution tests run over, and beside it what the real
+/// registry also holds: the abstract base every setting derives from, one
+/// declared setting as the registrar registers it, and a module's value type.
 pub fn resolution_catalogue() -> FakeSource {
+    let declared = SettingKey::parse(DECLARED_SETTING).expect("a setting key");
     FakeSource::default()
+        .with_type(
+            settings_service_sdk::gts::SETTING_TYPE_BASE,
+            settings_service_sdk::gts::setting_type_base_schema(),
+        )
+        .with_derived_type(
+            DECLARED_SETTING,
+            crate::infra::setting_type_registrar::setting_type_schema(&declared, BOOL),
+        )
+        .with_type(
+            MODULE_TYPE,
+            json!({ "$id": format!("gts://{MODULE_TYPE}"), "type": "integer", "minimum": 0 }),
+        )
         .with_type(
             BOOL,
             json!({ "$id": format!("gts://{BOOL}"), "type": "boolean" }),
@@ -611,6 +743,9 @@ pub struct ResolutionHarness {
     pub hierarchy: Arc<FakeHierarchy>,
     pub cache: Arc<EffectiveCache>,
     pub resolver: Arc<ValueResolver<DeclarationRepo, ValueRepo, AccessRepo>>,
+    /// The platform scope the resolver asks for the root tenant, which a test
+    /// can take down.
+    pub platform: Arc<SwitchableScope>,
     category_id: Uuid,
 }
 
@@ -640,13 +775,13 @@ impl ResolutionHarness {
         let tree = Tree::new();
         let hierarchy = Arc::new(tree.hierarchy());
         let cache = Arc::new(EffectiveCache::new(ttl));
-        let platform: Arc<dyn PlatformScope> = Arc::new(FixedScope(tree.root));
+        let platform = Arc::new(SwitchableScope::new(tree.root));
         let resolver = Arc::new(ValueResolver::new(
             DeclarationRepo,
             ValueRepo,
             AccessRepo,
             Arc::clone(&hierarchy) as Arc<dyn crate::domain::resolution::TenantHierarchy>,
-            Arc::clone(&platform),
+            Arc::clone(&platform) as Arc<dyn PlatformScope>,
             Arc::new(GtsTypeValidator::new(resolution_catalogue())),
             Arc::clone(&cache),
         ));
@@ -672,6 +807,7 @@ impl ResolutionHarness {
             hierarchy,
             cache,
             resolver,
+            platform,
             category_id: category.id,
         }
     }
@@ -1186,44 +1322,6 @@ impl crate::domain::ports::ChangePublisher for RecordingPublisher {
     }
 }
 
-/// A metrics port that keeps every count it was given.
-#[derive(Default)]
-pub struct RecordingMetrics {
-    /// `(operation, result)` of every step-up count, in order.
-    pub step_ups: Mutex<Vec<(StepUpOperation, &'static str)>>,
-    /// The `result` of every purge release count, in order.
-    pub purge_releases: Mutex<Vec<&'static str>>,
-}
-
-impl RecordingMetrics {
-    /// The step-up counts of one operation, in order.
-    pub fn step_ups_of(&self, operation: StepUpOperation) -> Vec<&'static str> {
-        self.step_ups
-            .lock()
-            .expect("lock")
-            .iter()
-            .filter(|(op, _)| *op == operation)
-            .map(|(_, result)| *result)
-            .collect()
-    }
-}
-
-impl crate::domain::ports::WriteMetrics for RecordingMetrics {
-    fn value_write(&self, _result: &'static str) {}
-    fn step_up(&self, operation: StepUpOperation, result: &'static str) {
-        self.step_ups
-            .lock()
-            .expect("lock")
-            .push((operation, result));
-    }
-    fn purge_released(&self) {
-        self.purge_releases.lock().expect("lock").push("ok");
-    }
-    fn purge_release_failed(&self) {
-        self.purge_releases.lock().expect("lock").push("failed");
-    }
-}
-
 /// A step-up verifier whose verdict the test fixes.
 pub struct FixedStepUp {
     pub verdict: Result<(), crate::domain::stepup::StepUpRefusal>,
@@ -1575,6 +1673,129 @@ impl authz_resolver_sdk::AuthZResolverApi for DenyAll {
     }
 }
 
+/// A policy decision point that cannot be reached: every evaluation fails.
+pub struct UnreachablePdp;
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverApi for UnreachablePdp {
+    async fn evaluate(
+        &self,
+        _ctx: toolkit_security::PlatformSecurityContext,
+        _request: authz_resolver_sdk::models::EvaluationRequest,
+    ) -> Result<
+        authz_resolver_sdk::models::EvaluationResponse,
+        toolkit::api::canonical_prelude::CanonicalError,
+    > {
+        Err(toolkit::api::canonical_prelude::CanonicalError::service_unavailable().create())
+    }
+}
+
+/// A policy decision point that allows with a native group predicate the
+/// enforcer never advertised: the decision arrives and its constraints cannot
+/// be compiled.
+pub struct UncompilablePdp;
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverApi for UncompilablePdp {
+    async fn evaluate(
+        &self,
+        _ctx: toolkit_security::PlatformSecurityContext,
+        _request: authz_resolver_sdk::models::EvaluationRequest,
+    ) -> Result<
+        authz_resolver_sdk::models::EvaluationResponse,
+        toolkit::api::canonical_prelude::CanonicalError,
+    > {
+        use authz_resolver_sdk::{Constraint, InGroupPredicate, Predicate};
+        Ok(authz_resolver_sdk::models::EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::models::EvaluationResponseContext {
+                constraints: vec![Constraint {
+                    predicates: vec![Predicate::InGroup(InGroupPredicate::new(
+                        toolkit_security::pep_properties::RESOURCE_ID,
+                        [Uuid::from_u128(1)],
+                    ))],
+                }],
+                ..Default::default()
+            },
+        })
+    }
+}
+
+/// An enforcer over a policy decision point that denies everything.
+pub fn denying_enforcer() -> crate::api::authz::PermissionEnforcer {
+    crate::api::authz::PermissionEnforcer::over(authz_resolver_sdk::PolicyEnforcer::new(Arc::new(
+        DenyAll,
+    )))
+}
+
+/// An enforcer over a policy decision point that allows everything.
+pub fn allowing_enforcer() -> crate::api::authz::PermissionEnforcer {
+    crate::api::authz::PermissionEnforcer::over(authz_resolver_sdk::PolicyEnforcer::new(Arc::new(
+        AllowAll,
+    )))
+}
+
+/// A policy decision point that allows everything, with no constraint, and
+/// keeps every request it was asked: what a caller asked the enforcer, as the
+/// decision point received it.
+#[derive(Default)]
+pub struct RecordingPdp {
+    asked: Mutex<Vec<authz_resolver_sdk::models::EvaluationRequest>>,
+}
+
+impl RecordingPdp {
+    /// The requests asked since the last call, in the order they were asked.
+    pub fn take(&self) -> Vec<authz_resolver_sdk::models::EvaluationRequest> {
+        std::mem::take(
+            &mut *self
+                .asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverApi for RecordingPdp {
+    async fn evaluate(
+        &self,
+        _ctx: toolkit_security::PlatformSecurityContext,
+        request: authz_resolver_sdk::models::EvaluationRequest,
+    ) -> Result<
+        authz_resolver_sdk::models::EvaluationResponse,
+        toolkit::api::canonical_prelude::CanonicalError,
+    > {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        Ok(authz_resolver_sdk::models::EvaluationResponse {
+            decision: true,
+            context: authz_resolver_sdk::models::EvaluationResponseContext::default(),
+        })
+    }
+}
+
+/// An enforcer over `pdp`.
+pub fn enforcer_over(pdp: &Arc<RecordingPdp>) -> crate::api::authz::PermissionEnforcer {
+    let pdp: Arc<dyn authz_resolver_sdk::AuthZResolverApi> = pdp.clone();
+    crate::api::authz::PermissionEnforcer::over(authz_resolver_sdk::PolicyEnforcer::new(pdp))
+}
+
+/// An enforcer over a policy decision point that cannot be reached.
+pub fn unreachable_enforcer() -> crate::api::authz::PermissionEnforcer {
+    crate::api::authz::PermissionEnforcer::over(authz_resolver_sdk::PolicyEnforcer::new(Arc::new(
+        UnreachablePdp,
+    )))
+}
+
+/// An enforcer whose decision arrives with constraints that cannot be compiled.
+pub fn uncompilable_enforcer() -> crate::api::authz::PermissionEnforcer {
+    crate::api::authz::PermissionEnforcer::over(authz_resolver_sdk::PolicyEnforcer::new(Arc::new(
+        UncompilablePdp,
+    )))
+}
+
 /// What a request answered with: the status, the decoded body, and the two
 /// headers a conditional write needs to follow a read.
 pub struct Answer {
@@ -1590,7 +1811,7 @@ pub struct Answer {
     pub headers: HashMap<String, String>,
 }
 
-/// A directory that lists nobody: every history name reads `null`.
+/// A directory that lists nobody: every user of a history page reads `unknown`.
 struct NobodyDirectory;
 
 #[async_trait]
@@ -1666,6 +1887,12 @@ pub struct RestHarness {
     /// The raw view of the database, on a harness built with
     /// [`RestHarness::probed`].
     pub probe: Option<Probe>,
+    /// What the enforcement points counted, for the tests that assert a
+    /// refusal is — or is not — an authorization denial.
+    pub security: Arc<RecordingSecurityMetrics>,
+    /// The operations the surface registered, for the tests that read a
+    /// route's declaration rather than its answer.
+    pub openapi: toolkit::api::OpenApiRegistryImpl,
     router: axum::Router,
 }
 
@@ -1710,6 +1937,19 @@ impl RestHarness {
                 unavailable: true,
                 ..resolution_catalogue()
             },
+        )
+        .await
+    }
+
+    /// The same surface whose declaration admin asks a types registry client
+    /// about a value type, so the adapter over the registry is part of what a
+    /// request exercises — as it is in the gear — and not the hand-built
+    /// catalogue standing in for both.
+    pub async fn with_registry(registry: Arc<dyn types_registry_sdk::TypesRegistryClient>) -> Self {
+        Self::build_with(
+            Arc::new(AllowAll),
+            Arc::new(FixedStepUp::verified()),
+            registry,
         )
         .await
     }
@@ -1800,7 +2040,7 @@ impl RestHarness {
     async fn build_with(
         pdp: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
         step_up: Arc<dyn crate::domain::stepup::StepUpVerifier>,
-        admin_catalogue: FakeSource,
+        admin_catalogue: impl SchemaSource + 'static,
     ) -> Self {
         Self::build_over(
             ResolutionHarness::new().await,
@@ -1816,6 +2056,13 @@ impl RestHarness {
     /// rewrite raw, through [`RestHarness::probe_query`] and
     /// [`RestHarness::probe_exec`].
     pub async fn probed() -> Self {
+        Self::probed_with_directory(nobody()).await
+    }
+
+    /// The probed surface with a directory the test scripts.
+    pub async fn probed_with_directory(
+        directory: Arc<dyn crate::infra::actor_names::ActorDirectory>,
+    ) -> Self {
         let (inner, probe) = ResolutionHarness::probed().await;
         Self::build_over(
             inner,
@@ -1823,7 +2070,7 @@ impl RestHarness {
             Arc::new(AllowAll),
             Arc::new(FixedStepUp::verified()),
             resolution_catalogue(),
-            nobody(),
+            directory,
         )
     }
 
@@ -1860,18 +2107,20 @@ impl RestHarness {
         probe: Option<Probe>,
         pdp: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
         step_up: Arc<dyn crate::domain::stepup::StepUpVerifier>,
-        admin_catalogue: FakeSource,
+        admin_catalogue: impl SchemaSource + 'static,
         directory: Arc<dyn crate::infra::actor_names::ActorDirectory>,
     ) -> Self {
         *inner.hierarchy.connection_guard.lock().expect("lock") = Some(Arc::clone(&inner.db));
-        let enforcer = Arc::new(authz_resolver_sdk::PolicyEnforcer::new(pdp));
+        let enforcer = Arc::new(crate::api::authz::PermissionEnforcer::over(
+            authz_resolver_sdk::PolicyEnforcer::new(pdp),
+        ));
         let openapi = toolkit::api::OpenApiRegistryImpl::new();
         let search = Arc::new(crate::domain::search::service::SearchService::new(
             crate::infra::storage::search_repo::SearchRepo::new(inner.db.db().backend()),
         ));
         let categories = Arc::new(crate::domain::category::CategoryService::new(
             crate::infra::storage::category_repo::CategoryRepo,
-            crate::infra::storage::audit_store::AuditStore,
+            crate::infra::storage::audit_store::AuditStore::default(),
         ));
         let router = crate::api::rest::routes::register_routes(
             axum::Router::new(),
@@ -1906,7 +2155,7 @@ impl RestHarness {
         let access = Arc::new(crate::domain::access::AccessService::new(
             crate::infra::storage::declaration_repo::DeclarationRepo,
             crate::infra::storage::access_repo::AccessRepo,
-            crate::infra::storage::audit_store::AuditStore,
+            crate::infra::storage::audit_store::AuditStore::default(),
             Arc::clone(&inner.hierarchy) as Arc<dyn TenantHierarchy>,
             Arc::new(FixedScope(inner.tree.root)) as Arc<dyn PlatformScope>,
             Arc::clone(&inner.cache),
@@ -1940,7 +2189,7 @@ impl RestHarness {
             )),
             Arc::clone(&registrar) as Arc<dyn crate::domain::contribution::SettingTypeRegistrar>,
             step_up,
-            crate::infra::storage::audit_store::AuditStore,
+            crate::infra::storage::audit_store::AuditStore::default(),
             Arc::clone(&inner.cache),
             crate::infra::storage::pending_secret_repo::PendingSecretRepo,
             Arc::clone(&secrets) as Arc<dyn crate::domain::ports::SecretManager>,
@@ -1971,12 +2220,19 @@ impl RestHarness {
             coordinator,
             enforcer,
         );
+        // The security-metrics port beside the enforcer, for every handler.
+        let security = Arc::new(RecordingSecurityMetrics::default());
+        let router = router.layer(axum::Extension(
+            Arc::clone(&security) as Arc<dyn crate::domain::ports::SecurityMetrics>
+        ));
         Self {
             inner,
             secrets,
             published,
             registrar,
             probe,
+            security,
+            openapi,
             router,
         }
     }
@@ -2217,7 +2473,7 @@ pub fn write_coordinator(
         Arc::new(crate::infra::type_validator::GtsTypeValidator::new(
             resolution_catalogue(),
         )),
-        crate::infra::storage::audit_store::AuditStore,
+        crate::infra::storage::audit_store::AuditStore::default(),
         step_up,
         secrets as Arc<dyn crate::domain::ports::SecretManager>,
         crate::infra::storage::pending_secret_repo::PendingSecretRepo,
@@ -2227,6 +2483,7 @@ pub fn write_coordinator(
     Arc::new(crate::infra::value_writes::WriteCoordinator::new(
         Arc::clone(&inner.db),
         writer,
+        crate::infra::storage::audit_store::AuditStore::default(),
     ))
 }
 
@@ -2253,4 +2510,349 @@ pub fn service_context_for(tenant: Uuid) -> SecurityContext {
         .subject_type("gts.cf.core.security.subject_service.v1~")
         .build()
         .expect("context")
+}
+
+// ---------------------------------------------------------------------------
+// Recording doubles of the metrics ports: what the production code reports,
+// as static labels and numbers, in order.
+// ---------------------------------------------------------------------------
+
+/// Records what the lifecycle passes publish, in order.
+#[derive(Default)]
+pub struct RecordingLifecycleMetrics {
+    pub review: Mutex<Vec<(&'static str, u64)>>,
+    pub retention: Mutex<Vec<(&'static str, u64)>>,
+    pub up: Mutex<Vec<bool>>,
+    pub declarations: Mutex<Vec<(&'static str, &'static str, u64)>>,
+    pub values: Mutex<Vec<(&'static str, &'static str, u64)>>,
+}
+
+impl crate::domain::ports::LifecycleMetrics for RecordingLifecycleMetrics {
+    fn needs_review(&self, source: DeclarationSource, count: u64) {
+        self.review
+            .lock()
+            .expect("lock")
+            .push((source.as_str(), count));
+    }
+
+    fn retention_pass(&self, result: RetentionResult, pruned: u64) {
+        self.retention
+            .lock()
+            .expect("lock")
+            .push((result.as_str(), pruned));
+    }
+
+    fn service_up(&self, up: bool) {
+        self.up.lock().expect("lock").push(up);
+    }
+
+    fn declarations(&self, source: DeclarationSource, status: DeclarationStatus, count: u64) {
+        self.declarations
+            .lock()
+            .expect("lock")
+            .push((source.as_str(), status.as_str(), count));
+    }
+
+    fn values(&self, scope_class: ScopeClass, scope_kind: ScopeKind, count: u64) {
+        self.values
+            .lock()
+            .expect("lock")
+            .push((scope_class.as_str(), scope_kind.as_str(), count));
+    }
+}
+
+/// Records what the write path counts, in order.
+#[derive(Default)]
+pub struct RecordingWriteMetrics {
+    pub writes: Mutex<Vec<&'static str>>,
+    pub step_ups: Mutex<Vec<(StepUpOperation, &'static str)>>,
+    pub changes: Mutex<Vec<(&'static str, &'static str)>>,
+    /// The `result` of every purge release count, in order.
+    pub purge_releases: Mutex<Vec<&'static str>>,
+}
+
+impl crate::domain::ports::WriteMetrics for RecordingWriteMetrics {
+    fn value_write(&self, outcome: Outcome) {
+        self.writes.lock().expect("lock").push(outcome.as_str());
+    }
+
+    fn step_up(&self, operation: StepUpOperation, result: StepUpResult) {
+        self.step_ups
+            .lock()
+            .expect("lock")
+            .push((operation, result.as_str()));
+    }
+
+    fn purge_released(&self) {
+        self.purge_releases.lock().expect("lock").push("ok");
+    }
+
+    fn purge_release_failed(&self) {
+        self.purge_releases.lock().expect("lock").push("failed");
+    }
+
+    fn change(&self, change_type: ChangeType, outcome: Outcome) {
+        self.changes
+            .lock()
+            .expect("lock")
+            .push((change_type.as_str(), outcome.as_str()));
+    }
+}
+
+impl RecordingWriteMetrics {
+    pub fn writes(&self) -> Vec<&'static str> {
+        self.writes.lock().expect("lock").clone()
+    }
+
+    /// Every step-up count as its `(operation, result)` labels, in order.
+    pub fn step_ups(&self) -> Vec<(&'static str, &'static str)> {
+        self.step_ups
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|(operation, result)| (operation.label(), *result))
+            .collect()
+    }
+
+    /// The step-up counts of one operation, in order.
+    pub fn step_ups_of(&self, operation: StepUpOperation) -> Vec<&'static str> {
+        self.step_ups
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|(op, _)| *op == operation)
+            .map(|(_, result)| *result)
+            .collect()
+    }
+
+    pub fn changes(&self) -> Vec<(&'static str, &'static str)> {
+        self.changes.lock().expect("lock").clone()
+    }
+}
+
+/// Records what the reader boundary reports, in order.
+#[derive(Default)]
+pub struct RecordingReadMetrics {
+    pub lookups: Mutex<Vec<(&'static str, &'static str)>>,
+    pub reads: Mutex<Vec<(&'static str, &'static str, f64)>>,
+    pub failures: Mutex<Vec<&'static str>>,
+}
+
+impl crate::domain::ports::ReadMetrics for RecordingReadMetrics {
+    fn lookup(&self, result: LookupResult, scope_class: ScopeClass) {
+        self.lookups
+            .lock()
+            .expect("lock")
+            .push((result.as_str(), scope_class.as_str()));
+    }
+
+    fn read(&self, source: ReadSource, scope_class: ScopeClass, seconds: f64) {
+        self.reads
+            .lock()
+            .expect("lock")
+            .push((source.as_str(), scope_class.as_str(), seconds));
+    }
+
+    fn resolve_failure(&self, reason: ResolveFailure) {
+        self.failures.lock().expect("lock").push(reason.as_str());
+    }
+}
+
+impl RecordingReadMetrics {
+    pub fn lookups(&self) -> Vec<(&'static str, &'static str)> {
+        self.lookups.lock().expect("lock").clone()
+    }
+
+    pub fn reads(&self) -> Vec<(&'static str, &'static str, f64)> {
+        self.reads.lock().expect("lock").clone()
+    }
+
+    pub fn failures(&self) -> Vec<&'static str> {
+        self.failures.lock().expect("lock").clone()
+    }
+
+    /// Nothing was recorded at all: no lookup, no duration, no failure.
+    pub fn is_silent(&self) -> bool {
+        self.lookups().is_empty() && self.reads().is_empty() && self.failures().is_empty()
+    }
+}
+
+/// Records what the enforcement points, the secret path and the audit sink
+/// count, in order.
+#[derive(Default)]
+pub struct RecordingSecurityMetrics {
+    pub denials: Mutex<Vec<(&'static str, &'static str)>>,
+    pub secret_uses: Mutex<Vec<&'static str>>,
+    pub audit_events: Mutex<Vec<&'static str>>,
+}
+
+impl crate::domain::ports::SecurityMetrics for RecordingSecurityMetrics {
+    fn authz_denial(&self, operation: Operation, reason: AuthzReason) {
+        self.denials
+            .lock()
+            .expect("lock")
+            .push((operation.as_str(), reason.as_str()));
+    }
+
+    fn secret_use(&self, result: SecretUseResult) {
+        self.secret_uses.lock().expect("lock").push(result.as_str());
+    }
+
+    fn audit_event(&self, kind: AuditKind) {
+        self.audit_events.lock().expect("lock").push(kind.as_str());
+    }
+}
+
+impl RecordingSecurityMetrics {
+    pub fn denials(&self) -> Vec<(&'static str, &'static str)> {
+        self.denials.lock().expect("lock").clone()
+    }
+
+    pub fn secret_uses(&self) -> Vec<&'static str> {
+        self.secret_uses.lock().expect("lock").clone()
+    }
+
+    pub fn audit_events(&self) -> Vec<&'static str> {
+        self.audit_events.lock().expect("lock").clone()
+    }
+}
+
+/// A database that holds no schema at all: every statement against a table
+/// fails, standing in for a store that cannot answer.
+pub async fn schemaless_provider() -> Arc<DBProvider<DbError>> {
+    Arc::new(DBProvider::new(
+        connect_db(
+            "sqlite::memory:",
+            ConnectOpts {
+                max_conns: Some(1),
+                min_conns: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("an empty database"),
+    ))
+}
+
+/// One exported data point: its labels, sorted by name, and its value — a
+/// counter's sum, a gauge's last value, a histogram's observation count.
+pub type ExportedPoint = (Vec<(String, String)>, u64);
+
+/// A meter over a local provider whose in-memory exporter hands back what
+/// the OpenTelemetry bindings recorded: their instrument names, labels and
+/// histogram boundaries, which the recording doubles of the ports never see.
+pub struct ExportedMetrics {
+    provider: SdkMeterProvider,
+    exporter: InMemoryMetricExporter,
+}
+
+impl ExportedMetrics {
+    pub fn new() -> Self {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        Self { provider, exporter }
+    }
+
+    /// The meter a binding is built on.
+    pub fn meter(&self) -> opentelemetry::metrics::Meter {
+        self.provider.meter("settings-service")
+    }
+
+    /// Make this the process's meter provider, so what the gear's own
+    /// bindings record on `opentelemetry::global::meter` is exported here.
+    /// Process-wide: for a test that drives the gear as the runtime does.
+    pub fn install_global(&self) {
+        opentelemetry::global::set_meter_provider(self.provider.clone());
+    }
+
+    /// The name of every histogram that recorded anything, sorted.
+    pub fn histogram_names(&self) -> Vec<String> {
+        self.provider.force_flush().expect("the provider flushes");
+        let exported = self
+            .exporter
+            .get_finished_metrics()
+            .expect("the exporter reads");
+        let mut names: Vec<String> = exported
+            .last()
+            .into_iter()
+            .flat_map(ResourceMetrics::scope_metrics)
+            .flat_map(ScopeMetrics::metrics)
+            .filter(|metric| {
+                matches!(
+                    metric.data(),
+                    AggregatedMetrics::F64(MetricData::Histogram(_))
+                        | AggregatedMetrics::U64(MetricData::Histogram(_))
+                        | AggregatedMetrics::I64(MetricData::Histogram(_))
+                )
+            })
+            .map(|metric| metric.name().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every point of the instrument `name`, sorted by labels; empty when
+    /// nothing was recorded under that name.
+    pub fn points(&self, name: &str) -> Vec<ExportedPoint> {
+        let mut points: Vec<ExportedPoint> = self
+            .read(name, |data| match data {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
+                    .data_points()
+                    .map(|p| (labels(p.attributes()), p.value()))
+                    .collect(),
+                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge
+                    .data_points()
+                    .map(|p| (labels(p.attributes()), p.value()))
+                    .collect(),
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .map(|p| (labels(p.attributes()), p.count()))
+                    .collect(),
+                _ => panic!("`{name}` is not an instrument kind the bindings use"),
+            })
+            .unwrap_or_default();
+        points.sort();
+        points
+    }
+
+    /// The bucket boundaries of the histogram `name`, from its first point.
+    pub fn boundaries(&self, name: &str) -> Vec<f64> {
+        self.read(name, |data| match data {
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                .data_points()
+                .next()
+                .map(|p| p.bounds().collect())
+                .unwrap_or_default(),
+            _ => panic!("`{name}` is not a histogram"),
+        })
+        .unwrap_or_default()
+    }
+
+    fn read<T>(&self, name: &str, read: impl FnOnce(&AggregatedMetrics) -> T) -> Option<T> {
+        self.provider.force_flush().expect("the provider flushes");
+        let exported = self
+            .exporter
+            .get_finished_metrics()
+            .expect("the exporter reads");
+        // The last export carries the cumulative state of every instrument.
+        exported
+            .last()
+            .into_iter()
+            .flat_map(ResourceMetrics::scope_metrics)
+            .flat_map(ScopeMetrics::metrics)
+            .find(|metric| metric.name() == name)
+            .map(|metric| read(metric.data()))
+    }
+}
+
+fn labels<'a>(
+    attributes: impl Iterator<Item = &'a opentelemetry::KeyValue>,
+) -> Vec<(String, String)> {
+    let mut labels: Vec<(String, String)> = attributes
+        .map(|kv| (kv.key.as_str().to_owned(), kv.value.as_str().into_owned()))
+        .collect();
+    labels.sort();
+    labels
 }

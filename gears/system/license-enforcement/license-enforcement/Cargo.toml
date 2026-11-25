@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-license-enforcement"
-version = "0.1.2"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -47,11 +47,13 @@ sea-orm-migration = { workspace = true }
 
 anyhow = { workspace = true }
 hex = { workspace = true }
+jsonschema = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }

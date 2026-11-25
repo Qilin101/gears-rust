@@ -741,3 +741,76 @@ async fn overlapping_batches_all_land() {
 async fn a_count_agrees_with_the_listing() {
     conformance::a_count_agrees_with_the_listing(&store(), Uuid::now_v7()).await;
 }
+
+#[tokio::test]
+async fn a_key_carried_twice_is_written_twice_in_request_order() {
+    conformance::a_key_carried_twice_is_written_twice_in_request_order(&store(), Uuid::now_v7())
+        .await;
+}
+
+#[tokio::test]
+async fn a_purge_removes_a_node_and_every_edge_and_frees_its_key() {
+    conformance::a_purge_removes_a_node_and_every_edge_and_frees_its_key(&store(), Uuid::now_v7())
+        .await;
+}
+
+#[tokio::test]
+async fn a_purge_takes_a_tombstone_and_repeats_as_no_change() {
+    conformance::a_purge_takes_a_tombstone_and_repeats_as_no_change(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn a_scope_erasure_removes_its_tombstoned_members() {
+    conformance::a_scope_erasure_removes_its_tombstoned_members(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn a_tombstoned_edge_a_replacement_removes_is_counted() {
+    conformance::a_tombstoned_edge_a_replacement_removes_is_counted(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn a_purge_of_tombstones_only_refuses_a_live_node() {
+    conformance::a_purge_of_tombstones_only_refuses_a_live_node(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn a_purge_bound_to_a_creation_instant_leaves_a_later_node_alone() {
+    conformance::a_purge_bound_to_a_creation_instant_leaves_a_later_node_alone(
+        &store(),
+        Uuid::now_v7(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_hubs_edges_are_listed_a_page_at_a_time() {
+    conformance::a_hubs_edges_are_listed_a_page_at_a_time(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn edge_payloads_are_read_for_live_edges_only() {
+    conformance::edge_payloads_are_read_for_live_edges_only(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn offboarding_removes_every_row_of_the_tenant_and_no_other() {
+    conformance::offboarding_removes_every_row_of_the_tenant_and_no_other(&store(), Uuid::now_v7())
+        .await;
+}
+
+#[tokio::test]
+async fn a_fenced_tenant_takes_no_write() {
+    conformance::a_fenced_tenant_takes_no_write(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
+async fn offboarding_is_idempotent_and_only_for_a_fenced_tenant() {
+    conformance::offboarding_is_idempotent_and_only_for_a_fenced_tenant(&store(), Uuid::now_v7())
+        .await;
+}
+
+#[tokio::test]
+async fn the_fenced_tenants_are_listed_for_the_read_path() {
+    conformance::the_fenced_tenants_are_listed_for_the_read_path(&store(), Uuid::now_v7()).await;
+}

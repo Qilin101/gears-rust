@@ -28,8 +28,8 @@ use crate::infra::storage::pending_secret_repo::PendingSecretRepo;
 use crate::infra::storage::value_repo::ValueRepo;
 use crate::infra::type_validator::GtsTypeValidator;
 use crate::test_support::{
-    BOOL, FixedStepUp, RecordingAudit, RecordingMetrics, RecordingRegistrar, RecordingSecrets,
-    ResolutionHarness, SECRET, TEXT, resolution_catalogue,
+    BOOL, DECLARED_SETTING, FixedStepUp, MODULE_TYPE, RecordingAudit, RecordingRegistrar,
+    RecordingSecrets, RecordingWriteMetrics, ResolutionHarness, SECRET, TEXT, resolution_catalogue,
 };
 
 type Admin = DeclarationAdmin<
@@ -46,7 +46,7 @@ struct Harness {
     audit: Arc<RecordingAudit>,
     registrar: Arc<RecordingRegistrar>,
     secrets: Arc<RecordingSecrets>,
-    metrics: Arc<RecordingMetrics>,
+    metrics: Arc<RecordingWriteMetrics>,
 }
 
 impl Harness {
@@ -63,16 +63,27 @@ impl Harness {
     }
 
     async fn with_step_up(step_up: Arc<dyn StepUpVerifier>) -> Self {
+        Self::with_validator(
+            step_up,
+            Arc::new(GtsTypeValidator::new(resolution_catalogue())),
+        )
+        .await
+    }
+
+    async fn with_validator(
+        step_up: Arc<dyn StepUpVerifier>,
+        validator: Arc<dyn crate::domain::validation::TypeValidator>,
+    ) -> Self {
         let base = ResolutionHarness::new().await;
         let audit = Arc::new(RecordingAudit::default());
         let registrar = Arc::new(RecordingRegistrar::default());
         let secrets = Arc::new(RecordingSecrets::default());
-        let metrics = Arc::new(RecordingMetrics::default());
+        let metrics = Arc::new(RecordingWriteMetrics::default());
         let admin = DeclarationAdmin::new(
             DeclarationRepo,
             CategoryRepo,
             ValueRepo,
-            Arc::new(GtsTypeValidator::new(resolution_catalogue())),
+            validator,
             Arc::clone(&registrar) as Arc<dyn crate::domain::contribution::SettingTypeRegistrar>,
             step_up,
             Arc::clone(&audit),
@@ -1383,6 +1394,211 @@ async fn a_secret_placeholder_must_be_an_instance_of_the_type_as_well_as_empty()
         .expect("the empty string is both empty and a string");
 }
 
+// ── A value type that is not one ─────────────────────────────────────────────
+
+fn assert_not_a_value_type(err: DomainError, what: &str) {
+    match err {
+        DomainError::Validation { field, code, .. } => {
+            assert_eq!(field, "value_type_id", "{what}");
+            assert_eq!(code, crate::field::NOT_A_VALUE_TYPE, "{what}");
+        }
+        other => panic!("{what}: expected the value-type refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_value_type_id_that_is_no_type_id_is_refused_as_an_unknown_type() {
+    // Over the registry's own test client, which refuses such an id as an
+    // invalid argument: the create answers for the declaration's mistake,
+    // not as if the registry were down.
+    let h = Harness::with_validator(
+        Arc::new(FixedStepUp::verified()),
+        Arc::new(GtsTypeValidator::new(crate::test_support::registry_client())),
+    )
+    .await;
+    for id in crate::test_support::NOT_TYPE_IDS {
+        let mut request = h.request("retry_policy");
+        request.value_type_id = id.to_owned();
+        match h.create(request, &admin_actor()).await {
+            Err(DomainError::Validation { field, code, .. }) => {
+                assert_eq!(field, "value_type_id", "{id}");
+                assert_eq!(code, crate::field::VALUE_TYPE_UNKNOWN, "{id}");
+            }
+            other => panic!("{id}: expected the refusal, got {other:?}"),
+        }
+    }
+    assert!(h.registrar.registered.lock().expect("lock").is_empty());
+    assert!(h.audit.records().is_empty(), "nothing audited");
+}
+
+#[tokio::test]
+async fn a_value_type_whose_schema_does_not_build_is_refused_before_its_default_is_validated() {
+    use crate::test_support::{REFERRING_TYPE, referring_type_schema};
+    let h = Harness::with_validator(
+        Arc::new(FixedStepUp::verified()),
+        Arc::new(GtsTypeValidator::new(
+            resolution_catalogue().with_type(REFERRING_TYPE, referring_type_schema()),
+        )),
+    )
+    .await;
+    let mut request = h.request("retry_policy");
+    request.value_type_id = REFERRING_TYPE.to_owned();
+    request.default_value = json!({ "inner": 3 });
+    match h.create(request, &admin_actor()).await {
+        Err(DomainError::Validation { field, code, .. }) => {
+            assert_eq!(field, "value_type_id");
+            assert_eq!(code, crate::field::VALUE_TYPE_UNSUPPORTED);
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    assert!(h.registrar.registered.lock().expect("lock").is_empty());
+    assert!(h.audit.records().is_empty(), "nothing audited");
+}
+
+/// The ids the registry knows that are not value types, each with a
+/// default the type itself would not turn away.
+fn requests_naming_no_value_type(
+    h: &Harness,
+    name: &str,
+) -> Vec<(&'static str, CreateDeclaration)> {
+    let mut declared = h.request(name);
+    declared.value_type_id = DECLARED_SETTING.to_owned();
+    declared.default_value = json!(true);
+    let mut base = h.request(name);
+    base.value_type_id = settings_service_sdk::gts::SETTING_TYPE_BASE.to_owned();
+    base.default_value = json!({ "payload": true });
+    vec![
+        ("a declared setting", declared),
+        ("the abstract base", base),
+    ]
+}
+
+/// An admin-authored row whose value type is the abstract base, written
+/// straight to the store: what a create admitted before the check existed.
+async fn stored_with_the_base_as_its_type(h: &Harness, name: &str) -> Uuid {
+    let key = SettingKey::compose("acme", "network", name).expect("admin key");
+    let conn = h.base.db.conn().expect("connection");
+    DeclarationRepo
+        .insert(
+            &conn,
+            &AccessScope::allow_all(),
+            DeclarationDraft {
+                key: key.to_string(),
+                leaf_slug: name.to_owned(),
+                value_type_id: settings_service_sdk::gts::SETTING_TYPE_BASE.to_owned(),
+                category_id: h.base.category_id(),
+                default_value: json!({ "payload": true }),
+                scope_class: "cascading".to_owned(),
+                mode: "standard".to_owned(),
+                requires_step_up: true,
+                anonymous_exposable: false,
+                domain_affinity: None,
+                has_secret_trait: false,
+                data_classification: "public".to_owned(),
+                source: "admin_authored".to_owned(),
+                owner_module: None,
+                licence_feature: None,
+                display_name: None,
+                description: Some("a demo setting".to_owned()),
+                created_by: "admin".to_owned(),
+            },
+        )
+        .await
+        .expect("stored")
+        .id
+}
+
+#[tokio::test]
+async fn a_create_naming_a_setting_or_the_abstract_base_as_its_value_type_is_refused() {
+    let h = Harness::verified().await;
+    for (what, request) in requests_naming_no_value_type(&h, "retry_policy") {
+        let err = h.create(request, &admin_actor()).await.expect_err(what);
+        assert_not_a_value_type(err, what);
+    }
+    assert_eq!(
+        h.versions_of(
+            "gts.cf.core.settings.setting_type.v1~acme.settings.network.retry_policy.v1~"
+        )
+        .await,
+        0,
+        "no row"
+    );
+    assert!(
+        h.registrar.registered.lock().expect("lock").is_empty(),
+        "no setting type registered"
+    );
+    assert!(h.audit.records().is_empty(), "nothing audited");
+}
+
+#[tokio::test]
+async fn a_create_with_a_modules_own_value_type_is_accepted() {
+    let h = Harness::verified().await;
+    let mut request = h.request("retry_limit");
+    request.value_type_id = MODULE_TYPE.to_owned();
+    request.default_value = json!(3);
+    let created = h.create(request, &admin_actor()).await.expect("created");
+    assert_eq!(created.declaration.value_type_id, MODULE_TYPE);
+    assert_eq!(created.declaration.status, DeclarationStatus::Active);
+}
+
+#[tokio::test]
+async fn a_revive_of_a_row_stored_with_a_non_value_type_is_refused_and_the_row_stays_retired() {
+    // The request repeats the stored type, so nothing a revive may not change
+    // is changed: the refusal is the type's own.
+    let h = Harness::verified().await;
+    let id = stored_with_the_base_as_its_type(&h, "retry_policy").await;
+    h.base.retire(id).await;
+
+    let (_, request) = requests_naming_no_value_type(&h, "retry_policy").remove(1);
+    let err = h
+        .create(request.clone(), &admin_actor())
+        .await
+        .expect_err("revive");
+    assert_not_a_value_type(err, "revive");
+    assert_eq!(h.load(id).await.status, DeclarationStatus::Retired);
+    assert!(h.registrar.registered.lock().expect("lock").is_empty());
+    assert!(h.audit.records().is_empty(), "nothing audited");
+
+    // The revival report runs the create's checks and answers the same.
+    let conn = h.base.db.conn().expect("connection");
+    let scope = AccessScope::allow_all();
+    let plan = h
+        .admin
+        .plan_revival(&conn, &scope, &request, &OpenGate)
+        .await
+        .expect("a retired declaration sits at the key");
+    let err = h
+        .admin
+        .revival_report(&conn, &scope, plan, &request, 10, || async {
+            Ok(super::Walk {
+                tenants: Vec::new(),
+                truncated: false,
+            })
+        })
+        .await
+        .expect_err("report");
+    assert_not_a_value_type(err, "revival report");
+}
+
+#[tokio::test]
+async fn an_evolution_to_a_non_value_type_is_refused_and_the_active_major_is_untouched() {
+    let h = Harness::verified().await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    let audited = h.audit.records().len();
+
+    for (what, request) in requests_naming_no_value_type(&h, "retry_policy") {
+        let err = h.create(request, &admin_actor()).await.expect_err(what);
+        assert_not_a_value_type(err, what);
+    }
+    assert_eq!(h.load(v1.id).await.status, DeclarationStatus::Active);
+    assert_eq!(h.versions_of(&v1.key).await, 1, "no successor");
+    assert_eq!(h.audit.records().len(), audited, "nothing audited");
+}
+
 // ── Evolve by re-declaring ───────────────────────────────────────────────────
 
 impl Harness {
@@ -1581,7 +1797,11 @@ async fn evolution_needs_step_up_and_may_not_cross_the_secret_boundary() {
         DeclarationStatus::Active,
         "nothing moved"
     );
-    assert!(h.by_key(&v1.key.replace(".v1~", ".v2~")).await.is_none());
+    assert!(
+        h.by_key(&v1.key.replace(".retry_policy.v1~", ".retry_policy.v2~"))
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1688,6 +1908,91 @@ fn a_display_name_of_the_wrong_shape_or_length_is_a_validation_error_naming_it()
         let err = classify_field("display_name", &value, &declaration).expect_err("refused");
         assert!(names_display_name(&err), "{value}: {err:?}");
     }
+}
+
+/// Whether a refusal is the validation error a too-long description gets.
+fn is_description_length(err: &DomainError) -> bool {
+    matches!(
+        err,
+        DomainError::Validation { field, code, .. }
+            if field == "description" && *code == crate::field::DECLARATION_DESCRIPTION_LENGTH
+    )
+}
+
+#[test]
+fn a_description_is_bounded_in_characters_not_bytes() {
+    // The column is `varchar(4096)`, which Postgres counts in characters:
+    // 4096 `ё` are 8192 bytes and fit, 4097 characters of anything do not.
+    use super::check_description;
+    for fits in [String::new(), "x".repeat(4096), "\u{451}".repeat(4096)] {
+        assert!(
+            check_description(&fits).is_ok(),
+            "{} chars",
+            fits.chars().count()
+        );
+    }
+    for too_long in ["x".repeat(4097), "\u{451}".repeat(4097)] {
+        let err = check_description(&too_long).expect_err("refused");
+        assert!(is_description_length(&err), "{err:?}");
+    }
+}
+
+#[test]
+fn a_description_edit_is_bounded_and_null_clears_it() {
+    let declaration = classified_declaration();
+    for value in [
+        json!(null),
+        json!(""),
+        json!("x".repeat(4096)),
+        json!("\u{451}".repeat(4096)),
+    ] {
+        assert_eq!(
+            classify_field("description", &value, &declaration).expect("classified"),
+            FieldClass::Immediate
+        );
+    }
+    for value in [json!("x".repeat(4097)), json!("\u{451}".repeat(4097))] {
+        let err = classify_field("description", &value, &declaration).expect_err("refused");
+        assert!(is_description_length(&err), "{err:?}");
+    }
+    let err = classify_field("description", &json!(7), &declaration).expect_err("refused");
+    assert!(
+        matches!(&err, DomainError::Validation { field, code, .. }
+            if field == "description" && *code == crate::field::VALIDATION),
+        "a wrong shape keeps its own code: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_create_refuses_an_over_long_description_and_stores_one_at_the_bound() {
+    // Refused in the domain, on either backend, before any row is written: the
+    // caller gets a validation error naming the field, not a storage failure.
+    let h = Harness::new().await;
+
+    let mut request = h.request("too_long");
+    request.description = Some("x".repeat(4097));
+    let err = h
+        .create(request, &admin_actor())
+        .await
+        .expect_err("refused");
+    assert!(is_description_length(&err), "{err:?}");
+
+    let mut request = h.request("at_the_bound");
+    request.description = Some("\u{451}".repeat(4096));
+    let created = h.create(request, &admin_actor()).await.expect("created");
+    assert_eq!(
+        created
+            .declaration
+            .description
+            .as_deref()
+            .map(|d| d.chars().count()),
+        Some(4096)
+    );
+
+    let mut request = h.request("absent");
+    request.description = None;
+    let created = h.create(request, &admin_actor()).await.expect("created");
+    assert_eq!(created.declaration.description, None);
 }
 
 #[tokio::test]
@@ -2013,6 +2318,13 @@ struct FailsOnOneValue {
 
 #[async_trait::async_trait]
 impl crate::domain::validation::TypeValidator for FailsOnOneValue {
+    async fn ensure_value_type(
+        &self,
+        value_type_id: &str,
+    ) -> Result<Result<(), crate::domain::validation::ValueTypeRefusal>, DomainError> {
+        self.inner.ensure_value_type(value_type_id).await
+    }
+
     async fn validate_value(
         &self,
         value_type_id: &str,
@@ -2196,6 +2508,13 @@ struct CountingValidator {
 
 #[async_trait::async_trait]
 impl crate::domain::validation::TypeValidator for CountingValidator {
+    async fn ensure_value_type(
+        &self,
+        value_type_id: &str,
+    ) -> Result<Result<(), crate::domain::validation::ValueTypeRefusal>, DomainError> {
+        self.inner.ensure_value_type(value_type_id).await
+    }
+
     async fn validate_value(
         &self,
         value_type_id: &str,
@@ -2462,6 +2781,15 @@ impl ValueRepository for BatchRecordingValues {
         source: &str,
     ) -> Result<u64, DomainError> {
         ValueRepo.count_flagged(conn, scope, source).await
+    }
+
+    async fn count_by_scope_kind<C: toolkit_db::secure::DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        root: Uuid,
+    ) -> Result<std::collections::HashMap<(String, &'static str), u64>, DomainError> {
+        ValueRepo.count_by_scope_kind(conn, scope, root).await
     }
 
     async fn list_review<C: toolkit_db::secure::DBRunner>(
@@ -3605,4 +3933,220 @@ async fn a_release_task_that_panics_counts_every_entry_it_did_not_report_as_fail
             )),
         }
     });
+}
+
+// ---- `settings_step_up_total` on the step-up-gated declaration actions.
+
+/// The re-declaration of `retry_policy` as text: what evolves the active path.
+fn as_text(h: &Harness) -> CreateDeclaration {
+    let mut request = h.request("retry_policy");
+    request.value_type_id = TEXT.to_owned();
+    request.default_value = json!("gentle");
+    request
+}
+
+#[tokio::test]
+async fn a_step_up_gated_update_a_retire_a_reactivate_and_an_evolution_each_count_verified() {
+    let h = Harness::verified().await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    assert!(
+        h.metrics.step_ups().is_empty(),
+        "a fresh create asks no step-up"
+    );
+
+    // Loosening is step-up gated.
+    let tag = etag_of(&v1);
+    h.update(
+        v1.id,
+        Some(tag.as_str()),
+        json!({"requires_step_up": false}),
+        &admin_actor(),
+    )
+    .await
+    .expect("loosened");
+    assert_eq!(h.metrics.step_ups(), vec![("update", "verified")]);
+
+    // An evolution to the next major.
+    h.create(as_text(&h), &admin_actor())
+        .await
+        .expect("evolved");
+    assert_eq!(
+        h.metrics.step_ups(),
+        vec![("update", "verified"), ("evolve", "verified")]
+    );
+
+    // Retire the active major, then re-declare it: a reactivation.
+    let v2 = h
+        .by_key(&v1.key.replace(".retry_policy.v1~", ".retry_policy.v2~"))
+        .await
+        .expect("the evolved declaration");
+    let tag = etag_of(&v2);
+    h.retire(v2.id, Some(tag.as_str()), &admin_actor())
+        .await
+        .expect("retired");
+    // The path's composed key is the first major's: a revive keeps its shape.
+    h.create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("reactivated");
+    assert_eq!(
+        h.metrics.step_ups(),
+        vec![
+            ("update", "verified"),
+            ("evolve", "verified"),
+            ("retire", "verified"),
+            ("reactivate", "verified"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_declaration_action_without_a_valid_assertion_counts_the_refusal_code() {
+    let h = Harness::with_step_up(Arc::new(FixedStepUp::refusing(StepUpRefusal::Missing))).await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    let tag = etag_of(&v1);
+
+    h.update(
+        v1.id,
+        Some(tag.as_str()),
+        json!({"requires_step_up": false}),
+        &admin_actor(),
+    )
+    .await
+    .expect_err("refused");
+    h.retire(v1.id, Some(tag.as_str()), &admin_actor())
+        .await
+        .expect_err("refused");
+    h.create(as_text(&h), &admin_actor())
+        .await
+        .expect_err("refused");
+    // A retired row to revive, seeded the way retirement leaves it.
+    let other = h
+        .create(h.request("other_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    h.base.retire(other.id).await;
+    h.create(h.request("other_policy"), &admin_actor())
+        .await
+        .expect_err("refused");
+
+    assert_eq!(
+        h.metrics.step_ups(),
+        vec![
+            ("update", "missing"),
+            ("retire", "missing"),
+            ("evolve", "missing"),
+            ("reactivate", "missing"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_verifier_that_cannot_answer_counts_its_own_code_not_a_verdict() {
+    let h = Harness::with_step_up(Arc::new(FixedStepUp::refusing(StepUpRefusal::Unavailable(
+        "authn down".to_owned(),
+    ))))
+    .await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    let tag = etag_of(&v1);
+    let err = h
+        .retire(v1.id, Some(tag.as_str()), &admin_actor())
+        .await
+        .expect_err("outage");
+    assert!(matches!(err, DomainError::Unavailable { .. }), "{err:?}");
+    assert_eq!(h.metrics.step_ups(), vec![("retire", "unavailable")]);
+}
+
+#[tokio::test]
+async fn a_declaration_action_by_a_non_interactive_caller_counts_service_principal() {
+    let h = Harness::verified().await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    let tag = etag_of(&v1);
+    h.update(
+        v1.id,
+        Some(tag.as_str()),
+        json!({"requires_step_up": false}),
+        &service_actor(),
+    )
+    .await
+    .expect_err("a machine cannot re-authenticate");
+    h.retire(v1.id, Some(tag.as_str()), &service_actor())
+        .await
+        .expect_err("a machine cannot re-authenticate");
+    h.create(as_text(&h), &service_actor())
+        .await
+        .expect_err("a machine cannot re-authenticate");
+    let other = h
+        .create(h.request("other_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+    h.base.retire(other.id).await;
+    h.create(h.request("other_policy"), &service_actor())
+        .await
+        .expect_err("a machine cannot re-authenticate");
+
+    assert_eq!(
+        h.metrics.step_ups(),
+        vec![
+            ("update", "service_principal"),
+            ("retire", "service_principal"),
+            ("evolve", "service_principal"),
+            ("reactivate", "service_principal"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_metadata_update_that_needs_no_step_up_counts_nothing() {
+    let h = Harness::verified().await;
+    let v1 = h
+        .create(h.request("retry_policy"), &admin_actor())
+        .await
+        .expect("created")
+        .declaration;
+
+    // Loosening: counted, so the recorder is known to be wired.
+    let tag = etag_of(&v1);
+    h.update(
+        v1.id,
+        Some(tag.as_str()),
+        json!({"requires_step_up": false}),
+        &admin_actor(),
+    )
+    .await
+    .expect("loosened");
+    assert_eq!(h.metrics.step_ups(), vec![("update", "verified")]);
+
+    // Tightening and a descriptive edit are not gated.
+    let tag = etag_of(&h.load(v1.id).await);
+    h.update(
+        v1.id,
+        Some(tag.as_str()),
+        json!({"requires_step_up": true, "description": "retried"}),
+        &admin_actor(),
+    )
+    .await
+    .expect("tightened");
+    assert_eq!(
+        h.metrics.step_ups(),
+        vec![("update", "verified")],
+        "a metadata update that needs no step-up counts nothing"
+    );
 }

@@ -85,15 +85,15 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 - Concurrency limit exceeded at upstream level (503 ConcurrencyLimitExceeded)
 - Concurrency limit exceeded at route level (503 ConcurrencyLimitExceeded)
 - Concurrency limit exceeded at tenant-global level (503 ConcurrencyLimitExceeded)
-- Circuit breaker open for upstream (503 CircuitBreakerOpen + `Retry-After`)
+- Circuit breaker open for upstream (503 CircuitBreakerOpen + `Retry-After`, reason `REQUEST_NOT_SENT`)
 - Circuit breaker half-open probe fails — circuit re-opens
 
 **Steps**:
 1. [x] - `p2` - Actor sends proxy request via `cpt-cf-oagw-flow-proxy-request` (alias resolution and route matching complete) - `inst-rl-1`
 2. [x] - `p2` - Resolve effective rate limit config via `cpt-cf-oagw-algo-hierarchical-rate-limit-merge` for upstream and matched route - `inst-rl-2`
-3. [ ] - `p2` - Check circuit breaker state via `cpt-cf-oagw-algo-circuit-breaker-evaluation` - `inst-rl-3`
-4. [ ] - `p2` - **IF** circuit breaker is OPEN - `inst-rl-4`
-   1. [ ] - `p2` - **RETURN** 503 CircuitBreakerOpen with `Retry-After` and `X-Circuit-State: OPEN` via `cpt-cf-oagw-algo-error-source-classification` - `inst-rl-4a`
+3. [x] - `p2` - Check the upstream's circuit breaker via `cpt-cf-oagw-algo-circuit-breaker-evaluation`, before the auth plugin, the rate limits and any CredStore read, so an open circuit costs no credential or token. The check keeps no probe slot; the permit that counts the outcome is taken just before target resolution (`inst-rl-9a`) - `inst-rl-3`
+4. [x] - `p2` - **IF** circuit breaker is OPEN, or HALF_OPEN with every probe slot taken - `inst-rl-4`
+   1. [x] - `p2` - **RETURN** 503 CircuitBreakerOpen with reason `REQUEST_NOT_SENT` and `Retry-After` (the time left until a probe, in whole seconds rounded up, at least 1) via `cpt-cf-oagw-algo-error-source-classification` - `inst-rl-4a`
 5. [x] - `p2` - Check rate limit via `cpt-cf-oagw-algo-token-bucket-check` with effective rate config and request cost - `inst-rl-5`
 6. [x] - `p2` - **IF** rate limit exceeded - `inst-rl-6`
    1. [x] - `p2` - **IF** strategy = `reject` - `inst-rl-6a`
@@ -109,7 +109,8 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
    2. [ ] - `p2` - **IF** strategy = `queue` - `inst-rl-8b`
       1. [ ] - `p2` - Enqueue request via `cpt-cf-oagw-algo-backpressure-queue` - `inst-rl-8b1`
 9. [x] - `p2` - Continue proxy flow (auth → guards → transform → upstream call) per `cpt-cf-oagw-flow-proxy-request` - `inst-rl-9`
-10. [ ] - `p2` - On upstream response: evaluate circuit breaker via `cpt-cf-oagw-algo-circuit-breaker-evaluation` (record success/failure) - `inst-rl-10`
+   1. [x] - `p2` - Just before target resolution, take the breaker's permit via `cpt-cf-oagw-algo-circuit-breaker-evaluation` (503 CircuitBreakerOpen as in `inst-rl-4` if it is refused) and note how much of the request timeout is left - `inst-rl-9a`
+10. [x] - `p2` - On the upstream's response head, or the exchange's transport error: record the outcome via `cpt-cf-oagw-algo-circuit-breaker-evaluation` - `inst-rl-10`
 11. [ ] - `p2` - Concurrency permits auto-released via RAII Drop - `inst-rl-11`
 12. [x] - `p2` - Include `X-RateLimit-*` response headers if `response_headers: true` in rate limit config - `inst-rl-12`
 13. [x] - `p2` - **RETURN** upstream response to caller - `inst-rl-13`
@@ -130,19 +131,24 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 **Error Scenarios**:
 - Budget allocation exceeds parent's available capacity (400 ValidationError)
 - Child rate limit exceeds enforced ancestor limit (400 ValidationError)
+- Upstream's effective cost exceeds the `budget.total` of the shared pool it draws on (400 ValidationError)
 - Invalid configuration values (400 ValidationError)
 
 **Steps**:
 1. [x] - `p2` - Actor sends PUT /api/oagw/v1/upstreams/{id} or PUT /api/oagw/v1/routes/{id} with `rate_limit`, `circuit_breaker`, or `concurrency_limit` in request body - `inst-cfg-1`
-2. [x] - `p2` - Validate rate limit config: `sustained.rate` > 0, `burst.capacity` ≥ 1, `scope` is valid enum, `strategy` is valid enum - `inst-cfg-2`
+2. [x] - `p2` - Validate rate limit config, on upstreams and routes alike: `sustained.rate` ≥ 1, `burst.capacity` ≥ 1, `cost` ≥ 1, `scope` is valid enum, `strategy` is valid enum, and `cost` ≤ the bucket capacity (`burst.capacity` for a token bucket with a burst, else `sustained.rate`; a sliding window ignores `burst`), since a costlier request could never pass - `inst-cfg-2`
+   1. [x] - `p2` - On an upstream, the effective limit's `cost` ≤ `budget.total` of the shared pool it draws on (its own shared budget or the one an ancestor defines, from the merge `cpt-cf-oagw-algo-hierarchical-rate-limit-merge` over the ancestors already found by `cpt-cf-oagw-algo-tenant-closest-ancestor`, disabled ones included): the pool is charged the upstream's effective cost, so a costlier request would be refused by it every time. A route's cost goes to the route's bucket only and is not checked against the pool. A shortfall the ancestors' effective limit already has (a pool lowered under a descendant's cost, which is not re-checked) does not block the write - `inst-cfg-2a`
 3. [x] - `p2` - **IF** `budget.mode` = `allocated` - `inst-cfg-3`
    1. [x] - `p2` - Use the closest ancestor upstream already found by `cpt-cf-oagw-algo-tenant-closest-ancestor` for this request (no separate ancestor walk) - `inst-cfg-3-anc`
-   2. [x] - `p2` - Validate sum of child allocations ≤ parent budget × `overcommit_ratio`; descendant allocations are loaded with one `list_by_alias_for_tenants` call over the ancestor's descendant tree - `inst-cfg-3a`
-   3. [x] - `p2` - **IF** validation fails - `inst-cfg-3b`
+   2. [x] - `p2` - Validate sum of child allocations ≤ parent budget × `overcommit_ratio`; descendant allocations are loaded with one `list_by_alias_for_tenants` call over the ancestor's descendant tree, and only direct allocations count: an upstream whose path up to the parent passes another tenant with the alias allocates from that tenant instead - `inst-cfg-3a`
+   3. [x] - `p2` - When a parent's update changes its budget or its `sustained.window` (the window `budget.total` is counted in), its direct allocations are checked against the proposed budget - `inst-cfg-3a-own`
+   4. [x] - `p2` - **IF** validation fails - `inst-cfg-3b`
       1. [x] - `p2` - **RETURN** 400 ValidationError with budget allocation details - `inst-cfg-3b1`
 4. [x] - `p2` - **IF** ancestor has `sharing: enforce` on rate limit - `inst-cfg-4`
    1. [x] - `p2` - Validate descendant's limit does not exceed ancestor's enforced limit - `inst-cfg-4a`
-5. [ ] - `p2` - Validate circuit breaker config: `failure_threshold` ≥ 1, `timeout_seconds` ≥ 1, `success_threshold` ≥ 1 - `inst-cfg-5`
+5. [x] - `p2` - Validate circuit breaker config (upstreams only): `failure_threshold` 1 to 1000, `timeout_seconds` 1 to 86400 (`MAX_PROXY_TIMEOUT_SECS`), `success_threshold` 1 to 100, whether or not `enabled`; else 400 `circuit_breaker.<field> must be at least 1` or `circuit_breaker.<field> must be at most N`. An unknown field is refused (422 over REST, a provisioning failure from the types registry) - `inst-cfg-5`
+   1. [x] - `p2` - **IF** any ancestor upstream with the alias has `circuit_breaker.sharing: enforce`, refuse a descendant's own `circuit_breaker` with 400 (`cannot override circuit_breaker: ancestor upstream has sharing mode 'enforce'`); no permission of its own is needed under `inherit` - `inst-cfg-5a`
+   2. [x] - `p2` - A delete, or a write that changes or removes the stored `circuit_breaker`, drops the upstream's breakers on the replica that handles it, as the rate-limit buckets; a changed endpoint list needs no drop: every replica rebuilds the breaker on the next request (`inst-cb-2`) - `inst-cfg-5b`
 6. [ ] - `p2` - Validate concurrency limit config: `max_concurrent` > 0, `per_tenant_max` ≤ `max_concurrent` - `inst-cfg-6`
 7. [ ] - `p2` - **IF** `strategy` = `queue` on rate_limit or concurrency_limit - `inst-cfg-7`
    1. [ ] - `p2` - Validate queue config: `max_depth` (1–10,000), `timeout` (1–60s), `memory_limit` (1B–1GB), `overflow_strategy` is valid enum (`drop_newest`, `drop_oldest`, `reject`) - `inst-cfg-7a`
@@ -155,7 +161,7 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 
 - [x] `p2` - **ID**: `cpt-cf-oagw-algo-token-bucket-check`
 
-**Input**: Rate limit config (algorithm, sustained rate, burst capacity, scope, cost), request context (tenant_id, user_id, IP, route_id)
+**Input**: Rate limit config (algorithm, sustained rate, burst capacity, scope, cost), request context (tenant_id, user_id, client IP, route_id)
 
 **Output**: Allow (with remaining tokens) or deny (with retry-after estimate)
 
@@ -163,10 +169,13 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 1. [x] - `p2` - Determine counter key from scope (format varies by scope): - `inst-tb-1`
      - `tenant`: `oagw:ratelimit:{resource_type}:{resource_id}:tenant:{tenant_id}:{window}`
      - `user`: `oagw:ratelimit:{resource_type}:{resource_id}:user:{subject_id}:{window}`
-     - `ip`: `oagw:ratelimit:{resource_type}:{resource_id}:ip:{client_ip}:{window}` (falls back to `unknown` when no client IP)
+     - `ip`: `oagw:ratelimit:{resource_type}:{resource_id}:ip:{client_ip}:{window}`. The client IP is the address the API gateway resolved (`ClientIp` request extension): the peer address, or with `trusted_proxy_hops` ≥ 1 the `X-Forwarded-For` entry the outermost trusted proxy wrote. OAGW never reads forwarding headers itself. Without the extension (in-process SDK calls) all requests share the `unknown` bucket
      - `global`: `oagw:ratelimit:{resource_type}:{resource_id}:global:{window}` (no scope_id segment)
-     - `route`: `oagw:ratelimit:{resource_type}:{resource_id}:route:{window}` (no scope_id segment)
-2. [x] - `p2` - Load or create in-memory `TokenBucket` for key - `inst-tb-2`
+     - `route`: `oagw:ratelimit:{resource_type}:{resource_id}:route:{route_id}:{window}` (one bucket per matched route, also for an upstream limit)
+     - The upstream's scoped bucket uses the shared-budget owner's id as `{resource_id}` when the limit draws on a shared pool
+     - An upstream's scoped bucket whose effective limit is not owned by its `{resource_id}` (the selected upstream, or the pool owner for a shared budget) names its owner: `{resource_id}:via:{limit_owner_id}` in place of `{resource_id}`. Tenants resolving one upstream can get different limits (another tenant's `private` limit does not apply to them), and in one bucket one tenant's requests would use up the other's limit. Tenants that inherit a pool owner's limit share its scoped bucket without `via`; a tenant whose own limit applies gets its own; route and pool buckets never carry it
+     - Shared pool: `oagw:ratelimit:upstream:{owner_id}:pool:{window}`, checked last (after the route buckets and the upstream's scoped bucket, so a request one of them rejects does not draw on the pool other tenants share), with capacity and refill `budget.total` per the owner's window and the request's `cost`
+2. [x] - `p2` - Load or create in-memory `TokenBucket` for key. A key reached with another config (a merged limit that differs by tenant chain, a write made on another replica) keeps what was consumed: the old bucket refills to now, then the new one starts with `tokens = new_capacity - (old_capacity - old_tokens)`, possibly negative, so switching configs never gains a request (a sliding window on the same window takes the new limit in place). A write through this replica drops the resource's keys instead, so the next request starts a full bucket - `inst-tb-2`
 3. [x] - `p2` - Refill tokens: `elapsed = now - last_update`, `new_tokens = elapsed_seconds × refill_rate`, `tokens = min(tokens + new_tokens, capacity)`, `last_update = now` - `inst-tb-3`
 4. [x] - `p2` - **IF** `tokens >= cost` - `inst-tb-4`
    1. [x] - `p2` - Deduct: `tokens -= cost` - `inst-tb-4a`
@@ -193,48 +202,50 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 3. [x] - `p2` - Compute effective sustained rate: `min(own_rate, all_enforced_ancestor_rates)` - `inst-merge-3`
 4. [x] - `p2` - Compute effective burst capacity: `min(own_burst, all_enforced_ancestor_bursts)` - `inst-merge-4`
 5. [x] - `p2` - **IF** route has own rate limit config - `inst-merge-5`
-   1. [x] - `p2` - Apply route-level override: `effective = min(upstream_effective, route_config)` - `inst-merge-5a`
-6. [x] - `p2` - **RETURN** effective rate limit config - `inst-merge-6`
+   1. [x] - `p2` - Enforce it on the route's own bucket next to the upstream's, so the effective limit is `min(upstream_effective, route_config)`; it is not merged into the upstream's config, which stays the same whichever route matched - `inst-merge-5a`
+   2. [x] - `p2` - **IF** the matched route shadows ancestors' routes with an enforced rate limit (`cpt-cf-oagw-algo-tenant-config-merge` `inst-merge-2a`), enforce each on that route's own bucket too, keyed by its id and its own scope as if it had matched; none is merged into the upstream's config - `inst-merge-5c`
+6. [x] - `p2` - **IF** an upstream in the chain has `budget.mode = shared` and the descendant did not opt out with a non-enforced `private` limit - `inst-merge-5b`
+   1. [x] - `p2` - Record the pool (owner upstream, `budget.total`, owner's window and algorithm) with the effective config; the first defining ancestor owns it - `inst-merge-5b1`
+7. [x] - `p2` - **RETURN** effective rate limit config - `inst-merge-6`
 
 ### Circuit Breaker State Evaluation
 
-- [ ] `p2` - **ID**: `cpt-cf-oagw-algo-circuit-breaker-evaluation`
+- [x] `p2` - **ID**: `cpt-cf-oagw-algo-circuit-breaker-evaluation`
 
-**Input**: Upstream circuit breaker config, upstream_id, tenant_id, event (pre-request check or post-response evaluation)
+**Input**: The effective upstream (merged `circuit_breaker` per `cpt-cf-oagw-algo-tenant-config-merge`, with the upstream whose level set it), event (fail-fast check, permit before target resolution, or the exchange's outcome)
 
-**Output**: Allow request / reject request (503 CircuitBreakerOpen) / state transition
+**Output**: Permit / reject (503 CircuitBreakerOpen) / recorded outcome
+
+Breakers live in memory on each replica (`domain/circuit_breaker.rs`, on `toolkit-resilience`'s `CircuitBreaker`). There is no shared store: each replica opens on the failures it sees. One breaker serves a `(resolved upstream, config owner)` pair, so tenants that resolve different configs on one upstream (a `private` one its owner sees, an inherited one a descendant sees) do not share or rebuild each other's. The tenant is not part of the key: every tenant on the upstream shares its breaker, and only failures the upstream caused count (`cpt-cf-oagw-adr-circuit-breaker`, *Breaker Scope and Failure Classification*); tenant isolation is the rate limits' job.
 
 **Steps**:
-1. [ ] - `p2` - **IF** circuit breaker not enabled for upstream - `inst-cb-1`
-   1. [ ] - `p2` - **RETURN** Allow (bypass circuit breaker) - `inst-cb-1a`
-2. [ ] - `p2` - Load circuit state from Redis: `oagw:cb:{tenant_id}:{upstream_id}:state` - `inst-cb-2`
-3. [ ] - `p2` - **IF** Redis unavailable - `inst-cb-3`
-   1. [ ] - `p2` - **RETURN** Allow (fail open — graceful degradation) - `inst-cb-3a`
-4. [ ] - `p2` - **IF** event = pre-request check - `inst-cb-4`
-   1. [ ] - `p2` - **IF** state = CLOSED - `inst-cb-4a`
-      1. [ ] - `p2` - **RETURN** Allow - `inst-cb-4a1`
-   2. [ ] - `p2` - **IF** state = OPEN - `inst-cb-4b`
-      1. [ ] - `p2` - Load `opened_at` timestamp from Redis - `inst-cb-4b1`
-      2. [ ] - `p2` - **IF** `now - opened_at > timeout_seconds` - `inst-cb-4b2`
-         1. [ ] - `p2` - Atomic transition: OPEN → HALF_OPEN (via Redis Lua script), reset `half_open_count = 0` - `inst-cb-4b2a`
-         2. [ ] - `p2` - **RETURN** Allow (first probe request) - `inst-cb-4b2b`
-      3. [ ] - `p2` - **ELSE** - `inst-cb-4b3`
-         1. [ ] - `p2` - **IF** `fallback_strategy` = `fallback_endpoint` and `fallback_endpoint_id` configured - `inst-cb-4b3a`
-            1. [ ] - `p2` - Route to fallback upstream - `inst-cb-4b3a1`
-         2. [ ] - `p2` - **RETURN** Reject: 503 CircuitBreakerOpen with `retry_after = timeout_seconds - elapsed` - `inst-cb-4b3b`
-   3. [ ] - `p2` - **IF** state = HALF_OPEN - `inst-cb-4c`
-      1. [ ] - `p2` - Increment `half_open_count` atomically - `inst-cb-4c1`
-      2. [ ] - `p2` - **IF** `half_open_count > half_open_max_requests` - `inst-cb-4c2`
-         1. [ ] - `p2` - **RETURN** Reject: 503 CircuitBreakerOpen (probe limit reached) - `inst-cb-4c2a`
-      3. [ ] - `p2` - **RETURN** Allow (probe request) - `inst-cb-4c3`
-5. [ ] - `p2` - **IF** event = post-response evaluation - `inst-cb-5`
-   1. [ ] - `p2` - Classify response as success or failure using `failure_conditions` (status codes, timeout, connection error) - `inst-cb-5a`
-   2. [ ] - `p2` - **IF** failure - `inst-cb-5b`
-      1. [ ] - `p2` - **IF** state = CLOSED: increment failure counter; **IF** counter ≥ `failure_threshold` → atomic transition CLOSED → OPEN, set `opened_at = now` - `inst-cb-5b1`
-      2. [ ] - `p2` - **IF** state = HALF_OPEN: atomic transition HALF_OPEN → OPEN, set `opened_at = now` - `inst-cb-5b2`
-   3. [ ] - `p2` - **IF** success - `inst-cb-5c`
-      1. [ ] - `p2` - **IF** state = CLOSED: reset failure counter to 0 - `inst-cb-5c1`
-      2. [ ] - `p2` - **IF** state = HALF_OPEN: increment success counter; **IF** counter ≥ `success_threshold` → atomic transition HALF_OPEN → CLOSED, reset all counters - `inst-cb-5c2`
+1. [x] - `p2` - **IF** the upstream has no `circuit_breaker`, or `enabled: false` - `inst-cb-1`
+   1. [x] - `p2` - **IF** the config is present with `enabled: false`, remove the pair's breaker - `inst-cb-1b`
+   2. [x] - `p2` - **RETURN** Allow (no breaker) - `inst-cb-1a`
+2. [x] - `p2` - Take the replica's breaker for the pair; **IF** there is none, or its config, the upstream alias or the upstream's endpoints differ from those it was built for (a write on this or another replica), build a closed one: open after `failure_threshold` failures in a row, stay open `timeout_seconds`, then let `success_threshold` probes through. It is named `{alias}/{upstream_id}`, with `/{owner_id}` when the config is another upstream's - `inst-cb-2`
+3. [x] - `p2` - **IF** event = fail-fast check (`inst-rl-3`): as below, but a probe permit is released at once, so the check keeps no slot - `inst-cb-3`
+4. [x] - `p2` - **IF** event = permit before target resolution (`inst-rl-9a`) - `inst-cb-4`
+   1. [x] - `p2` - **IF** state = CLOSED - `inst-cb-4a`
+      1. [x] - `p2` - **RETURN** Allow with a permit - `inst-cb-4a1`
+   2. [x] - `p2` - **IF** state = OPEN - `inst-cb-4b`
+      1. [x] - `p2` - **IF** `timeout_seconds` have passed since it opened - `inst-cb-4b2`
+         1. [x] - `p2` - Transition OPEN → HALF_OPEN with `success_threshold` free probe slots - `inst-cb-4b2a`
+         2. [x] - `p2` - **RETURN** Allow with a probe permit - `inst-cb-4b2b`
+      2. [x] - `p2` - **ELSE** **RETURN** Reject: 503 CircuitBreakerOpen with `retry_after = timeout_seconds - elapsed` - `inst-cb-4b3b`
+   3. [x] - `p2` - **IF** state = HALF_OPEN - `inst-cb-4c`
+      1. [x] - `p2` - **IF** every probe slot is taken - `inst-cb-4c2`
+         1. [x] - `p2` - **RETURN** Reject: 503 CircuitBreakerOpen with `retry_after = min(1 s, timeout_seconds)` - `inst-cb-4c2a`
+      2. [x] - `p2` - **RETURN** Allow with a probe permit - `inst-cb-4c3`
+5. [x] - `p2` - **IF** event = outcome of target resolution or the exchange (recorded on the permit at the response head; a WebSocket upgrade at the handshake) - `inst-cb-5`
+   1. [x] - `p2` - Classify: upstream status 502, 503 or 504 is a failure, any other status a success. A DNS failure or no address, and the engine's errors (`ConnectionTimeout`, `RequestTimeout` from its own read or write timeout, `LinkUnavailable`, `DownstreamError`: refused, TLS, certificate, closed connection, invalid response; `ProtocolError`, `StreamAborted`) are failures. A hit of the shared request deadline is a failure only when the permit was taken with at least 90 % of the request timeout left, less the time of an auth plugin's signing phase; otherwise the gateway's own steps (the `request_ref` CredStore read, endpoint selection, signing) used the upstream's budget and it counts as nothing. An SSRF refusal of every resolved address counts as nothing. While the client is still sending a streamed request body, a timeout or a broken exchange counts as nothing; only a failure to connect (refused, no route, connect or TLS timeout, TLS or certificate error) counts. A request pinned with `X-OAGW-Target-Host` to one endpoint of an upstream with several counts as nothing. The match over `DomainError` is exhaustive: every other error is the gateway's or the caller's and counts as nothing - `inst-cb-5a`
+   2. [x] - `p2` - **IF** failure - `inst-cb-5b`
+      1. [x] - `p2` - **IF** state = CLOSED: increment the consecutive failure count; **IF** count ≥ `failure_threshold` → transition CLOSED → OPEN - `inst-cb-5b1`
+      2. [x] - `p2` - **IF** state = HALF_OPEN: transition HALF_OPEN → OPEN - `inst-cb-5b2`
+   3. [x] - `p2` - **IF** success - `inst-cb-5c`
+      1. [x] - `p2` - **IF** state = CLOSED: reset the failure count to 0 - `inst-cb-5c1`
+      2. [x] - `p2` - **IF** state = HALF_OPEN: count the probe; **IF** `success_threshold` probes succeeded → transition HALF_OPEN → CLOSED - `inst-cb-5c2`
+   4. [x] - `p2` - An outcome that arrives after the breaker changed state is ignored - `inst-cb-5d`
+6. [x] - `p2` - **IF** the request ends without an outcome (the body over the limit or the client's body stream failing during the exchange, or the client went away before the response head): the permit is dropped, nothing is counted, and a probe slot is freed. A client that gives up before the gateway's timeout decides when the request ends, so its cancellation says nothing about the upstream - `inst-cb-6`
 
 ### Concurrency Permit Acquisition
 
@@ -298,34 +309,28 @@ Prevents abuse, cost overruns, and protects external service agreements. Maintai
 
 ### Circuit Breaker State Machine
 
-- [ ] `p2` - **ID**: `cpt-cf-oagw-state-circuit-breaker`
+- [x] `p2` - **ID**: `cpt-cf-oagw-state-circuit-breaker`
 
-**Scope**: Per upstream (or per endpoint if `scope: per_endpoint`), per tenant
+**Scope**: Per replica, per `(resolved upstream, config owner)` pair; one breaker covers every endpoint of the upstream
 
 **States**:
 
 | State | Description | Behavior |
 |-------|-------------|----------|
-| CLOSED | Normal operation | All requests forwarded; failure counter incremented on error; transitions to OPEN when `failure_counter >= failure_threshold` |
-| OPEN | Circuit tripped | All requests immediately rejected with 503 CircuitBreakerOpen; transitions to HALF_OPEN after `timeout_seconds` elapsed since `opened_at` |
-| HALF_OPEN | Recovery probe | Limited probe requests allowed (up to `half_open_max_requests` concurrent); success increments success counter; failure transitions back to OPEN; transitions to CLOSED when `success_counter >= success_threshold` |
+| CLOSED | Normal operation | All requests forwarded; a failure increments the consecutive failure count, a success resets it; transitions to OPEN when the count reaches `failure_threshold` |
+| OPEN | Circuit tripped | All requests immediately rejected with 503 CircuitBreakerOpen; the first request after `timeout_seconds` moves it to HALF_OPEN |
+| HALF_OPEN | Recovery probe | Up to `success_threshold` probes in flight; a failed probe transitions back to OPEN; transitions to CLOSED when `success_threshold` probes succeeded |
 
 **Transitions**:
 
 | From | To | Trigger | Action |
 |------|----|---------|--------|
-| CLOSED | OPEN | `failure_counter >= failure_threshold` | Set `opened_at = now`; emit metric `oagw_circuit_breaker_transitions_total{from=CLOSED, to=OPEN}` |
-| OPEN | HALF_OPEN | `now - opened_at > timeout_seconds` | Reset `half_open_count = 0`, `success_counter = 0`; emit metric `oagw_circuit_breaker_transitions_total{from=OPEN, to=HALF_OPEN}` |
-| HALF_OPEN | CLOSED | `success_counter >= success_threshold` | Reset `failure_counter = 0`; emit metric `oagw_circuit_breaker_transitions_total{from=HALF_OPEN, to=CLOSED}` |
-| HALF_OPEN | OPEN | Any failure during probe | Set `opened_at = now`; emit metric `oagw_circuit_breaker_transitions_total{from=HALF_OPEN, to=OPEN}` |
+| CLOSED | OPEN | consecutive failures ≥ `failure_threshold` | `resilience.circuit_breaker.transitions{resilience.previous_state=closed, resilience.state=open}`; WARN log |
+| OPEN | HALF_OPEN | first request after `timeout_seconds` | likewise `open` → `half_open` |
+| HALF_OPEN | CLOSED | `success_threshold` probes succeeded | likewise `half_open` → `closed`; the failure count starts from 0 |
+| HALF_OPEN | OPEN | any failed probe | likewise `half_open` → `open` |
 
-**Storage**: Redis keys per `cpt-cf-oagw-adr-circuit-breaker`:
-- `oagw:cb:{tenant_id}:{upstream_id}:state` → `CLOSED` | `OPEN` | `HALF_OPEN`
-- `oagw:cb:{tenant_id}:{upstream_id}:failures` → counter (TTL: rolling window)
-- `oagw:cb:{tenant_id}:{upstream_id}:opened_at` → timestamp
-- `oagw:cb:{tenant_id}:{upstream_id}:half_open_count` → counter
-
-**Graceful degradation**: If Redis unavailable, default to CLOSED state (fail open).
+**Storage**: in memory on each replica, no shared store. A replica restart, or a changed effective config, alias or endpoint list (on the next request, on every replica), starts a closed breaker. A request that resolves no config leaves the breaker alone, so a removed config is dropped only by the write, on the replica that handles it; elsewhere an identical config re-added before the idle sweep continues the old state, open for at most `timeout_seconds`. A delete drops the upstream's breakers on the replica that handles it; the idle sweep (every 60 s, with the rate-limit buckets) removes breakers unused for 10 minutes past their `timeout_seconds` and held by no request, e.g. those of upstreams another replica deleted.
 
 ## 5. Definitions of Done
 
@@ -358,7 +363,7 @@ The system **MUST** include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X
 
 - [x] `p2` - **ID**: `cpt-cf-oagw-dod-hierarchical-rate-merge`
 
-The system **MUST** compute effective rate limits by walking the tenant hierarchy and applying `min(ancestor.enforced, descendant)` per `cpt-cf-oagw-adr-rate-limiting`. When ancestor sharing = `enforce`, descendant **MUST NOT** exceed ancestor's limit. When sharing = `inherit` and descendant has no config, ancestor's config **MUST** be used. Budget allocation **MUST** validate that sum of child allocations ≤ parent budget × `overcommit_ratio`. Route-level rate limits **MUST** apply as `min(upstream_effective, route_config)`.
+The system **MUST** compute effective rate limits by walking the tenant hierarchy and applying `min(ancestor.enforced, descendant)` per `cpt-cf-oagw-adr-rate-limiting`. When ancestor sharing = `enforce`, descendant **MUST NOT** exceed ancestor's limit. When sharing = `inherit` and descendant has no config, ancestor's config **MUST** be used. Budget allocation **MUST** validate that sum of direct child allocations ≤ parent budget × `overcommit_ratio`. A shared budget **MUST** limit every tenant drawing on it to `budget.total` per window together. Route-level rate limits **MUST** apply as `min(upstream_effective, route_config)`, each on its own bucket.
 
 **Implements**:
 - `cpt-cf-oagw-algo-hierarchical-rate-limit-merge`
@@ -369,9 +374,9 @@ The system **MUST** compute effective rate limits by walking the tenant hierarch
 
 ### Implement Circuit Breaker State Machine
 
-- [ ] `p2` - **ID**: `cpt-cf-oagw-dod-circuit-breaker`
+- [x] `p2` - **ID**: `cpt-cf-oagw-dod-circuit-breaker`
 
-The system **MUST** implement the circuit breaker state machine (CLOSED → OPEN → HALF_OPEN → CLOSED) per `cpt-cf-oagw-adr-circuit-breaker`. State **MUST** be stored in Redis with atomic transitions via Lua scripts. Failure conditions **MUST** be configurable: HTTP status codes (default: 500, 502, 503, 504), timeouts, connection errors. When OPEN, the system **MUST** return 503 CircuitBreakerOpen with `Retry-After` and `X-Circuit-State` headers. When Redis is unavailable, the system **MUST** default to CLOSED (fail open).
+The system **MUST** implement the circuit breaker state machine (CLOSED → OPEN → HALF_OPEN → CLOSED) per `cpt-cf-oagw-adr-circuit-breaker`, with state kept in memory on each replica. The breaker is shared per upstream (and config owner) by every tenant, and only failures the upstream caused count: upstream 502, 503 and 504, connection, TLS and DNS failures, broken exchanges and timeouts the upstream had its full budget for; SSRF refusals, gateway errors, client cancellations, failures while the client is still uploading (other than failing to connect) and requests pinned to one endpoint of several do not. When OPEN, the system **MUST** return 503 CircuitBreakerOpen with `Retry-After` set to the time left until a probe. The upstream's `circuit_breaker` is stored with it (`oagw_upstream.circuit_breaker` and `circuit_breaker_sharing`) and shared with descendant tenants by its `sharing` mode, as the other upstream fields.
 
 **Implements**:
 - `cpt-cf-oagw-flow-rate-limited-proxy`
@@ -380,6 +385,7 @@ The system **MUST** implement the circuit breaker state machine (CLOSED → OPEN
 
 **Touches**:
 - Entities: `Upstream` (circuit_breaker field)
+- DB: `oagw_upstream` (`circuit_breaker`, `circuit_breaker_sharing` columns)
 
 ### Implement Concurrency Control
 
@@ -420,17 +426,20 @@ The system **MUST** implement `reject` and `queue` strategies for handling overl
 - [x] Hierarchical rate limit merge computes `effective = min(ancestor.enforced, descendant)` across tenant hierarchy
 - [x] Ancestor with `sharing: enforce` prevents descendant from exceeding enforced limit
 - [x] Ancestor with `sharing: inherit` provides default config when descendant has none
-- [x] Budget allocation validates sum of child allocations ≤ parent budget × `overcommit_ratio`; rejects if exceeded
-- [x] Route-level rate limit applies as `min(upstream_effective, route_config)`
-- [ ] Circuit breaker transitions CLOSED → OPEN when consecutive failures ≥ `failure_threshold`
-- [ ] Circuit breaker transitions OPEN → HALF_OPEN after `timeout_seconds` elapsed
-- [ ] Circuit breaker transitions HALF_OPEN → CLOSED after `success_threshold` consecutive probe successes
-- [ ] Circuit breaker transitions HALF_OPEN → OPEN on any probe failure
-- [ ] Circuit breaker OPEN state returns 503 CircuitBreakerOpen with `Retry-After` and `X-Circuit-State: OPEN` headers
-- [ ] Circuit breaker HALF_OPEN limits concurrent probes to `half_open_max_requests`
-- [ ] Circuit breaker failure conditions configurable: status codes, timeout, connection error
-- [ ] Circuit breaker state stored in Redis with atomic transitions via Lua scripts
-- [ ] Circuit breaker defaults to CLOSED (fail open) when Redis unavailable
+- [x] Budget allocation validates sum of direct child allocations ≤ parent budget × `overcommit_ratio`; rejects if exceeded, also when the parent changes its window
+- [x] Shared budget: every tenant drawing on it shares one pool of `budget.total` requests per window
+- [x] An upstream whose effective cost exceeds the `budget.total` of the shared pool it draws on is rejected on write
+- [x] Route-level rate limit applies as `min(upstream_effective, route_config)`; calling routes in turn does not refill the upstream bucket
+- [x] `scope: ip` keys on the address the API gateway resolved; forwarding headers a client sends do not change it
+- [x] Circuit breaker transitions CLOSED → OPEN when consecutive failures ≥ `failure_threshold`
+- [x] Circuit breaker transitions OPEN → HALF_OPEN after `timeout_seconds` elapsed
+- [x] Circuit breaker transitions HALF_OPEN → CLOSED after `success_threshold` probe successes
+- [x] Circuit breaker transitions HALF_OPEN → OPEN on any probe failure
+- [x] Circuit breaker OPEN state returns 503 CircuitBreakerOpen with `Retry-After`
+- [x] Circuit breaker HALF_OPEN limits concurrent probes to `success_threshold`
+- [x] Circuit breaker values below 1 or above their maximum are rejected on write; a changed config, changed endpoints or a deleted upstream reset the breaker
+- [x] Only upstream-attributable failures count: an SSRF refusal, a gateway error, a client cancellation, a deadline hit after the gateway's own steps (signing included) used more than a tenth of the request timeout, a client's unfinished slow upload or a request pinned with `X-OAGW-Target-Host` to one endpoint of several do not; refused connections and DNS failures do
+- [ ] Circuit breaker `X-Circuit-State` header, configurable failure conditions, `scope: per_endpoint` and fallback strategies (planned)
 - [ ] Concurrency limiting enforces three independent levels: tenant-global, upstream, route
 - [ ] Concurrency permits use RAII pattern — auto-released on completion, error, timeout, or panic
 - [ ] Per-tenant fairness enforced via `per_tenant_max` on upstream concurrency config
@@ -442,7 +451,8 @@ The system **MUST** implement `reject` and `queue` strategies for handling overl
 - [ ] Queue timeout returns 503 QueueTimeout with `queue_wait_seconds` and `Retry-After`
 - [ ] Queue does not accumulate requests when circuit breaker is OPEN
 - [x] All gateway-originated errors include `X-OAGW-Error-Source: gateway` and use RFC 9457 Problem Details format
-- [ ] Prometheus metrics emitted: `oagw_rate_limit_exceeded_total`, `oagw_rate_limit_usage_ratio`, `oagw_circuit_breaker_state`, `oagw_circuit_breaker_transitions_total`, `oagw_requests_in_flight`, `oagw_concurrency_limit_exceeded_total`, `oagw_queue_depth`, `oagw_queue_wait_duration_seconds`
+- [ ] Prometheus metrics emitted: `oagw_rate_limit_exceeded_total`, `oagw_rate_limit_usage_ratio`, `oagw_requests_in_flight`, `oagw_concurrency_limit_exceeded_total`, `oagw_queue_depth`, `oagw_queue_wait_duration_seconds`
+- [x] Circuit breaker metrics emitted over OTLP as `resilience.circuit_breaker.calls` (by `resilience.outcome`: `success`, `failure`, `ignored`, `rejected`), `resilience.circuit_breaker.state` (breakers per `resilience.state`) and `resilience.circuit_breaker.transitions`, each with `resilience.name` = `{alias}/{upstream_id}` (and `/{owner_id}` when the config is another upstream's)
 - [x] Rate limit check latency < 1ms (in-memory token bucket) per `cpt-cf-oagw-nfr-low-latency`
 - [x] No credentials or PII appear in rate limit / circuit breaker error responses or logs
 
@@ -450,11 +460,11 @@ The system **MUST** implement `reject` and `queue` strategies for handling overl
 
 ### Performance Considerations
 
-Rate limiting and concurrency control are on the hot path for every proxy request. Token bucket check is an in-memory operation (<1ms per `cpt-cf-oagw-nfr-low-latency`). Concurrency permit acquisition uses `AtomicUsize` operations (<100ns per check per `cpt-cf-oagw-adr-concurrency-control`). Circuit breaker state check requires a Redis round-trip (~1-2ms) but can fall back to local-only (fail open) if Redis is unavailable. Redis sync for distributed rate limiting uses a configurable interval (default 100ms) to balance accuracy vs load.
+Rate limiting and concurrency control are on the hot path for every proxy request. Token bucket check is an in-memory operation (<1ms per `cpt-cf-oagw-nfr-low-latency`). Concurrency permit acquisition uses `AtomicUsize` operations (<100ns per check per `cpt-cf-oagw-adr-concurrency-control`). The circuit breaker check is a concurrent-map read and, for a closed breaker, one atomic load; only an open or half-open breaker takes its lock. Redis sync for distributed rate limiting uses a configurable interval (default 100ms) to balance accuracy vs load.
 
 ### Distributed State
 
-MVP uses per-instance rate limiting and concurrency control (no distributed coordination). Distributed rate limiting via Redis (hybrid local + periodic sync per `cpt-cf-oagw-adr-rate-limiting`) and distributed circuit breaker state (Redis-backed per `cpt-cf-oagw-adr-circuit-breaker`) are production-grade capabilities. Redis key structure: `oagw:ratelimit:{resource_type}:{resource_id}:{scope}:{scope_id}:{window}` for rate limits, `oagw:cb:{tenant_id}:{upstream_id}:*` for circuit breaker.
+MVP uses per-instance rate limiting and concurrency control (no distributed coordination). Distributed rate limiting via Redis (hybrid local + periodic sync per `cpt-cf-oagw-adr-rate-limiting`) is a production-grade capability. Circuit breaker state stays per replica: a replica opens on the failures it sees, which also protects it from an upstream only it cannot reach. Redis key structure: `oagw:ratelimit:{resource_type}:{resource_id}:{scope}:{scope_id}:{window}` for rate limits (`route` scope: `{scope_id}` is the route id; shared pools: `oagw:ratelimit:upstream:{owner_id}:pool:{window}`).
 
 ### Deliberate Omissions
 

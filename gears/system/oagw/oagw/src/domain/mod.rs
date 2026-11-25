@@ -1,12 +1,28 @@
+// oagw is an HTTP gateway: methods, headers and upstream status codes are its
+// domain, not a transport detail, so the domain uses the `http` crate's types
+// instead of copies of them.
+#![allow(unknown_lints, reason = "dylint lint names are unknown to rustc")]
+#![allow(
+    de0301_no_infra_in_domain,
+    de0308_no_http_in_domain,
+    reason = "an HTTP gateway's domain is HTTP; see the comment above"
+)]
+
+/// Upstream circuit breakers, one registry per replica.
+pub(crate) mod circuit_breaker;
 pub(crate) mod cors;
 /// Domain error types returned by services and mapped to API errors.
 pub(crate) mod error;
+/// Header names the gateway sets or strips on outbound requests.
+pub(crate) mod gateway_headers;
 pub(crate) mod gts_helpers;
 /// Domain model: upstreams, routes, endpoints and request/query types.
 pub(crate) mod model;
 /// Auth, guard and transform plugin traits and their shared types.
 pub(crate) mod plugin;
 pub(crate) mod ports;
+/// Canonical form of a proxied request path.
+pub(crate) mod proxy_path;
 /// Rate limiting (token-bucket) logic and bucket-key construction.
 pub(crate) mod rate_limit;
 /// Repository traits for upstream and route persistence.
@@ -16,6 +32,8 @@ pub(crate) mod route_matching;
 pub(crate) mod services;
 /// SSRF guard that filters outbound IP addresses.
 pub(crate) mod ssrf;
+/// Rules over a caller's tenant chain.
+pub(crate) mod tenant_chain;
 pub(crate) mod type_catalog;
 pub(crate) mod type_provisioning;
 

@@ -132,9 +132,9 @@ Chosen option: "Portable relational baseline + JSON blobs", because it keeps hot
   - `plugin_ref` must represent the same UUID (exact format is an application concern; comparisons must be done on the parsed UUID).
   - The referenced row must exist in `oagw_plugin` within scope.
 - If `plugin_uuid` is NULL on a binding row:
-  - `plugin_ref` must resolve to a built-in plugin in the registry. (Planned, with custom plugin support.)
-- `auth_plugin_ref/auth_plugin_uuid` (when present) must resolve to an **auth** plugin. (Planned, with custom plugin support.)
-- `oagw_upstream_plugin` / `oagw_route_plugin` bindings must not reference auth plugins (auth is configured only via `auth_plugin_*`). (Planned, with custom plugin support.)
+  - `plugin_ref` must resolve to a built-in guard or transform plugin in the registry. (Enforced on write: anything else is a 400 `NOT_IMPLEMENTED`.)
+- `auth_plugin_ref/auth_plugin_uuid` (when present) must resolve to an **auth** plugin. (Enforced on write for named plugins; custom UUID plugins are rejected until they are implemented.)
+- `oagw_upstream_plugin` / `oagw_route_plugin` bindings must not reference auth plugins (auth is configured only via `auth_plugin_*`). (Enforced on write.)
 - Binding ordering:
   - `position` is unique per `(upstream_id)` / `(route_id)` by PK.
   - Positions start at 0 and are contiguous (no gaps): the repositories assign them from the list order on write.
@@ -225,6 +225,8 @@ Notes:
 | `cors_sharing` | VARCHAR(16) | No | `private\|inherit\|enforce` |
 | `rate_limit` | JSON | Yes | |
 | `rate_limit_sharing` | VARCHAR(16) | No | `private\|inherit\|enforce` |
+| `circuit_breaker` | JSON | Yes | `enabled`, `failure_threshold`, `timeout_seconds`, `success_threshold` (no `sharing`); NULL when the upstream has no circuit breaker |
+| `circuit_breaker_sharing` | VARCHAR(16) | No | `private\|inherit\|enforce`; default `private` for rows written before the column |
 | `plugins_sharing` | VARCHAR(16) | Yes | `private\|inherit\|enforce`; NULL when no plugins configuration (distinguishes absent from empty list) |
 | `created_at` | TIMESTAMP | No | |
 | `updated_at` | TIMESTAMP | No | |
@@ -587,7 +589,6 @@ INSERT INTO oagw_upstream_plugin (upstream_id, tenant_id, position, plugin_ref, 
 
 Deferred / future work:
 - Concurrency limiting / backpressure queueing: add nullable JSON config fields (upstream and/or route)
-- Circuit breaker: add nullable JSON config fields (upstream)
 - Backend-specific indexes (e.g. JSON indexes) may be added for performance, but must not change semantics
 
 - [ADR: Optional Persistence](./0018-optional-persistence.md) — opt-in persistence implementing this schema (except `oagw_plugin`)

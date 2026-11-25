@@ -2,13 +2,13 @@
 
 ## Overview
 
-Plugins execute in Data Plane during proxy request processing. Three plugin types execute in strict order: Auth → Guards → Transform → Proxy Call → Transform.
+Plugins execute in Data Plane during proxy request processing. Three plugin types execute in strict order: Auth → Guards → Transform → Auth signing → Proxy Call → Transform.
 
 ## Plugin Types
 
 ### AuthPlugin
 - **Purpose**: Inject authentication credentials
-- **Execution**: Once per request, before guards
+- **Execution**: Once per request, before guards; the optional signing phase runs once more on the final request, right before the proxy call ([ADR-0023](../../docs/ADR/0023-request-signing.md))
 - **Can terminate**: No (always succeeds or errors)
 - **Examples**: API key, OAuth2, Bearer token
 
@@ -35,9 +35,11 @@ Incoming Request
   ↓
 3. Transform Plugins (modify request)
   ↓
-4. HTTP call to external service
+4. Auth Plugin signing phase (final URL and headers; only plugins that declare it)
   ↓
-5. Transform Plugins (modify response)
+5. HTTP call to external service
+  ↓
+6. Transform Plugins (modify response)
   ↓
 Response to Client
 ```
@@ -335,17 +337,20 @@ Content-Type: application/problem+json
 
 ## Transform Plugin Error Handling
 
-Transform plugins operate on error responses too:
+`on_error` runs only for gateway-originated errors of the upstream exchange: connection failure, timeout, protocol error, request body limit, response guard rejection. Errors raised before forwarding (validation, auth, request guards, rate limit, CORS) return without it. A WebSocket upgrade does not run it: a failed upgrade returns its gateway error without `on_error`. An upstream error response is not a gateway error: it goes through `on_response`, like any upstream response.
 
 ```
-Upstream returns 500 error
+Upstream unreachable / timeout / response guard rejection
   ↓
-Transform plugins (post-error) execute
+Transform plugins (on_error) execute
   ↓
-  - LoggingTransformPlugin: logs error
-  - RequestIdTransformPlugin: preserves request ID
+Gateway error returned to client (X-OAGW-Error-Source: gateway)
+
+Upstream returns 4xx/5xx
   ↓
-Error response returned to client
+Transform plugins (on_response) execute
+  ↓
+Upstream response returned to client (X-OAGW-Error-Source: upstream)
 ```
 
 ### Example: Upstream Error
@@ -358,26 +363,22 @@ Content-Type: application/json
 {"error": {"message": "Internal server error"}}
 ```
 
-**Transform execution**:
-```
-LoggingTransformPlugin:
-  → Log error response
+**Transform execution**: `on_response` with status `500`; `on_error` does not run.
 
-RequestIdTransformPlugin:
-  → Ensure X-Request-ID present in response
-```
-
-**Final response**:
+**Final response**: the upstream's status, headers (after `on_response` and response header rules) and body:
 ```http
 HTTP/1.1 500 Internal Server Error
 X-OAGW-Error-Source: upstream
-X-Request-ID: req_abc123...
 Content-Type: application/json
 
 {"error": {"message": "Internal server error"}}
 ```
 
 Note: `X-OAGW-Error-Source: upstream` indicates error from external service.
+
+### Example: Gateway Error
+
+The upstream refuses the connection. `on_error` runs with the error type (`DownstreamError`), the status the client gets (`502`) and the detail; it works on a copy and does not change the response. The client gets the gateway's Problem Details response with `X-OAGW-Error-Source: gateway`.
 
 ## Plugin Configuration Merging
 

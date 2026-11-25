@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::domain::error::DomainError;
-use crate::domain::model::{PassthroughMode, RequestHeaderRules, ResponseHeaderRules};
+use crate::domain::gateway_headers;
+use crate::domain::model::{Endpoint, PassthroughMode, RequestHeaderRules, ResponseHeaderRules};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use oagw_sdk::api::ErrorSource;
 use oagw_sdk::field;
@@ -26,14 +27,24 @@ pub fn apply_passthrough(
 ) -> HeaderMap {
     let mut out = match mode {
         PassthroughMode::None => HeaderMap::new(),
-        PassthroughMode::All => inbound.clone(),
+        // `all` forwards what the client sent, but not its forwarding and
+        // override headers: only an allowlist that names one forwards it.
+        PassthroughMode::All => {
+            let mut all = inbound.clone();
+            strip_forwarding_headers(&mut all);
+            all
+        }
+        // Every line of a repeated header, in order, as `All` forwards it;
+        // a signing phase must see what the client sent, not the first line.
         PassthroughMode::Allowlist => {
             let mut h = HeaderMap::new();
             for name in allowlist {
                 if let Ok(n) = HeaderName::from_bytes(name.to_lowercase().as_bytes())
-                    && let Some(v) = inbound.get(&n)
+                    && !h.contains_key(&n)
                 {
-                    h.insert(n, v.clone());
+                    for v in inbound.get_all(&n) {
+                        h.append(n.clone(), v.clone());
+                    }
                 }
             }
             h
@@ -60,18 +71,9 @@ pub fn apply_passthrough(
 /// Per RFC 7230 Section 6.1, intermediaries MUST remove headers listed in the
 /// `Connection` header value in addition to the static hop-by-hop list.
 pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    // First, parse Connection header and remove any headers it names.
-    if let Some(conn_value) = headers.get("connection").and_then(|v| v.to_str().ok()) {
-        let named: Vec<String> = conn_value
-            .split(',')
-            .map(|token| token.trim().to_lowercase())
-            .filter(|token| !token.is_empty())
-            .collect();
-        for name in &named {
-            if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
-                headers.remove(header_name);
-            }
-        }
+    // First, remove the headers every Connection field line names.
+    for name in connection_nominated(headers) {
+        headers.remove(name);
     }
 
     // Then remove the static hop-by-hop list.
@@ -80,11 +82,48 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
+/// The header names nominated by every `Connection` field line (RFC 9110
+/// §7.6.1). A request may repeat the field; reading only the first line
+/// would forward the names the others nominate.
+fn connection_nominated(headers: &HeaderMap) -> Vec<HeaderName> {
+    headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| HeaderName::from_bytes(token.as_bytes()).ok())
+        .collect()
+}
+
+/// Whether `name` is a forwarding header (see
+/// [`gateway_headers::is_forwarding_header`]).
+fn is_forwarding_header(name: &HeaderName) -> bool {
+    gateway_headers::is_forwarding_header(name.as_str())
+}
+
+/// Remove forwarding headers ([`is_forwarding_header`]) from an outbound
+/// request. Requests only: upstream responses keep them.
+fn strip_forwarding_headers(headers: &mut HeaderMap) {
+    let to_remove: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| is_forwarding_header(name))
+        .cloned()
+        .collect();
+    for name in to_remove {
+        headers.remove(&name);
+    }
+}
+
 /// Remove X-OAGW-* internal headers.
 pub fn strip_internal_headers(headers: &mut HeaderMap) {
     let to_remove: Vec<HeaderName> = headers
         .keys()
-        .filter(|k| k.as_str().starts_with("x-oagw-"))
+        .filter(|k| {
+            k.as_str()
+                .starts_with(gateway_headers::INTERNAL_HEADER_PREFIX)
+        })
         .cloned()
         .collect();
     for name in to_remove {
@@ -145,17 +184,10 @@ pub fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
 /// Like [`strip_hop_by_hop`] but preserves `Upgrade` and `Connection` headers,
 /// which are required for WebSocket upgrade negotiation (RFC 6455 §4.1).
 pub fn strip_hop_by_hop_for_upgrade(headers: &mut HeaderMap) {
-    // Parse Connection-nominated headers but skip "upgrade" itself.
-    if let Some(conn_value) = headers.get("connection").and_then(|v| v.to_str().ok()) {
-        let named: Vec<String> = conn_value
-            .split(',')
-            .map(|token| token.trim().to_lowercase())
-            .filter(|token| !token.is_empty() && token != "upgrade")
-            .collect();
-        for name in &named {
-            if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
-                headers.remove(header_name);
-            }
+    // Remove Connection-nominated headers but keep "upgrade" itself.
+    for name in connection_nominated(headers) {
+        if name != http::header::UPGRADE {
+            headers.remove(name);
         }
     }
 
@@ -163,6 +195,18 @@ pub fn strip_hop_by_hop_for_upgrade(headers: &mut HeaderMap) {
     for name in HOP_BY_HOP_HEADERS {
         if *name != "connection" && *name != "upgrade" {
             headers.remove(*name);
+        }
+    }
+}
+
+/// Remove from `outbound` every header the client's `Connection` lines in
+/// `inbound` nominate. Passthrough copies `Connection` only when the mode
+/// forwards it, so stripping `outbound` alone would forward an allowlisted
+/// header the client marked hop-by-hop. An upgrade keeps `Upgrade`.
+pub fn strip_inbound_nominated(outbound: &mut HeaderMap, inbound: &HeaderMap, is_upgrade: bool) {
+    for name in connection_nominated(inbound) {
+        if !(is_upgrade && name == http::header::UPGRADE) {
+            outbound.remove(name);
         }
     }
 }
@@ -337,64 +381,24 @@ pub fn validate_smuggling_headers(headers: &HeaderMap) -> Result<(), DomainError
     Ok(())
 }
 
-/// Set the Host header to match the upstream endpoint.
-pub fn set_host_header(headers: &mut HeaderMap, host: &str, port: u16) {
-    let host_value = if port == 443 || port == 80 {
-        host.to_string()
+/// Set the Host header to match the upstream endpoint. The port is left out
+/// only when it is the default for the endpoint's scheme (RFC 9110 §7.2):
+/// `http` on 443 or `https` on 80 keeps it.
+pub fn set_host_header(headers: &mut HeaderMap, endpoint: &Endpoint) {
+    let host_value = if endpoint.is_standard_port() {
+        endpoint.host.clone()
     } else {
-        format!("{host}:{port}")
+        format!("{}:{}", endpoint.host, endpoint.port)
     };
     if let Ok(v) = HeaderValue::from_str(&host_value) {
         headers.insert(http::header::HOST, v);
     }
 }
 
-/// Extract client IP from request headers for IP-scoped rate limiting.
-///
-/// Checks `X-Forwarded-For` (first IP in the chain) then `X-Real-IP`.
-/// Returns `None` if neither header is present or parseable.
-pub fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    // Parse and validate as a real IP address to prevent arbitrary token injection.
-    // Only trusted when headers originate from a trusted proxy.
-    if let Some(xff) = headers.get("x-forwarded-for")
-        && let Ok(val) = xff.to_str()
-        && let Some(candidate) = val
-            .split(',')
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        && let Ok(ip) = candidate.parse::<std::net::IpAddr>()
-    {
-        return Some(ip.to_string());
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.to_string())
-}
-
-/// Convert an HTTP `HeaderMap` to a `HashMap<String, String>` for plugin contexts.
-///
-/// Non-UTF-8 header values are silently dropped (they cannot be represented as
-/// `String` and are rare in practice).
-pub fn header_map_to_hash_map(headers: &HeaderMap) -> HashMap<String, String> {
-    headers
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|s| (k.as_str().to_string(), s.to_string()))
-        })
-        .collect()
-}
-
 /// Convert an HTTP `HeaderMap` to a `Vec<(String, String)>` preserving multi-valued headers.
 ///
-/// Non-UTF-8 header values are silently dropped (they cannot be represented as
-/// `String` and are rare in practice).
+/// Values that are not visible ASCII (obs-text, non-UTF-8) are left out: they
+/// cannot be represented as `String`. Plugins do not see them.
 pub fn header_map_to_vec(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
@@ -406,54 +410,68 @@ pub fn header_map_to_vec(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Convert a `Vec<(String, String)>` back to an HTTP `HeaderMap`, preserving multi-values.
+/// Apply a plugin's edit of the string view of `headers` to `headers`.
 ///
-/// Entries with invalid header names or values are logged at `debug` level and
-/// dropped — this can happen when a plugin injects malformed headers.
-pub fn vec_to_header_map(headers: &[(String, String)]) -> HeaderMap {
-    let mut out = HeaderMap::new();
-    for (k, v) in headers {
-        match (
-            HeaderName::from_bytes(k.as_bytes()),
-            HeaderValue::from_str(v),
-        ) {
-            (Ok(name), Ok(val)) => {
-                out.append(name, val);
+/// `before` is [`header_map_to_vec`] of `headers`, `after` is the view the
+/// plugin left. Only names whose lines differ between the two change: all
+/// their lines, including ones the plugin could not see, are replaced by the
+/// new ones (none: the header is removed), keeping the sensitive flag if any
+/// old line had it. Every other line keeps its bytes, its position among the
+/// lines of its name and its sensitive flag, so a value that is not visible
+/// ASCII survives a plugin that does not touch its name. A name or value from
+/// the plugin that is not a valid header is dropped.
+///
+/// Order across names is not kept (`HeaderMap::remove` moves another name into
+/// the freed slot; HTTP gives that order no meaning). Replaced names are
+/// re-added in the order they first appear in `after`, then removed names are
+/// processed in `before` order, so the result does not vary between runs.
+pub fn apply_header_edits(
+    headers: &mut HeaderMap,
+    before: &[(String, String)],
+    after: &[(String, String)],
+) {
+    /// Lines grouped by lowercased name; names in order of first appearance.
+    fn by_name(lines: &[(String, String)]) -> (Vec<String>, HashMap<String, Vec<&str>>) {
+        let mut order = Vec::new();
+        let mut out: HashMap<String, Vec<&str>> = HashMap::new();
+        for (name, value) in lines {
+            let name = name.to_ascii_lowercase();
+            if !out.contains_key(&name) {
+                order.push(name.clone());
             }
-            _ => {
-                tracing::debug!(
-                    header_name = %k,
-                    "plugin-mutated header dropped: invalid name or value"
-                );
-            }
+            out.entry(name).or_default().push(value.as_str());
+        }
+        (order, out)
+    }
+    let (before_order, before) = by_name(before);
+    let (after_order, after) = by_name(after);
+    let removed = before_order
+        .iter()
+        .filter(|name| !after.contains_key(*name));
+    for name in after_order.iter().chain(removed) {
+        let old = before.get(name).map_or(&[][..], Vec::as_slice);
+        let new = after.get(name).map_or(&[][..], Vec::as_slice);
+        if old == new {
+            continue;
+        }
+        let Ok(header) = HeaderName::from_bytes(name.as_bytes()) else {
+            tracing::debug!(header_name = %name, "plugin header dropped: invalid name");
+            continue;
+        };
+        let sensitive = headers
+            .get_all(&header)
+            .iter()
+            .any(HeaderValue::is_sensitive);
+        headers.remove(&header);
+        for value in new {
+            let Ok(mut value) = HeaderValue::from_str(value) else {
+                tracing::debug!(header_name = %header, "plugin header dropped: invalid value");
+                continue;
+            };
+            value.set_sensitive(sensitive);
+            headers.append(&header, value);
         }
     }
-    out
-}
-
-/// Convert a `HashMap<String, String>` back to an HTTP `HeaderMap`.
-///
-/// Entries with invalid header names or values are logged at `debug` level and
-/// dropped — this can happen when a plugin injects malformed headers.
-pub fn hash_map_to_header_map(headers: &HashMap<String, String>) -> HeaderMap {
-    let mut out = HeaderMap::new();
-    for (k, v) in headers {
-        match (
-            HeaderName::from_bytes(k.as_bytes()),
-            HeaderValue::from_str(v),
-        ) {
-            (Ok(name), Ok(val)) => {
-                out.insert(name, val);
-            }
-            _ => {
-                tracing::debug!(
-                    header_name = %k,
-                    "plugin-mutated header dropped: invalid name or value"
-                );
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -527,12 +545,77 @@ mod tests {
         assert_eq!(headers.get("x-custom").unwrap(), "keep-me");
     }
 
+    /// An unchanged view leaves the map as it was; a changed name keeps the
+    /// sensitive flag; a name or value that is not a valid header is dropped.
+    #[test]
+    fn header_edits_apply_only_changed_names() {
+        let raw = HeaderValue::from_bytes(b"caf\xe9").unwrap();
+        let mut secret = HeaderValue::from_static("Bearer a");
+        secret.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", secret);
+        headers.append("x-multi", HeaderValue::from_static("a"));
+        headers.append("x-multi", raw.clone());
+        let before = header_map_to_vec(&headers);
+        assert_eq!(before.len(), 2, "{before:?}");
+
+        // Same lines, other order across names: nothing changes.
+        let mut after = before.clone();
+        after.reverse();
+        apply_header_edits(&mut headers, &before, &after);
+        let multi: Vec<_> = headers.get_all("x-multi").iter().collect();
+        assert_eq!(multi, [&HeaderValue::from_static("a"), &raw]);
+
+        let after = vec![
+            ("Authorization".to_owned(), "Bearer b".to_owned()),
+            ("x-multi".to_owned(), "a".to_owned()),
+            ("x-multi".to_owned(), "bad\r\nvalue".to_owned()),
+            ("bad name".to_owned(), "v".to_owned()),
+        ];
+        apply_header_edits(&mut headers, &before, &after);
+        assert_eq!(headers["authorization"], "Bearer b");
+        assert!(headers["authorization"].is_sensitive());
+        let multi: Vec<_> = headers.get_all("x-multi").iter().collect();
+        assert_eq!(multi, ["a"]);
+        assert_eq!(headers.len(), 2, "{headers:?}");
+    }
+
+    /// Replaced and added names go out in the order the plugin listed them,
+    /// not in hash order.
+    #[test]
+    fn header_edits_follow_plugin_order() {
+        let names = ["x-e", "x-a", "x-d", "x-b", "x-c", "x-f", "x-h", "x-g"];
+        let mut headers = HeaderMap::new();
+        headers.insert("x-keep", HeaderValue::from_static("k"));
+        let before = header_map_to_vec(&headers);
+        let mut after = before.clone();
+        after.extend(names.iter().map(|n| ((*n).to_owned(), "v".to_owned())));
+
+        apply_header_edits(&mut headers, &before, &after);
+
+        let out: Vec<_> = headers.keys().map(HeaderName::as_str).collect();
+        let mut expected = vec!["x-keep"];
+        expected.extend(names);
+        assert_eq!(out, expected);
+    }
+
+    fn endpoint(scheme: crate::domain::model::Scheme, port: u16) -> Endpoint {
+        Endpoint {
+            scheme,
+            host: "api.openai.com".into(),
+            port,
+        }
+    }
+
     #[test]
     fn host_replaced() {
         let mut headers = HeaderMap::new();
         headers.insert(http::header::HOST, "original.com".parse().unwrap());
 
-        set_host_header(&mut headers, "api.openai.com", 443);
+        set_host_header(
+            &mut headers,
+            &endpoint(crate::domain::model::Scheme::Https, 443),
+        );
 
         assert_eq!(headers.get(http::header::HOST).unwrap(), "api.openai.com");
     }
@@ -540,12 +623,189 @@ mod tests {
     #[test]
     fn host_nonstandard_port() {
         let mut headers = HeaderMap::new();
-        set_host_header(&mut headers, "api.openai.com", 8443);
+        set_host_header(
+            &mut headers,
+            &endpoint(crate::domain::model::Scheme::Https, 8443),
+        );
 
         assert_eq!(
             headers.get(http::header::HOST).unwrap(),
             "api.openai.com:8443"
         );
+    }
+
+    /// The port is left out only when it is the default for the scheme:
+    /// `http` on 443 and `https` on 80 keep it (#4979).
+    #[test]
+    fn host_port_is_the_scheme_default_only() {
+        use crate::domain::model::Scheme;
+        let cases = [
+            (Scheme::Http, 80, "api.openai.com"),
+            (Scheme::Http, 443, "api.openai.com:443"),
+            (Scheme::Https, 443, "api.openai.com"),
+            (Scheme::Https, 80, "api.openai.com:80"),
+            (Scheme::Wss, 443, "api.openai.com"),
+            (Scheme::Wss, 80, "api.openai.com:80"),
+            (Scheme::Grpc, 443, "api.openai.com"),
+            (Scheme::Grpc, 80, "api.openai.com:80"),
+        ];
+        for (scheme, port, expected) in cases {
+            let mut headers = HeaderMap::new();
+            set_host_header(&mut headers, &endpoint(scheme, port));
+            assert_eq!(
+                headers.get(http::header::HOST).unwrap(),
+                expected,
+                "{scheme:?}:{port}"
+            );
+        }
+    }
+
+    /// A request may repeat `Connection`; the names every line nominates go
+    /// (#4862 item 6).
+    #[test]
+    fn hop_by_hop_reads_every_connection_line() {
+        let mut headers = HeaderMap::new();
+        headers.append("connection", "x-first".parse().unwrap());
+        headers.append("connection", "x-second, X-Third".parse().unwrap());
+        headers.insert("x-first", "1".parse().unwrap());
+        headers.insert("x-second", "2".parse().unwrap());
+        headers.insert("x-third", "3".parse().unwrap());
+        headers.insert("x-custom", "keep".parse().unwrap());
+
+        strip_hop_by_hop(&mut headers);
+
+        for name in ["connection", "x-first", "x-second", "x-third"] {
+            assert!(headers.get(name).is_none(), "{name} was forwarded");
+        }
+        assert_eq!(headers.get("x-custom").unwrap(), "keep");
+    }
+
+    #[test]
+    fn upgrade_strip_reads_every_connection_line() {
+        let mut headers = HeaderMap::new();
+        headers.append("connection", "Upgrade".parse().unwrap());
+        headers.append("connection", "x-second".parse().unwrap());
+        headers.insert("upgrade", "websocket".parse().unwrap());
+        headers.insert("x-second", "2".parse().unwrap());
+
+        strip_hop_by_hop_for_upgrade(&mut headers);
+
+        assert!(headers.get("x-second").is_none());
+        assert_eq!(headers.get("upgrade").unwrap(), "websocket");
+        assert_eq!(headers.get_all("connection").iter().count(), 2);
+    }
+
+    /// An allowlist that names a header but not `Connection` still drops
+    /// the header when the client nominates it on any `Connection` line.
+    #[test]
+    fn allowlist_passthrough_drops_connection_nominated_headers() {
+        let mut inbound = HeaderMap::new();
+        inbound.append("connection", "keep-alive".parse().unwrap());
+        inbound.append("connection", "x-hop".parse().unwrap());
+        inbound.insert("x-hop", "1".parse().unwrap());
+        inbound.insert("x-keep", "2".parse().unwrap());
+        let allowlist = vec!["x-hop".to_string(), "x-keep".to_string()];
+
+        let mut out = apply_passthrough(&inbound, &PassthroughMode::Allowlist, &allowlist);
+        strip_inbound_nominated(&mut out, &inbound, false);
+        strip_hop_by_hop(&mut out);
+
+        assert!(out.get("x-hop").is_none(), "nominated header was forwarded");
+        assert_eq!(out.get("x-keep").unwrap(), "2");
+    }
+
+    /// On an upgrade the nominated `Upgrade` header stays.
+    #[test]
+    fn upgrade_keeps_nominated_upgrade_header() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert("connection", "Upgrade, x-hop".parse().unwrap());
+        inbound.insert("upgrade", "websocket".parse().unwrap());
+        inbound.insert("x-hop", "1".parse().unwrap());
+        let allowlist = vec!["upgrade".to_string(), "x-hop".to_string()];
+
+        let mut out = apply_passthrough(&inbound, &PassthroughMode::Allowlist, &allowlist);
+        strip_inbound_nominated(&mut out, &inbound, true);
+        strip_hop_by_hop_for_upgrade(&mut out);
+
+        assert!(out.get("x-hop").is_none());
+        assert_eq!(out.get("upgrade").unwrap(), "websocket");
+    }
+
+    #[test]
+    fn forwarding_headers_stripped_unless_allowlisted() {
+        let build = || {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+            headers.insert("x-forwarded-host", "evil.example".parse().unwrap());
+            headers.insert("x-forwarded-proto", "http".parse().unwrap());
+            headers.insert("x-real-ip", "10.0.0.2".parse().unwrap());
+            headers.insert("forwarded", "for=10.0.0.3;host=internal".parse().unwrap());
+            headers.insert("x-forwarded", "for=10.0.0.4".parse().unwrap());
+            headers.insert("x-client-ip", "10.0.0.5".parse().unwrap());
+            headers.insert("true-client-ip", "10.0.0.6".parse().unwrap());
+            headers.insert("cf-connecting-ip", "10.0.0.7".parse().unwrap());
+            headers.insert("fastly-client-ip", "10.0.0.8".parse().unwrap());
+            headers.insert("x-original-url", "/admin".parse().unwrap());
+            headers.insert("x-rewrite-url", "/admin".parse().unwrap());
+            headers.insert("client-ip", "10.0.0.9".parse().unwrap());
+            headers.insert("x-originating-ip", "10.0.0.10".parse().unwrap());
+            headers.insert("x-remote-addr", "10.0.0.11".parse().unwrap());
+            headers.insert("x-original-host", "internal".parse().unwrap());
+            headers.insert("x-http-method-override", "DELETE".parse().unwrap());
+            headers.insert("x-remote-ip", "10.0.0.12".parse().unwrap());
+            headers.insert("x-original-forwarded-for", "10.0.0.13".parse().unwrap());
+            headers.insert("x-original-uri", "/admin".parse().unwrap());
+            headers.insert("x-host", "internal".parse().unwrap());
+            headers.insert("x-http-method", "DELETE".parse().unwrap());
+            headers.insert("x-method-override", "DELETE".parse().unwrap());
+            headers.insert("x-envoy-original-path", "/admin".parse().unwrap());
+            headers.insert("via", "1.1 internal".parse().unwrap());
+            headers.insert("x-proxyuser-ip", "10.0.0.14".parse().unwrap());
+            headers.insert("x-custom", "keep".parse().unwrap());
+            headers
+        };
+
+        let headers = apply_passthrough(&build(), &PassthroughMode::All, &[]);
+        for name in [
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-real-ip",
+            "forwarded",
+            "x-forwarded",
+            "x-client-ip",
+            "true-client-ip",
+            "cf-connecting-ip",
+            "fastly-client-ip",
+            "x-original-url",
+            "x-rewrite-url",
+            "client-ip",
+            "x-originating-ip",
+            "x-remote-addr",
+            "x-original-host",
+            "x-http-method-override",
+            "x-remote-ip",
+            "x-original-forwarded-for",
+            "x-original-uri",
+            "x-host",
+            "x-http-method",
+            "x-method-override",
+            "x-envoy-original-path",
+            "via",
+            "x-proxyuser-ip",
+        ] {
+            assert!(headers.get(name).is_none(), "{name} was forwarded");
+        }
+        assert_eq!(headers.get("x-custom").unwrap(), "keep");
+
+        let headers = apply_passthrough(
+            &build(),
+            &PassthroughMode::Allowlist,
+            &["X-Forwarded-For".to_owned(), "x-custom".to_owned()],
+        );
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "10.0.0.1");
+        assert!(headers.get("x-forwarded-host").is_none());
+        assert!(headers.get("x-real-ip").is_none());
     }
 
     #[test]
@@ -700,6 +960,29 @@ mod tests {
 
         assert_eq!(out.get("x-allowed").unwrap(), "yes");
         assert!(out.get("x-blocked").is_none());
+    }
+
+    /// Every line of an allowlisted header is kept, in order, once even if
+    /// the allowlist names it twice.
+    #[test]
+    fn passthrough_allowlist_keeps_repeated_lines() {
+        let mut inbound = HeaderMap::new();
+        inbound.append("x-multi", "b".parse().unwrap());
+        inbound.append("x-multi", "a".parse().unwrap());
+        inbound.append("x-multi", HeaderValue::from_bytes(b"c\xff").unwrap());
+
+        let out = apply_passthrough(
+            &inbound,
+            &PassthroughMode::Allowlist,
+            &["x-multi".into(), "X-Multi".into()],
+        );
+
+        let lines: Vec<&[u8]> = out
+            .get_all("x-multi")
+            .iter()
+            .map(|v| v.as_bytes())
+            .collect();
+        assert_eq!(lines, [&b"b"[..], b"a", b"c\xff"]);
     }
 
     #[test]
@@ -968,41 +1251,6 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-    }
-
-    #[test]
-    fn extract_client_ip_from_xff() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".to_string()));
-    }
-
-    #[test]
-    fn extract_client_ip_from_xff_single() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("10.0.0.1".to_string()));
-    }
-
-    #[test]
-    fn extract_client_ip_from_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "192.168.1.1".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("192.168.1.1".to_string()));
-    }
-
-    #[test]
-    fn extract_client_ip_xff_takes_precedence() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
-        headers.insert("x-real-ip", "5.6.7.8".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("1.2.3.4".to_string()));
-    }
-
-    #[test]
-    fn extract_client_ip_none() {
-        let headers = HeaderMap::new();
-        assert_eq!(extract_client_ip(&headers), None);
     }
 
     // -- validate_smuggling_headers tests --

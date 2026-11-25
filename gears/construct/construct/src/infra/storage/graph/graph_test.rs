@@ -24,8 +24,9 @@ use graph_storage::infra::fake_store::{FakeGraphEngine, FakeGraphStore};
 use graph_storage_sdk::GraphStorageClientV1;
 use graph_storage_sdk::models::{
     DeleteOutcome, EdgeKey, EdgeSpec, GraphRevision, GtsTypeId, IngestOutcome, IngestRequest,
-    NeighborhoodRequest, NodeKey, NodeRow, NodeSpec, NodeView, Page, SearchRequest, SearchResponse,
-    TraversalResponse, TraverseRequest, TruncationReason, TypeQuery, TypeRecord, TypeRegistration,
+    NeighborhoodRequest, NodeKey, NodeRow, NodeSpec, NodeView, Page, RegisteredType, SearchRequest,
+    SearchResponse, TraversalResponse, TraverseRequest, TruncationReason, TypeQuery, TypeRecord,
+    TypeRegistration, TypeRegistrationOptions,
 };
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
@@ -35,7 +36,7 @@ use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties}
 use uuid::Uuid;
 
 use super::reader::{GraphProfileSource, MAX_FACTS, MAX_PROFILE_NODES};
-use super::root::{PayloadCounter, Root, root_key};
+use super::root::{FirstGeneration, PayloadCounter, Root, root_key};
 use super::types::GraphTypes;
 use super::writer::{
     DEFAULT_ATTEMPTS, FactRemoval, GraphPlanWriter, SoftDelete, WriterPorts, pauses, resendable,
@@ -184,6 +185,12 @@ struct Scripted {
     registrations: AtomicU32,
     fail_next_registration: AtomicBool,
     conflict_next_registration: AtomicBool,
+    /// Every node listing asked for.
+    listings: Mutex<Vec<toolkit_odata::ODataQuery>>,
+    /// Rows added to every node listing.
+    extra_rows: Mutex<Vec<NodeRow>>,
+    /// The cursor every node listing names for its next page.
+    next_cursor: Mutex<Option<String>>,
 }
 
 impl Scripted {
@@ -203,6 +210,9 @@ impl Scripted {
             registrations: AtomicU32::new(0),
             fail_next_registration: AtomicBool::new(false),
             conflict_next_registration: AtomicBool::new(false),
+            listings: Mutex::default(),
+            extra_rows: Mutex::default(),
+            next_cursor: Mutex::default(),
         })
     }
 
@@ -217,11 +227,12 @@ impl Scripted {
 
 #[async_trait]
 impl GraphStorageClientV1 for Scripted {
-    async fn register_types(
+    async fn register_types_with(
         &self,
         ctx: &SecurityContext,
         batch: Vec<TypeRegistration>,
-    ) -> Result<Vec<TypeRecord>, CanonicalError> {
+        options: TypeRegistrationOptions,
+    ) -> Result<Vec<RegisteredType>, CanonicalError> {
         self.registrations.fetch_add(1, Ordering::SeqCst);
         if self.fail_next_registration.swap(false, Ordering::SeqCst) {
             return Err(unavailable());
@@ -232,14 +243,6 @@ impl GraphStorageClientV1 for Scripted {
         {
             return Err(cas_conflict());
         }
-        self.inner.register_types(ctx, batch).await
-    }
-    async fn register_types_with(
-        &self,
-        ctx: &SecurityContext,
-        batch: Vec<TypeRegistration>,
-        options: graph_storage_sdk::models::TypeRegistrationOptions,
-    ) -> Result<Vec<graph_storage_sdk::models::RegisteredType>, CanonicalError> {
         self.inner.register_types_with(ctx, batch, options).await
     }
     async fn count_nodes(
@@ -333,7 +336,26 @@ impl GraphStorageClientV1 for Scripted {
         type_patterns: &[String],
         query: toolkit_odata::ODataQuery,
     ) -> Result<toolkit_odata::Page<NodeRow>, CanonicalError> {
-        self.inner.project_nodes(ctx, type_patterns, query).await
+        self.listings.lock().unwrap().push(query.clone());
+        let scripted_next = self.next_cursor.lock().unwrap().is_some();
+        if scripted_next && query.cursor.is_some() {
+            // The page after a scripted cursor: the last, and empty.
+            return Ok(toolkit_odata::Page {
+                items: Vec::new(),
+                page_info: toolkit_odata::PageInfo {
+                    next_cursor: None,
+                    prev_cursor: None,
+                    limit: query.limit.unwrap_or_default(),
+                },
+            });
+        }
+        let mut page = self.inner.project_nodes(ctx, type_patterns, query).await?;
+        page.items
+            .extend(self.extra_rows.lock().unwrap().iter().cloned());
+        if let Some(next) = self.next_cursor.lock().unwrap().clone() {
+            page.page_info.next_cursor = Some(next);
+        }
+        Ok(page)
     }
     async fn search(
         &self,
@@ -420,6 +442,8 @@ impl Profiles {
             types: Arc::new(GraphTypes::new(client)),
             version: Arc::new(PayloadCounter),
             removal,
+            generations: Arc::new(FirstGeneration),
+            tenants: Arc::new(crate::test_support::MemoryDeletionStore::default()),
         })
     }
 
@@ -439,7 +463,12 @@ impl Profiles {
     }
 
     fn reader(&self) -> GraphProfileSource {
-        GraphProfileSource::new(Arc::clone(&self.client), Arc::new(PayloadCounter))
+        GraphProfileSource::new(
+            Arc::clone(&self.client),
+            Arc::new(PayloadCounter),
+            Arc::new(FirstGeneration),
+            crate::test_support::no_retention(),
+        )
     }
 
     async fn read(&self) -> Profile {
@@ -1153,6 +1182,8 @@ async fn a_node_reached_by_an_edge_of_another_type_is_not_read_as_a_fact() {
     let profile = GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     )
     .read(&profiles.ctx, profiles.tenant, profiles.subject)
     .await
@@ -1318,6 +1349,8 @@ async fn a_profile_cut_short_by_the_read_limit_is_full_not_partial() {
     let read = GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     )
     .read(&profiles.ctx, profiles.tenant, profiles.subject)
     .await;
@@ -1344,6 +1377,8 @@ async fn a_profile_read_cut_short_for_another_reason_is_internal() {
     let reader = GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     );
 
     for reason in [
@@ -1372,6 +1407,8 @@ async fn a_read_that_saw_more_than_one_graph_state_is_sent_again() {
     let read = GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     )
     .read(&profiles.ctx, profiles.tenant, profiles.subject)
     .await
@@ -1412,6 +1449,8 @@ async fn a_profile_read_asks_for_the_root_and_at_most_its_facts() {
     GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     )
     .read(&profiles.ctx, profiles.tenant, profiles.subject)
     .await
@@ -2031,6 +2070,8 @@ async fn a_read_without_an_answer_in_time_is_unavailable() {
     let read = GraphProfileSource::new(
         Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>,
         Arc::new(PayloadCounter),
+        Arc::new(FirstGeneration),
+        crate::test_support::no_retention(),
     )
     .read(&profiles.ctx, profiles.tenant, profiles.subject)
     .await;
@@ -2169,6 +2210,187 @@ async fn registration_is_remembered_per_tenant_and_a_failed_one_is_not() {
         "{failed:?}"
     );
     assert_eq!(scripted.registrations.load(Ordering::SeqCst), 4);
+}
+
+/// The registry as an earlier release left it: the person types without the
+/// properties added since.
+fn earlier_person_types() -> Vec<TypeRegistration> {
+    construct_sdk::profile_types::graph_types()
+        .into_iter()
+        .map(|graph_type| {
+            let mut schema: Value = serde_json::from_str(graph_type.schema).unwrap();
+            if let Some(Value::Object(properties)) =
+                schema.pointer_mut("/allOf/1/properties/payload/properties")
+            {
+                for added in [
+                    "projects",
+                    "repositories",
+                    "programming_languages",
+                    "tools_and_frameworks",
+                    "development_environment",
+                    "coding_conventions",
+                ] {
+                    properties.remove(added);
+                }
+            }
+            TypeRegistration {
+                type_id: graph_type.type_id.to_owned(),
+                schema,
+            }
+        })
+        .collect()
+}
+
+/// Every type is stored as the current release defines it.
+async fn assert_current_types_stored(
+    client: &Arc<dyn GraphStorageClientV1>,
+    ctx: &SecurityContext,
+) {
+    for graph_type in construct_sdk::profile_types::graph_types() {
+        let stored = client
+            .get_type(ctx, &graph_type.type_id.parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.schema,
+            serde_json::from_str::<Value>(graph_type.schema).unwrap(),
+            "{}",
+            graph_type.type_id
+        );
+    }
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn schemas_of_an_earlier_version_are_upgraded_on_registration() {
+    let client = graph_storage();
+    let tenant = Uuid::new_v4();
+    let ctx = construct_in(tenant);
+    let earlier = earlier_person_types();
+    client.register_types(&ctx, earlier.clone()).await.unwrap();
+    let changed = earlier
+        .iter()
+        .filter(|registered| {
+            let current = construct_sdk::profile_types::graph_types()
+                .into_iter()
+                .find(|graph_type| graph_type.type_id == registered.type_id)
+                .unwrap();
+            serde_json::from_str::<Value>(current.schema).unwrap() != registered.schema
+        })
+        .count();
+    assert_eq!(changed, 3, "the role, skill and preference types differ");
+
+    GraphTypes::new(Arc::clone(&client))
+        .ensure(&ctx)
+        .await
+        .unwrap();
+
+    assert_current_types_stored(&client, &ctx).await;
+    assert!(logs_contain(&tenant.to_string()));
+    assert!(logs_contain("graph types upgraded in the tenant"));
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn registering_unchanged_schemas_logs_no_upgrade() {
+    let client = graph_storage();
+    let ctx = construct_in(Uuid::new_v4());
+    // The tenant already holds the current schemas, as after a restart.
+    GraphTypes::new(Arc::clone(&client))
+        .ensure(&ctx)
+        .await
+        .unwrap();
+
+    GraphTypes::new(client).ensure(&ctx).await.unwrap();
+
+    assert!(!logs_contain("graph types upgraded in the tenant"));
+}
+
+#[tokio::test]
+async fn a_registration_sent_again_after_a_lost_race_still_upgrades() {
+    let client = graph_storage();
+    let ctx = construct_in(Uuid::new_v4());
+    client
+        .register_types(&ctx, earlier_person_types())
+        .await
+        .unwrap();
+    let scripted = Scripted::over(Arc::clone(&client));
+    scripted
+        .conflict_next_registration
+        .store(true, Ordering::SeqCst);
+
+    GraphTypes::new(Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>)
+        .ensure(&ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(scripted.registrations.load(Ordering::SeqCst), 2);
+    assert_current_types_stored(&client, &ctx).await;
+}
+
+#[tokio::test]
+async fn a_tenant_whose_schema_is_newer_than_the_release_is_refused_and_not_remembered() {
+    let client = graph_storage();
+    let ctx = construct_in(Uuid::new_v4());
+    // A newer release registered a property this one does not know, so this
+    // release's schema would remove it.
+    let newer: Vec<TypeRegistration> = construct_sdk::profile_types::graph_types()
+        .into_iter()
+        .map(|graph_type| {
+            let mut schema: Value = serde_json::from_str(graph_type.schema).unwrap();
+            if let Some(Value::Object(properties)) =
+                schema.pointer_mut("/allOf/1/properties/payload/properties")
+            {
+                properties.insert(
+                    "added_by_a_later_release".to_owned(),
+                    json!({ "type": "string" }),
+                );
+            }
+            TypeRegistration {
+                type_id: graph_type.type_id.to_owned(),
+                schema,
+            }
+        })
+        .collect();
+    client.register_types(&ctx, newer).await.unwrap();
+    let scripted = Scripted::over(Arc::clone(&client));
+    let types = GraphTypes::new(Arc::clone(&scripted) as Arc<dyn GraphStorageClientV1>);
+
+    let first = types.ensure(&ctx).await;
+    let second = types.ensure(&ctx).await;
+
+    assert!(matches!(first, Err(DomainError::Internal(_))), "{first:?}");
+    assert!(
+        matches!(second, Err(DomainError::Internal(_))),
+        "{second:?}"
+    );
+    // Graph storage refuses the change as a conflict, so each call sends the
+    // batch twice, and the second call asks again: the refusal is not
+    // remembered.
+    assert_eq!(scripted.registrations.load(Ordering::SeqCst), 4);
+    // The refused change left the newer schemas in place, on every type that
+    // has payload properties to add one to.
+    for graph_type in construct_sdk::profile_types::graph_types() {
+        let current: Value = serde_json::from_str(graph_type.schema).unwrap();
+        if current
+            .pointer("/allOf/1/properties/payload/properties")
+            .is_none()
+        {
+            continue;
+        }
+        let stored = client
+            .get_type(&ctx, &graph_type.type_id.parse().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            stored
+                .schema
+                .pointer("/allOf/1/properties/payload/properties/added_by_a_later_release")
+                .is_some(),
+            "{}",
+            graph_type.type_id
+        );
+    }
 }
 
 #[tokio::test]
@@ -2375,4 +2597,114 @@ async fn the_stored_facts_leave_out_one_listed_for_removal_and_a_subject_without
     let stored = profiles.stored().await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].value, skills("Go"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_whose_listed_deletes_never_end_stays_and_its_removal_is_unavailable_in_time() {
+    use crate::domain::deletion::ProfileRoots;
+
+    let profiles = Profiles::new();
+    let rust = add_skill("Rust");
+    let key = key_of(&rust);
+    profiles.given(None, vec![rust]).await;
+    let timeout = Duration::from_secs(1);
+    let writer = Profiles::writer_with(Arc::clone(&profiles.client), Arc::new(HangingRemoval))
+        .with_timeout(timeout);
+    // The removal is written; its delete never ends, so the root lists it.
+    assert_eq!(
+        writer
+            .write(&profiles.ctx, &profiles.plan(Some(1), vec![remove(&key)]))
+            .await
+            .unwrap(),
+        Written::Stored
+    );
+    let started = tokio::time::Instant::now();
+
+    let err = writer
+        .remove_root(&profiles.ctx, profiles.subject_key(), 0)
+        .await;
+
+    assert!(
+        matches!(&err, Err(DomainError::Unavailable(message)) if message.contains("not deleted within")),
+        "{err:?}"
+    );
+    let waited = started.elapsed();
+    assert!(waited >= timeout * 6 && waited < timeout * 7, "{waited:?}");
+    assert!(
+        profiles.root().await.is_some(),
+        "the root stays for the next run"
+    );
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn the_directory_hands_on_graph_storages_cursor_and_leaves_out_a_root_it_cannot_read() {
+    use super::directory::GraphProfileDirectory;
+    use crate::domain::deletion::ProfileDirectory;
+
+    let profiles = Profiles::new();
+    profiles.given(None, vec![add_skill("Rust")]).await;
+    let scripted = Scripted::over(Arc::clone(&profiles.client));
+    let listed = profiles
+        .client
+        .project_nodes(
+            &profiles.ctx,
+            &[construct_sdk::gts::PROFILE_ROOT_TYPE.to_owned()],
+            toolkit_odata::ODataQuery::new(),
+        )
+        .await
+        .unwrap();
+    let [root] = listed.items.as_slice() else {
+        panic!("one root, got {listed:?}");
+    };
+    // A root without a payload, and one whose key is another tenant's.
+    let foreign_key = format!("construct:{}:root:{}", Uuid::new_v4(), profiles.subject);
+    *scripted.extra_rows.lock().unwrap() = vec![
+        NodeRow {
+            payload: None,
+            ..root.clone()
+        },
+        NodeRow {
+            node_key: foreign_key,
+            ..root.clone()
+        },
+    ];
+    let cursor = toolkit_odata::CursorV1 {
+        k: vec!["next".to_owned()],
+        o: toolkit_odata::SortDir::Asc,
+        s: "+node_key".to_owned(),
+        f: None,
+        d: "fwd".to_owned(),
+    }
+    .encode()
+    .unwrap();
+    *scripted.next_cursor.lock().unwrap() = Some(cursor.clone());
+    let directory = GraphProfileDirectory::new(Arc::clone(&scripted) as _);
+
+    let page = directory.subjects(&profiles.ctx, None).await.unwrap();
+    directory
+        .subjects(&profiles.ctx, page.next.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.subjects,
+        [profiles.subject],
+        "the bad roots are left out"
+    );
+    assert_eq!(page.next.as_deref(), Some(cursor.as_str()));
+    let asked: Vec<Option<String>> = scripted
+        .listings
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|query| query.cursor.as_ref().map(|cursor| cursor.encode().unwrap()))
+        .collect();
+    assert_eq!(
+        asked,
+        [None, Some(cursor)],
+        "the next page starts at the cursor"
+    );
+    assert!(logs_contain("has no payload"));
+    assert!(logs_contain("is not the root of subject"));
 }

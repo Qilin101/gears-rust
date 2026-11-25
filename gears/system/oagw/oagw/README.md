@@ -24,8 +24,8 @@ The `cf-gears-oagw` gear provides:
 - **Upstream management** — CRUD for external upstream services with alias-based resolution
 - **Route management** — CRUD for routes with HTTP/gRPC match rules, plugins, and rate limits
 - **Proxy pipeline** — alias resolution → authZ → credential injection → rate limiting → HTTP forwarding
-- **Plugin system** — per-upstream/route auth plugins (`noop`, `api-key`; extensible)
-- **Type provisioning** — reconciles pre-configured upstreams and routes from the types registry: at startup in memory, in a background task on a database
+- **Plugin system** — per-upstream auth plugins (`noop`, `apikey`, `oauth2_client_cred`, `oauth2_client_cred_basic`, `aws_sigv4`), guard and transform plugins
+- **Type provisioning** — reconciles pre-configured upstreams and routes from the types registry in a background task (in memory also once at startup)
 - **ClientHub integration** — registers `ServiceGatewayClientV1` for inter-gear use
 
 This gear depends on `types-registry` and `authz-resolver`. With a database and the proxy configuration cache enabled (the default) it also needs the cluster gear, through `cluster-sdk` and the `cluster` feature (see [Proxy configuration cache](#proxy-configuration-cache)).
@@ -70,6 +70,19 @@ proxy_timeout_secs = 30
 "my-api-key" = "sk-..."
 ```
 
+OAGW checks these values at startup and does not start if one is out of range:
+
+| Key | Allowed | Default |
+|---|---|---|
+| `proxy_timeout_secs` | 1 to 86400 (a day) | 30 |
+| `streaming_idle_timeout_secs` | 1 to 86400 | 300 |
+| `websocket_idle_timeout_secs` | 1 to 86400 | 300 |
+| `websocket_close_timeout_secs` | 1 to 86400 | 5 |
+| `max_body_size_bytes` | 1 to 104857600 (100 MiB, the DESIGN hard limit) | 104857600 |
+| `token_cache_capacity` | at least 1 | 10000 |
+
+The api-gateway in front of OAGW has its own request body limit, `body_limit_bytes` (16 MiB by default), so the effective limit is the smaller of the two. A body over the api-gateway limit gets a `413` with an `about:blank` problem body and no `X-OAGW-Error-Source` header; OAGW's own `413` (`PAYLOAD_TOO_LARGE`, `X-OAGW-Error-Source: gateway`) comes only when `max_body_size_bytes` is the smaller limit.
+
 ## Persistence
 
 Upstreams and routes are kept in memory unless the gear has a database. To persist them across restarts, add a `database` section to `gears.oagw`:
@@ -113,7 +126,7 @@ gears:
 - **`generation`** (optional integer, at most `i64::MAX`): a monotonic deployment generation. A pod whose generation is older than the one stored by another pod does not reconcile, so an old-release pod that restarts during or after a rollout cannot revert newer registry content. Set it from Helm's `.Release.Revision`, which increases on every `helm upgrade` and `helm rollback`, for example through the environment variable `APP__GEARS__OAGW__CONFIG__REGISTRY_PROVISIONING__GENERATION` or the rendered config file. When unset, the guard is off and a startup warning says so. `kubectl rollout undo` does not bump the revision: its pods are refused; recover with `helm rollback` or a higher `generation`.
 - **`recheck_interval`** (humantime, from `1s` to `24h`): how often every pod checks the registry state again.
 
-In memory, the reconcile runs once in `post_init`, before the pod serves; an infrastructure error fails startup. There is no re-check (`recheck_interval` and `generation` are ignored), so a skipped instance stays skipped, and the healthcheck Degraded, until the process restarts. See [ADR-0018 Provisioning from the Types Registry](../docs/ADR/0018-optional-persistence.md#provisioning-from-the-types-registry).
+In memory, the reconcile also runs once in `post_init`, so a normal start serves the registry rows at once. A failure there (a tenant resolver or root tenant not ready yet) does not fail startup: it is logged, the healthcheck reports Degraded, and the background task retries it with the backoff above. The task then re-checks every `recheck_interval`; with no registry-state row each check reconciles, writing only what changed, so a skipped instance is retried without a restart. `generation` is ignored. See [ADR-0018 Provisioning from the Types Registry](../docs/ADR/0018-optional-persistence.md#provisioning-from-the-types-registry).
 
 ### Proxy configuration cache
 

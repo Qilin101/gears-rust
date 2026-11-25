@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::TokenCacheConfig;
+use crate::domain::circuit_breaker::CircuitBreakers;
 use crate::domain::services::{
     ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, EndpointSelector,
     ServiceGatewayClientV1Facade,
 };
 use crate::domain::ssrf::SsrfGuard;
 use crate::infra::proxy::DataPlaneServiceImpl;
+use crate::infra::proxy::streaming::StreamShutdown;
 use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
 use async_trait::async_trait;
 use authz_resolver_sdk::{
@@ -203,16 +205,58 @@ impl ProvisioningMetrics {
 
 #[cfg(test)]
 impl crate::domain::ports::OagwMetricsPort for ProvisioningMetrics {
-    fn record_request(&self, _: &str, _: &str, _: &str, _: u16) {}
-    fn record_error(&self, _: &str, _: &str, _: &str) {}
+    fn record_request(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: u16,
+        _: Option<crate::domain::plugin::credentials::CredentialMode>,
+    ) {
+    }
+    fn record_error(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Option<crate::domain::plugin::credentials::CredentialMode>,
+    ) {
+    }
     fn record_request_duration_seconds(&self, _: &str, _: &str, _: &str, _: f64) {}
     fn increment_in_flight(&self, _: &str) {}
     fn decrement_in_flight(&self, _: &str) {}
-    fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-    fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+    fn record_rate_limit_exceeded(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::RateLimitBucket,
+    ) {
+    }
+    fn record_rate_limit_usage_ratio(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::RateLimitBucket,
+        _: f64,
+    ) {
+    }
     fn increment_active_websocket_sessions(&self, _: &str) {}
     fn decrement_active_websocket_sessions(&self, _: &str) {}
-    fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+    fn record_websocket_session_duration_seconds(
+        &self,
+        _: &str,
+        _: crate::domain::ports::metric_labels::StreamOutcome,
+        _: f64,
+    ) {
+    }
+    fn record_stream_duration_seconds(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::StreamOutcome,
+        _: f64,
+    ) {
+    }
     fn record_rate_limit_sweep(&self, _: u64, _: u64) {}
     fn record_registry_provisioning_failure(&self, kind: &str, reason: &str) {
         self.failures
@@ -302,6 +346,51 @@ impl CredStoreClientV1 for ErroringCredStore {
 }
 
 #[cfg(test)]
+/// A credential store that never answers.
+pub struct StalledCredStore;
+
+#[cfg(test)]
+#[async_trait]
+impl CredStoreClientV1 for StalledCredStore {
+    async fn get(
+        &self,
+        _ctx: &SecurityContext,
+        _key: &credstore_sdk::SecretRef,
+    ) -> Result<Option<credstore_sdk::GetSecretResponse>, credstore_sdk::CredStoreError> {
+        std::future::pending().await
+    }
+    async fn put_opts(
+        &self,
+        _ctx: &SecurityContext,
+        _key: &credstore_sdk::SecretRef,
+        _value: credstore_sdk::SecretValue,
+        _sharing: credstore_sdk::SharingMode,
+        _precondition: credstore_sdk::WritePrecondition,
+        _opts: credstore_sdk::WriteOptions,
+    ) -> Result<(), credstore_sdk::CredStoreError> {
+        std::future::pending().await
+    }
+    async fn create_opts(
+        &self,
+        _ctx: &SecurityContext,
+        _key: &credstore_sdk::SecretRef,
+        _value: credstore_sdk::SecretValue,
+        _sharing: credstore_sdk::SharingMode,
+        _opts: credstore_sdk::WriteOptions,
+    ) -> Result<(), credstore_sdk::CredStoreError> {
+        std::future::pending().await
+    }
+    async fn delete(
+        &self,
+        _ctx: &SecurityContext,
+        _key: &credstore_sdk::SecretRef,
+        _precondition: credstore_sdk::WritePrecondition,
+    ) -> Result<(), credstore_sdk::CredStoreError> {
+        std::future::pending().await
+    }
+}
+
+#[cfg(test)]
 /// A tenant resolver that refuses OAGW itself (`Unauthorized`) on every
 /// call, as a misconfigured resolver client would.
 pub struct UnauthorizedTenantResolver;
@@ -365,15 +454,51 @@ impl TenantResolverClient for UnauthorizedTenantResolver {
 pub struct MockTenantResolverClient {
     /// Map from tenant_id → (TenantInfo, ordered ancestors [parent..root]).
     tenants: HashMap<TenantId, (TenantInfo, Vec<TenantRef>)>,
+    /// How many calls it answered, of any method.
+    calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockTenantResolverClient {
     /// Create a single-tenant resolver: any tenant_id is treated as a root
     /// tenant with no ancestors.
     pub fn single_tenant() -> Self {
+        Self::from_tenants(HashMap::new())
+    }
+
+    fn from_tenants(tenants: HashMap<TenantId, (TenantInfo, Vec<TenantRef>)>) -> Self {
         Self {
-            tenants: HashMap::new(),
+            tenants,
+            calls: Arc::default(),
         }
+    }
+
+    /// A counter of the calls this resolver answers, of any method; take it
+    /// before handing the resolver over.
+    pub fn calls(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.calls)
+    }
+
+    /// Add `child` under `parent`, which must already be configured. Its
+    /// ancestors are `parent` and the parent's ancestors.
+    #[must_use]
+    pub fn with_child(mut self, child: TenantId, parent: TenantId) -> Self {
+        let (parent_info, parent_ancestors) = self
+            .tenants
+            .get(&parent)
+            .cloned()
+            .unwrap_or_else(|| panic!("with_child: parent {parent} is not configured"));
+        let info = TenantInfo {
+            id: child,
+            name: format!("tenant-{}", &child.to_string()[..8]),
+            status: TenantStatus::Active,
+            tenant_type: None,
+            parent_id: Some(parent),
+            self_managed: false,
+        };
+        let mut ancestors = vec![TenantRef::from(parent_info)];
+        ancestors.extend(parent_ancestors);
+        self.tenants.insert(child, (info, ancestors));
+        self
     }
 
     /// Create a resolver where `parent` has multiple direct `children`.
@@ -409,7 +534,7 @@ impl MockTenantResolverClient {
             }];
             tenants.insert(child, (info, ancestors));
         }
-        Self { tenants }
+        Self::from_tenants(tenants)
     }
 
     /// Create a resolver with two independent trees (separate roots).
@@ -486,7 +611,25 @@ impl MockTenantResolverClient {
                 .collect();
             tenants.insert(id, (info, ancestors));
         }
-        Self { tenants }
+        Self::from_tenants(tenants)
+    }
+
+    /// Add `child` under `parent`, which must already be known.
+    pub fn add_child(&mut self, parent: TenantId, child: TenantId) {
+        let Some((parent_info, parent_ancestors)) = self.tenants.get(&parent).cloned() else {
+            panic!("add_child: unknown parent {parent}");
+        };
+        let mut ancestors = vec![TenantRef::from(parent_info)];
+        ancestors.extend(parent_ancestors);
+        let info = TenantInfo {
+            id: child,
+            name: format!("tenant-{}", &child.to_string()[..8]),
+            status: TenantStatus::Active,
+            tenant_type: None,
+            parent_id: Some(parent),
+            self_managed: false,
+        };
+        self.tenants.insert(child, (info, ancestors));
     }
 }
 
@@ -497,6 +640,7 @@ impl TenantResolverClient for MockTenantResolverClient {
         _ctx: &SecurityContext,
         id: TenantId,
     ) -> Result<TenantInfo, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some((info, _)) = self.tenants.get(&id) {
             return Ok(info.clone());
         }
@@ -515,6 +659,7 @@ impl TenantResolverClient for MockTenantResolverClient {
         &self,
         _ctx: &SecurityContext,
     ) -> Result<TenantInfo, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // The SDK contract says `get_root_tenant` MUST return a tenant with
         // `parent_id == None`. If no configured tenant has `parent_id == None`
         // we surface an Internal error instead of silently synthesizing one,
@@ -541,6 +686,7 @@ impl TenantResolverClient for MockTenantResolverClient {
         ids: &[TenantId],
         _options: &GetTenantsOptions,
     ) -> Result<Vec<TenantInfo>, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut result = Vec::new();
         for &id in ids {
             result.push(self.get_tenant(ctx, id).await?);
@@ -554,6 +700,7 @@ impl TenantResolverClient for MockTenantResolverClient {
         id: TenantId,
         _options: &GetAncestorsOptions,
     ) -> Result<GetAncestorsResponse, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some((info, ancestors)) = self.tenants.get(&id) {
             return Ok(GetAncestorsResponse {
                 tenant: TenantRef::from(info.clone()),
@@ -577,8 +724,9 @@ impl TenantResolverClient for MockTenantResolverClient {
         &self,
         _ctx: &SecurityContext,
         id: TenantId,
-        _options: &GetDescendantsOptions,
+        options: &GetDescendantsOptions,
     ) -> Result<GetDescendantsResponse, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tenant_ref = if let Some((info, _)) = self.tenants.get(&id) {
             TenantRef::from(info.clone())
         } else {
@@ -590,13 +738,21 @@ impl TenantResolverClient for MockTenantResolverClient {
                 self_managed: false,
             }
         };
-        // Collect children from the hierarchy map.
-        let descendants: Vec<TenantRef> = self
-            .tenants
-            .values()
-            .filter(|(info, _)| info.parent_id == Some(id))
-            .map(|(info, _)| TenantRef::from(info.clone()))
-            .collect();
+        // The whole subtree, as the real resolver returns it (pre-order,
+        // children unordered), down to `max_depth`.
+        let mut descendants: Vec<TenantRef> = Vec::new();
+        let mut stack: Vec<(TenantId, u32)> = vec![(id, 0)];
+        while let Some((parent, depth)) = stack.pop() {
+            if options.max_depth.is_some_and(|max| depth >= max) {
+                continue;
+            }
+            for (info, _) in self.tenants.values() {
+                if info.parent_id == Some(parent) {
+                    descendants.push(TenantRef::from(info.clone()));
+                    stack.push((info.id, depth + 1));
+                }
+            }
+        }
         Ok(GetDescendantsResponse {
             tenant: tenant_ref,
             descendants,
@@ -610,6 +766,7 @@ impl TenantResolverClient for MockTenantResolverClient {
         descendant_id: TenantId,
         _options: &IsAncestorOptions,
     ) -> Result<bool, TenantResolverError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if ancestor_id == descendant_id {
             return Ok(false);
         }
@@ -629,7 +786,9 @@ pub use crate::domain::gts_helpers::{
 /// Builder for a fully-wired Control Plane test environment.
 pub struct TestCpBuilder {
     credentials: Vec<(String, String)>,
+    credstore: Option<Arc<dyn CredStoreClientV1>>,
     tenant_resolver: Option<MockTenantResolverClient>,
+    circuit_breakers: Option<Arc<CircuitBreakers>>,
 }
 
 impl TestCpBuilder {
@@ -637,8 +796,27 @@ impl TestCpBuilder {
     pub fn new() -> Self {
         Self {
             credentials: Vec::new(),
+            credstore: None,
             tenant_resolver: None,
+            circuit_breakers: None,
         }
+    }
+
+    /// Drop the breakers of `circuit_breakers` on writes, as the gear does
+    /// with the Data Plane's.
+    #[must_use]
+    pub(crate) fn with_circuit_breakers(mut self, circuit_breakers: Arc<CircuitBreakers>) -> Self {
+        self.circuit_breakers = Some(circuit_breakers);
+        self
+    }
+
+    /// Use `credstore` instead of a mock built from
+    /// [`Self::with_credentials`] (e.g. a `MockCredStoreClient` the test
+    /// keeps to seed secrets and read back the recorded `get`s).
+    #[must_use]
+    pub fn with_credstore(mut self, credstore: Arc<dyn CredStoreClientV1>) -> Self {
+        self.credstore = Some(credstore);
+        self
     }
 
     /// Pre-load credentials into the mock credstore client.
@@ -657,18 +835,23 @@ impl TestCpBuilder {
 
     /// Create repos, service, and mock credstore, register them in the
     /// provided `ClientHub`, and return the CP service trait object.
-    pub(crate) fn build_and_register(self, hub: &ClientHub) -> Arc<dyn ControlPlaneService> {
+    pub(crate) fn build_and_register(
+        self,
+        hub: &ClientHub,
+        rate_limiter: Arc<crate::domain::rate_limit::RateLimiter>,
+    ) -> Arc<dyn ControlPlaneService> {
         let upstream_repo = Arc::new(InMemoryUpstreamRepo::new());
         let route_repo = Arc::new(InMemoryRouteRepo::new());
         let tenant_resolver: Arc<dyn TenantResolverClient> = Arc::new(
             self.tenant_resolver
                 .unwrap_or_else(MockTenantResolverClient::single_tenant),
         );
-        let credstore: Arc<dyn CredStoreClientV1> =
-            Arc::new(MockCredStoreClient::with_secrets(self.credentials));
+        let credstore: Arc<dyn CredStoreClientV1> = self
+            .credstore
+            .unwrap_or_else(|| Arc::new(MockCredStoreClient::with_secrets(self.credentials)));
         hub.register::<dyn CredStoreClientV1>(credstore.clone());
 
-        let cp: Arc<dyn ControlPlaneService> = Arc::new(ControlPlaneServiceImpl::new(
+        let mut cp = ControlPlaneServiceImpl::new(
             upstream_repo,
             route_repo,
             tenant_resolver,
@@ -676,9 +859,14 @@ impl TestCpBuilder {
             credstore,
             Arc::new(SsrfGuard::disabled()),
             None,
-        ));
-
-        cp
+        )
+        .with_rate_limiter(rate_limiter)
+        // The harness proxies to plaintext mocks, as its Data Plane allows.
+        .with_allow_http_upstream(true);
+        if let Some(circuit_breakers) = self.circuit_breakers {
+            cp = cp.with_circuit_breakers(circuit_breakers);
+        }
+        Arc::new(cp)
     }
 }
 
@@ -702,6 +890,12 @@ pub struct TestDpBuilder {
     token_cache_config: TokenCacheConfig,
     websocket_idle_timeout: Option<Duration>,
     websocket_close_timeout: Option<Duration>,
+    metrics: Option<Arc<dyn crate::domain::ports::OagwMetricsPort>>,
+    transform_plugins: Vec<(String, Arc<dyn crate::domain::plugin::TransformPlugin>)>,
+    auth_plugins: Vec<(String, Arc<dyn crate::domain::plugin::AuthPlugin>)>,
+    streaming_idle_timeout: Option<Duration>,
+    circuit_breakers: Option<Arc<CircuitBreakers>>,
+    upstream_ssrf_policy: bool,
 }
 
 impl TestDpBuilder {
@@ -717,6 +911,12 @@ impl TestDpBuilder {
             token_cache_config: TokenCacheConfig::default(),
             websocket_idle_timeout: None,
             websocket_close_timeout: None,
+            metrics: None,
+            transform_plugins: Vec::new(),
+            auth_plugins: Vec::new(),
+            streaming_idle_timeout: None,
+            circuit_breakers: None,
+            upstream_ssrf_policy: false,
         }
     }
 
@@ -724,6 +924,39 @@ impl TestDpBuilder {
     #[must_use]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Register a transform plugin next to the built-ins.
+    #[must_use]
+    pub(crate) fn with_transform_plugin(
+        mut self,
+        plugin_id: &str,
+        plugin: Arc<dyn crate::domain::plugin::TransformPlugin>,
+    ) -> Self {
+        self.transform_plugins.push((plugin_id.to_owned(), plugin));
+        self
+    }
+
+    /// Register an auth plugin under `plugin_id`, replacing a built-in of
+    /// that id.
+    #[must_use]
+    pub(crate) fn with_auth_plugin(
+        mut self,
+        plugin_id: &str,
+        plugin: Arc<dyn crate::domain::plugin::AuthPlugin>,
+    ) -> Self {
+        self.auth_plugins.push((plugin_id.to_owned(), plugin));
+        self
+    }
+
+    /// Record the Data Plane's metrics in `metrics` instead of dropping them.
+    #[must_use]
+    pub(crate) fn with_metrics(
+        mut self,
+        metrics: Arc<dyn crate::domain::ports::OagwMetricsPort>,
+    ) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -785,13 +1018,48 @@ impl TestDpBuilder {
         self
     }
 
+    /// Override the SSE streaming idle timeout.
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.streaming_idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Resolve upstream hosts in the engine under the default SSRF policy.
+    #[must_use]
+    pub fn with_upstream_ssrf_policy(mut self) -> Self {
+        self.upstream_ssrf_policy = true;
+        self
+    }
+
+    /// Use `circuit_breakers`, shared with the Control Plane, as the gear
+    /// does.
+    #[must_use]
+    pub(crate) fn with_circuit_breakers(mut self, circuit_breakers: Arc<CircuitBreakers>) -> Self {
+        self.circuit_breakers = Some(circuit_breakers);
+        self
+    }
+
     /// Fetch `CredStoreClientV1` from the hub, create a DP service with
     /// the given CP, and return the trait object.
     pub(crate) fn build_and_register(
         self,
         hub: &ClientHub,
         cp: Arc<dyn ControlPlaneService>,
+        rate_limiter: Arc<crate::domain::rate_limit::RateLimiter>,
     ) -> Arc<dyn DataPlaneService> {
+        self.build_and_register_with_streams(hub, cp, rate_limiter)
+            .0
+    }
+
+    /// [`Self::build_and_register`], plus the handle the gear stops the
+    /// service's SSE streams and WebSocket relays with.
+    pub(crate) fn build_and_register_with_streams(
+        self,
+        hub: &ClientHub,
+        cp: Arc<dyn ControlPlaneService>,
+        rate_limiter: Arc<crate::domain::rate_limit::RateLimiter>,
+    ) -> (Arc<dyn DataPlaneService>, StreamShutdown) {
         let credstore = hub
             .get::<dyn CredStoreClientV1>()
             .expect("CredStoreClientV1 must be registered before building DP");
@@ -811,7 +1079,11 @@ impl TestDpBuilder {
                     #[cfg(feature = "test-utils")]
                     skip_upstream_tls_verify: self.skip_upstream_tls_verify,
                 },
-                Arc::new(SsrfGuard::disabled()),
+                Arc::new(if self.upstream_ssrf_policy {
+                    SsrfGuard::from_config(&Default::default()).expect("default SSRF policy")
+                } else {
+                    SsrfGuard::disabled()
+                }),
             )
             .expect("test proxy engine"),
         );
@@ -833,7 +1105,11 @@ impl TestDpBuilder {
             self.token_cache_config,
             backend_selector,
             engine,
-            std::sync::Arc::new(crate::domain::ports::NoopMetrics),
+            self.metrics
+                .unwrap_or_else(|| Arc::new(crate::domain::ports::NoopMetrics)),
+            rate_limiter,
+            self.circuit_breakers
+                .unwrap_or_else(|| Arc::new(CircuitBreakers::new())),
         )
         .with_allow_http_upstream(true);
         if let Some(timeout) = self.request_timeout {
@@ -848,8 +1124,17 @@ impl TestDpBuilder {
         if let Some(timeout) = self.websocket_close_timeout {
             svc = svc.with_websocket_close_timeout(timeout);
         }
-
-        Arc::new(svc)
+        for (plugin_id, plugin) in self.transform_plugins {
+            svc = svc.with_transform_plugin(&plugin_id, plugin);
+        }
+        for (plugin_id, plugin) in self.auth_plugins {
+            svc = svc.with_auth_plugin(&plugin_id, plugin);
+        }
+        if let Some(timeout) = self.streaming_idle_timeout {
+            svc = svc.with_streaming_idle_timeout(timeout);
+        }
+        let streams = svc.stream_shutdown();
+        (Arc::new(svc), streams)
     }
 }
 
@@ -864,6 +1149,8 @@ impl Default for TestDpBuilder {
 pub struct TestAppState {
     pub state: crate::gear::AppState,
     pub facade: Arc<dyn ServiceGatewayClientV1>,
+    /// What the gear's `stop` ends the Data Plane's open streams with.
+    pub(crate) stream_shutdown: StreamShutdown,
 }
 
 /// Build an `AppState` and facade for integration tests.
@@ -884,10 +1171,17 @@ pub fn build_test_app_state(
     // The gear hands one `max_body_size_bytes` to both the handler and the
     // Data Plane, so a limit set for the Data Plane applies to the handler too.
     let max_body_size_bytes = dp_builder.max_body_size.unwrap_or(100 * 1024 * 1024);
-    let cp = cp_builder.build_and_register(hub);
-    let dp = dp_builder
+    // One limiter and one breaker registry, as the gear wires them: Control
+    // Plane writes drop what the Data Plane enforces.
+    let rate_limiter = Arc::new(crate::domain::rate_limit::RateLimiter::new());
+    let circuit_breakers = Arc::new(CircuitBreakers::new());
+    let cp = cp_builder
+        .with_circuit_breakers(circuit_breakers.clone())
+        .build_and_register(hub, rate_limiter.clone());
+    let (dp, stream_shutdown) = dp_builder
         .with_backend_selector(backend_selector.clone())
-        .build_and_register(hub, cp.clone());
+        .with_circuit_breakers(circuit_breakers)
+        .build_and_register_with_streams(hub, cp.clone(), rate_limiter);
     let facade: Arc<dyn ServiceGatewayClientV1> = Arc::new(ServiceGatewayClientV1Facade::new(
         cp.clone(),
         dp.clone(),
@@ -908,6 +1202,7 @@ pub fn build_test_app_state(
             },
         },
         facade,
+        stream_shutdown,
     }
 }
 
@@ -926,10 +1221,17 @@ pub fn build_test_gateway(
                 )),
             )
         });
-    let cp = cp_builder.build_and_register(hub);
+    // One limiter and one breaker registry, as the gear wires them: Control
+    // Plane writes drop what the Data Plane enforces.
+    let rate_limiter = Arc::new(crate::domain::rate_limit::RateLimiter::new());
+    let circuit_breakers = Arc::new(CircuitBreakers::new());
+    let cp = cp_builder
+        .with_circuit_breakers(circuit_breakers.clone())
+        .build_and_register(hub, rate_limiter.clone());
     let dp = dp_builder
         .with_backend_selector(backend_selector.clone())
-        .build_and_register(hub, cp.clone());
+        .with_circuit_breakers(circuit_breakers)
+        .build_and_register(hub, cp.clone(), rate_limiter);
     let oagw: Arc<dyn ServiceGatewayClientV1> =
         Arc::new(ServiceGatewayClientV1Facade::new(cp, dp, backend_selector));
     hub.register::<dyn ServiceGatewayClientV1>(oagw.clone());

@@ -44,12 +44,14 @@ pub fn from_gateway(err: CanonicalError) -> LlmGatewayError {
             "rate limited by the outbound gateway",
             retry_after_secs,
         ),
-        ServiceGatewayError::Timeout => gateway_provider(
+        ServiceGatewayError::Timeout { .. } => gateway_provider(
             ProviderErrorCategory::ProviderUnavailable,
             "provider call timed out",
             None,
         ),
-        ServiceGatewayError::Unavailable { retry_after_secs } => gateway_provider(
+        ServiceGatewayError::Unavailable {
+            retry_after_secs, ..
+        } => gateway_provider(
             ProviderErrorCategory::ProviderUnavailable,
             "provider unavailable",
             retry_after_secs,

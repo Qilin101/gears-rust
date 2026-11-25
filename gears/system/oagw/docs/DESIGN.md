@@ -56,6 +56,7 @@ This design satisfies the requirements for centralized outbound traffic manageme
 | Alias resolution | `cpt-cf-oagw-fr-alias-resolution` | Path-based routing with alias shadowing |
 | Credential isolation | `cpt-cf-oagw-nfr-credential-isolation` | Auth via `cred_store` references, no direct secret storage |
 | Named upstream credentials (proposed) | `cpt-cf-oagw-fr-upstream-credentials` | Authorize and limit the requested key under the destination's existing policies |
+| Per-request secret references (proposed) | `cpt-cf-oagw-fr-request-secret-refs` | Read the requested secret as the caller and inject it only when its owner and type pass the upstream's guards |
 | Optional persistence | `cpt-cf-oagw-fr-config-persistence` | Database repositories when configured, in-memory otherwise; fail-fast on an unusable database |
 | ToolKit integration | Gears middleware | Single-executable deployment, trait-based DI, secure ORM |
 
@@ -65,7 +66,7 @@ This design satisfies the requirements for centralized outbound traffic manageme
 - `cpt-cf-oagw-adr-request-routing` — Path-based routing with alias resolution
 - `cpt-cf-oagw-adr-plugin-system` — Three plugin types with deterministic execution order
 - `cpt-cf-oagw-adr-rate-limiting` — Token bucket algorithm with hierarchical merge
-- `cpt-cf-oagw-adr-circuit-breaker` — State machine with configurable thresholds and fallback
+- `cpt-cf-oagw-adr-circuit-breaker` — Per-upstream state machine with configurable thresholds, kept in memory on each replica (fallback strategies planned)
 - `cpt-cf-oagw-adr-cors` — Built-in CORS handler with per-upstream/route config
 - `cpt-cf-oagw-adr-data-plane-caching` — Control plane caching strategies (superseded by `cpt-cf-oagw-adr-proxy-config-cache`)
 - `cpt-cf-oagw-adr-state-management` — CP/DP state structures; its Data Plane L1 cache is replaced by `cpt-cf-oagw-adr-proxy-config-cache`, its rate-limiter ownership stays
@@ -82,6 +83,8 @@ This design satisfies the requirements for centralized outbound traffic manageme
 - `cpt-cf-oagw-adr-upstream-proxy-engine` — Upstream forwarding through the in-house `toolkit-http-proxy` engine instead of the Pingora bridge
 - `cpt-cf-oagw-adr-proxy-config-cache` — Per-replica cache of the proxy lookup with a database; each write evicts only the entries it affects, on every replica through a cluster change log, with a TTL backstop (proposed until its benchmark)
 - `cpt-cf-oagw-adr-upstream-credentials` — [Proposed tenant-local named API keys](ADR/0021-upstream-credentials.md)
+- `cpt-cf-oagw-adr-request-secret-refs` — [Proposed per-request CredStore references with guards](ADR/0022-request-secret-refs.md)
+- `cpt-cf-oagw-adr-request-signing` — [Proposed optional signing phase of auth plugins, run on the final outbound request](ADR/0023-request-signing.md)
 
 ### 1.3 Architecture Layers
 
@@ -176,11 +179,11 @@ Multi-SQL backend portability: PostgreSQL, MySQL, SQLite. The OAGW build compile
 
 **ID**: `cpt-cf-oagw-constraint-body-limit`
 
-Body size hard limit: 100MB. Prevent resource exhaustion; reject before buffering.
+Body size hard limit: 100 MiB (`max_body_size_bytes` cannot be set higher). Prevent resource exhaustion; reject before buffering. The effective limit is the smaller of OAGW's `max_body_size_bytes` and the api-gateway's `body_limit_bytes` (16 MiB by default), see [Body Validation Rules](#body-validation-rules).
 
 **ID**: `cpt-cf-oagw-constraint-https-only`
 
-HTTPS-only for upstream connections in MVP. SSRF prevention; plaintext upstreams explicitly blocked.
+HTTPS-only for upstream connections in MVP. SSRF prevention; plaintext upstreams explicitly blocked. An `http` endpoint is rejected on create and update with 400 `invalid_argument` (field `server.endpoints.scheme`, reason `HTTP_UPSTREAM_FORBIDDEN`) unless the gear option `allow_http_upstream` is on. The proxy checks it again, before auth runs, for upstreams stored earlier, with the same field; the proxy's `UNSUPPORTED_SCHEME` violation names `server.endpoints.scheme` too.
 
 ## 3. Technical Architecture
 
@@ -200,6 +203,7 @@ classDiagram
         +AuthConfig auth
         +HeadersConfig headers
         +RateLimitConfig rate_limit
+        +CircuitBreakerConfig circuit_breaker
         +CorsConfig cors
         +PluginsConfig plugins
         +List~String~ tags
@@ -246,7 +250,7 @@ classDiagram
 
 **Key Domain Entities**:
 
-- **Upstream** (`gts.cf.core.oagw.upstream.v1~`): Tenant-scoped root configuration object representing an external service. Unique per `(tenant_id, alias)`. Contains server endpoints, auth config, rate limits, CORS, headers, and plugin bindings.
+- **Upstream** (`gts.cf.core.oagw.upstream.v1~`): Tenant-scoped root configuration object representing an external service. Unique per `(tenant_id, alias)`. Contains server endpoints, auth config, rate limits, circuit breaker, CORS, headers, and plugin bindings.
 - **Route** (`gts.cf.core.oagw.route.v1~`): Belongs to an upstream. Defines match rules (HTTP path/method; gRPC service/method matching is planned for Phase 3 — no gRPC proxy code path is currently implemented or reachable), priority, and route-level overrides for rate limits, CORS, and plugins.
 - **Upstream credential** (proposed, `gts.cf.core.oagw.credential.v1~`): A tenant-owned child of one local upstream. Its UUID identifies a named API-key reference and its optional per-replica request limit. The upstream supplies the auth plugin and injection policy. See [ADR-0021](ADR/0021-upstream-credentials.md) and the [schema](schemas/credential.v1.schema.json).
 - **Plugin** (`gts.cf.core.oagw.{type}_plugin.v1~`): Custom tenant-defined Starlark plugins stored in `oagw_plugin`. Named (built-in) plugins are resolved via in-process registry and not persisted.
@@ -276,8 +280,9 @@ Built-in auth plugins:
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1`
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred.v1`
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_basic.v1`
+- `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.aws_sigv4.v1` — AWS Signature Version 4, signed in the signing phase ([ADR-0023](./ADR/0023-request-signing.md)); config in [F0003](./features/0003-cpt-cf-oagw-feature-plugin-system.md#aws-sigv4-auth-plugin)
 
-`basic.v1` and `bearer.v1` are reserved GTS identifiers cataloged in the types-registry with no backing `AuthPlugin` implementation in `AuthPluginRegistry` — using either as `auth.plugin_type` fails with `unknown auth plugin`.
+`basic.v1` and `bearer.v1` are reserved GTS identifiers cataloged in the types-registry with no backing `AuthPlugin` implementation in `AuthPluginRegistry`: setting either as `auth.type` is rejected on write with 400 `invalid_argument` (reason `NOT_IMPLEMENTED`).
 
 **Guard Plugin** — Base type: `gts.cf.core.oagw.guard_plugin.v1~` — [schemas/guard_plugin.v1.schema.json](./schemas/guard_plugin.v1.schema.json)
 
@@ -287,7 +292,7 @@ Multiple per upstream/route. Can reject requests before they reach upstream.
 |---|---|
 | `gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.required_headers.v1` | Required header enforcement (request/response) — see [ADR: Required Headers Guard Plugin](./ADR/0017-required-headers-guard-plugin.md) |
 
-`required_headers.v1` is the only guard identifier resolvable via `GuardPluginRegistry` and bindable through `plugins.items[].plugin_ref`. Timeout and CORS are core Data Plane functionality, not `GuardPlugin` trait implementations: request timeout is gear-level configuration, and CORS is configured via the dedicated `cors` field on `Upstream`/`Route` (see [ADR: CORS](./ADR/0006-cors.md)). Their `gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1` / `...cors.v1` identifiers exist only for types-registry cataloging and cannot be bound via `plugins.items[].plugin_ref`. Circuit breaker is likewise **core functionality** (not a plugin). See [ADR: Circuit Breaker](./ADR/0005-circuit-breaker.md).
+`required_headers.v1` is the only guard identifier resolvable via `GuardPluginRegistry` and bindable through `plugins.items[].plugin_ref`. Timeout and CORS are core Data Plane functionality, not `GuardPlugin` trait implementations: request timeout is gear-level configuration, and CORS is configured via the dedicated `cors` field on `Upstream`/`Route` (see [ADR: CORS](./ADR/0006-cors.md)). Their `gts.cf.core.oagw.guard_plugin.v1~cf.core.oagw.timeout.v1` / `...cors.v1` identifiers exist only for types-registry cataloging and cannot be bound via `plugins.items[].plugin_ref` (400 `NOT_IMPLEMENTED` on write). Circuit breaker is likewise **core functionality** (not a plugin). See [ADR: Circuit Breaker](./ADR/0005-circuit-breaker.md).
 
 **Transform Plugin** — Base type: `gts.cf.core.oagw.transform_plugin.v1~` — [schemas/transform_plugin.v1.schema.json](./schemas/transform_plugin.v1.schema.json)
 
@@ -297,7 +302,7 @@ Multiple per upstream/route, executed in order. Each plugin declares supported p
 |---|---|---|
 | `gts.cf.core.oagw.transform_plugin.v1~cf.core.oagw.request_id.v1` | request, response | X-Request-ID injection/propagation |
 
-`logging.v1` and `metrics.v1` are core Data Plane instrumentation (`infra/metrics.rs`, `tracing`), not `TransformPlugin` trait implementations. Their GTS identifiers exist for types-registry cataloging only and are not resolvable via `TransformPluginRegistry`.
+`logging.v1` and `metrics.v1` are core Data Plane instrumentation (`infra/metrics.rs`, `tracing`), not `TransformPlugin` trait implementations. Their GTS identifiers exist for types-registry cataloging only, are not resolvable via `TransformPluginRegistry`, and are rejected on write (400 `NOT_IMPLEMENTED`).
 
 #### Plugin Identification Model
 
@@ -396,12 +401,12 @@ Three plugin types with separate traits, deterministic execution order:
 2. **GuardPlugin** (`gts.cf.core.oagw.guard_plugin.v1~*`): Validation/policy enforcement (can reject). Multiple per upstream/route.
 3. **TransformPlugin** (`gts.cf.core.oagw.transform_plugin.v1~*`): Request/response mutation. Multiple per upstream/route.
 
-Execution order: Auth → Guards → Transform(on_request) → Upstream call → Transform(on_response/on_error).
+Execution order: Auth → Guards → Transform(on_request) → Auth signing → Upstream call → Transform(on_response/on_error). The auth plugin's optional signing phase ([ADR-0023](ADR/0023-request-signing.md)) runs last, after header rules, transforms, endpoint selection, the `Host` header, rate limits and the URL build, on the HTTP and WebSocket paths. It sees the method, URL, every header line as sent and the body (buffered bytes, a streamed marker, or empty for a WebSocket handshake), and may set headers and keep, remove or replace the query, a replacement sent as returned. A signing failure stops the request before anything is sent. Only plugins whose `signs` flag is `true` have the phase; among the built-ins only `aws_sigv4` does. `on_response` runs for every upstream response, 4xx/5xx included; `on_error` runs only for gateway-originated errors of the upstream exchange (connection failure, timeout, protocol error, body limit, response guard rejection). A WebSocket upgrade does not run it: a failed upgrade returns its gateway error without `on_error`.
 
 Plugin chain composition: upstream plugins execute before route plugins (`[U1, U2] + [R1, R2] => [U1, U2, R1, R2]`).
 
 **Built-in Plugins** (registered and resolvable via their plugin registry):
-- Auth: `noop`, `apikey`, `oauth2_client_cred`, `oauth2_client_cred_basic`
+- Auth: `noop`, `apikey`, `oauth2_client_cred`, `oauth2_client_cred_basic`, `aws_sigv4`
 - Guard: `required_headers`
 - Transform: `request_id`
 
@@ -409,6 +414,42 @@ Plugin chain composition: upstream plugins execute before route plugins (`[U1, U
 - Auth: `basic`, `bearer`
 - Guard: `timeout`, `cors`
 - Transform: `logging`, `metrics`
+
+**Write-time check**: on create and update (Management API, SDK and types-registry provisioning), `auth.type` must be an implemented auth plugin and every `plugins.items[].plugin_ref` an implemented guard or transform plugin. Catalog-only ids, custom (UUID) ids, which are not implemented yet, and unknown ids are rejected with 400 `invalid_argument`, field violation reason `NOT_IMPLEMENTED`. A plugin of the wrong kind (an auth plugin in `plugins.items`, a guard or transform plugin in `auth.type`) is rejected with reason `VALIDATION`. Bindings stored before this check are not rewritten; the proxy still has to handle an unresolvable one.
+
+#### Circuit Breaker
+
+`circuit_breaker` on an upstream (optional; absent = no breaker) per [ADR: Circuit Breaker](./ADR/0005-circuit-breaker.md):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `sharing` | `private` | Sharing mode, as for the other upstream fields |
+| `enabled` | `true` | `false` keeps the config and sends every request through |
+| `failure_threshold` | `5` | Failures in a row that open the circuit; 1 to 1000 |
+| `timeout_seconds` | `30` | Seconds the circuit stays open before probes go through; 1 to 86400 (a day, as `proxy_timeout_secs`) |
+| `success_threshold` | `3` | Probes let through at once after the timeout; all must succeed to close the circuit, one failure opens it again; 1 to 100 |
+
+Each value is checked whether or not `enabled`: below 1 is a 400 `invalid_argument` `circuit_breaker.<field> must be at least 1`, above the maximum `circuit_breaker.<field> must be at most N`. An unknown field is refused like any body that does not deserialize (422); the REST API and types-registry provisioning apply the defaults above to omitted fields (`oagw_sdk::CircuitBreakerConfig::default()`). Routes have no circuit breaker.
+
+The breaker is shared by every tenant that resolves to the upstream: it describes the upstream's health, as Envoy's outlier detection and resilience4j's per-dependency breakers do (ADR-0005, *Breaker Scope and Failure Classification*). Isolation between tenants is the rate limits' job. So that no caller can open it with its own errors, only failures the upstream caused count. A caller can still make the upstream fail with what it asks for (a path that answers `503`, a request slower than the timeout); ADR-0005 lists the mitigations.
+
+| Outcome | Breaker |
+|---|---|
+| Upstream `502`, `503`, `504` | failure |
+| Any other upstream status (`500`, `4xx`, `101` included) | success |
+| DNS failure or no address where the engine resolves the host (a single-endpoint upstream; a multi-endpoint upstream resolves in endpoint selection, whose errors are not counted), connection refused, no route, connect error or timeout, TLS handshake or certificate error, peer closed, invalid response, HTTP/2 or stream error before the response head, the engine's read or write timeout | failure |
+| Request deadline hit during target resolution or the exchange, which started with at least 90 % of the request timeout left | failure |
+| The same, when the gateway's own steps (the `request_ref` CredStore read, endpoint selection, an auth plugin's signing phase) used more than 10 % | not counted |
+| A timeout or a broken exchange while the client is still sending a streamed request body (a failure to connect still counts) | not counted |
+| Any outcome of a request pinned with `X-OAGW-Target-Host` to one endpoint of an upstream with several (still rejected while open) | not counted |
+| The SSRF policy refuses every resolved address | not counted |
+| Any gateway error before the upstream (validation, CORS, auth plugin, guards, rate limit, CredStore, body limit, internal) | not counted |
+| The client cancels before the response head | not counted |
+| Anything after the response head (SSE or long body, WebSocket tunnel) | not counted |
+
+While the circuit is open, a check before the auth plugin, the rate limits and the CredStore read answers `503` (`service_unavailable`, `X-OAGW-Error-Source: gateway`) with `Retry-After` = the time left until a probe, without calling the upstream; that check keeps no half-open probe slot. The permit that counts the outcome (and holds a probe slot) is taken just before target resolution, so a slow `authenticate` or `request_ref` CredStore read does not keep a probe slot; a signing phase, which runs after target resolution, does, and its time is taken off the upstream's budget. The cost is at the open → half-open edge: requests that pass the check before the first probe takes its slot do the gateway's steps and get `503` at the permit; this lasts at most the time between the check and the permit of the first request after `timeout_seconds`, once per open period, and once a probe holds the slot the check rejects. The outcome is taken at the response head (for a WebSocket upgrade, at the handshake).
+
+State is kept in memory on each replica (`toolkit-resilience`), one breaker per resolved upstream and the upstream whose config is in effect; nothing is shared between replicas. A breaker is rebuilt closed on the next request, on every replica, when the effective config, the alias or the endpoints differ from those it was built for; disabling it removes it. A request that resolves no config leaves the breaker alone (under a `private` config a descendant sees none while the owner sees it). A write that changes or removes the stored `circuit_breaker`, and a delete, drop the upstream's breakers on the replica that handles the write; the idle sweep that evicts rate-limit buckets (every 60 s) evicts breakers unused for 10 minutes past their `timeout_seconds`, e.g. those of upstreams another replica deleted. Another replica does not see a removal, so an identical config re-added there before the sweep continues the old state, open for at most `timeout_seconds`. While two snapshots of one upstream are both in use (proxy config cache lag), each switch rebuilds the breaker closed, so it may not open until they converge.
 
 **Custom Plugins**: Starlark scripts with sandboxed execution (no network/file I/O, timeout/memory limits enforced). Immutable after creation; GC for unlinked plugins after configurable TTL.
 
@@ -419,9 +460,14 @@ Multi-tenant hierarchy with sharing modes (`private`/`inherit`/`enforce`) per co
 | Field | Merge Strategy |
 |---|---|
 | Auth | Override if `inherit`; forced if `enforce`; never sent to endpoints its owner did not configure |
-| Rate Limits | `min(ancestor, descendant)` — stricter always wins |
-| Plugins | Concatenate: `ancestor.plugins + descendant.plugins` |
+| Rate Limits | `min(ancestor, descendant)` — stricter always wins; an enforced limit stays `enforce` down the chain, whichever level's value wins, so a `private` level below cannot replace it |
+| Circuit Breaker | Closest level's config wins (no `min()`: thresholds and timeout have no one stricter order); forced if `enforce` on any ancestor, down the chain |
+| Plugins | Concatenate: `ancestor.plugins + descendant.plugins`; a `private` level (upstream or route) keeps only the enforced items and appends its own; an enforced item is never dropped, and a level or route naming the same `plugin_ref` does not replace it |
 | CORS | Union origins if `inherit`; forced if `enforce` |
+
+`private` means the field stays with its owner: an upstream or route of another tenant takes part in a descendant's resolution only with its shared fields. Any shared field makes the ancestor's upstream visible to descendants, a circuit breaker with `sharing: inherit` or `enforce` included: a descendant without an upstream of its own can then proxy through it, without the `private` fields. Its `private` auth, rate limit, circuit breaker, plugins and CORS are neither merged nor returned, also when the descendant has no upstream of its own and the alias resolves to the ancestor's. Headers have no sharing mode and follow the endpoint rule below.
+
+A descendant cannot override auth, circuit breaker or CORS that any ancestor upstream with the alias enforces, not only the closest one (`400`); a circuit breaker override needs no permission of its own. A rate limit is refused only when the closest ancestor enforces it: a farther enforcing ancestor's limit stays the floor in the merge, so the descendant's limit cannot exceed it, and a child of an `inherit` parent with an allocated budget must set a limit to allocate. The override permissions are checked on the closest ancestor.
 
 Tags do not have a sharing mode — they always use add-only union semantics: `effective_tags = union(ancestor_tags, descendant_tags)`. Descendants cannot remove inherited tags.
 
@@ -489,8 +535,8 @@ OAGW processes headers in three categories:
 | Inbound Header | Rule |
 |---|---|
 | `X-OAGW-Target-Host` | Read during routing, then stripped |
-| `Host` | Replaced by upstream host |
-| `Connection` | Stripped |
+| `Host` | Replaced by upstream host, with `:port` unless the port is the scheme's default (`http` 80, others 443) |
+| `Connection` | Stripped, with every header any `Connection` field line names |
 | `Keep-Alive` | Stripped |
 | `Proxy-Authenticate` | Stripped |
 | `Proxy-Authorization` | Stripped |
@@ -498,6 +544,11 @@ OAGW processes headers in three categories:
 | `Trailer` | Stripped |
 | `Transfer-Encoding` | Stripped |
 | `Upgrade` | Stripped |
+| `Forwarded`, `Via`, `X-Forwarded*`, `X-Envoy-*`, `*Client-IP`, `X-Real-IP`, `X-Originating-IP`, `X-Remote-IP`, `X-Remote-Addr`, `X-ProxyUser-Ip`, `CF-Connecting-IP`, `X-Original-Forwarded-For`, `X-Original-URL`, `X-Original-URI`, `X-Rewrite-URL`, `X-Original-Host`, `X-Host`, `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` | Not forwarded under `passthrough: all`; forwarded only when the upstream's `passthrough_allowlist` names the header. The list cannot name every framework-specific header: an upstream that trusts client-identity or override headers should use `allowlist` |
+
+A forwarded header keeps every line the client sent, in order, under `passthrough: all` and `allowlist` alike.
+
+Request-phase guard plugins check the inbound headers as the client sent them, before passthrough filtering and auth injection ([ADR: Required Headers Guard Plugin](./ADR/0017-required-headers-guard-plugin.md)).
 
 Simple header transformations are defined in the upstream `headers` configuration. Complex header transformations can be defined in corresponding upstream/route plugins. Well-known headers (e.g., `Content-Length`, `Content-Type`) must be validated, set or adjusted; invalid headers should result in `400 Bad Request`.
 
@@ -528,8 +579,15 @@ Default validation checks (no configuration required):
 | Check | Rule | Error |
 |---|---|---|
 | Content-Length | Must be valid integer if present; must match actual size | `400 ValidationError` |
-| Max size | Hard limit 100MB; reject before buffering | `413 PayloadTooLarge` |
+| Max size | `max_body_size_bytes`; a larger `Content-Length` is rejected before buffering, a body without one while buffering | `413 PayloadTooLarge` |
+| Body read | Reading the body fails for another reason (for example the client aborts the upload) | `400 BODY_READ_FAILED` |
 | Transfer-Encoding | Reject unsupported encodings (only `chunked` supported) | `400 ValidationError` |
+
+These checks run after the `proxy:invoke` permission check, so a caller without it gets `403` before any body is read.
+
+**Effective body limit.** The api-gateway in front of OAGW enforces its own `body_limit_bytes` (default 16 MiB) before OAGW sees the request. The effective limit is the smaller of the two:
+- A body over the api-gateway limit is rejected by the outer layer: `413` with an `about:blank` `application/problem+json` body and no `X-OAGW-Error-Source` header.
+- OAGW's own `413` (canonical `out_of_range` with the 413 override, field violation reason `PAYLOAD_TOO_LARGE`, `X-OAGW-Error-Source: gateway`) is returned only when `max_body_size_bytes` is the smaller limit. With both defaults (100 MiB and 16 MiB) the outer `413` comes first.
 
 Additional validation (JSON Schema, content-type checks, custom rules) implemented via guard plugins.
 
@@ -563,7 +621,7 @@ Auth configuration references secrets via `secret_ref` (e.g., `cred://partner-op
 1. OAGW resolves `secret_ref` via `cred_store` API
 2. `cred_store` checks if secret is accessible to current tenant (own or shared by ancestor)
 3. If accessible → return secret material
-4. If not → return error, OAGW returns 401 Unauthorized
+4. If not → OAGW returns 401 `unauthenticated` with reason `AUTH_CREDENTIAL_NOT_FOUND`, whether the secret does not exist or is not accessible to the tenant; the error and the logs name the auth config key, never the `secret_ref`. See [Credential failures](#credential-failures) for the other cases.
 
 Ancestor can share a secret with descendants via `cred_store` policies. Descendant can also use own secret with different `secret_ref`.
 
@@ -583,9 +641,29 @@ Without appropriate permissions, descendant must use ancestor's configuration as
 #### Security Considerations
 
 **Server-Side Request Forgery (SSRF)**:
-- DNS: IP pinning rules, allowed segments matching.
+- Endpoints: an endpoint IP address in a denied range, or a denied hostname, is rejected on create, update and registry reconcile with 400 naming the reason. The hostname check runs again on every alias resolution.
+- DNS: every address an endpoint host resolves to is checked on every resolution (DNS rebinding); a refused address is never connected to. With every address refused the request fails with 503 (single endpoint) or 502 (pool).
 - Headers: Well-known headers stripping and validation.
 - Request Validation: Path, query parameters validation against route configuration.
+
+The gear option `ssrf_policy` configures it (on by default):
+
+| Field | Effect |
+|---|---|
+| `enabled` | `false` skips every SSRF check. |
+| `extra_deny_cidrs` | Denies these ranges in addition to the built-in list. |
+| `allow_cidrs` | Exempts these ranges from both deny lists, for IP endpoints and resolved addresses alike. |
+| `extra_deny_hostnames` | Denies these hostnames in addition to `localhost` and `localhost.localdomain`; an entry starting with `.` also matches subdomains. |
+| `allow_hostnames` | Exempts these hostnames from both hostname deny lists, and their resolved addresses from the range deny lists, except loopback, unspecified, link-local, multicast, broadcast and cloud metadata addresses (only `allow_cidrs` admits those). |
+
+An IPv6 CIDR matches only IPv6 addresses, by their bits: `::/3` does not cover public IPv4, and `::/0` does not allow it. An IPv4-mapped address (`::ffff:a.b.c.d`) is matched as its IPv4 address, and an IPv6 CIDR inside `::ffff:0:0/96` (prefix 96 or longer) as the IPv4 CIDR it maps. An IPv4 CIDR in `extra_deny_cidrs` also denies the IPv6 addresses that carry an IPv4 address it covers (the forms listed below; IPv4-compatible ones the built-in list denies anyway): `8.8.8.0/24` denies `64:ff9b::808:808` and `2002:808:808::1`. An IPv4 CIDR in `allow_cidrs` exempts only the IPv4 address and its mapped form, so allowing `10.0.0.0/8` does not admit `64:ff9b::a00:1`; such an address needs an IPv6 entry.
+
+An IPv6 entry that contains `::ffff:0:0/96` (`::/0`, `::/80`) covers no IPv4 address. Earlier releases matched every IPv4 address with it, so the gear logs a warning at startup for each such entry in either list; covering IPv4 takes an IPv4 CIDR (`0.0.0.0/0`).
+
+Built-in denied ranges:
+- IPv4: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24` (except `192.0.0.9` and `192.0.0.10`), `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4` (with `255.255.255.255`).
+- IPv6: every block of the IANA IPv6 Special-Purpose Address Registry (2025-10-09) that is not globally reachable: `::1/128`, `::/128`, `64:ff9b:1::/48`, `100::/64`, `100:0:0:1::/64`, `2001::/23` except its globally reachable entries (`2001:1::1`, `2001:1::2`, `2001:1::3`, `2001:3::/32`, `2001:4:112::/48`, `2001:20::/28`, `2001:30::/28`), so with `2001:2::/48` and `2001:10::/28`, Teredo `2001::/32`, `2001:db8::/32`, `3fff::/20`, `5f00::/16`, `fc00::/7`, `fe80::/10`; plus the deprecated site-local `fec0::/10`, the deprecated IPv4-compatible `::/96` whatever IPv4 address it carries (a Linux host with `sit0` up tunnels it to that IPv4 address, other stacks send it as IPv6 outside `2000::/3`), multicast `ff00::/8`, and every other address outside `2000::/3`, the only space allocated for global unicast. A block IANA assigns outside `2000::/3` later is therefore denied already.
+- IPv6 addresses that carry an IPv4 address are judged by it: IPv4-mapped `::ffff:0:0/96`, IPv4-translated `::ffff:0:0:0/96`, NAT64 `64:ff9b::/96` and 6to4 `2002::/16`.
 
 **Cross-Origin Resource Sharing (CORS)**: Built-in, configured per upstream/route. Preflight OPTIONS requests return a permissive 204 at the handler level (no upstream resolution or tenant context required). Origin validation happens on actual requests after upstream resolution, before forwarding. See [ADR: CORS](./ADR/0006-cors.md).
 
@@ -666,7 +744,7 @@ IDs use anonymous GTS identifiers: `gts.cf.core.oagw.{type}.v1~{uuid}`. Plugins 
 
 **Immutable fields**: `id`, `tenant_id` on all resources. Route `upstream_id` is also immutable.
 
-**Registry-managed resources**: upstreams and routes provisioned from the types registry (`managed_by = registry`) are read-only through the Management API and the SDK. PUT and DELETE return 400 `failed_precondition` with violation type `REGISTRY_MANAGED` and subject `managed_by` (SDK constants `oagw_sdk::precondition::REGISTRY_MANAGED` and `MANAGED_BY`); they change only with their registry instance, which the registry reconcile applies (at startup in memory; on a database in a background task that re-checks every few minutes) ([ADR: Optional Persistence](./ADR/0018-optional-persistence.md#provisioning-from-the-types-registry)). Routes created through the API may attach to a registry-managed upstream, and keep it alive: when the registry drops that upstream, its registry routes are removed but the upstream stays, registry-managed with its last configuration, until the API routes are deleted. A registry route the reconcile skipped (invalid content) keeps its dropped upstream alive the same way, until its content is fixed. A registry route must name a registry-managed upstream; only the reconcile can move a route to another upstream.
+**Registry-managed resources**: upstreams and routes provisioned from the types registry (`managed_by = registry`) are read-only through the Management API and the SDK. PUT and DELETE return 400 `failed_precondition` with violation type `REGISTRY_MANAGED` and subject `managed_by` (SDK constants `oagw_sdk::precondition::REGISTRY_MANAGED` and `MANAGED_BY`); they change only with their registry instance, which the registry reconcile applies (in a background task that re-checks every few minutes; in memory also once at startup) ([ADR: Optional Persistence](./ADR/0018-optional-persistence.md#provisioning-from-the-types-registry)). Routes created through the API may attach to a registry-managed upstream, and keep it alive: when the registry drops that upstream, its registry routes are removed but the upstream stays, registry-managed with its last configuration, until the API routes are deleted. A registry route the reconcile skipped (invalid content) keeps its dropped upstream alive the same way, until its content is fixed. A registry route must name a registry-managed upstream; only the reconcile can move a route to another upstream.
 
 #### Tenant Scoping
 
@@ -684,7 +762,9 @@ At proxy time, `resolve_alias` walks the tenant chain (descendant → root) to f
 
 #### List Query Parameters
 
-All list endpoints support OData query parameters: `$filter`, `$select`, `$orderby`, `$top`, `$skip`.
+Implemented today: upstream lists accept `limit` (default 50, capped at 100) and `offset`, route lists also `upstream_id`. Lists are ordered by resource id (UUID). Any other parameter, OData `$…` parameters included, is rejected with 400 `invalid_argument` instead of being ignored: one field violation per parameter, named by the parameter, with reason `UNSUPPORTED_QUERY_PARAM` (as the platform `OData` extractor reports them). At most 16 parameters are named, each cut to 64 bytes.
+
+Planned: OData query parameters `$filter`, `$select`, `$orderby`, `$top`, `$skip`, as below.
 
 **Upstream**:
 
@@ -720,35 +800,82 @@ All list endpoints support OData query parameters: `$filter`, `$select`, `$order
 `{METHOD} /api/oagw/v1/proxy/{alias}[/{path_suffix}][?{query_parameters}]`
 
 Request classification uses `upstream.protocol` to determine match strategy:
-- HTTP: method allowlist + longest path prefix match
+- HTTP: method allowlist + longest path prefix match, ending on a segment boundary (`/v1/chat` covers `/v1/chat/x` and `/v1/chat.json`, not `/v1/chatty`; route `/` covers the bare alias). Matching runs on the normalized path: percent-encoded unreserved characters decoded (`/v1/ch%61t` is `/v1/chat`), other escapes uppercased, `.` and `..` resolved; a segment that is a dot-segment once decoded (also through `;` parameters or double encoding) is rejected with 400. An encoded `/` or `\` (`%2F`, `%5C`) ends a segment without starting a new one (`/v1%2Fadmin` is under `/v1`); the candidates are also ranked with `%2F`, `%5C`, `\` and the fullwidth and small solidi `%EF%BC%8F`, `%EF%BC%BC` and `%EF%B9%A8`, which NFKC folds to `/` and `\` read as `/`, and a request for which that picks another route (routes `/v1` and `/v1/admin`, request `/v1%2Fadmin`) is rejected with 400 `INVALID_PROXY_PATH`, so an upstream that decodes them cannot be reached past the narrower route's policy
 - gRPC (planned/Phase 3): `(service, method)` match from gRPC request path (no gRPC proxy code path is currently implemented or reachable)
 
 #### Error Response Format
 
 All gateway errors follow RFC 9457 Problem Details (`application/problem+json`) with GTS `type` identifiers.
 
-| Error Type | HTTP | GTS Instance ID | Retriable | Description |
-|---|---|---|---|---|
-| RouteError | 400 | `gts.cf.core.errors.err.v1~cf.oagw.validation.error.v1` | No | General route validation error |
-| ValidationError | 400 | `gts.cf.core.errors.err.v1~cf.oagw.validation.error.v1` | No | Request validation failed |
-| MissingTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.missing_target_host.v1` | No | X-OAGW-Target-Host header required for multi-endpoint upstream with common suffix alias |
-| InvalidTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.invalid_target_host.v1` | No | X-OAGW-Target-Host header format is invalid (must be hostname or IP, no port/path/special chars) |
-| UnknownTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.unknown_target_host.v1` | No | X-OAGW-Target-Host value does not match any configured endpoint |
-| AuthenticationFailed | 401 | `gts.cf.core.errors.err.v1~cf.oagw.auth.failed.v1` | No | Authentication to upstream failed |
-| RouteNotFound | 404 | `gts.cf.core.errors.err.v1~cf.oagw.route.not_found.v1` | No | No matching route found |
-| PluginInUse | 409 | `gts.cf.core.errors.err.v1~cf.oagw.plugin.in_use.v1` | No | Plugin in use |
-| PayloadTooLarge | 413 | `gts.cf.core.errors.err.v1~cf.oagw.payload.too_large.v1` | No | Request payload exceeds limit |
-| RateLimitExceeded | 429 | `gts.cf.core.errors.err.v1~cf.oagw.rate_limit.exceeded.v1` | Yes | Rate limit exceeded |
-| SecretNotFound | 500 | `gts.cf.core.errors.err.v1~cf.oagw.secret.not_found.v1` | No | Referenced secret not found |
-| ProtocolError | 502 | `gts.cf.core.errors.err.v1~cf.oagw.protocol.error.v1` | No | Protocol-level error |
-| DownstreamError | 502 | `gts.cf.core.errors.err.v1~cf.oagw.downstream.error.v1` | Depends | Upstream service error |
-| StreamAborted | 502 | `gts.cf.core.errors.err.v1~cf.oagw.stream.aborted.v1` | No | Stream connection aborted |
-| LinkUnavailable | 503 | `gts.cf.core.errors.err.v1~cf.oagw.link.unavailable.v1` | Yes | Upstream link unavailable |
-| CircuitBreakerOpen | 503 | `gts.cf.core.errors.err.v1~cf.oagw.circuit_breaker.open.v1` | Yes | Circuit breaker open |
-| PluginNotFound | 503 | `gts.cf.core.errors.err.v1~cf.oagw.plugin.not_found.v1` | No | Plugin not found |
-| ConnectionTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.connection.v1` | Yes | Connection timeout |
-| RequestTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.request.v1` | Yes | Request timeout |
-| IdleTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.idle.v1` | Yes | Idle timeout |
+| Error Type | HTTP | GTS Instance ID | Retriable | `context.reason` | Description |
+|---|---|---|---|---|---|
+| RouteError | 400 | `gts.cf.core.errors.err.v1~cf.oagw.validation.error.v1` | No | | General route validation error |
+| ValidationError | 400 | `gts.cf.core.errors.err.v1~cf.oagw.validation.error.v1` | No | | Request validation failed |
+| MissingTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.missing_target_host.v1` | No | | X-OAGW-Target-Host header required for multi-endpoint upstream with common suffix alias |
+| InvalidTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.invalid_target_host.v1` | No | | X-OAGW-Target-Host header format is invalid (must be hostname or IP, no port/path/special chars) |
+| UnknownTargetHost | 400 | `gts.cf.core.errors.err.v1~cf.oagw.routing.unknown_target_host.v1` | No | | X-OAGW-Target-Host value does not match any configured endpoint |
+| AuthenticationFailed | 401 | `gts.cf.core.errors.err.v1~cf.oagw.auth.failed.v1` | No | `AUTH_PLUGIN_FAILED`, `AUTH_PLUGIN_INTERNAL`, `AUTH_PLUGIN_NOT_FOUND` | Authentication to upstream failed |
+| SecretNotFound | 401 | `gts.cf.core.errors.err.v1~cf.oagw.secret.not_found.v1` | No | `AUTH_CREDENTIAL_NOT_FOUND` | A secret the auth config references is missing or not accessible to the tenant |
+| RouteNotFound | 404 | `gts.cf.core.errors.err.v1~cf.oagw.route.not_found.v1` | No | | No matching route found |
+| PluginInUse | 409 | `gts.cf.core.errors.err.v1~cf.oagw.plugin.in_use.v1` | No | | Plugin in use |
+| PayloadTooLarge | 413 | `gts.cf.core.errors.err.v1~cf.oagw.payload.too_large.v1` | No | | Request payload exceeds limit |
+| RateLimitExceeded | 429 | `gts.cf.core.errors.err.v1~cf.oagw.rate_limit.exceeded.v1` | Yes | | Rate limit exceeded |
+| Internal | 500 | `gts.cf.core.errors.err.v1~cf.core.err.internal.v1` | No | | Gateway fault, including an auth plugin misconfiguration |
+| ProtocolError | 502 | `gts.cf.core.errors.err.v1~cf.oagw.protocol.error.v1` | Depends | dispatch reason | Protocol-level error |
+| DownstreamError | 502 | `gts.cf.core.errors.err.v1~cf.oagw.downstream.error.v1` | Depends | dispatch reason | Upstream connection refused or closed, TLS failure, invalid response |
+| StreamAborted | 502 | `gts.cf.core.errors.err.v1~cf.oagw.stream.aborted.v1` | Depends | dispatch reason | Stream connection aborted |
+| IdpInvalidResponse | 502 | `gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1` | Yes | `REQUEST_NOT_SENT` | The identity provider an auth plugin calls sent an invalid response |
+| LinkUnavailable | 503 | `gts.cf.core.errors.err.v1~cf.oagw.link.unavailable.v1` | Depends | dispatch reason | Upstream link unavailable (DNS failure, SSRF refusal, no route, connect error) |
+| UpstreamDisabled | 503 | `gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1` | After operator action | `UPSTREAM_DISABLED` | The upstream is disabled; `Retry-After: 300` |
+| CredentialStoreUnavailable | 503 | `gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1` | Yes | `CREDENTIAL_STORE_UNAVAILABLE` | The credential store is unavailable; `Retry-After` is the store's hint (default 5 s) |
+| IdpUnavailable | 503 | `gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1` | Yes | `IDENTITY_PROVIDER_UNAVAILABLE` | The OAuth2 identity provider's token endpoint an auth plugin calls is unreachable, times out or answers 408, 429 or 5xx; `Retry-After: 5` |
+| CircuitBreakerOpen | 503 | `gts.cf.core.errors.err.v1~cf.oagw.circuit_breaker.open.v1` | Yes | `REQUEST_NOT_SENT` | The upstream's circuit breaker is open (or half-open with every probe slot taken); `Retry-After` is the time left until a probe |
+| PluginNotFound | 503 | `gts.cf.core.errors.err.v1~cf.oagw.plugin.not_found.v1` | No | | Plugin not found |
+| ConnectionTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.connection.v1` | Depends | dispatch reason | Connection timeout |
+| RequestTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.request.v1` | Depends | dispatch reason | Request timeout |
+| IdleTimeout | 504 | `gts.cf.core.errors.err.v1~cf.oagw.timeout.idle.v1` | Depends | `REQUEST_MAY_HAVE_BEEN_SENT` | Idle timeout |
+
+On the wire the 502, 503 and 504 rows are the canonical `service_unavailable` (502 through the transport status override) and `deadline_exceeded` categories; `context.reason` carries the reason. The SDK exports the values in `oagw_sdk::reason::{auth, unavailable, timeout}`.
+
+#### Dispatch Reasons
+
+Every gateway 502, 503 or 504 from the upstream exchange carries a dispatch reason. It is set from the engine error kind (or the gateway step that failed), not from the error type, and tells the client whether a retry of a non-idempotent request is safe.
+
+`REQUEST_NOT_SENT` means no byte of the HTTP request left the gateway; TCP or TLS setup may have reached the upstream. The reason covers the whole exchange: when the engine resends a request after a first attempt the upstream may have processed (a stale keep-alive connection, a graceful HTTP/2 `GOAWAY`) and the resend fails, even to connect, the reason is `REQUEST_MAY_HAVE_BEEN_SENT`.
+
+| Reason | Cases | Status | Retry |
+|---|---|---|---|
+| `REQUEST_NOT_SENT` | Connection refused; TLS handshake failure or timeout; invalid certificate | 502 | Any method |
+| | DNS failure, SSRF refusal of every resolved address, no route, other connect error | 503, `Retry-After: 10` | |
+| | Circuit breaker open | 503, `Retry-After` until the probe | |
+| | Connect timeout; endpoint selection, resolution or signing timed out | 504 | |
+| | Upstream without endpoints; outbound request that cannot be built | 502 | |
+| `REQUEST_MAY_HAVE_BEEN_SENT` | Connection closed by the upstream, read or write error, HTTP/2 error, invalid response (`Protocol`), WebSocket upgrade rejected, streamed request body failed mid-stream, any engine error kind added later | 502 | Idempotent requests only |
+| | Read or write timeout; request timeout; WebSocket upgrade timeout | 504 | |
+
+The 502 cases send `retry_after_seconds: 5`. Statuses did not change with the reasons.
+
+#### Credential Failures
+
+All auth plugins (`authenticate` and `sign`) use one mapping. Errors and logs name the auth config key, never the reference or the secret. A missing secret, a credential store outage, an identity provider outage and an invalid identity provider response are each logged once, at WARN, with the upstream id and alias, the plugin type and the caller's tenant; a missing secret also logs the credential store's error kind (not found, access denied, invalid reference). None of these failures counts toward the upstream's circuit breaker.
+
+The two backends an auth plugin depends on have their own reasons: `CREDENTIAL_STORE_UNAVAILABLE` for the platform credential store, `IDENTITY_PROVIDER_UNAVAILABLE` for the OAuth2 identity provider's token endpoint the tenant configured. The first is a platform fault, the second a fault of a third party.
+
+| Failure | Status | `context.reason` |
+|---|---|---|
+| Secret missing or not accessible to the tenant | 401 `unauthenticated` | `AUTH_CREDENTIAL_NOT_FOUND` |
+| Credential store unavailable | 503 `service_unavailable`, the store's retry hint (default 5 s) | `CREDENTIAL_STORE_UNAVAILABLE` |
+| Identity provider unreachable, timing out or answering 408, 429 or 5xx (discovery or token request), or the connection dropped while reading its answer | 503 `service_unavailable`, `retry_after_seconds: 5` | `IDENTITY_PROVIDER_UNAVAILABLE` |
+| Identity provider rejects the client: 400, 401 or 403 to the token request | 401 `unauthenticated` | `AUTH_PLUGIN_FAILED` |
+| Identity provider answers with an invalid response: any other status (discovery 400, 401 and 403 included), unparseable body, unsupported token type, invalid or zero lifetime, an access token that is empty or not a valid header value | 502 `service_unavailable` | `REQUEST_NOT_SENT` |
+| Plugin misconfiguration (bad config, an endpoint URL or scheme the HTTP client cannot use, header the gateway cannot set, signing output the gateway cannot send) | 500 `internal` | |
+| Other plugin failure (secret value not UTF-8 or not a header value, in `config` and `request_ref` mode alike; an `aws_sigv4` secret that is not an access key id, an empty secret key or a session token that is not visible ASCII; unexpected credential store error) | 401 `unauthenticated` | `AUTH_PLUGIN_INTERNAL` |
+
+A signer that has a valid config but cannot sign the request as the caller sent it (`PluginError::InvalidRequest`: an `aws_sigv4` streamed body without `unsigned_payload`, a client `X-Amz-Security-Token` without `session_token_ref`, an S3 path the gateway rewrote) is not a credential failure: 400 `invalid_argument`, reason `VALIDATION`, on the field the plugin names.
+
+An invalid identity provider response is logged and reported by a fixed class (for example "unsupported token type"), never with text from its body. An unusable token is never sent or cached.
+
+In `request_ref` mode ([ADR-0022](./ADR/0022-request-secret-refs.md)) a credential store outage also carries `CREDENTIAL_STORE_UNAVAILABLE`; a requested secret that is missing or not visible stays 403 `SECRET_REF_NOT_ACCESSIBLE`.
 
 **Standard Fields** (RFC 9457):
 - `type`: GTS identifier for the error type (used for programmatic error handling)
@@ -767,7 +894,7 @@ All gateway errors follow RFC 9457 Problem Details (`application/problem+json`) 
 OAGW distinguishes between **gateway errors** (originated by OAGW) and **upstream errors** (passthrough from upstream service) using the `X-OAGW-Error-Source` header. See [ADR: Error Source Distinction](./ADR/0013-error-source-distinction.md).
 
 - **Gateway error**: `X-OAGW-Error-Source: gateway` — response body is `application/problem+json`
-- **Upstream error**: `X-OAGW-Error-Source: upstream` — response body is passthrough from upstream as-is
+- **Upstream error**: `X-OAGW-Error-Source: upstream` — status, body and headers are passed through from upstream as-is, including the upstream's own `Retry-After` and `WWW-Authenticate`. An upstream 429 or 503 differs from a gateway one only by this header.
 
 Header may be stripped by intermediaries. For critical error handling, clients should combine header check with error response structure inspection.
 
@@ -825,6 +952,9 @@ sequenceDiagram
     Chain-->>DP: validated request
     DP->>Chain: transform_request(request)
     Chain-->>DP: transformed request
+    DP->>DP: select endpoint, set Host, build URL
+    DP->>Auth: sign(final request)
+    Auth-->>DP: headers to set, query
     DP->>US: HTTP request
     US-->>DP: HTTP response
     DP->>Chain: transform_response(response)
@@ -834,6 +964,8 @@ sequenceDiagram
 ```
 
 With a database, `resolve_proxy_target` reads the upstream candidates and routes through the per-replica proxy configuration cache; a hit runs no query (§4.1).
+
+**Rate limits** (after endpoint selection, before the request is sent; [ADR-0004](./ADR/0004-rate-limiting.md)): buckets are checked narrowest first: the route's own limit on the route's bucket, then the enforced limit of each ancestor's route the matched route shadows on that route's own bucket (closest ancestor first), then the upstream's tenant-merged limit on the upstream's bucket, then a shared budget's pool bucket when the limit draws on one. A bucket that admitted the request stays charged when a later one rejects it, so a request a route limit rejects is not charged to the upstream bucket or to the pool other tenants draw on. Route limits are not merged into the upstream's, so whichever route matches the upstream bucket keeps one config. A rejection reports the rejecting bucket's numbers and `Retry-After`. `scope: ip` keys on the client address the API gateway resolved and passes as the `toolkit::http::ClientIp` request extension: the connection's peer address, or with the gateway's `trusted_proxy_hops` ≥ 1 the `X-Forwarded-For` entry the outermost trusted proxy wrote. OAGW does not read `X-Forwarded-For` or `X-Real-IP` itself; a request without the extension (an in-process SDK call, or a gear behind the edge's reverse proxy, which strips both headers) uses the shared `unknown` bucket.
 
 #### Management Operation Flow
 
@@ -906,7 +1038,7 @@ See [ADR: Resource Identification](./ADR/0010-resource-identification.md) for th
 |---|---|
 | Find Upstream by Alias | One query for the alias across the tenant chain (`alias = ? AND tenant_id IN (chain)`); the closest enabled, visible upstream wins in application code |
 | List Upstreams for Tenant | The tenant's own upstreams, ordered by id, offset-paginated |
-| Find Matching Route for Request | Match by `(upstream_ids, method, longest path prefix, priority, lowest route ID)` for HTTP, where `upstream_ids` is the selected upstream followed by its ancestor upstreams closest-first (see ADR-0018); `(upstream_id, service, method)` for gRPC (planned/Phase 3 — no gRPC proxy code path is currently implemented or reachable) |
+| Find Matching Route for Request | Match by `(upstream_ids, method, longest whole-segment path prefix, priority, lowest route ID)` for HTTP, where `upstream_ids` is the selected upstream followed by its ancestor upstreams closest-first (see ADR-0018); `(upstream_id, service, method)` for gRPC (planned/Phase 3 — no gRPC proxy code path is currently implemented or reachable) |
 | Resolve Effective Configuration | Walk hierarchy, collect bindings, merge from root to child per sharing modes |
 | List Routes by Upstream | Filter by `upstream_id` with tenant scoping |
 | Track Plugin Usage | Scan `oagw_upstream_plugin`, `oagw_route_plugin`, and `auth_plugin_uuid` columns for references |
@@ -930,18 +1062,21 @@ The endpoint selector (`PoolEndpointSelector`) caches each upstream's endpoint p
 
 Prometheus metrics at `/metrics` (admin-only):
 
-- `oagw_requests_total{host, http.request.method, http.route, http.response.status_code}` — counter (label keys follow OTel HTTP semantic conventions; numeric status; method normalized to a standard verb or `_OTHER`; aligned with the inbound API Gateway)
-- `oagw_request_duration_seconds{host, http.route, phase}` — histogram (`phase`: `total` for the whole request, `resolve` for the upstream and route lookup, `auth` for the auth plugin; a request that does not resolve records `resolve` with `host` and `http.route` set to `unknown`)
-- `oagw_requests_in_flight{host}` — gauge
-- `oagw_errors_total{host, http.route, error_type}` — counter
-- `oagw_circuit_breaker_state{host}` — gauge
-- `oagw_rate_limit_exceeded_total{host, path}` — counter
+- `oagw_requests_total{host, http.request.method, http.route, http.response.status_code, credential_mode}` — counter, one per request with a response: the upstream's status, or for a gateway error the status the client gets (a denied `proxy:invoke` check, and a granted request the REST handler rejects before the Data Plane runs, under `host` and `http.route` `unknown`); a request the client dropped before its response head is only in `oagw_errors_total` as `Cancelled` (label keys follow OTel HTTP semantic conventions; numeric status; method normalized to a standard verb or `_OTHER`; aligned with the inbound API Gateway; `credential_mode` is `config` or `request_ref`, see [ADR-0022](ADR/0022-request-secret-refs.md), and `unknown` before the upstream resolves)
+- `oagw_request_duration_seconds{host, http.route, phase}` — histogram (`phase`: `total` from request start to the response head or the gateway error, the body not included; `resolve` for the upstream and route lookup; `auth` for the auth plugin; `sign` for its signing phase ([ADR-0023](ADR/0023-request-signing.md)), only for a plugin that signs; a request that does not resolve records `resolve` with `host` and `http.route` set to `unknown`)
+- `oagw_stream_duration_seconds{host, http.route, outcome}` — histogram, request start to the end of the response body (`outcome`: `completed` at the end of the body or once its `Content-Length` went through, `error` for an upstream failure or idle timeout, `shutdown` for a gateway stop, `cancelled` when the client went away); every upstream body, SSE or not; none for a response without a body
+- `oagw_requests_in_flight{host}` — gauge, from the start of the Data Plane pipeline until the response body ends, fails or is dropped (`host` `unknown` until the upstream is resolved)
+- `oagw_errors_total{host, http.route, error_type, credential_mode}` — counter (gateway errors, and `Cancelled`; upstream error responses are not errors here; `credential_mode` is `unknown` before the upstream resolves)
+- `oagw_rate_limit_exceeded_total{host, http.route, bucket}` — counter (`bucket`: `route`, `shadowed_route`, `upstream`, `pool`)
+- `oagw_active_websocket_sessions{host}` — gauge; `oagw_websocket_session_duration_seconds{host, outcome}` — histogram, recorded at session teardown (`completed` when the tunnel closed, from either side; `error` on an idle timeout or an IO error; `shutdown` for a gateway stop; `cancelled` when the bridge task was dropped or panicked)
 
-**Circuit Breaker Metrics**:
-- `oagw_circuit_breaker_transitions_total{host, from_state, to_state}` — counter
+**Circuit Breaker Metrics** (the shared `toolkit-resilience` names, without `metrics.prefix`; `resilience.name` is `{alias}/{upstream_id}`, or `{alias}/{upstream_id}/{owner_id}` when the effective config is another upstream's; aliases alone repeat across tenants). Unlike `host`, this label is per upstream: one set of series for each upstream (and config owner) with an enabled breaker that served a request, which tenants create. The series of an evicted breaker stay in the exporter until restart; a deployment with many tenant upstreams should drop or aggregate `resilience.name` in the collector:
+- `resilience.circuit_breaker.calls{resilience.name, resilience.outcome}` — counter (`success`, `failure`, `ignored`, `rejected`)
+- `resilience.circuit_breaker.state{resilience.name, resilience.state}` — up-down counter, breakers in each state (`closed`, `open`, `half_open`)
+- `resilience.circuit_breaker.transitions{resilience.name, resilience.previous_state, resilience.state}` — counter
 
 **Rate Limit Metrics**:
-- `oagw_rate_limit_usage_ratio{host, path}` — gauge (0.0 to 1.0)
+- `oagw_rate_limit_usage_ratio{host, http.route, bucket}` — gauge (0.0 to 1.0), one series per bucket checked (`route`, `shadowed_route`, `upstream`, `pool`); the shadowed ancestor routes of one route share the `shadowed_route` series, written once per request with the highest ratio among them
 - `oagw_rate_limit_buckets_evicted_total` — counter (idle buckets evicted by the periodic sweep)
 - `oagw_rate_limit_buckets` — gauge (buckets held in memory after the last sweep)
 
@@ -989,13 +1124,13 @@ Structured JSON logs to stdout, ingested by centralized logging system (e.g., EL
 
 **Log Levels**:
 - `INFO`: Successful requests, normal operations
-- `WARN`: Rate limit exceeded, circuit breaker open, retry guidance emitted (`Retry-After`)
+- `WARN`: Rate limit exceeded, circuit breaker opened (once per transition; a rejected request logs at `DEBUG`), retry guidance emitted (`Retry-After`)
 - `ERROR`: Upstream failures, timeouts, auth failures
 - `DEBUG`: Detailed plugin execution (disabled in production)
 
 ### 4.4 Security Considerations
 
-- **SSRF**: IP pinning rules, allowed segments, scheme allowlist (HTTPS-only for MVP)
+- **SSRF**: endpoint IP and hostname deny lists checked on write, resolved addresses checked on connect, scheme allowlist (HTTPS-only unless `allow_http_upstream`); see [Security Considerations](#security-considerations)
 - **CORS**: Built-in handler per upstream/route, secure defaults (disabled unless configured)
 - **HTTP smuggling**: Strict header parsing, reject CR/LF, validate CL/TE combinations
 - **HTTP/2**: Adaptive per-host version detection with cached capability (1h TTL)
@@ -1022,7 +1157,7 @@ Structured JSON logs to stdout, ingested by centralized logging system (e.g., EL
 5. [Security] TLS certificate pinning — Pin specific certificates/public keys for critical upstreams to prevent MITM attacks
 6. [Security] mTLS support — Mutual TLS for client certificate authentication with upstream services
 7. [Protocol] gRPC support — HTTP/2 multiplexing with content-type detection — [ADR: gRPC Support](./ADR/0014-grpc-support.md) — **Requires prototype**
-8. [Deployment] Registry-only mode — All upstreams, routes, and plugin configs sourced exclusively from type registry (no management API CRUD). The registry reconcile already materializes registry entities through the full domain validation pipeline, reconciles them with the registry (at startup in memory, in a background task on a database), keeps them read-only through the Management API, and soft-fails invalid or conflicting entities: each is skipped with an error log and counted in `oagw_registry_provisioning_failures_total{kind,reason}` instead of blocking startup ([ADR: Optional Persistence](./ADR/0018-optional-persistence.md#provisioning-from-the-types-registry)). A registry-only mode would still require: (a) config flag to disable CRUD for API-managed upstreams and routes, (b) a validation feedback mechanism so config authors can discover rejected entities — e.g., status writeback on GTS entities or a dedicated provisioning status endpoint. This is a platform-level concern: any gear consuming GTS entities for configuration faces the same write-time validation gap.
+8. [Deployment] Registry-only mode — All upstreams, routes, and plugin configs sourced exclusively from type registry (no management API CRUD). The registry reconcile already materializes registry entities through the full domain validation pipeline, reconciles them with the registry (in a background task, and in memory also once at startup), keeps them read-only through the Management API, and soft-fails invalid or conflicting entities: each is skipped with an error log and counted in `oagw_registry_provisioning_failures_total{kind,reason}` instead of blocking startup ([ADR: Optional Persistence](./ADR/0018-optional-persistence.md#provisioning-from-the-types-registry)). A registry-only mode would still require: (a) config flag to disable CRUD for API-managed upstreams and routes, (b) a validation feedback mechanism so config authors can discover rejected entities — e.g., status writeback on GTS entities or a dedicated provisioning status endpoint. This is a platform-level concern: any gear consuming GTS entities for configuration faces the same write-time validation gap.
 
 ## 5. Traceability
 
@@ -1067,3 +1202,5 @@ Structured JSON logs to stdout, ingested by centralized logging system (e.g., EL
 | [0019 Upstream Proxy Engine](./ADR/0019-upstream-proxy-engine.md) | `cpt-cf-oagw-tech-dependencies`, `cpt-cf-oagw-seq-proxy-flow` |
 | [0020 Proxy Configuration Cache](./ADR/0020-proxy-config-cache.md) | `cpt-cf-oagw-tech-dependencies`, `cpt-cf-oagw-seq-proxy-flow` |
 | [0021 Named Upstream Credentials](./ADR/0021-upstream-credentials.md) (proposed) | `cpt-cf-oagw-fr-upstream-credentials`, `cpt-cf-oagw-seq-proxy-flow` |
+| [0022 Per-Request Secret References](./ADR/0022-request-secret-refs.md) (proposed) | `cpt-cf-oagw-fr-request-secret-refs`, `cpt-cf-oagw-seq-proxy-flow` |
+| [0023 Late Request Signing for Auth Plugins](./ADR/0023-request-signing.md) (proposed) | `cpt-cf-oagw-component-model`, `cpt-cf-oagw-seq-proxy-flow` |

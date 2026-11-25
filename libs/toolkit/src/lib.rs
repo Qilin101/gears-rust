@@ -67,6 +67,10 @@
 #[cfg(test)]
 extern crate self as toolkit;
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) mod test_tracing;
+
 pub use anyhow::Result;
 pub use async_trait::async_trait;
 
@@ -153,8 +157,7 @@ pub use domain::{DomainErrorMarker, DomainModel};
 // Directory API for service discovery
 pub mod directory;
 pub use directory::{
-    DirectoryClient, GrpcServiceInfo, LocalDirectoryClient, RegisterInstanceInfo, ServiceEndpoint,
-    ServiceInstanceInfo,
+    DirectoryClient, GrpcServiceInfo, RegisterInstanceInfo, ServiceEndpoint, ServiceInstanceInfo,
 };
 
 // REST healthcheck infrastructure. Module private so types have one public path

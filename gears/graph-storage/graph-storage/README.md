@@ -40,6 +40,12 @@ graph-storage:
     # embedding_remote_api_key_env: "GRAPH_STORAGE_EMBEDDING_API_KEY"
 ```
 
+Tenant offboarding runs in the background; three keys tune it and all have
+defaults: `offboarding_batch` (rows per transaction, default 1 000),
+`offboarding_interval_secs` (seconds between passes, default 10) and
+`offboarding_step_timeout_secs` (how long one step may take before it counts
+as failed, default 60).
+
 One deployment runs one embedding provider. The gear records the provider's
 embedding-space identity on first use and, on a later boot with a different
 provider, blocks the vector arm until the graph is re-embedded — lexical search,
@@ -155,16 +161,40 @@ Each is the shipped behaviour, with the contract that fixes it.
   requests stay. A replacement, like every write, touches one tenant: the
   target a call names (`?tenant=`, `in_tenant`), and otherwise the caller's
   own, whatever subtree a read without a target may see.
-- **A tombstoned node key is not reusable before purge**, and purge is not
-  built; a tombstoned edge is revived by the next upsert that names it
-  (DESIGN § Soft Delete Contract, rules 4 and 6).
+- **A tombstoned node key is not reusable before purge**; a tombstoned edge
+  is revived by the next upsert that names it (DESIGN § Soft Delete Contract,
+  rules 4 and 6). **Purge** (`DELETE /nodes/{key}?mode=purge`,
+  `purge_node`, the `purge` permission) removes a node, live or tombstoned,
+  and every edge incident to it, analysis edges included, and frees the key;
+  purging an absent key is `204` / `purged_nodes: 0`. That makes a retry
+  safe only while the key is not written again in between; where keys are
+  reused, purge with `?expected_created_at=<envelope.created_at>`, which
+  answers `409` for any other node under the key, live or tombstoned
+  (`?only_tombstoned=true` refuses a live node only). The precondition
+  compares creation timestamps, not a unique instance id (#5944). A scope replacement
+  removes tombstoned members as well as live ones. The gear removes rows;
+  dead tuples, WAL and backups follow the deployment's retention.
 - **Adjacency on a node read is bounded per direction** by
   `node_read_max_adjacency` (100 by default, at most 1 000): outgoing and
   incoming are cut separately, so one read carries up to twice that many
-  entries, with a truncation flag and no cursor. To list every edge of a hub,
-  walk it: `POST /graph/traverse` with the node as the seed and depth 1 returns
-  its edges, up to `traversal_max_nodes` (1 000 by default, at most 10 000)
-  neighbours.
+  entries, with a truncation flag and no cursor. **Every edge of a hub is
+  listed a page at a time** by `GET /nodes/{node_key}/edges`
+  (`list_node_edges` in process): payloads and envelopes included, in storage
+  order, narrowed by `direction`, `edge_type_pattern` and `discriminator`
+  (repeat a key for several values), at most `edge_list_max_page` (200 by
+  default, at most 1 000) a page. An edge is listed only when both its
+  endpoints are visible to the caller, so a page can come back short, or
+  empty, and still carry a `next_cursor`: keep paging until it is null. The
+  cursor is bound to the node, the direction and the filters as sent, and
+  refused under others; it binds the patterns, not the types they match, so a
+  type registered mid-listing does not invalidate it.
+- **A traversal returns edge payloads when asked.** `include_edge_payload:
+  true` on `POST /graph/traverse` or `/graph/neighborhood` puts each edge's
+  payload on its `EdgeRef`, read once per piece of the answer rather than
+  once per edge, and counted against `response_max_bytes` like node payloads
+  -- a walk that fits without them can be cut, with `truncated:
+  response_bytes`, once they are carried. Without the flag `payload` is
+  absent.
 - **`$filter` and `$orderby` reach payload attributes the type declares** in
   its `index` trait (`payload/severity`). Equality on a string, boolean or
   date-time value is served by one GIN over the payload; equality on a number,
@@ -227,8 +257,8 @@ bites ("Found while building the prototype").
 **Deferred features** (the API and schema leave room; nothing is built): content
 chunking and heavy-content offload; labels; change events; the admission layer
 beyond per-request bounds (per-tenant and global concurrency, queues, reserved
-connections, aggregate response bounds); tenant offboarding and deletion
-monotonicity; the analytics topology role and metric annotation; the
+connections, aggregate response bounds); deletion monotonicity across a
+restore (the deletion ledger); the analytics topology role and metric annotation; the
 index-activation lifecycle and per-path index DDL; the re-embedding lifecycle
 that opens a new embedding epoch; observability counters; the retained
 type-revision history; runtime plugin registration and selection (the built-in
@@ -236,6 +266,14 @@ store, engine and embedding provider are constructed directly, and no
 independently developed implementation can reach the service yet; #4873).
 
 **Narrower than documented** (built, with a stated gap):
+
+- *Tenant offboarding has no deletion ledger.* A tenant the tenant resolver
+  reports deleted is fenced and its rows are removed in the background
+  (`POST`/`GET /graph-storage/v1/tenants/{tenant_id}/offboarding`), but the
+  deletion generation is recorded and not checked, and a backup restored from
+  before the offboarding brings the tenant back unnoticed. In-flight writes are
+  refused at their commit rather than cancelled (DESIGN § Tenant Offboarding
+  and Deletion Monotonicity).
 
 - *Ordinary ingests do not take the shared scope lock the ingest protocol
   describes* — a scope replacement fences on a monotonic generation instead,

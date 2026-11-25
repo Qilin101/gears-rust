@@ -120,6 +120,31 @@ impl InstanceState {
     }
 }
 
+/// What an instance declares about itself in `RegisterInstance` / `Heartbeat`
+/// (`cpt-cf-adr-directory-persistence-and-replication`). The directory derives
+/// the observable [`InstanceState`] from this
+/// plus the instance's lease; this is the only liveness signal an instance
+/// writes. Distinct from [`InstanceState`], which is the *observed* projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReportedState {
+    /// Not yet serving (starting up, or failing a readiness check).
+    #[default]
+    Starting,
+    /// Serving and heartbeating.
+    Serving,
+    /// Gracefully draining; upstreams should stop routing new work.
+    Draining,
+}
+
+/// Acknowledgement returned by a successful registration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegisterAck {
+    /// Lease TTL the directory granted, if it returned one. A new worker
+    /// heartbeats every `lease_ttl / 3`; `None` means the directory returned no
+    /// TTL and the worker falls back to its configured heartbeat interval.
+    pub lease_ttl: Option<std::time::Duration>,
+}
+
 /// Information about a service instance
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -139,9 +164,10 @@ pub struct ServiceInstanceInfo {
     /// Stable content token for the published `OpenAPI` spec, if any.
     ///
     /// Enumeration is deliberately spec-free: only this hash rides along, never
-    /// the full document (fetched out-of-band via
-    /// [`DirectoryClient::get_openapi_spec`]). The hash lets a consumer detect a
-    /// spec change without inlining N copies of the document.
+    /// the full document (the edge fetches it from the instance's
+    /// `/.well-known/openapi.json` and verifies it against this hash). The hash
+    /// lets a consumer detect a spec change without inlining N copies of the
+    /// document.
     pub openapi_spec_hash: Option<String>,
     /// Published gRPC services as `(service name, endpoint)` pairs.
     ///
@@ -253,10 +279,18 @@ pub struct RegisterInstanceInfo {
     pub version: Option<String>,
     /// Optional REST endpoint (HTTP base URL) exposed by the gear.
     pub rest_endpoint: Option<ServiceEndpoint>,
-    /// Optional `OpenAPI` spec (JSON) published by the gear.
-    pub openapi_spec: Option<String>,
+    /// Lowercase-hex SHA-256 of the `OpenAPI` document the instance serves, or
+    /// `None` if the gear publishes no document. This is what the directory
+    /// stores and returns in [`ServiceInstanceInfo::openapi_spec_hash`]; the
+    /// edge fetches the document from the instance and verifies it against the
+    /// hash.
+    pub openapi_spec_hash: Option<String>,
     /// Stable addressing labels for this instance (k8s `matchLabels` style).
     pub labels: BTreeMap<String, String>,
+    /// State the registrant declares about itself, or `None` when
+    /// unspecified. On a new record `None` means [`ReportedState::Starting`];
+    /// on a re-registration `None` leaves the stored state unchanged.
+    pub reported_state: Option<ReportedState>,
 }
 
 impl RegisterInstanceInfo {
@@ -292,10 +326,10 @@ impl RegisterInstanceInfo {
         self
     }
 
-    /// Set the published `OpenAPI` spec (JSON).
+    /// Set the lowercase-hex SHA-256 of the published `OpenAPI` document.
     #[must_use]
-    pub fn with_openapi_spec(mut self, openapi_spec: impl Into<String>) -> Self {
-        self.openapi_spec = Some(openapi_spec.into());
+    pub fn with_openapi_spec_hash(mut self, openapi_spec_hash: impl Into<String>) -> Self {
+        self.openapi_spec_hash = Some(openapi_spec_hash.into());
         self
     }
 
@@ -313,6 +347,13 @@ impl RegisterInstanceInfo {
     #[must_use]
     pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.labels = labels;
+        self
+    }
+
+    /// Set the state the registrant declares about itself.
+    #[must_use]
+    pub fn with_reported_state(mut self, reported: ReportedState) -> Self {
+        self.reported_state = Some(reported);
         self
     }
 }
@@ -470,16 +511,14 @@ pub trait DirectoryClient: Send + Sync {
     /// make REST requests to the resolved gear.
     async fn resolve_rest_service(&self, gear_name: &str) -> Result<ServiceEndpoint>;
 
-    /// Retrieve the `OpenAPI` spec (JSON) published by a gear.
-    async fn get_openapi_spec(&self, gear_name: &str) -> Result<String>;
-
     /// List all service instances for a given gear.
     ///
     /// Entries are **spec-free**: only the `openapi_spec_hash` is carried, never
     /// the full `OpenAPI` document, so a multi-instance response stays
-    /// bounded regardless of spec size. Callers fetch the document out-of-band
-    /// via [`get_openapi_spec`](Self::get_openapi_spec); the hash lets a consumer
-    /// detect a spec change without inlining N copies of the document.
+    /// bounded regardless of spec size. Consumers fetch the document directly
+    /// from the instance's `/.well-known/openapi.json` and verify it against the
+    /// hash; the hash lets a consumer detect a spec change without inlining N
+    /// copies of the document.
     ///
     /// An endpoint-less instance is still returned (`endpoint`/`rest_endpoint` =
     /// `None`, never an empty-URI sentinel): *no-endpoint, not an error*. Only
@@ -507,8 +546,8 @@ pub trait DirectoryClient: Send + Sync {
     ///
     /// Returned entries are **spec-free** on every implementation — the full
     /// `OpenAPI` document is omitted (only its hash is carried), so the
-    /// polled resolve payload stays bounded; the caller fetches documents via
-    /// [`get_openapi_spec`](Self::get_openapi_spec). This holds regardless of
+    /// polled resolve payload stays bounded; the caller fetches documents from
+    /// the instance's `/.well-known/openapi.json`. This holds regardless of
     /// whether the selector is empty. The default body enumerates via
     /// [`list_instances`](Self::list_instances) and filters in-process;
     /// transport-backed clients (e.g. the gRPC client) override it to push the
@@ -542,10 +581,9 @@ pub trait DirectoryClient: Send + Sync {
     /// Used by the edge gateway to discover which gears (and their REST
     /// endpoints) to reverse-proxy. This is a lightweight discovery snapshot.
     /// Like every enumeration path, it is **spec-free**: entries carry only the
-    /// `openapi_spec_hash`, never the full `OpenAPI` document, even when the
-    /// backing store holds a stored specification. The edge fetches a gear's
-    /// document once, on first discovery, via
-    /// [`get_openapi_spec`](Self::get_openapi_spec).
+    /// `openapi_spec_hash`, never the full `OpenAPI` document. The edge fetches
+    /// a gear's document from the instance's `/.well-known/openapi.json` when it
+    /// sees a hash it has not cached, and verifies it against the hash.
     ///
     /// The returned instances also do **not** carry `labels`: every
     /// implementation applies [`ServiceInstanceInfo::without_labels`] so the
@@ -557,11 +595,43 @@ pub trait DirectoryClient: Send + Sync {
     /// Register a new gear instance with the directory
     async fn register_instance(&self, info: RegisterInstanceInfo) -> Result<()>;
 
+    /// Register a new gear instance and learn the lease TTL the directory
+    /// granted.
+    ///
+    /// The default delegates to [`register_instance`](Self::register_instance)
+    /// and reports no TTL, so existing implementations keep working unchanged;
+    /// the real clients (in-process and gRPC) override it to surface
+    /// `lease_ttl_ms`. Callers that need the lease to pace their heartbeats
+    /// (the presence loop) use this instead of `register_instance`.
+    async fn register_with_lease(&self, info: RegisterInstanceInfo) -> Result<RegisterAck> {
+        self.register_instance(info)
+            .await
+            .map(|()| RegisterAck::default())
+    }
+
     /// Deregister a gear instance (for graceful shutdown)
     async fn deregister_instance(&self, gear: &str, instance_id: &str) -> Result<()>;
 
     /// Send a heartbeat for a gear instance to indicate it's still alive
     async fn send_heartbeat(&self, gear: &str, instance_id: &str) -> Result<()>;
+
+    /// Send a heartbeat carrying the state the instance reports about itself:
+    /// `Serving` in steady state, `Draining` while shutting down.
+    ///
+    /// The default ignores `reported` and delegates to
+    /// [`send_heartbeat`](Self::send_heartbeat), so existing implementations
+    /// keep working; the real clients override it to carry the state (and to
+    /// map an unknown instance onto [`DirectoryNotFound`]). `None` means the
+    /// caller does not report a state, which the directory reads as `Serving`.
+    async fn heartbeat(
+        &self,
+        gear: &str,
+        instance_id: &str,
+        reported: Option<ReportedState>,
+    ) -> Result<()> {
+        let _ = reported;
+        self.send_heartbeat(gear, instance_id).await
+    }
 }
 
 #[cfg(test)]
@@ -598,7 +668,7 @@ mod tests {
         assert_eq!(info.instance_id, "instance1");
         assert_eq!(info.grpc_services.len(), 1);
         assert!(info.rest_endpoint.is_none());
-        assert!(info.openapi_spec.is_none());
+        assert!(info.openapi_spec_hash.is_none());
         assert!(info.labels.is_empty());
     }
 
@@ -611,7 +681,8 @@ mod tests {
             version: Some("2.0.0".to_owned()),
             labels: BTreeMap::new(),
             rest_endpoint: Some(ServiceEndpoint::http("billing", 8080)),
-            openapi_spec: Some("{\"openapi\":\"3.1.0\"}".to_owned()),
+            openapi_spec_hash: Some("a".repeat(64)),
+            reported_state: None,
         };
 
         assert_eq!(info.gear, "billing");
@@ -619,7 +690,7 @@ mod tests {
             info.rest_endpoint.as_ref().unwrap().uri,
             concat!("http", "://billing:8080")
         );
-        assert!(info.openapi_spec.is_some());
+        assert!(info.openapi_spec_hash.is_some());
     }
 
     fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -666,9 +737,6 @@ mod tests {
         }
         async fn resolve_rest_service(&self, gear_name: &str) -> Result<ServiceEndpoint> {
             Err(DirectoryNotFound::new(format!("gear {gear_name}")).into())
-        }
-        async fn get_openapi_spec(&self, gear_name: &str) -> Result<String> {
-            Err(DirectoryNotFound::new(format!("spec {gear_name}")).into())
         }
         async fn list_instances(&self, gear: &str) -> Result<Vec<ServiceInstanceInfo>> {
             Ok(self

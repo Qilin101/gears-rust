@@ -4,13 +4,17 @@
 //! mutation's transaction, read back for the per-(setting, scope) history, and
 //! pruned by retention and nothing else.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use time::{Duration, OffsetDateTime};
-use toolkit_db::odata::{FieldToColumn, LimitCfg, ODataFieldMapping};
+use toolkit_db::odata::{
+    FieldToColumn, LimitCfg, ODataFieldMapping, paginate_odata, parse_cursor_value,
+};
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt};
 use toolkit_odata::filter::{FieldKind, FilterField};
-use toolkit_odata::{ODataQuery, SortDir};
+use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -19,7 +23,12 @@ use crate::audit::{
     StoredAuditRecord,
 };
 use crate::domain::error::DomainError;
+use crate::domain::metric_labels::AuditKind;
 use crate::domain::odata::Listing;
+#[cfg(test)]
+use crate::domain::ports::NoMetrics;
+use crate::domain::ports::SecurityMetrics;
+use crate::domain::resolution::SUBTREE_BUDGET;
 use crate::infra::storage::entity::audit_record::{self, Entity as AuditEntity};
 use crate::infra::storage::listing::list_counted;
 
@@ -29,9 +38,35 @@ const HISTORY_LIMIT_CFG: LimitCfg = LimitCfg {
     max: 200,
 };
 
-/// The store. Stateless: every operation takes its connection.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AuditStore;
+/// The store. Every operation takes its connection; the only state is the
+/// port the appends are counted on.
+#[derive(Clone)]
+pub struct AuditStore {
+    metrics: Arc<dyn SecurityMetrics>,
+}
+
+impl AuditStore {
+    /// A store whose appends are counted on `metrics`.
+    #[must_use]
+    pub fn new(metrics: Arc<dyn SecurityMetrics>) -> Self {
+        Self { metrics }
+    }
+}
+
+/// A store that counts nothing: the test binding. Production code builds the
+/// store with the counting port in `init`; it never binds this one.
+#[cfg(test)]
+impl Default for AuditStore {
+    fn default() -> Self {
+        Self::new(Arc::new(NoMetrics))
+    }
+}
+
+impl std::fmt::Debug for AuditStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditStore").finish_non_exhaustive()
+    }
+}
 
 fn unavailable(err: impl std::fmt::Display) -> DomainError {
     DomainError::dependency_unavailable("audit store", "complete the operation", err)
@@ -90,13 +125,101 @@ fn to_domain(model: audit_record::Model) -> Result<StoredAuditRecord, DomainErro
     })
 }
 
-/// The cursor binding of one history: the `(declaration_key, tenant)` pair.
-fn history_binding(declaration_key: &str, tenant_id: Uuid) -> String {
+/// The bind parameters a subtree history statement carries beside its tenant
+/// list: the key, the keyset cursor's values and the page size, with
+/// room to spare for what the caller's access scope adds.
+const SUBTREE_STATEMENT_HEADROOM: usize = 64;
+
+/// The fewest bind parameters one statement may carry on a backend this gear
+/// runs on: `SQLite`'s default `SQLITE_MAX_VARIABLE_NUMBER`. `PostgreSQL`'s
+/// wire protocol counts them in sixteen bits and takes 65 535.
+const BIND_PARAMETER_FLOOR: usize = 32_766;
+
+// The subtree history names every tenant of the walk in one `IN` list: the
+// target and at most the subtree budget of descendants. That list fits one
+// statement on both backends, so it is never chunked — chunks would each need
+// their own page and a merge to stay newest first. A budget raised past the
+// floor fails the build here instead of a statement at run time.
+const _: () = assert!(SUBTREE_BUDGET + 1 + SUBTREE_STATEMENT_HEADROOM <= BIND_PARAMETER_FLOOR);
+
+/// Which result set a history cursor pages: one scope's records, or the
+/// records of a tenant and of the tenants below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryMode {
+    /// The history of one `(setting, scope)` pair.
+    Scope,
+    /// The history of a setting at a tenant and across its subtree.
+    Subtree,
+}
+
+/// The cursor binding of one history: the `(declaration_key, tenant)` pair
+/// and the mode. The two modes of one pair are two result sets, so a cursor
+/// of one is refused by the other as a cursor of another pair is.
+///
+/// The single-scope binding hashes the pair alone, as it did before the
+/// subtree mode existed, so a cursor minted then still continues its history.
+fn history_binding(declaration_key: &str, tenant_id: Uuid, mode: HistoryMode) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     declaration_key.hash(&mut hasher);
     tenant_id.hash(&mut hasher);
+    if mode == HistoryMode::Subtree {
+        "descendants".hash(&mut hasher);
+    }
     format!("{:016x}", hasher.finish())
+}
+
+/// The page request of a history read: newest first, the caller's `limit` and
+/// `cursor`, and the binding the cursor must carry.
+fn history_page_query(query: &ODataQuery, binding: String) -> ODataQuery {
+    ODataQuery {
+        filter: None,
+        order: toolkit_odata::ODataOrderBy(vec![toolkit_odata::OrderKey {
+            field: "occurred_at".to_owned(),
+            dir: SortDir::Desc,
+        }]),
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+        filter_hash: Some(binding),
+        select: None,
+    }
+}
+
+/// A failed page read as the history reports it. A cursor that does not
+/// decode or was minted for another history, and a limit out of range, are
+/// the caller's to correct. The database failing is not, and is an internal
+/// fault, as the platform maps a database error: the pager hands it over as
+/// text only, so nothing tells an outage from any other failure, and the text
+/// stays in the diagnostic, which the caller is not shown.
+fn page_error(err: &toolkit_odata::Error) -> DomainError {
+    use toolkit_odata::Error;
+    match err {
+        Error::Db(_) => DomainError::Internal {
+            diagnostic: err.to_string(),
+        },
+        // The pager was built without what the history's fixed order needs:
+        // a fault of this build, not of the request.
+        Error::ParsingUnavailable(_) => DomainError::Internal {
+            diagnostic: format!("the audit history cannot be paged: {err}"),
+        },
+        Error::InvalidFilter(_)
+        | Error::InvalidOrderByField(_)
+        | Error::OrderMismatch
+        | Error::FilterMismatch
+        | Error::InvalidCursor
+        | Error::InvalidLimit
+        | Error::OrderWithCursor
+        | Error::CursorInvalidBase64
+        | Error::CursorInvalidJson
+        | Error::CursorInvalidVersion
+        | Error::CursorInvalidKeys
+        | Error::CursorInvalidFields
+        | Error::CursorInvalidDirection => DomainError::Validation {
+            field: "query".to_owned(),
+            code: crate::field::ODATA_QUERY,
+            message: err.to_string(),
+        },
+    }
 }
 
 /// The orderable surface of the history read: newest first, ties broken by id.
@@ -163,6 +286,11 @@ impl AuditSink for AuditStore {
         record: AuditRecord,
     ) -> Result<(), DomainError> {
         // @cpt-begin:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-4
+        let kind = if record.operation == AuditOperation::SecretUse {
+            AuditKind::SecretUse
+        } else {
+            AuditKind::Mutation
+        };
         let active = audit_record::ActiveModel {
             id: Set(Uuid::new_v4()),
             resource: Set(record.resource),
@@ -197,11 +325,18 @@ impl AuditSink for AuditStore {
         // else is tracked — the record lives or dies with the mutation.
         toolkit_db::secure::secure_insert::<AuditEntity>(active, scope, conn)
             .await
-            .map(|_| ())
-            .map_err(unavailable)
+            .map_err(unavailable)?;
         // @cpt-end:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-7
         // @cpt-end:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-6
         // @cpt-end:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-5
+        // @cpt-begin:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-9
+        // Counted on the successful insert, inside the mutation's transaction: a
+        // failed insert counts nothing, but a transaction that rolls back
+        // afterwards overcounts by the records already appended (the DESIGN
+        // accepts this).
+        self.metrics.audit_event(kind);
+        Ok(())
+        // @cpt-end:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-9
     }
 }
 
@@ -210,13 +345,14 @@ impl AuditStore {
     /// with how many records the pair holds in all.
     ///
     /// An index lookup on `(declaration_key, tenant_id)`; `query` contributes
-    /// only `limit` and `cursor`, the order being fixed.
+    /// only `limit` and `cursor`, the order being fixed. A read, so it needs
+    /// no store — nothing is appended, nothing counted.
     ///
     /// # Errors
-    /// [`DomainError::Validation`] on a malformed cursor; [`DomainError`] when
-    /// the read fails.
+    /// [`DomainError::Validation`] on a malformed cursor;
+    /// [`DomainError::Internal`] when the database fails the read; [`DomainError`]
+    /// when a record does not decode.
     pub async fn history<C: DBRunner>(
-        &self,
         conn: &C,
         scope: &AccessScope,
         declaration_key: &str,
@@ -237,20 +373,14 @@ impl AuditStore {
                     .add(audit_record::Column::TenantId.eq(tenant_id))
                     .add(audit_record::Column::TenantId.is_null()),
             );
-        let paged = ODataQuery {
-            filter: None,
-            order: toolkit_odata::ODataOrderBy(vec![toolkit_odata::OrderKey {
-                field: "occurred_at".to_owned(),
-                dir: SortDir::Desc,
-            }]),
-            limit: query.limit,
-            cursor: query.cursor.clone(),
-            // Bound to the pair this history pages: a cursor minted for another
-            // setting's or another scope's history carries another binding and
-            // is refused, instead of applying its boundary here.
-            filter_hash: Some(history_binding(declaration_key, tenant_id)),
-            select: None,
-        };
+        // Bound to the pair this history pages: a cursor minted for another
+        // setting's or another scope's history, or for the subtree history of
+        // the same pair, carries another binding and is refused, instead of
+        // applying its boundary here.
+        let paged = history_page_query(
+            query,
+            history_binding(declaration_key, tenant_id, HistoryMode::Scope),
+        );
         let page = list_counted::<AuditFilterField, AuditODataMapper, _, _, _, _>(
             base,
             scope,
@@ -261,11 +391,7 @@ impl AuditStore {
             |m: audit_record::Model| m,
         )
         .await
-        .map_err(|err| DomainError::Validation {
-            field: "query".to_owned(),
-            code: crate::field::ODATA_QUERY,
-            message: err.to_string(),
-        })?;
+        .map_err(|err| page_error(&err))?;
         // @cpt-end:cpt-cf-settings-service-flow-audit-store-history:p1:inst-as-hist-7
         let items = page
             .items
@@ -276,6 +402,95 @@ impl AuditStore {
             items,
             page_info: page.page_info,
             total_count: page.total_count,
+        })
+    }
+
+    /// The history of one setting at `target` and at each of `descendants`,
+    /// in one list: newest first, ties broken by id, cursor-paginated.
+    ///
+    /// The setting's scopeless definition records are in it once, as they are
+    /// in every single scope's history. No total is counted: the count would
+    /// read every record of the subtree to say a number a walk of this shape
+    /// does not need, so the page comes back alone.
+    ///
+    /// `descendants` is the caller's bounded walk of the target's subtree — at
+    /// most the subtree budget of tenants, which one `IN` list holds on either
+    /// backend (see the assertion beside [`BIND_PARAMETER_FLOOR`]). The read
+    /// is meant to be served by `idx_audit_key_recent`, which holds one
+    /// setting's records already in the order the page takes them; the plan
+    /// has not been measured on a large `PostgreSQL` table.
+    ///
+    /// `query` contributes only `limit` and `cursor`. The cursor is bound to
+    /// the key, the target and the mode: one minted by [`Self::history`], or
+    /// for another target's subtree, is refused. A read, as [`Self::history`]
+    /// is, so it needs no store either.
+    ///
+    /// # Errors
+    /// [`DomainError::Validation`] on a malformed or foreign cursor;
+    /// [`DomainError::Internal`] when the database fails the read; [`DomainError`]
+    /// when a record does not decode.
+    pub async fn history_subtree<C: DBRunner>(
+        conn: &C,
+        scope: &AccessScope,
+        declaration_key: &str,
+        target: Uuid,
+        descendants: &[Uuid],
+        query: &ODataQuery,
+    ) -> Result<Page<StoredAuditRecord>, DomainError> {
+        // @cpt-begin:cpt-cf-settings-service-flow-audit-store-history:p1:inst-as-hist-7
+        // The target is always one of the tenants read, whatever the walk
+        // found below it; the definition records ride along through the
+        // explicit `IS NULL` branch, as in the single-scope read.
+        let tenants = std::iter::once(target).chain(descendants.iter().copied());
+        let mut base = AuditEntity::find()
+            .filter(audit_record::Column::DeclarationKey.eq(declaration_key))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(audit_record::Column::TenantId.is_in(tenants))
+                    .add(audit_record::Column::TenantId.is_null()),
+            );
+        // The pager spells the keyset as `occurred_at < c OR (occurred_at = c
+        // AND id < i)`, a disjunction an index range cannot start from, so a
+        // deep page would walk the setting's newer records again to reach its
+        // own. The cursor's instant is repeated here as a plain bound on the
+        // leading order column. The keyset implies it, so the rows are the
+        // same; a cursor whose instant does not parse adds nothing and is
+        // left for the pager to refuse.
+        if let Some(cursor) = &query.cursor
+            && let Some(Ok(instant)) = cursor
+                .k
+                .first()
+                .map(|at| parse_cursor_value(FieldKind::DateTimeUtc, at))
+        {
+            base = base.filter(if cursor.d == "bwd" {
+                audit_record::Column::OccurredAt.gte(instant)
+            } else {
+                audit_record::Column::OccurredAt.lte(instant)
+            });
+        }
+        let paged = history_page_query(
+            query,
+            history_binding(declaration_key, target, HistoryMode::Subtree),
+        );
+        let page = paginate_odata::<AuditFilterField, AuditODataMapper, _, _, _, _>(
+            base.secure().scope_with(scope),
+            conn,
+            &paged,
+            ("id", SortDir::Desc),
+            HISTORY_LIMIT_CFG,
+            |m: audit_record::Model| m,
+        )
+        .await
+        .map_err(|err| page_error(&err))?;
+        // @cpt-end:cpt-cf-settings-service-flow-audit-store-history:p1:inst-as-hist-7
+        let items = page
+            .items
+            .into_iter()
+            .map(to_domain)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Page {
+            items,
+            page_info: page.page_info,
         })
     }
 
@@ -292,7 +507,6 @@ impl AuditStore {
     /// # Errors
     /// [`DomainError`] when the delete fails.
     pub async fn prune_expired<C: DBRunner>(
-        &self,
         conn: &C,
         scope: &AccessScope,
         now: OffsetDateTime,
@@ -364,7 +578,6 @@ impl AuditStore {
     /// [`DomainError`] when the write fails, `days` does not fit the column, or
     /// the seeded row is missing.
     pub async fn record_retention<C: DBRunner>(
-        &self,
         conn: &C,
         scope: &AccessScope,
         days: u32,

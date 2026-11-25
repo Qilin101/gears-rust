@@ -1,11 +1,17 @@
-use credstore_sdk::{CredStoreClientV1, SecretRef};
+use crate::domain::plugin::credentials::{
+    CLIENT_ID_REF_KEY, CLIENT_SECRET_REF_KEY, credstore_error_kind, parse_credential_ref,
+};
+use credstore_sdk::CredStoreClientV1;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::infra::plugin::read_credential;
 use crate::infra::ttl_cache::TtlCache;
 use toolkit_auth::oauth2::types::SecretString;
-use toolkit_auth::oauth2::{ClientCredentials, OAuthClientConfig, TokenEndpoint, fetch_token};
+use toolkit_auth::oauth2::{
+    ClientCredentials, OAuthClientConfig, TokenEndpoint, TokenError, fetch_token,
+};
 use url::Url;
 
 use crate::domain::plugin::{AuthContext, AuthPlugin, PluginError};
@@ -58,12 +64,12 @@ impl OAuth2PluginConfig {
         };
 
         let client_id_ref = config
-            .get("client_id_ref")
+            .get(CLIENT_ID_REF_KEY)
             .ok_or_else(|| PluginError::InvalidConfig("missing client_id_ref".into()))?
             .clone();
 
         let client_secret_ref = config
-            .get("client_secret_ref")
+            .get(CLIENT_SECRET_REF_KEY)
             .ok_or_else(|| PluginError::InvalidConfig("missing client_secret_ref".into()))?
             .clone();
 
@@ -169,24 +175,30 @@ impl OAuth2ClientCredAuthPlugin {
         self
     }
 
-    /// Resolve a `cred://` reference to its plaintext UTF-8 value.
+    /// Resolve a `cred://` reference to its plaintext UTF-8 value. Errors
+    /// name the config `key` the reference came from: the reference and the
+    /// store's own text (which may quote it) stay out of errors and logs
+    /// (F0008).
     async fn resolve_secret(
         &self,
         security_context: &toolkit_security::SecurityContext,
+        key: &'static str,
         cred_ref: &str,
     ) -> Result<String, PluginError> {
-        let raw = cred_ref.strip_prefix("cred://").unwrap_or(cred_ref);
-        let secret_ref = SecretRef::new(raw)
-            .map_err(|e| PluginError::Internal(format!("invalid secret ref '{raw}': {e}")))?;
-        let response = self
-            .credstore
-            .get(security_context, &secret_ref)
-            .await
-            .map_err(|e| PluginError::Internal(format!("credstore error: {e}")))?
-            .ok_or_else(|| PluginError::SecretNotFound(cred_ref.to_owned()))?;
-        std::str::from_utf8(response.value.as_bytes())
+        // The shared reference parser; the error names the config key, never
+        // the reference or the store's text.
+        let secret_ref = parse_credential_ref(cred_ref).map_err(|e| {
+            PluginError::InvalidConfig(format!("auth.config.{key}: {}", credstore_error_kind(&e)))
+        })?;
+        let secret =
+            read_credential(self.credstore.as_ref(), security_context, key, &secret_ref).await?;
+        std::str::from_utf8(secret.as_bytes())
             .map(str::to_owned)
-            .map_err(|_| PluginError::Internal(format!("secret '{cred_ref}' is not valid UTF-8")))
+            .map_err(|_| {
+                PluginError::Internal(format!(
+                    "secret referenced by auth.config.{key} is not valid UTF-8"
+                ))
+            })
     }
 }
 
@@ -197,19 +209,27 @@ impl AuthPlugin for OAuth2ClientCredAuthPlugin {
         let key = build_cache_key(ctx, self.auth_method);
 
         if let Some(entry) = self.cache.get(&key) {
-            ctx.headers.insert(
+            ctx.set_headers.push((
                 "authorization".into(),
                 format!("Bearer {}", entry.token.expose()),
-            );
+            ));
             return Ok(());
         }
 
         // Cache miss — resolve credentials and fetch token.
         let client_id_str = self
-            .resolve_secret(&ctx.security_context, &config.client_id_ref)
+            .resolve_secret(
+                &ctx.security_context,
+                CLIENT_ID_REF_KEY,
+                &config.client_id_ref,
+            )
             .await?;
         let client_secret_str = self
-            .resolve_secret(&ctx.security_context, &config.client_secret_ref)
+            .resolve_secret(
+                &ctx.security_context,
+                CLIENT_SECRET_REF_KEY,
+                &config.client_secret_ref,
+            )
             .await?;
 
         let oauth_config = OAuthClientConfig {
@@ -223,9 +243,21 @@ impl AuthPlugin for OAuth2ClientCredAuthPlugin {
             )
         };
 
-        let fetched = fetch_token(oauth_config)
-            .await
-            .map_err(|e| PluginError::Internal(format!("token fetch failed: {e}")))?;
+        let fetched = fetch_token(oauth_config).await.map_err(token_error)?;
+
+        // A token the upstream cannot use is never cached or sent: one
+        // already expired, or one a header cannot carry.
+        if fetched.expires_in.is_zero() {
+            return Err(PluginError::IdpInvalidResponse(
+                "identity provider sent a token with a zero lifetime".into(),
+            ));
+        }
+        if !is_b64token(fetched.bearer.expose()) {
+            return Err(PluginError::IdpInvalidResponse(
+                "identity provider sent an access token that is not a bearer token".into(),
+            ));
+        }
+        let authorization = format!("Bearer {}", fetched.bearer.expose());
 
         // Use the shorter of config TTL and IdP-reported lifetime (minus safety
         // margin) to avoid serving tokens that are about to expire.
@@ -244,12 +276,73 @@ impl AuthPlugin for OAuth2ClientCredAuthPlugin {
             Some(ttl),
         );
 
-        ctx.headers.insert(
-            "authorization".into(),
-            format!("Bearer {}", fetched.bearer.expose()),
-        );
+        ctx.set_headers
+            .push(("authorization".into(), authorization));
 
         Ok(())
+    }
+}
+
+/// Whether `token` is an RFC 6750 §2.1 `b64token`: one or more of
+/// `A-Z a-z 0-9 - . _ ~ + /`, then any number of `=`. Anything else (empty,
+/// whitespace, control or non-ASCII bytes) no upstream can take as a bearer
+/// credential.
+fn is_b64token(token: &str) -> bool {
+    let body = token.trim_end_matches('=');
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
+}
+
+/// The auth plugin error for a failed token fetch, by the stage that
+/// failed: the identity provider unreachable, timing out or answering 408,
+/// 429 or 5xx is unavailable; 400, 401 or 403 to the token request (RFC 6749
+/// §5.2 `invalid_client` and friends) means the client credentials were
+/// rejected; any other answer, to discovery or the token request, is an
+/// invalid response; a configuration the flow cannot run is a
+/// misconfiguration. The messages carry no secret (`TokenError` never
+/// formats one) and nothing from the response body: an invalid response is
+/// reported by a fixed class, since its text can quote the body.
+fn token_error(e: TokenError) -> PluginError {
+    use http::StatusCode;
+    use toolkit_auth::oauth2::HttpOperation;
+    let unavailable = |e: &TokenError| PluginError::IdpUnavailable(e.to_string());
+    let invalid = |class: &str| PluginError::IdpInvalidResponse(class.to_owned());
+    match e {
+        TokenError::Http(_) | TokenError::Unavailable(_) => unavailable(&e),
+        TokenError::HttpStatus {
+            operation, status, ..
+        } => {
+            // The operation and the status only: with discovery, the URL
+            // came from the identity provider.
+            let answer = format!("{operation} answered HTTP {}", status.as_u16());
+            match status {
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS => {
+                    PluginError::IdpUnavailable(answer)
+                }
+                s if s.is_server_error() => PluginError::IdpUnavailable(answer),
+                StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    if operation == HttpOperation::TokenRequest =>
+                {
+                    PluginError::AuthFailed(format!(
+                        "identity provider rejected the client: {answer}"
+                    ))
+                }
+                _ => PluginError::IdpInvalidResponse(answer),
+            }
+        }
+        TokenError::InvalidResponse(_) => invalid("identity provider sent an invalid response"),
+        TokenError::UnsupportedTokenType(_) => {
+            invalid("identity provider sent an unsupported token type")
+        }
+        TokenError::InvalidTokenLifetime(_) => {
+            invalid("identity provider sent an invalid token lifetime")
+        }
+        TokenError::ConfigError(_) | TokenError::ClientAssertion(_) => {
+            PluginError::InvalidConfig(format!("token fetch failed: {e}"))
+        }
+        _ => PluginError::Internal(format!("token fetch failed: {e}")),
     }
 }
 
@@ -317,11 +410,7 @@ mod tests {
     }
 
     fn make_auth_ctx(config: HashMap<String, String>) -> AuthContext {
-        AuthContext {
-            headers: HashMap::new(),
-            config,
-            security_context: test_security_context(),
-        }
+        AuthContext::new(config, test_security_context())
     }
 
     fn make_plugin(credstore: Arc<dyn CredStoreClientV1>) -> OAuth2ClientCredAuthPlugin {
@@ -450,7 +539,16 @@ mod tests {
         let mut ctx = make_auth_ctx(make_config(&server));
 
         let err = plugin.authenticate(&mut ctx).await.unwrap_err();
-        assert!(matches!(err, PluginError::SecretNotFound(ref s) if s.contains("test-client-id")));
+        assert!(matches!(
+            err,
+            PluginError::SecretNotFound {
+                key: CLIENT_ID_REF_KEY,
+                ..
+            }
+        ));
+        let text = err.to_string();
+        assert!(text.contains("auth.config.client_id_ref"), "{text}");
+        assert!(!text.contains("test-client-id"), "{text}");
     }
 
     #[tokio::test]
@@ -464,19 +562,66 @@ mod tests {
         let mut ctx = make_auth_ctx(make_config(&server));
 
         let err = plugin.authenticate(&mut ctx).await.unwrap_err();
-        assert!(
-            matches!(err, PluginError::SecretNotFound(ref s) if s.contains("test-client-secret"))
-        );
+        assert!(matches!(
+            err,
+            PluginError::SecretNotFound {
+                key: CLIENT_SECRET_REF_KEY,
+                ..
+            }
+        ));
+        let text = err.to_string();
+        assert!(text.contains("auth.config.client_secret_ref"), "{text}");
+        assert!(!text.contains("test-client-secret"), "{text}");
     }
 
+    /// A credential store outage is unavailable and names the config key;
+    /// neither the reference nor the store's text (which may quote it) is in
+    /// the error.
     #[tokio::test]
-    async fn credstore_error_maps_to_internal() {
+    async fn credstore_outage_is_unavailable_without_the_ref() {
         let server = MockServer::start();
-        let plugin = make_plugin(Arc::new(MockCredStoreClient::always_failing()));
+        let plugin = make_plugin(Arc::new(crate::domain::test_support::ErroringCredStore(
+            || {
+                credstore_sdk::CredStoreError::Internal(
+                    "store failed reading test-client-id".into(),
+                )
+            },
+        )));
         let mut ctx = make_auth_ctx(make_config(&server));
 
         let err = plugin.authenticate(&mut ctx).await.unwrap_err();
-        assert!(matches!(err, PluginError::Internal(ref msg) if msg.contains("credstore error")));
+        let PluginError::CredentialStoreUnavailable {
+            detail: msg,
+            retry_after: None,
+        } = &err
+        else {
+            panic!("expected CredentialStoreUnavailable, got {err:?}");
+        };
+        assert!(msg.contains("credential store unavailable"), "{msg}");
+        assert!(msg.contains("auth.config.client_id_ref"), "{msg}");
+        assert!(!msg.contains("test-client-id"), "{msg}");
+    }
+
+    /// A secret the tenant cannot read is not found, as a missing one is.
+    #[tokio::test]
+    async fn an_inaccessible_secret_is_not_found() {
+        let server = MockServer::start();
+        let plugin = make_plugin(Arc::new(crate::domain::test_support::ErroringCredStore(
+            || credstore_sdk::CredStoreError::AccessDenied,
+        )));
+        let mut ctx = make_auth_ctx(make_config(&server));
+
+        let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PluginError::SecretNotFound {
+                    key: CLIENT_ID_REF_KEY,
+                    kind: "access denied"
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -489,29 +634,280 @@ mod tests {
         let mut ctx = make_auth_ctx(make_config(&server));
 
         let err = plugin.authenticate(&mut ctx).await.unwrap_err();
-        assert!(matches!(err, PluginError::Internal(ref msg) if msg.contains("not valid UTF-8")));
+        let PluginError::Internal(msg) = &err else {
+            panic!("expected Internal, got {err:?}");
+        };
+        assert!(msg.contains("not valid UTF-8"), "{msg}");
+        assert!(msg.contains("auth.config.client_id_ref"), "{msg}");
+        assert!(!msg.contains("test-client-id"), "{msg}");
     }
 
     // -----------------------------------------------------------------------
     // Group 3: Token fetch
     // -----------------------------------------------------------------------
 
+    /// Token endpoint answers map onto the credential mapping: 408, 429 and
+    /// 5xx are unavailable, 400/401/403 reject the client, anything else
+    /// (an unexpected status, an unparseable body, a token type other than
+    /// Bearer) is an invalid identity provider response.
     #[tokio::test]
-    async fn token_fetch_failure_returns_internal_error() {
+    async fn token_endpoint_answers_follow_the_credential_mapping() {
+        let cases: [(u16, &str, &str); 9] = [
+            (500, "internal server error", "unavailable"),
+            (503, "", "unavailable"),
+            (429, "", "unavailable"),
+            (408, "", "unavailable"),
+            (400, r#"{"error":"invalid_client"}"#, "rejected"),
+            (401, r#"{"error":"invalid_client"}"#, "rejected"),
+            (404, "", "invalid response"),
+            (200, "not json", "invalid response"),
+            (
+                200,
+                r#"{"access_token":"t","expires_in":3600,"token_type":"mac"}"#,
+                "invalid response",
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/token");
+                then.status(status)
+                    .header("content-type", "application/json")
+                    .body(body);
+            });
+
+            let plugin = make_plugin(credstore);
+            let mut ctx = make_auth_ctx(make_config(&server));
+
+            let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+            let got = match &err {
+                PluginError::IdpUnavailable(_) => "unavailable",
+                PluginError::AuthFailed(_) => "rejected",
+                PluginError::IdpInvalidResponse(_) => "invalid response",
+                other => panic!("{status}: unexpected {other:?}"),
+            };
+            assert_eq!(got, expected, "{status} {body}: {err:?}");
+            let text = err.to_string();
+            assert!(!text.contains("my-client-secret"), "{text}");
+        }
+    }
+
+    /// An invalid response is reported by a fixed class: nothing from the
+    /// body (a token type, a JSON value) reaches the error, the log or the
+    /// REST detail.
+    #[tokio::test]
+    async fn invalid_response_errors_quote_nothing_from_the_body() {
+        let bodies = [
+            r#"{"access_token":"t","expires_in":3600,"token_type":"leak-me"}"#,
+            r#"{"access_token":"t","expires_in":"leak-me","token_type":"Bearer"}"#,
+            "leak-me",
+        ];
+        for body in bodies {
+            let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/token");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(body);
+            });
+            let plugin = make_plugin(credstore);
+            let mut ctx = make_auth_ctx(make_config(&server));
+
+            let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+            assert!(
+                matches!(err, PluginError::IdpInvalidResponse(_)),
+                "{body}: {err:?}"
+            );
+            assert!(!err.to_string().contains("leak-me"), "{body}: {err}");
+        }
+    }
+
+    /// Discovery is an unauthenticated GET: a 400, 401 or 403 there does not
+    /// mean the client credentials were rejected. It is an invalid response;
+    /// 5xx, 408 and 429 stay unavailable.
+    #[tokio::test]
+    async fn discovery_answers_keep_their_stage() {
+        let cases: [(u16, &str); 5] = [
+            (403, "invalid response"),
+            (401, "invalid response"),
+            (404, "invalid response"),
+            (503, "unavailable"),
+            (429, "unavailable"),
+        ];
+        for (status, expected) in cases {
+            let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/.well-known/openid-configuration");
+                then.status(status);
+            });
+            let plugin = make_plugin(credstore);
+            let mut ctx = make_auth_ctx(HashMap::from([
+                (
+                    "issuer_url".into(),
+                    format!("http://localhost:{}", server.port()),
+                ),
+                ("client_id_ref".into(), "cred://test-client-id".into()),
+                (
+                    "client_secret_ref".into(),
+                    "cred://test-client-secret".into(),
+                ),
+            ]));
+
+            let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+            let got = match &err {
+                PluginError::IdpUnavailable(_) => "unavailable",
+                PluginError::IdpInvalidResponse(_) => "invalid response",
+                other => panic!("{status}: unexpected {other:?}"),
+            };
+            assert_eq!(got, expected, "{status}: {err:?}");
+        }
+    }
+
+    /// A token endpoint from the discovery document that the HTTP client
+    /// cannot use is the identity provider's invalid response (502), not a
+    /// misconfiguration.
+    #[tokio::test]
+    async fn an_unusable_discovered_endpoint_is_an_invalid_response() {
         let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/token");
-            then.status(500).body("internal server error");
+            when.method(GET).path("/.well-known/openid-configuration");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"token_endpoint":"ftp://idp.example/token"}"#);
         });
-
         let plugin = make_plugin(credstore);
-        let mut ctx = make_auth_ctx(make_config(&server));
+        let mut ctx = make_auth_ctx(HashMap::from([
+            (
+                "issuer_url".into(),
+                format!("http://localhost:{}", server.port()),
+            ),
+            ("client_id_ref".into(), "cred://test-client-id".into()),
+            (
+                "client_secret_ref".into(),
+                "cred://test-client-secret".into(),
+            ),
+        ]));
 
         let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+        assert!(matches!(err, PluginError::IdpInvalidResponse(_)), "{err:?}");
+        assert!(!err.to_string().contains("idp.example"), "{err}");
+    }
+
+    #[test]
+    fn b64token_accepts_bearer_tokens_only() {
+        for ok in [
+            "abc",
+            "eyJhbGciOi.eyJzdWIi.c2ln",
+            "a-b._~+/9",
+            "dG9r==",
+            "x=",
+        ] {
+            assert!(is_b64token(ok), "{ok:?}");
+        }
+        for bad in ["", "=", "==", " ", "a b", "a\tb", "tök", "a=b", "a\u{7}"] {
+            assert!(!is_b64token(bad), "{bad:?}");
+        }
+    }
+
+    /// A token endpoint whose scheme the HTTP client does not support fails
+    /// the same way on every retry: a misconfiguration (500), not a
+    /// retryable 503.
+    #[tokio::test]
+    async fn an_unsupported_endpoint_scheme_is_a_misconfiguration() {
+        let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+        let plugin = make_plugin(credstore);
+        let mut ctx = make_auth_ctx(HashMap::from([
+            ("token_endpoint".into(), "ftp://localhost/token".into()),
+            ("client_id_ref".into(), "cred://test-client-id".into()),
+            (
+                "client_secret_ref".into(),
+                "cred://test-client-secret".into(),
+            ),
+        ]));
+
+        let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+        // Past config parsing: the HTTP client refused the scheme.
         assert!(
-            matches!(err, PluginError::Internal(ref msg) if msg.contains("token fetch failed"))
+            matches!(&err, PluginError::InvalidConfig(msg) if msg.starts_with("token fetch failed")),
+            "{err:?}"
         );
+    }
+
+    /// A token the upstream cannot use (already expired, or not a valid
+    /// header value) is an invalid response: never sent, never cached, so
+    /// the next request asks the identity provider again.
+    #[tokio::test]
+    async fn an_unusable_token_is_neither_sent_nor_cached() {
+        let bodies = [
+            mock_token_response("tok-expired", 0),
+            r#"{"access_token":"tok\u0007bell","expires_in":3600,"token_type":"Bearer"}"#
+                .to_owned(),
+            mock_token_response("", 3600),
+            mock_token_response(" ", 3600),
+            mock_token_response("tok en", 3600),
+            mock_token_response("tök", 3600),
+        ];
+        for body in bodies {
+            let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/token");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(body.clone());
+            });
+            let plugin = make_plugin(credstore);
+            let sc = test_security_context();
+            let config = make_config(&server);
+
+            for _ in 0..2 {
+                let mut ctx = make_auth_ctx_with_sc(config.clone(), sc.clone());
+                let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+                assert!(
+                    matches!(err, PluginError::IdpInvalidResponse(_)),
+                    "{body}: {err:?}"
+                );
+                assert!(ctx.header_value("authorization").is_none(), "{body}");
+                let text = err.to_string();
+                assert!(
+                    !text.contains("tok-expired") && !text.contains("bell"),
+                    "{body}: {text}"
+                );
+            }
+            mock.assert_calls(2);
+        }
+    }
+
+    /// An identity provider that does not answer at all is unavailable.
+    #[tokio::test]
+    async fn an_unreachable_token_endpoint_is_unavailable() {
+        let credstore = Arc::new(MockCredStoreClient::with_secrets(default_creds()));
+        // Bind and drop a listener: nothing accepts on the port.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let plugin = make_plugin(credstore);
+        let config = HashMap::from([
+            (
+                "token_endpoint".into(),
+                format!("http://127.0.0.1:{port}/token"),
+            ),
+            ("client_id_ref".into(), "cred://test-client-id".into()),
+            (
+                "client_secret_ref".into(),
+                "cred://test-client-secret".into(),
+            ),
+        ]);
+        let mut ctx = make_auth_ctx(config);
+
+        let err = plugin.authenticate(&mut ctx).await.unwrap_err();
+        assert!(matches!(err, PluginError::IdpUnavailable(_)), "{err:?}");
     }
 
     #[tokio::test]
@@ -530,7 +926,7 @@ mod tests {
 
         plugin.authenticate(&mut ctx).await.unwrap();
         assert_eq!(
-            ctx.headers.get("authorization").unwrap(),
+            ctx.header_value("authorization").unwrap(),
             "Bearer test-access-token"
         );
     }
@@ -556,7 +952,7 @@ mod tests {
 
         plugin.authenticate(&mut ctx).await.unwrap();
         assert_eq!(
-            ctx.headers.get("authorization").unwrap(),
+            ctx.header_value("authorization").unwrap(),
             "Bearer tok-prefixed"
         );
     }
@@ -584,7 +980,10 @@ mod tests {
         ]));
 
         plugin.authenticate(&mut ctx).await.unwrap();
-        assert_eq!(ctx.headers.get("authorization").unwrap(), "Bearer tok-bare");
+        assert_eq!(
+            ctx.header_value("authorization").unwrap(),
+            "Bearer tok-bare"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -630,7 +1029,7 @@ mod tests {
 
         plugin.authenticate(&mut ctx).await.unwrap();
         assert_eq!(
-            ctx.headers.get("authorization").unwrap(),
+            ctx.header_value("authorization").unwrap(),
             "Bearer tok-no-scope"
         );
     }
@@ -667,7 +1066,7 @@ mod tests {
         plugin.authenticate(&mut ctx).await.unwrap();
         mock.assert();
         assert_eq!(
-            ctx.headers.get("authorization").unwrap(),
+            ctx.header_value("authorization").unwrap(),
             "Bearer tok-basic"
         );
     }
@@ -699,7 +1098,10 @@ mod tests {
         plugin.authenticate(&mut ctx).await.unwrap();
         mock.assert();
         assert_eq!(header_mock.calls(), 0, "Form must not send a Basic header");
-        assert_eq!(ctx.headers.get("authorization").unwrap(), "Bearer tok-form");
+        assert_eq!(
+            ctx.header_value("authorization").unwrap(),
+            "Bearer tok-form"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -708,11 +1110,7 @@ mod tests {
 
     /// Helper that creates an `AuthContext` with an explicit `SecurityContext`.
     fn make_auth_ctx_with_sc(config: HashMap<String, String>, sc: SecurityContext) -> AuthContext {
-        AuthContext {
-            headers: HashMap::new(),
-            config,
-            security_context: sc,
-        }
+        AuthContext::new(config, sc)
     }
 
     #[tokio::test]
@@ -734,7 +1132,7 @@ mod tests {
         let mut ctx1 = make_auth_ctx_with_sc(config.clone(), sc.clone());
         plugin.authenticate(&mut ctx1).await.unwrap();
         assert_eq!(
-            ctx1.headers.get("authorization").unwrap(),
+            ctx1.header_value("authorization").unwrap(),
             "Bearer cached-token"
         );
 
@@ -742,7 +1140,7 @@ mod tests {
         let mut ctx2 = make_auth_ctx_with_sc(config, sc);
         plugin.authenticate(&mut ctx2).await.unwrap();
         assert_eq!(
-            ctx2.headers.get("authorization").unwrap(),
+            ctx2.header_value("authorization").unwrap(),
             "Bearer cached-token"
         );
 
@@ -877,7 +1275,7 @@ mod tests {
         let mut ctx_a = make_auth_ctx_with_sc(config.clone(), sc_a);
         plugin.authenticate(&mut ctx_a).await.unwrap();
         assert_eq!(
-            ctx_a.headers.get("authorization").unwrap(),
+            ctx_a.header_value("authorization").unwrap(),
             "Bearer token-A"
         );
 
@@ -900,7 +1298,7 @@ mod tests {
         let mut ctx_b = make_auth_ctx_with_sc(config, sc_b);
         plugin.authenticate(&mut ctx_b).await.unwrap();
         assert_eq!(
-            ctx_b.headers.get("authorization").unwrap(),
+            ctx_b.header_value("authorization").unwrap(),
             "Bearer token-B"
         );
     }
@@ -938,7 +1336,7 @@ mod tests {
         let mut ctx2 = make_auth_ctx_with_sc(config, sc);
         plugin.authenticate(&mut ctx2).await.unwrap();
         assert_eq!(
-            ctx2.headers.get("authorization").unwrap(),
+            ctx2.header_value("authorization").unwrap(),
             "Bearer retry-token"
         );
         ok_mock.assert_calls(1);
@@ -968,7 +1366,7 @@ mod tests {
         let mut ctx1 = make_auth_ctx_with_sc(config.clone(), sc.clone());
         plugin.authenticate(&mut ctx1).await.unwrap();
         assert_eq!(
-            ctx1.headers.get("authorization").unwrap(),
+            ctx1.header_value("authorization").unwrap(),
             "Bearer tok-short"
         );
 
@@ -976,7 +1374,7 @@ mod tests {
         let mut ctx2 = make_auth_ctx_with_sc(config, sc);
         plugin.authenticate(&mut ctx2).await.unwrap();
         assert_eq!(
-            ctx2.headers.get("authorization").unwrap(),
+            ctx2.header_value("authorization").unwrap(),
             "Bearer tok-short"
         );
 
@@ -1004,7 +1402,7 @@ mod tests {
         let mut ctx1 = make_auth_ctx_with_sc(config.clone(), sc.clone());
         plugin.authenticate(&mut ctx1).await.unwrap();
         assert_eq!(
-            ctx1.headers.get("authorization").unwrap(),
+            ctx1.header_value("authorization").unwrap(),
             "Bearer tok-ephemeral"
         );
 
@@ -1035,7 +1433,7 @@ mod tests {
         let mut ctx1 = make_auth_ctx_with_sc(config.clone(), sc.clone());
         plugin.authenticate(&mut ctx1).await.unwrap();
         assert_eq!(
-            ctx1.headers.get("authorization").unwrap(),
+            ctx1.header_value("authorization").unwrap(),
             "Bearer tok-long"
         );
 
@@ -1043,7 +1441,7 @@ mod tests {
         let mut ctx2 = make_auth_ctx_with_sc(config, sc);
         plugin.authenticate(&mut ctx2).await.unwrap();
         assert_eq!(
-            ctx2.headers.get("authorization").unwrap(),
+            ctx2.header_value("authorization").unwrap(),
             "Bearer tok-long"
         );
 

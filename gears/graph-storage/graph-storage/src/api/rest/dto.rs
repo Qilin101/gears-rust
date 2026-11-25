@@ -180,6 +180,18 @@ pub struct GraphTypeDto {
     pub revision: i32,
 }
 
+/// One page of a node's edges (`GET /nodes/{node_key}/edges`).
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct GraphEdgeListDto {
+    pub items: Vec<GraphEdgeDto>,
+    /// Null when the listing is complete. A page can hold fewer edges than
+    /// `limit`, or none, and still carry a cursor: an edge whose other
+    /// endpoint the caller cannot see is skipped, not counted.
+    pub next_cursor: Option<String>,
+    pub revision: GraphRevisionDto,
+}
+
 #[derive(Debug)]
 #[toolkit_macros::api_dto(response)]
 pub struct GraphTypeListDto {
@@ -243,6 +255,55 @@ pub struct GraphSourceNamespaceListDto {
 pub struct GraphTransferNamespaceRequest {
     /// The producer principal that may write the namespace from now on.
     pub owner_principal: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tenant offboarding
+// ---------------------------------------------------------------------------
+
+/// Starting a tenant's offboarding. `{}` is a complete request.
+#[derive(Debug, Default)]
+#[toolkit_macros::api_dto(request)]
+pub struct GraphOffboardRequest {
+    /// The platform's deletion generation for the tenant, when the caller
+    /// has one. Recorded as given; the first call's value stands.
+    #[serde(default)]
+    pub deletion_generation: Option<i64>,
+}
+
+/// Rows removed so far, per kind of tenant-keyed state.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct GraphOffboardingCountsDto {
+    pub edges: u64,
+    pub nodes: u64,
+    pub types: u64,
+    pub scopes: u64,
+    pub receipts: u64,
+    pub namespaces: u64,
+    pub meta: u64,
+}
+
+/// A tenant's offboarding as it stands.
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct GraphTenantOffboardingDto {
+    pub tenant_id: uuid::Uuid,
+    pub deletion_generation: Option<i64>,
+    /// `in_progress` while rows remain, `completed` once none does.
+    pub state: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub fenced_at: time::OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub completed_at: Option<time::OffsetDateTime>,
+    pub removed: GraphOffboardingCountsDto,
+    /// Deletion steps that failed in a row. Non-zero means the deletion is
+    /// stuck, not merely running; the gear retries it with backoff.
+    pub failures: u32,
+    /// The error class of the last failed step, never its message.
+    pub last_failure: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub last_failure_at: Option<time::OffsetDateTime>,
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +596,10 @@ pub struct GraphTraverseRequest {
     /// matches a non-empty list.
     #[serde(default)]
     pub edge_discriminators: Vec<String>,
+    /// Return each edge's payload on its reference. Read in one statement for
+    /// the whole answer and counted against the response byte budget.
+    #[serde(default)]
+    pub include_edge_payload: bool,
 }
 
 #[derive(Debug)]
@@ -547,6 +612,9 @@ pub struct GraphNeighborhoodRequest {
     pub include_phantoms: bool,
     /// `outgoing`, `incoming` or `either` (the default).
     pub direction: Option<String>,
+    /// Return each edge's payload on its reference, as on traversal.
+    #[serde(default)]
+    pub include_edge_payload: bool,
 }
 
 /// How many nodes a listing matches.
@@ -571,6 +639,10 @@ pub struct GraphEdgeRefDto {
     /// Tells parallel edges of one type between one endpoint pair apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discriminator: Option<String>,
+    /// The edge's payload, present only when the request set
+    /// `include_edge_payload`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -653,6 +725,55 @@ impl From<m::Readiness> for GraphReadinessDto {
         Self {
             ready: value.ready,
             components: value.components.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<GraphOffboardRequest> for m::OffboardRequest {
+    type Error = &'static str;
+
+    fn try_from(value: GraphOffboardRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            deletion_generation: value
+                .deletion_generation
+                .map(|generation| {
+                    m::DeletionGeneration::new(generation)
+                        .ok_or("deletion_generation must be positive when it is given")
+                })
+                .transpose()?,
+        })
+    }
+}
+
+impl From<m::TenantOffboarding> for GraphTenantOffboardingDto {
+    fn from(value: m::TenantOffboarding) -> Self {
+        let removed = value.removed;
+        Self {
+            tenant_id: value.tenant_id,
+            deletion_generation: value.deletion_generation.map(m::DeletionGeneration::get),
+            state: if value.completed_at.is_some() {
+                "completed"
+            } else {
+                "in_progress"
+            }
+            .to_owned(),
+            fenced_at: value.fenced_at,
+            completed_at: value.completed_at,
+            removed: GraphOffboardingCountsDto {
+                edges: removed.edges,
+                nodes: removed.nodes,
+                types: removed.types,
+                scopes: removed.scopes,
+                receipts: removed.receipts,
+                namespaces: removed.namespaces,
+                meta: removed.meta,
+            },
+            failures: value.failures,
+            last_failure: value
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.class.clone()),
+            last_failure_at: value.last_failure.map(|failure| failure.at),
         }
     }
 }
@@ -957,6 +1078,7 @@ impl From<m::EdgeRef> for GraphEdgeRefDto {
             src: value.src,
             dst: value.dst,
             discriminator: value.discriminator,
+            payload: value.payload,
         }
     }
 }

@@ -232,7 +232,7 @@ token). `encode_bin` / `decode_bin` (which exclude `bearer_token`) remain in use
 | DeploymentProfile        | Enum: `Embedded`, `SelfHosted`, `K8sNative`. Determines bootstrap behavior.                      |
 | OopWorkerConfig          | Configuration for an OoP gear: gear list, listen address, DirectoryService endpoint, profile. |
 | ServiceEndpoint          | Extended with `rest_url` field. Represents a discovered gear's HTTP endpoint.                   |
-| RegisterInstanceInfo     | Extended with `rest_endpoint` and `openapi_spec` fields for REST service registration.            |
+| RegisterInstanceInfo     | Extended with `rest_endpoint` and `openapi_spec_hash` fields for REST service registration.        |
 | GatewayRouteRegistration | Struct carrying gear name, OpenAPI spec, and target endpoint for gateway registration.          |
 | SecurityContextHeaders   | Helper for single-header tenant-plane propagation (`Authorization: Bearer <jwt>`), re-validated per hop (cpt-cf-adr-two-plane-auth). |
 
@@ -364,16 +364,19 @@ What is **missing** and needs to be added:
     - When all critical deps resolved: set readiness = true.
     - In Profile 1: no-op (topo-sort guarantees deps are already in-process).
 - Register the gear's REST endpoint and OpenAPI spec with DirectoryService.
-- **Initialize `InternalCredential`** from configuration (bootstrap token from env, SA token from projected volume) and
-  attach to all system-level outgoing calls automatically.
+- **Build the outbound platform-plane credential** from `oop_http.internal_auth` (a shared secret, or the projected SA
+  token at `present.token_path`) and attach it to all system-level outgoing calls automatically.
 - **Install `InternalAuthMiddleware`** (platform plane) to validate incoming system calls — SA token in the first
   phase; sets `PeerAuthenticated` for workload policy (cpt-cf-adr-platform-plane-auth).
 - Attach `security_context_middleware` (tenant plane) that delegates forwarded-JWT validation to the AuthN Resolver and reconstructs
   `SecurityContext` from the resolver result; it does not perform validation itself.
-- Maintain DirectoryService presence via a **single** background task (`oop_registration::presence_loop`) that owns
-  registration, periodic heartbeats, and idempotent self-heal re-registration — one writer per instance record, so
-  heartbeat and re-registration can never race to conflicting liveness state.
-- Deregister from DirectoryService on graceful shutdown.
+- Maintain DirectoryService presence via a per-process **`PresenceManager`** (`runtime::presence_manager`, ADR-0011)
+  that owns **lease renewal** for every record the process registered, whoever wrote it (the OoP presence writer,
+  grpc-hub's registrar, `RestAdvertiser`, event-broker roles). Each record carries a *lease* (renewed on register and
+  every heartbeat, at `lease_ttl/3`) and a *reported state* (`Starting`/`Serving`/`Draining`) from the process
+  readiness signal; the directory derives the observable `InstanceState` from both at read time. A heartbeat for an
+  unknown instance returns `NOT_FOUND`, so the writer re-registers within one heartbeat.
+- Deregister from DirectoryService on graceful shutdown (owned by the `PresenceManager`, after the drain window).
 - The OoP gear does **not** call `GatewayProvider` itself; edge registration is directory-driven. The built-in edge
   discovers instances via `ListAllInstances` and invokes `GatewayProvider::register_routes()` on their behalf. (An
   external-provider adapter may instead call `GatewayProvider` directly to register/deregister public routes.)
@@ -385,7 +388,9 @@ mirrors `HostRuntime`'s in-process behavior (`libs/toolkit/src/runtime/host_runt
 extended for the cross-process case:
 
 1. **Readiness flip** — set `/readyz` to `503` immediately so kubernetes / gateway upstream pulls the instance out of
-   the load-balancer pool. Do NOT close the HTTP listener yet — in-flight requests must finish.
+   the load-balancer pool. Do NOT close the HTTP listener yet — in-flight requests must finish. The `PresenceManager`
+   reports `Draining` immediately and keeps renewing through the drain, so the directory and edge see `Draining`
+   rather than a record that vanishes at deregister.
 2. **Stop accepting new work** — refuse new requests with `503 Service Unavailable + Retry-After`. Background tasks
    (queue consumers, schedulers) stop pulling new work but keep processing what they hold.
 3. **Drain in-flight requests** — wait up to `drain_timeout` (config, default 30s) for active handlers to complete.
@@ -398,8 +403,9 @@ extended for the cross-process case:
    process this is the in-process `HostRuntime` topo order; across processes it relies on (4) — the orchestrator /
    k8s preStop hook is responsible for ordering pod termination via dependency-aware shutdown, NOT via simultaneous
    `SIGTERM` blasts.
-6. **Stop runtime services** — the presence task (heartbeat + registration/self-heal, stopped when the root token is
-   cancelled) and the internal-auth refresh task.
+6. **Stop runtime services** — the internal-auth refresh task. (The `PresenceManager`'s renewal loop runs on its own
+   token so step 1's `Draining` stays visible for the whole drain; `OopHttpServer::join` quiesces that loop *immediately
+   before* the step-4 deregistration, not after, so an in-flight renewal cannot re-register a record once it is removed.)
 7. **Close HTTP listener and exit.**
 
 In Profile 1 (in-process), steps 1-3 are no-ops (no LB to flip); the reverse-topo STOP loop in `HostRuntime` handles
@@ -450,10 +456,11 @@ The existing `DirectoryClient` trait (`libs/system-sdks/sdks/directory/src/api.r
 ##### Responsibility scope
 
 - Extend `RegisterInstanceInfo` with `rest_endpoint: Option<ServiceEndpoint>` (the gear's HTTP base URL) and
-  `openapi_spec: Option<String>` (the gear's OpenAPI JSON).
+  `openapi_spec_hash: Option<String>` (the lowercase-hex SHA-256 of the gear's OpenAPI document).
 - Add `resolve_rest_service(gear_name) -> Result<ServiceEndpoint>` to the `DirectoryClient` trait for REST URL
   resolution.
-- Store and serve per-gear OpenAPI specs for aggregation by api-gateway.
+- Store only the per-gear OpenAPI document hash; the edge fetches the document from each instance's
+  `/.well-known/openapi.json` and verifies it against the hash (ADR-0011).
 
 ##### Responsibility boundaries
 
@@ -547,7 +554,7 @@ gears, the gateway needs to reverse-proxy requests to remote OoP gears.
 
 - `cpt-cf-component-oop-bootstrap` — self-registers REST endpoint + OpenAPI spec with `DirectoryService` (the
   built-in edge then drives `register_routes` / `deregister_routes` from that; external adapters may call them directly)
-- `cpt-cf-component-directory-rest` — enumerates gear endpoints (`ListAllInstances`) for edge discovery; the OpenAPI document is fetched per gear via `GetOpenApiSpec`
+- `cpt-cf-component-directory-rest` — enumerates gear endpoints (`ListAllInstances`) for edge discovery; the OpenAPI document is fetched by the edge from each instance's `/.well-known/openapi.json` and verified against `openapi_spec_hash` (ADR-0011)
 
 #### REST Client Codegen
 
@@ -732,27 +739,47 @@ contract it carries is defined by the two-plane model ([cpt-cf-adr-two-plane-aut
 
 ##### Current state
 
-No internal authentication exists. The OoP bootstrap connects to DirectoryService via gRPC without any credential. In
-Profile 1 (Embedded), this is not a problem (same process). In Profiles 2 and 3, it is an open attack surface.
+Two credential providers are implemented, selected by `internal_auth` configuration
+(`toolkit_security::InternalAuthConfig`): `shared_secret` (one pre-shared token; dev and single-node) and `kube`
+(projected SA tokens, Profile 3). The Profile 2 bootstrap token minted by Flight Control and mTLS are not implemented
+yet. Profile 1 (Embedded) needs no credential (same process).
 
 ##### Design
 
-The component provides a profile-specific credential abstraction:
+Every participant configures the platform plane through one `internal_auth` block (`InternalAuthConfig`): OoP gears
+under `oop_http.internal_auth`, grpc-hub and api-gateway under their own `internal_auth`.
 
-```rust
-pub enum InternalCredential {
-    /// Profile 1: no auth needed (in-process)
-    None,
-    /// Profile 2 single-node: ephemeral random token from Flight Control
-    BootstrapToken(SecretString),
-    /// Profile 3: k8s ServiceAccount JWT (auto-mounted, auto-rotated)
-    KubeServiceAccountToken { token_path: PathBuf, audience: String },
-    /// Profile 2 multi-node (P2): mTLS client certificate
-    MtlsIdentity { cert: PathBuf, key: PathBuf, ca: PathBuf },
-}
+```yaml
+internal_auth:
+  provider: kube
+  verify:                         # inbound: validate callers' projected SA tokens via TokenReview
+    audiences: [toolkit-internal]
+  present:                        # outbound: the projected SA token this participant attaches
+    token_path: /var/run/secrets/tokens/toolkit-internal/token
+# Dev / single-node alternative, symmetric (accepted inbound, attached outbound):
+#   provider: shared_secret
+#   secret: <token>
 ```
 
-**Profile 2 (single-node)** — Bootstrap Token:
+The two kube blocks are independent, and each participant requires only the one it uses: grpc-hub validates only
+(`verify`); OoP gears register with DirectoryService and validate their own routes (both); the host process and
+`publish-gts` only send (`present`); api-gateway always validates (`verify`) and also sends when its reverse proxy is
+enabled (`present`). A participant missing a block it needs fails startup rather than running that direction
+unauthenticated.
+
+- **Outbound** — `toolkit_contract::runtime::platform_credential::build_internal_token_provider` maps the config to a
+  transport-agnostic `InternalTokenProvider`. Generated clients attach it through
+  `InternalTokenProvider::resolve_for_attach`; hand-written tonic clients (the DirectoryService client, cluster-sdk) wrap
+  it with `internal_auth_interceptor`. A projected token is re-read on rotation by a refresh task bound to the caller's
+  cancellation token.
+- **Inbound** — `toolkit_security::build_inbound_authenticator` builds the validator: the shared secret directly, or a
+  TokenReview validator via `toolkit_k8s_auth::kube_authenticator_builder` (cached, configurable TTL). It is installed
+  as `internal_auth_middleware` (HTTP) or `InternalAuthGrpcLayer` (gRPC).
+
+`toolkit_security::InternalCredential` (`None` / `BootstrapToken` / `KubeServiceAccountToken` / `MtlsIdentity`) is
+unused: the configuration above selects the credential.
+
+**Profile 2 (single-node, planned)** — Bootstrap Token (until then, single-node deployments use `shared_secret`):
 
 1. Flight Control generates a cryptographically random 256-bit token at startup (in-memory only).
 2. Passes it to spawned workers via `TOOLKIT_INTERNAL_TOKEN` env var.
@@ -763,10 +790,10 @@ pub enum InternalCredential {
 **Profile 3 (K8s)** — ServiceAccount Tokens:
 
 1. Each gear pod has a projected SA token with audience `toolkit-internal` (auto-mounted by kubelet).
-2. Gear reads the token from the projected volume at startup and on rotation.
+2. Gear reads the token from `present.token_path` at startup (failing startup if it cannot) and re-reads it on rotation.
 3. Attaches it to system calls as `X-ToolKit-Internal-Token: <sa-token>` (never `Authorization`, to avoid colliding
    with the tenant-plane user JWT).
-4. Flight Control validates via k8s TokenReview API (cached, configurable TTL).
+4. Flight Control validates via k8s TokenReview API against `verify.audiences` (cached, configurable TTL).
 5. Response includes gear identity: `{namespace, serviceAccountName, podName}`.
 
 **One plane per request** (per [cpt-cf-adr-two-plane-auth](ADR/0008-cpt-cf-adr-two-plane-auth.md)): a request carries either the tenant
@@ -864,11 +891,13 @@ belong on the tenant plane — they are *not* candidates for `PlatformSecurityCo
 
 ##### Responsibility scope
 
-- Define the `InternalCredential` enum and `attach_internal_auth` / `validate_internal_auth` helpers.
+- Own `InternalAuthConfig` and its two builders: `build_internal_token_provider` (outbound) and
+  `build_inbound_authenticator` (inbound).
 - Profile 2: Flight Control generates a bootstrap token, passes it to spawned workers via env, and validates it at its `service-discovery` DirectoryService.
-- Profile 3: read projected SA token, attach to calls, validate via TokenReview at Flight Control's `service-discovery`.
-- Provide `InternalAuthMiddleware` for both gRPC (tonic interceptor) and HTTP (Axum middleware) that validates incoming
-  system calls.
+- Profile 3: read the projected SA token at `present.token_path`, attach it to calls, validate via TokenReview against
+  `verify.audiences` at Flight Control's `service-discovery`.
+- Provide `InternalAuthMiddleware` for both gRPC (`InternalAuthGrpcLayer`, a Tower layer, since validation is async)
+  and HTTP (`internal_auth_middleware`, Axum) that validates incoming system calls.
 - All logic lives in ToolKit runtime — gear developers do not interact with internal auth.
 
 ##### Responsibility boundaries
@@ -879,7 +908,8 @@ belong on the tenant plane — they are *not* candidates for `PlatformSecurityCo
 
 ##### Related components (by ID)
 
-- `cpt-cf-component-oop-bootstrap` — initializes `InternalCredential` at startup, attaches to all system calls
+- `cpt-cf-component-oop-bootstrap` — builds the outbound credential and inbound validator from
+  `oop_http.internal_auth` at startup, attaches the credential to all system calls
 - `cpt-cf-component-secctx-http` — coexists on the same requests (different headers, different purpose)
 - `cpt-cf-component-k8s-packaging` — Helm charts configure SA token projection and `TOOLKIT_INTERNAL_TOKEN` env
 
@@ -1003,10 +1033,11 @@ Key design decisions:
 
 | Method               | Request                           | Response                            | Description                                  |
 |----------------------|-----------------------------------|-------------------------------------|----------------------------------------------|
-| `RegisterInstance`   | `RegisterInstanceInfo` (extended) | `RegisterResult`                    | Register gear with REST endpoint + OpenAPI |
+| `RegisterInstance`   | `RegisterInstanceInfo` (extended) | `RegisterResult`                    | Register gear with REST endpoint + `openapi_spec_hash` |
 | `ResolveRestService` | `ResolveRequest { gear_name }`  | `ServiceEndpoint` (with `rest_url`) | Resolve a gear's REST base URL             |
-| `GetOpenApiSpec`     | `SpecRequest { gear_name }`     | `SpecResponse { openapi_json }`     | Retrieve a gear's OpenAPI spec             |
-| `ListAllInstances`   | `ListAllInstancesRequest {}`      | `ListAllInstancesResponse { instances[] }` | Enumerate every registered instance (stable `instance_id` + gear + REST endpoint) for edge discovery — a spec-less snapshot; the OpenAPI document is fetched per gear via `GetOpenApiSpec` |
+| `ListAllInstances`   | `ListAllInstancesRequest {}`      | `ListAllInstancesResponse { instances[] }` | Enumerate every registered instance (stable `instance_id` + gear + REST endpoint + `openapi_spec_hash`) for edge discovery — a spec-less snapshot; the OpenAPI document is fetched from the instance's `/.well-known/openapi.json` |
+
+`GetOpenApiSpec` and `RegisterInstanceRequest.openapi_spec` were removed (ADR-0011): the directory never stores OpenAPI documents, only the `openapi_spec_hash`.
 
 #### GatewayProvider Trait
 
@@ -1061,11 +1092,13 @@ and no bespoke gateway admin API is needed. Notes:
   selection reduces to that one VIP.
 - **Gated + disabled by default** (`gateway_proxy.enabled`), so the Profile 1 in-process monolith is unaffected.
 - **Spec-less discovery snapshot**: `ListAllInstances` returns only instance identity (stable `instance_id` + gear) +
-  REST endpoint, not the full
-  OpenAPI document, so the poll response stays small and bounded regardless of gear count or spec size. Within a single
-  poll the edge fetches a gear's document at most once via `GetOpenApiSpec` (cached for the pass and reused across that
-  gear's instances); each poll reconciles the full snapshot, so a spec change is picked up on the next poll after the
-  gear re-publishes.
+  REST endpoint + the `openapi_spec_hash`, not the full OpenAPI document, so the poll response stays small and bounded
+  regardless of gear count or spec size. When the edge sees a hash it has not cached, it fetches the document directly
+  from the instance's `/.well-known/openapi.json`, verifies the fetched document's SHA-256 against the advertised hash,
+  and caches it by hash (so an unchanged hash is never re-fetched and co-located instances sharing a hash share one
+  copy). Cached documents no instance advertises anymore are dropped. On a hash mismatch — a Service VIP answering from
+  a pod with a different document mid-rollout — the edge keeps the gear's previous routes and retries on the next poll.
+  The edge no longer calls `GetOpenApiSpec` (ADR-0011).
 
 ### 3.4 Internal Dependencies
 
@@ -1185,7 +1218,7 @@ sequenceDiagram
 
     par Background: self-registration (retry with backoff)
         loop Until registered
-            Worker->>Dir: RegisterInstance(name, instance_id, rest_endpoint, openapi_spec)
+            Worker->>Dir: RegisterInstance(name, instance_id, rest_endpoint, openapi_spec_hash)
             alt Flight Control not yet available
                 Dir-->>Worker: connection refused
                 Worker->>Worker: backoff, retry
@@ -1214,9 +1247,12 @@ sequenceDiagram
     Note over Edge: Directory-sync (every sync_interval)
     loop Periodic
         Edge->>Dir: ListAllInstances()
-        Dir-->>Edge: instances[] (instance_id, gear, rest_endpoint) — spec-less snapshot
-        Edge->>Dir: GetOpenApiSpec(gear) [once per gear per poll, deduped across a gear's instances]
-        Dir-->>Edge: openapi_spec
+        Dir-->>Edge: instances[] (instance_id, gear, rest_endpoint, openapi_spec_hash) — spec-less snapshot
+        opt Hash not in the edge's by-hash cache
+            Edge->>Worker: GET {rest_endpoint}/.well-known/openapi.json
+            Worker-->>Edge: openapi document
+            Edge->>Edge: verify SHA-256 == openapi_spec_hash; on mismatch keep old routes and retry next poll; else cache by hash
+        end
         Edge->>Edge: register_routes(gear, instance_id) / prune by instance_id on ProxyRegistry
     end
 
@@ -1477,7 +1513,7 @@ conventions into reusable named templates.
 | Health probes      | `/healthz` (liveness), `/readyz` (readiness), `/health` (diagnostics) — provided by ToolKit runtime | `health.liveness.*`, `health.readiness.*`         |
 | Gear config      | `TOOLKIT_MODULE_CONFIG` from ConfigMap                                     | `gearConfig` (arbitrary map → JSON)             |
 | Directory endpoint | `TOOLKIT_DIRECTORY_ENDPOINT` env var                                       | `global.directoryEndpoint`                        |
-| Internal auth      | Projected SA token volume (audience: `toolkit-internal`) for Profile 3     | `internalAuth.audience`, `internalAuth.tokenPath` |
+| Internal auth      | Projected SA token volume (audience: `toolkit-internal`) for Profile 3; gear config points `internal_auth.present.token_path` at it | `saToken.enabled`, `saToken.audience`, `saToken.mountPath`, `saToken.fileName` |
 | Resources          | requests/limits block                                                     | `resources.requests.*`, `resources.limits.*`      |
 | Labels             | `app.kubernetes.io/*` standard labels                                     | Automatic from chart metadata                     |
 | Image pull secrets | Global pull secrets for private registries                                | `global.imagePullSecrets`                         |
@@ -1899,7 +1935,7 @@ Flight Control itself.** OoP gears register with Flight Control's directory and 
 
 | Component | Role | State | Notes |
 |-----------|------|-------|-------|
-| service-discovery (DirectoryService) | Service registration + discovery | No DB; in-memory registry. Gears re-register on heartbeat, so restart recovery is handled. | Serves gRPC via grpc-hub; its REST surface (co-hosted on api-gateway) enables k8s-native discovery. **One per installation** — see below. |
+| service-discovery (DirectoryService) | Service registration + discovery | No DB; in-memory, lease-based registry (ADR-0011). Each record carries a lease renewed by register/heartbeat and a reported state; the observable state is derived at read time and a `stateful` sweeper drops records past `ttl + grace`. A heartbeat for an unknown instance returns `NOT_FOUND`, so a worker re-registers within one heartbeat after a restart. `lease.ttl`/`lease.grace` default to 30s. | Serves gRPC via grpc-hub; its REST surface (co-hosted on api-gateway) enables k8s-native discovery. **One per installation** — see below. |
 | grpc-hub | gRPC transport for the directory + platform-plane RPCs | Stateless. | Hosts the DirectoryService gRPC endpoint. |
 | api-gateway | Edge + REST host: reverse-proxies exposed OoP routes and co-hosts the other control-plane gears' REST routes (directory, types-registry) on one HTTP server | No DB; in-memory route table populated from directory registrations. | Built-in edge in Profile 2 and Profile 3 Mode A; in Mode B an external gateway (Kong/Tyk) replaces the edge. |
 | types-registry | GTS catalogue | Database-backed admission and reads; the legacy in-memory catalogue remains during migration. | System startup prepares registry seeds; application GTS publication waits for admission before application `init`. Legacy finalization runs after application `init`. |

@@ -23,22 +23,35 @@ use super::{BackendEntry, DeploymentMode, EventBrokerConfig};
 use crate::domain::backend::{self, Routing};
 use crate::domain::outbox::{INGEST_QUEUE_NAME, OutboxPartitions};
 
+/// The request deadline the ingest-serving publish routes declare to
+/// api-gateway via `OperationBuilder::request_timeout`. Longer than
+/// the gateway's `defaults.request_timeout` (30s) so a synchronous publish can
+/// hold its response head open for [`MAX_PUBLISH_WAIT_SECS`] plus the broker's
+/// pre-wait work (authn, authz, validation, the enqueue transaction).
+pub const PUBLISH_ROUTE_TIMEOUT_SECS: u64 = 60;
+
+/// The request deadline the dispatcher's publish-forwarding routes declare.
+/// A cluster publish crosses two gateways: the dispatcher host's first, then
+/// the ingest host's. The outer deadline must cover the dispatch hop (the
+/// upstream connect is bounded at 5s in `infra::dispatcher::forward`) on top
+/// of the upstream's own [`PUBLISH_ROUTE_TIMEOUT_SECS`].
+pub const DISPATCHER_PUBLISH_ROUTE_TIMEOUT_SECS: u64 = 75;
+
 /// The largest `publish.max_wait_secs` an ingest-serving instance accepts. A
 /// synchronous publish holds its HTTP response head open until the events are
 /// stored or the wait elapses, and every event route sits behind api-gateway,
-/// whose request deadline (`defaults.request_timeout`, default 30s) answers
-/// `504` when it expires - twice in cluster, where the request crosses the
-/// dispatcher host's gateway and then the ingest host's. A hold that outlasts
-/// that deadline turns a slow backend into a `504` *after* the event is
-/// already committed, which a retrying client then publishes again. Capping the
-/// hold at 20s leaves the dispatcher hop, the upstream connect, and the broker's
-/// pre-wait work inside the 30s deadline. Enforced in every mode that serves
-/// ingest ([`DeploymentMode::ingest_active`]); the non-ingest roles never
-/// enqueue, so they carry the section without being subject to it. The cap can
-/// rise once a route can ask api-gateway for a longer deadline (#4752).
+/// which answers `504` when the request's deadline expires - twice in cluster,
+/// where the request crosses the dispatcher host's gateway and then the ingest
+/// host's. A hold that outlasts that deadline turns a slow backend into a
+/// `504` *after* the event is already committed, which a retrying client then
+/// publishes again. The publish routes declare a 60s deadline
+/// ([`PUBLISH_ROUTE_TIMEOUT_SECS`]); capping the hold at 50s leaves the
+/// broker's pre-wait work inside it. Enforced in every mode that serves ingest
+/// ([`DeploymentMode::ingest_active`]); the non-ingest roles never enqueue, so
+/// they carry the section without being subject to it.
 ///
 /// [`DeploymentMode::ingest_active`]: crate::config::DeploymentMode::ingest_active
-pub const MAX_PUBLISH_WAIT_SECS: u32 = 20;
+pub const MAX_PUBLISH_WAIT_SECS: u32 = 50;
 
 /// The deployment as the checks proved it: every name valid, every route
 /// naming an entry, the instance-less route present, every entry routed to.
@@ -126,6 +139,15 @@ pub enum Error {
         "publish: max_wait_secs is {secs}; in standalone and cluster_ingest modes it is at most {max} seconds, so a synchronous publish's hold stays inside the api-gateway request deadline"
     )]
     PublishMaxWaitTooLarge { secs: u32, max: u32 },
+
+    /// `streaming.authz_scope_ttl_secs` is not above the longest refresh lead
+    /// in a mode that serves delivery: a stream's refresh worker re-evaluates
+    /// a consume scope group one lead before it expires, so a shorter window
+    /// would be due again the moment it is stored.
+    #[error(
+        "streaming: authz_scope_ttl_secs is {ttl_secs} and authz_eval_deadline_secs is {deadline_secs}; in standalone and cluster_delivery modes authz_scope_ttl_secs must be greater than 2 x authz_eval_deadline_secs + 2, so a stream's consume scope is refreshed ahead of its expiry"
+    )]
+    ScopeTtlTooShort { ttl_secs: u32, deadline_secs: u32 },
 }
 
 /// Runs every configuration-level check this instance's role is subject to.
@@ -136,11 +158,16 @@ pub enum Error {
 /// # Errors
 /// The first rule the configuration breaks, checked in this order: in the
 /// ingest-serving modes (`standalone` and `cluster_ingest`), the
-/// synchronous-publish cap ([`MAX_PUBLISH_WAIT_SECS`]); registry names; each
+/// synchronous-publish cap ([`MAX_PUBLISH_WAIT_SECS`]); in the
+/// delivery-serving modes (`standalone` and `cluster_delivery`), the consume
+/// scope TTL against the refresh lead
+/// ([`StreamingConfig::outlasts_refresh_lead`]); registry names; each
 /// routing key in sorted order, its form and then its target (C3); the
 /// instance-less route (C4); unreferenced entries (C5); outside `standalone`, a
 /// `SQLite` entry (C10); and, where ingest runs, the outbox groups - a group
 /// other than `default`, then the partition count, then `topics` (C8).
+///
+/// [`StreamingConfig::outlasts_refresh_lead`]: super::StreamingConfig::outlasts_refresh_lead
 pub fn check(cfg: &EventBrokerConfig, mode: DeploymentMode) -> Result<Option<Deployment>, Error> {
     if mode.backend_role().is_none() {
         return Ok(None);
@@ -151,6 +178,14 @@ pub fn check(cfg: &EventBrokerConfig, mode: DeploymentMode) -> Result<Option<Dep
         return Err(Error::PublishMaxWaitTooLarge {
             secs: cfg.publish.max_wait_secs,
             max: MAX_PUBLISH_WAIT_SECS,
+        });
+    }
+    // A stream's consume scope is refreshed wherever delivery runs; see
+    // `StreamingConfig::outlasts_refresh_lead`.
+    if mode.delivery_active() && !cfg.streaming.outlasts_refresh_lead() {
+        return Err(Error::ScopeTtlTooShort {
+            ttl_secs: cfg.streaming.authz_scope_ttl_secs,
+            deadline_secs: cfg.streaming.authz_eval_deadline_secs,
         });
     }
     let backends = backends(cfg)?;

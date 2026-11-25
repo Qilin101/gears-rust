@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-graph-storage"
-version = "0.3.2"
+version = "0.4.2"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -49,6 +49,7 @@ tracing = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_html_form = { workspace = true }
 utoipa = { workspace = true, features = ["time"] }
 jsonschema = { workspace = true }
 gts = { workspace = true }
@@ -60,6 +61,14 @@ http = { workspace = true }
 toolkit = { workspace = true }
 authz-resolver = { workspace = true }
 authz-resolver-sdk = { workspace = true }
+# Offboarding asks the platform whether a tenant is marked deleted before it
+# fences it; the resolver is looked up when that is asked, not at boot.
+tenant-resolver-sdk = { workspace = true }
+# Lets a test check the offboarding order names every kind of state.
+strum = { workspace = true }
+# Spreads the offboarding worker's passes so replicas started together drift
+# apart.
+rand = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-http = { workspace = true }
 toolkit-security = { workspace = true }
@@ -85,7 +94,8 @@ test-containers = { workspace = true }
 graph-storage-sdk = { workspace = true, features = ["test-support"] }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# `test-util`: a paused clock for the worker and resolver-timeout cases.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 # Deliberately *not* `integration`. That feature gates toolkit-db's own
 # Docker-backed tests, and cargo unifies features across a workspace build —
 # so asking for it here turns those tests on for every `cargo test
@@ -105,7 +115,6 @@ types-registry-sdk = { workspace = true }
 tower = { workspace = true }
 # The target-tenant cases run against the platform's tenant-hierarchy PDP, over
 # a tenant tree from the static resolver's configuration (gears-rust #5623).
-tenant-resolver-sdk = { workspace = true }
 # Captures the events a refused target tenant must log (`tests/target_tenant.rs`).
 tracing-subscriber = { workspace = true }
 tr-authz-plugin = { package = "cf-gears-tr-authz-plugin", path = "../../system/authz-resolver/plugins/tr-authz-plugin" }

@@ -4,11 +4,13 @@ use super::*;
 use crate::config::{KeyConfig, RateSpec};
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::routing::get;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tower::ServiceExt;
 
-use toolkit::api::operation_builder::VendorExtensions;
+use toolkit::api::operation_builder::{RouteTimeout, VendorExtensions};
 
 fn op(method: Method, path: &str, throttling: Option<ThrottlingSpec>) -> OperationSpec {
     OperationSpec {
@@ -36,6 +38,7 @@ fn op(method: Method, path: &str, throttling: Option<ThrottlingSpec>) -> Operati
         allowed_request_content_types: None,
         vendor_extensions: VendorExtensions::default(),
         license_requirement: None,
+        request_timeout: RouteTimeout::Inherit,
     }
 }
 

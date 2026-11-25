@@ -10,7 +10,6 @@ use uuid::Uuid;
 
 use super::{ControlPlaneService, DataPlaneService, EndpointSelector};
 use crate::domain::model;
-use crate::domain::repo::Tags;
 
 /// Facade that implements the public `ServiceGatewayClientV1` trait by
 /// delegating to the internal CP and DP services.
@@ -177,7 +176,7 @@ impl ServiceGatewayClientV1 for ServiceGatewayClientV1Facade {
         path: &str,
     ) -> Result<(oagw_sdk::Upstream, oagw_sdk::Route), CanonicalError> {
         self.cp
-            .resolve_proxy_target(&ctx, alias, method, path, Tags::Load)
+            .resolve_proxy_target_for_client(&ctx, alias, method, path)
             .await
             .map(|(u, r)| (upstream_to_sdk(u), route_to_sdk(r)))
             .map_err(CanonicalError::from)
@@ -218,6 +217,10 @@ fn sdk_create_upstream_to_domain(
         headers: req.headers().cloned().map(headers_config_to_domain),
         plugins: req.plugins().cloned().map(plugins_config_to_domain),
         rate_limit: req.rate_limit().cloned().map(rate_limit_config_to_domain),
+        circuit_breaker: req
+            .circuit_breaker()
+            .cloned()
+            .map(circuit_breaker_config_to_domain),
         cors: req.cors().cloned().map(cors_config_to_domain),
         tags: req.tags().to_vec(),
         enabled: req.enabled(),
@@ -235,6 +238,10 @@ fn sdk_update_upstream_to_domain(
         headers: req.headers().cloned().map(headers_config_to_domain),
         plugins: req.plugins().cloned().map(plugins_config_to_domain),
         rate_limit: req.rate_limit().cloned().map(rate_limit_config_to_domain),
+        circuit_breaker: req
+            .circuit_breaker()
+            .cloned()
+            .map(circuit_breaker_config_to_domain),
         cors: req.cors().cloned().map(cors_config_to_domain),
         tags: req.tags().to_vec(),
         enabled: req.enabled(),
@@ -353,6 +360,19 @@ fn window_to_domain(v: oagw_sdk::Window) -> model::Window {
     }
 }
 
+fn circuit_breaker_config_to_domain(
+    v: oagw_sdk::CircuitBreakerConfig,
+) -> model::CircuitBreakerConfig {
+    model::CircuitBreakerConfig {
+        sharing: sharing_mode_to_domain(v.sharing),
+        enabled: v.enabled,
+        failure_threshold: v.failure_threshold,
+        timeout_seconds: v.timeout_seconds,
+        success_threshold: v.success_threshold,
+        owner_id: None,
+    }
+}
+
 fn rate_limit_config_to_domain(v: oagw_sdk::RateLimitConfig) -> model::RateLimitConfig {
     model::RateLimitConfig {
         sharing: sharing_mode_to_domain(v.sharing),
@@ -390,7 +410,8 @@ fn rate_limit_config_to_domain(v: oagw_sdk::RateLimitConfig) -> model::RateLimit
         },
         cost: v.cost,
         response_headers: v.response_headers,
-        pool_owner_id: None,
+        shared_pool: None,
+        limit_owner_id: None,
     }
 }
 
@@ -547,6 +568,7 @@ fn upstream_to_sdk(u: model::Upstream) -> oagw_sdk::Upstream {
                 .collect(),
         }),
         rate_limit: u.rate_limit.map(rate_limit_config_to_sdk),
+        circuit_breaker: u.circuit_breaker.map(circuit_breaker_config_to_sdk),
         cors: u.cors.map(cors_config_to_sdk),
         tags: u.tags,
     }
@@ -625,6 +647,16 @@ fn cors_config_to_sdk(v: model::CorsConfig) -> oagw_sdk::CorsConfig {
             .collect(),
         expose_headers: v.expose_headers,
         allow_credentials: v.allow_credentials,
+    }
+}
+
+fn circuit_breaker_config_to_sdk(v: model::CircuitBreakerConfig) -> oagw_sdk::CircuitBreakerConfig {
+    oagw_sdk::CircuitBreakerConfig {
+        sharing: sharing_mode_to_sdk(v.sharing),
+        enabled: v.enabled,
+        failure_threshold: v.failure_threshold,
+        timeout_seconds: v.timeout_seconds,
+        success_threshold: v.success_threshold,
     }
 }
 
@@ -734,6 +766,7 @@ mod tests {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             managed_by: model::ManagedBy::Api,
@@ -791,6 +824,7 @@ mod tests {
         let domain_err = DomainError::RequestTimeout {
             detail: "timed out".into(),
             instance: "/slow".into(),
+            dispatch: crate::domain::error::Dispatch::MaybeSent,
         };
         let canonical: CanonicalError = domain_err.into();
         assert!(matches!(canonical, CanonicalError::DeadlineExceeded { .. }));
@@ -988,7 +1022,7 @@ mod tests {
             &Unattended,
             &upstreams,
             &routes,
-            root,
+            Some(root),
         )
         .await
         .unwrap();
@@ -996,7 +1030,11 @@ mod tests {
         let selector = Arc::new(InvalidateRecorder::default());
         let dp = TestDpBuilder::new()
             .with_backend_selector(selector.clone())
-            .build_and_register(&hub, cp.clone());
+            .build_and_register(
+                &hub,
+                cp.clone(),
+                Arc::new(crate::domain::rate_limit::RateLimiter::new()),
+            );
         let gw = ServiceGatewayClientV1Facade::new(cp, dp, selector.clone());
         let ctx = provisioning_ctx(root).unwrap();
         let upstream_id = upstreams[0].request.id.unwrap();
@@ -1076,3 +1114,7 @@ mod tests {
 #[cfg(test)]
 #[path = "shadowing_tests.rs"]
 mod shadowing_tests;
+
+#[cfg(test)]
+#[path = "limit_owner_tests.rs"]
+mod limit_owner_tests;

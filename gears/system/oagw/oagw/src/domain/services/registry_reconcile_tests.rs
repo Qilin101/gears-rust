@@ -73,6 +73,7 @@ pub(crate) fn upstream_at(tenant_id: Uuid, host: &str) -> ProvisionedUpstream {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             enabled: true,
@@ -507,7 +508,7 @@ impl Fixture {
             &Unattended,
             upstreams,
             routes,
-            root,
+            Some(root),
         )
         .await
     }
@@ -948,7 +949,7 @@ async fn a_hierarchy_rejection_skips_and_the_old_config_serves(b: Backend) {
     );
     let mut ancestor = upstream_at(root, "api.example.com").request;
     ancestor.auth = Some(AuthConfig {
-        plugin_type: "apikey".into(),
+        plugin_type: crate::domain::gts_helpers::NOOP_AUTH_PLUGIN_ID.into(),
         sharing: SharingMode::Enforce,
         config: None,
     });
@@ -962,7 +963,7 @@ async fn a_hierarchy_rejection_skips_and_the_old_config_serves(b: Backend) {
     );
 
     upstreams[0].request.auth = Some(AuthConfig {
-        plugin_type: "apikey".into(),
+        plugin_type: crate::domain::gts_helpers::NOOP_AUTH_PLUGIN_ID.into(),
         sharing: SharingMode::Inherit,
         config: None,
     });
@@ -1062,8 +1063,8 @@ async fn the_content_check_skips_bad_instances_and_keeps_their_rows(b: Backend) 
 /// ADR-0018: PERS-PROV-002.
 async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
     use crate::domain::model::{
-        BudgetConfig, BudgetMode, CorsConfig, RateLimitAlgorithm, RateLimitConfig, RateLimitScope,
-        RateLimitStrategy, SustainedRate, Window,
+        BudgetConfig, BudgetMode, CorsConfig, PluginBinding, PluginsConfig, RateLimitAlgorithm,
+        RateLimitConfig, RateLimitScope, RateLimitStrategy, SustainedRate, Window,
     };
     use crate::domain::ssrf::SsrfPolicy;
 
@@ -1075,7 +1076,17 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
     let f = Fixture::guarded(b, ssrf);
     let root = Uuid::new_v4();
     let good = upstream_at(root, "good.example.com");
-    let hosts = ["ssrf", "cors", "budget", "secret"].map(|h| format!("{h}.example.com"));
+    let hosts = [
+        "ssrf",
+        "cors",
+        "budget",
+        "secret",
+        "plain",
+        "plugin",
+        "zero-rate",
+        "tag",
+    ]
+    .map(|h| format!("{h}.example.com"));
     let mut bad = hosts.map(|host| upstream_at(root, &host));
     let mut bad_cors_route = route_on(&good, "/cors");
     let mut upstreams = vec![good.clone()];
@@ -1097,7 +1108,7 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
         expose_headers: vec![],
         allow_credentials: true,
     };
-    let [ssrf, cors, budget, secret] = &mut bad;
+    let [ssrf, cors, budget, secret, plain, plugin, zero_rate, tag] = &mut bad;
     set_host(ssrf, "denied.example.com");
     cors.request.cors = Some(wildcard_with_credentials.clone());
     budget.request.rate_limit = Some(RateLimitConfig {
@@ -1117,10 +1128,11 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
         strategy: RateLimitStrategy::Reject,
         cost: 1,
         response_headers: false,
-        pool_owner_id: None,
+        shared_pool: None,
+        limit_owner_id: None,
     });
     secret.request.auth = Some(AuthConfig {
-        plugin_type: "apikey".into(),
+        plugin_type: crate::domain::gts_helpers::APIKEY_AUTH_PLUGIN_ID.into(),
         sharing: SharingMode::Private,
         config: Some(
             [
@@ -1130,6 +1142,33 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
             .into(),
         ),
     });
+    // The checks of #4974: plain HTTP while the gear does not allow it, an
+    // unimplemented plugin, a zero rate, a tag outside the pattern.
+    plain.request.server.endpoints[0].scheme = Scheme::Http;
+    plugin.request.plugins = Some(PluginsConfig {
+        sharing: SharingMode::Private,
+        items: vec![PluginBinding {
+            plugin_ref: crate::domain::gts_helpers::TIMEOUT_GUARD_PLUGIN_ID.into(),
+            config: Default::default(),
+        }],
+    });
+    zero_rate.request.rate_limit = Some(RateLimitConfig {
+        sharing: SharingMode::Private,
+        algorithm: RateLimitAlgorithm::TokenBucket,
+        sustained: SustainedRate {
+            rate: 0,
+            window: Window::Second,
+        },
+        burst: None,
+        budget: None,
+        scope: RateLimitScope::Tenant,
+        strategy: RateLimitStrategy::Reject,
+        cost: 1,
+        response_headers: false,
+        shared_pool: None,
+        limit_owner_id: None,
+    });
+    tag.request.tags = vec!["LLM".into()];
     bad_cors_route.request.cors = Some(wildcard_with_credentials);
     let mut no_id = route_on(&good, "/no-id");
     no_id.request.id = None;
@@ -1139,7 +1178,11 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
         "blocked by SSRF protection",
         "allow_credentials",
         "budget.total is required",
-        "invalid secret_ref",
+        "invalid credential reference",
+        "only HTTPS endpoints are permitted",
+        "is not implemented",
+        "rate_limit.sustained.rate must be at least 1",
+        "must match ^[a-z0-9_-]+$",
     ]) {
         let e = f
             .provisioner
@@ -1159,7 +1202,7 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
         (
             Tally {
                 unchanged: 1,
-                failed: 4,
+                failed: 8,
                 ..NONE
             },
             Tally {
@@ -1174,6 +1217,10 @@ async fn every_kind_of_bad_content_is_skipped_and_keeps_its_row(b: Backend) {
         vec![
             failure("route", why::INVALID_INSTANCE),
             failure("route", why::INVALID_REQUEST),
+            failure("upstream", why::INVALID_REQUEST),
+            failure("upstream", why::INVALID_REQUEST),
+            failure("upstream", why::INVALID_REQUEST),
+            failure("upstream", why::INVALID_REQUEST),
             failure("upstream", why::INVALID_REQUEST),
             failure("upstream", why::INVALID_REQUEST),
             failure("upstream", why::INVALID_REQUEST),
@@ -1603,7 +1650,7 @@ fn with_secret(root: Uuid) -> ProvisionedUpstream {
     config.insert("header".into(), "authorization".into());
     config.insert("secret_ref".into(), "cred://key".into());
     u.request.auth = Some(AuthConfig {
-        plugin_type: "apikey".into(),
+        plugin_type: crate::domain::gts_helpers::APIKEY_AUTH_PLUGIN_ID.into(),
         sharing: SharingMode::Private,
         config: Some(config),
     });
@@ -1956,6 +2003,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::DownstreamError {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::MaybeSent,
             },
             None,
         ),
@@ -1963,6 +2011,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::LinkUnavailable {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::NotSent,
             },
             None,
         ),
@@ -1970,6 +2019,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::CircuitBreakerOpen {
                 detail: d(),
                 instance: i(),
+                retry_after: std::time::Duration::from_secs(1),
             },
             None,
         ),
@@ -1977,6 +2027,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::ConnectionTimeout {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::NotSent,
             },
             None,
         ),
@@ -1984,6 +2035,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::RequestTimeout {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::MaybeSent,
             },
             None,
         ),
@@ -1995,9 +2047,24 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             None,
         ),
         (
+            DomainError::IdpUnavailable {
+                detail: d(),
+                instance: i(),
+            },
+            None,
+        ),
+        (
+            DomainError::IdpInvalidResponse {
+                detail: d(),
+                instance: i(),
+            },
+            None,
+        ),
+        (
             DomainError::StreamAborted {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::MaybeSent,
             },
             None,
         ),
@@ -2005,6 +2072,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::ProtocolError {
                 detail: d(),
                 instance: i(),
+                dispatch: crate::domain::error::Dispatch::MaybeSent,
             },
             None,
         ),
@@ -2012,6 +2080,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::Forbidden {
                 reason: oagw_sdk::reason::permission::TENANT_RESOLVER_UNAUTHORIZED.to_owned(),
                 detail: d(),
+                entity: crate::domain::error::DeniedOn::Proxy,
             },
             None,
         ),
@@ -2019,6 +2088,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
             DomainError::Forbidden {
                 reason: "policy".to_owned(),
                 detail: d(),
+                entity: crate::domain::error::DeniedOn::Proxy,
             },
             Some(why::FORBIDDEN),
         ),
@@ -2047,6 +2117,7 @@ fn every_domain_error_is_fatal_or_has_a_reason() {
         ),
         (
             DomainError::SecretRefNotAccessible {
+                field: "auth.config.secret_ref",
                 detail: d(),
                 instance: i(),
             },
@@ -2311,7 +2382,7 @@ async fn stopped_gated_run(b: Backend, stop: Stop, at: usize, written: (usize, u
                 &cancel,
                 upstreams,
                 routes,
-                root,
+                Some(root),
             )
             .await
             .unwrap()
@@ -2359,7 +2430,7 @@ async fn stopped_gated_run(b: Backend, stop: Stop, at: usize, written: (usize, u
     );
     assert_eq!(
         inner.read().await.unwrap().content_hash,
-        Some(content_hash(&upstreams, &routes, root))
+        Some(content_hash(&upstreams, &routes, Some(root)).unwrap())
     );
 }
 
@@ -2401,7 +2472,7 @@ async fn stop_after(b: Backend, writes: usize, written: (usize, usize)) {
         &StopAfter::writes(writes),
         &upstreams,
         &routes,
-        root,
+        Some(root),
     )
     .await
     .unwrap();
@@ -2590,7 +2661,7 @@ async fn a_stop_after_a_moving_routes_delete_leaves_the_rest_to_the_next_run(b: 
         &StopAfter::writes(1),
         &upstreams,
         &routes,
-        root,
+        Some(root),
     )
     .await
     .unwrap();
@@ -2920,7 +2991,7 @@ async fn reconcile_writes_are_seen_through_the_proxy_cache() {
             &Unattended,
             upstreams,
             routes,
-            root,
+            Some(root),
         )
         .await
         .unwrap();
@@ -2964,4 +3035,28 @@ async fn reconcile_writes_are_seen_through_the_proxy_cache() {
         run(&[], &[]).await;
     })
     .await;
+}
+
+#[test]
+fn changed_nothing_only_for_a_clean_run_without_writes() {
+    let mut counts = ProvisioningCounts::default();
+    counts.upstreams.unchanged = 2;
+    counts.routes.unchanged = 3;
+    assert!(counts.changed_nothing());
+
+    for change in [
+        |c: &mut ProvisioningCounts| c.upstreams.created = 1,
+        |c: &mut ProvisioningCounts| c.upstreams.updated = 1,
+        |c: &mut ProvisioningCounts| c.upstreams.removed = 1,
+        |c: &mut ProvisioningCounts| c.upstreams.kept = 1,
+        |c: &mut ProvisioningCounts| c.routes.created = 1,
+        |c: &mut ProvisioningCounts| c.routes.updated = 1,
+        |c: &mut ProvisioningCounts| c.routes.removed = 1,
+        |c: &mut ProvisioningCounts| c.routes.failed = 1,
+        |c: &mut ProvisioningCounts| c.stopped = true,
+    ] {
+        let mut changed = ProvisioningCounts::default();
+        change(&mut changed);
+        assert!(!changed.changed_nothing(), "{changed:?}");
+    }
 }

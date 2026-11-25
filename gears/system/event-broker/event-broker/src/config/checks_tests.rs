@@ -135,6 +135,82 @@ fn an_ingest_mode_refuses_a_publish_wait_above_the_cap() {
     }
 }
 
+fn config_with_scope_timing(mode: &str, ttl_secs: u32, deadline_secs: u32) -> EventBrokerConfig {
+    serde_json::from_value(json!({
+        "mode": mode,
+        "streaming": {
+            "authz_scope_ttl_secs": ttl_secs,
+            "authz_eval_deadline_secs": deadline_secs,
+        },
+        "backends": { "main": { "type": MEMORY_BACKEND } },
+        "backend_routing": { TOPIC_TYPE: "main" },
+    }))
+    .expect("test configuration deserializes")
+}
+
+/// Every delivery-serving mode refuses a scope TTL at `2 x deadline + 2`, the
+/// `ignore` refresh lead: a refreshed group would be due again at once.
+#[test]
+fn a_scope_ttl_within_two_deadlines_of_the_refresh_lead_is_refused() {
+    for (mode_str, mode) in [
+        ("standalone", DeploymentMode::Standalone),
+        ("cluster_delivery", DeploymentMode::ClusterDelivery),
+    ] {
+        let cfg = config_with_scope_timing(mode_str, 22, 10);
+
+        assert_eq!(
+            check(&cfg, mode).err(),
+            Some(Error::ScopeTtlTooShort {
+                ttl_secs: 22,
+                deadline_secs: 10,
+            }),
+            "{mode_str}"
+        );
+        assert_eq!(
+            Error::ScopeTtlTooShort {
+                ttl_secs: 22,
+                deadline_secs: 10,
+            }
+            .to_string(),
+            "streaming: authz_scope_ttl_secs is 22 and authz_eval_deadline_secs is 10; in \
+             standalone and cluster_delivery modes authz_scope_ttl_secs must be greater than 2 x \
+             authz_eval_deadline_secs + 2, so a stream's consume scope is refreshed ahead of its \
+             expiry"
+        );
+    }
+}
+
+/// One second past the `ignore` refresh lead passes where delivery runs.
+/// Both modes run a backend, so a passing check returns the proved
+/// deployment: its shape tells the pass from the `Ok(None)` of a mode with
+/// no backend, as `Deployment` has no `PartialEq`.
+#[test]
+fn a_scope_ttl_past_the_refresh_lead_is_accepted() {
+    for (mode_str, mode) in [
+        ("standalone", DeploymentMode::Standalone),
+        ("cluster_delivery", DeploymentMode::ClusterDelivery),
+    ] {
+        let cfg = config_with_scope_timing(mode_str, 23, 10);
+        let checked = check(&cfg, mode);
+        let Ok(Some(_)) = &checked else {
+            panic!("{mode_str}: expected the proved deployment, got {checked:?}");
+        };
+    }
+}
+
+/// The rule binds the delivery-serving modes only: `cluster_ingest` opens no
+/// stream, so it carries the `streaming` section without being subject to it.
+/// It runs a backend, so the check returns the proved deployment; its shape
+/// is the observable, as `Deployment` has no `PartialEq`.
+#[test]
+fn a_mode_without_delivery_accepts_a_short_scope_ttl() {
+    let cfg = config_with_scope_timing("cluster_ingest", 22, 10);
+    let checked = check(&cfg, DeploymentMode::ClusterIngest);
+    let Ok(Some(_)) = &checked else {
+        panic!("expected the proved deployment, got {checked:?}");
+    };
+}
+
 /// The cap itself, and a zero wait (every sync publish answered `202` at once),
 /// are within bounds in every ingest-serving mode.
 #[test]
@@ -150,6 +226,26 @@ fn an_ingest_mode_accepts_the_publish_wait_cap_and_zero() {
                 "{mode_str}: wait={wait} is within bounds"
             );
         }
+    }
+}
+
+/// The ordering that keeps a synchronous publish from being answered `504`
+/// after it already committed: the hold cap stays below the ingest publish
+/// deadline (so the broker never holds past it), which stays below the
+/// dispatcher's outer deadline (so a two-gateway cluster publish is bounded,
+/// not cut). Inverting either relationship reopens that window, so it is pinned
+/// at compile time.
+#[test]
+fn the_publish_deadlines_keep_the_hold_inside_the_declared_route_deadlines() {
+    const {
+        assert!(
+            (super::MAX_PUBLISH_WAIT_SECS as u64) < super::PUBLISH_ROUTE_TIMEOUT_SECS,
+            "the hold cap must stay below the ingest publish route deadline",
+        );
+        assert!(
+            super::PUBLISH_ROUTE_TIMEOUT_SECS < super::DISPATCHER_PUBLISH_ROUTE_TIMEOUT_SECS,
+            "the dispatcher's outer deadline must exceed the ingest publish deadline",
+        );
     }
 }
 

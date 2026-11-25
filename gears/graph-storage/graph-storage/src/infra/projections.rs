@@ -19,6 +19,25 @@ use sea_orm::{EntityTrait, ExprTrait as _, QuerySelect, Select};
 
 use crate::infra::storage::entity::{edge, gts_type, node};
 
+/// What a purge needs of the node it removes: its id, the tenant its edges
+/// are deleted in, and whether it is already tombstoned.
+#[derive(Debug, sea_orm::FromQueryResult)]
+pub struct PurgeTarget {
+    pub id: i64,
+    pub tenant_id: uuid::Uuid,
+    pub created_at: time::OffsetDateTime,
+    pub deleted_at: Option<time::OffsetDateTime>,
+}
+
+pub fn purge_target_columns(query: Select<node::Entity>) -> Select<node::Entity> {
+    query
+        .select_only()
+        .column(node::Column::Id)
+        .column(node::Column::TenantId)
+        .column(node::Column::CreatedAt)
+        .column(node::Column::DeletedAt)
+}
+
 /// A node's identity: the key a producer addresses it by, and the id
 /// everything internal joins on.
 #[derive(Debug, sea_orm::FromQueryResult)]
@@ -93,6 +112,32 @@ pub fn type_traits_columns(query: Select<gts_type::Entity>) -> Select<gts_type::
         .select_only()
         .column(gts_type::Column::Id)
         .column(gts_type::Column::EffectiveTraits)
+}
+
+/// An edge's storage id alone: what the edge listing orders and merges its
+/// two sides on before it reads any payload.
+#[derive(Debug, sea_orm::FromQueryResult)]
+pub struct EdgeId {
+    pub id: i64,
+}
+
+pub fn edge_id_columns(query: Select<edge::Entity>) -> Select<edge::Entity> {
+    query.select_only().column(edge::Column::Id)
+}
+
+/// An edge's key and payload: what a traversal that asked for edge payloads
+/// adds to the references the walk already built.
+#[derive(Debug, sea_orm::FromQueryResult)]
+pub struct EdgePayload {
+    pub edge_key: String,
+    pub payload: serde_json::Value,
+}
+
+pub fn edge_payload_columns(query: Select<edge::Entity>) -> Select<edge::Entity> {
+    query
+        .select_only()
+        .column(edge::Column::EdgeKey)
+        .column(edge::Column::Payload)
 }
 
 /// An edge's own id, the two nodes it holds and whether it is tombstoned:

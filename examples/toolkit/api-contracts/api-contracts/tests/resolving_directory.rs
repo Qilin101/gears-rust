@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use uuid::Uuid;
@@ -27,8 +27,9 @@ use api_contracts_sdk::models::{ChargeRequest, PaymentStatus};
 use api_contracts_sdk::rest::PaymentApiRestResolvingClient;
 
 use toolkit::api::OpenApiRegistryImpl;
+use toolkit::directory::test_support::ManagerDirectoryClient;
 use toolkit::discovery::DirectoryEndpointResolver;
-use toolkit::{DirectoryClient, Endpoint, GearInstance, GearManager, LocalDirectoryClient};
+use toolkit::{DirectoryClient, Endpoint, GearInstance, GearManager};
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_contract::policy::PolicyStack;
 use toolkit_contract::runtime::resolving::EndpointResolver;
@@ -83,8 +84,12 @@ fn register_provider(mgr: &GearManager, addr: SocketAddr) -> Uuid {
     let inst = GearInstance::new(PROVIDER_GEAR, id)
         .with_rest_endpoint(Endpoint::http(&addr.ip().to_string(), addr.port()));
     mgr.register_instance(Arc::new(inst)).unwrap();
-    // Promote Registered -> Healthy so round-robin prefers it.
-    mgr.update_heartbeat(PROVIDER_GEAR, id, Instant::now());
+    // Promote Registered -> Healthy so round-robin prefers it. A heartbeat with
+    // no reported state reads as Serving, which the directory observes as Healthy.
+    assert!(
+        mgr.heartbeat(PROVIDER_GEAR, id, None),
+        "heartbeat must find the just-registered instance"
+    );
     id
 }
 
@@ -94,7 +99,7 @@ fn resolving_client(mgr: &Arc<GearManager>) -> PaymentApiRestResolvingClient {
     // `Ok(None)`, which is the opposite of what production did at the time —
     // so the tests passed while the shipped path classified every unregistered
     // provider as a directory outage.
-    let dir: Arc<dyn DirectoryClient> = Arc::new(LocalDirectoryClient::new(Arc::clone(mgr)));
+    let dir: Arc<dyn DirectoryClient> = Arc::new(ManagerDirectoryClient::new(Arc::clone(mgr)));
     let resolver: Arc<dyn EndpointResolver> = Arc::new(DirectoryEndpointResolver::new(dir));
     PaymentApiRestResolvingClient::new(resolver, PROVIDER_GEAR, ClientTuning::default())
 }

@@ -11,9 +11,9 @@ use http::{Method, Uri};
 use llm_gateway_sdk::{
     CreateResponseBody, EmbeddingRequest, EmbeddingResponse, LlmGatewayError,
     LlmGatewayProviderPluginClientV1, MediaInputMode, PassthroughApi, PassthroughCapability,
-    PassthroughEndpoint, PassthroughRequest, PassthroughResponse, ProviderCallCtx,
-    ProviderErrorCategory, ProviderFailure, ProviderPluginCapabilities, ResponseEventStream,
-    ResponseResource,
+    PassthroughEndpoint, PassthroughMethod, PassthroughRequest, PassthroughResponse,
+    ProviderCallCtx, ProviderErrorCategory, ProviderFailure, ProviderPluginCapabilities,
+    ResponseEventStream, ResponseResource,
 };
 use oagw_sdk::sse::{ServerEventsResponse, ServerEventsStream};
 use oagw_sdk::{Body, ServiceGatewayClientV1};
@@ -131,8 +131,8 @@ impl LlmGatewayProviderPluginClientV1 for AnthropicPlugin {
             .with_passthrough(PassthroughCapability::new(
                 PassthroughApi::Anthropic,
                 vec![
-                    PassthroughEndpoint::metered(MESSAGES_PATH),
-                    PassthroughEndpoint::not_metered(COUNT_TOKENS_PATH),
+                    PassthroughEndpoint::metered(PassthroughMethod::Post, MESSAGES_PATH),
+                    PassthroughEndpoint::not_metered(PassthroughMethod::Post, COUNT_TOKENS_PATH),
                 ],
             ))
     }

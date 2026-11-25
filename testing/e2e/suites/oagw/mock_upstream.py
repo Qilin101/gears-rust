@@ -9,17 +9,29 @@ Uses only stdlib asyncio — no aiohttp dependency.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
+import hmac
 import base64
 import json
 import re
 import struct
-from urllib.parse import parse_qs
+import time
+from urllib.parse import parse_qs, quote, unquote_to_bytes
 import logging
 
 # ---------------------------------------------------------------------------
 # Request/response helpers
 # ---------------------------------------------------------------------------
+
+class _Headers(dict):
+    """Request headers by lowercase name (the last line wins), plus every
+    line in arrival order in ``lines`` so a repeated header can be seen."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[tuple[str, str]] = []
+
 
 async def _read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict, bytes]:
     """Parse a minimal HTTP/1.1 request from the stream."""
@@ -37,11 +49,12 @@ async def _read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict, b
     method = parts[0] if len(parts) > 0 else "GET"
     path = parts[1] if len(parts) > 1 else "/"
 
-    headers: dict[str, str] = {}
+    headers = _Headers()
     for line in lines[1:]:
         if ":" in line:
             k, _, v = line.partition(":")
             headers[k.strip().lower()] = v.strip()
+            headers.lines.append((k.strip().lower(), v.strip()))
 
     if "chunked" in headers.get("transfer-encoding", "").lower():
         return method, path, headers, await _read_chunked(reader, body_start)
@@ -117,6 +130,12 @@ def _json_response(data: object, status: int = 200) -> bytes:
     ).encode() + body
 
 
+def _with_header(response: bytes, name: str, value: str) -> bytes:
+    """``response`` with one more header line after the status line."""
+    status_line, _, rest = response.partition(b"\r\n")
+    return status_line + f"\r\n{name}: {value}".encode() + b"\r\n" + rest
+
+
 def _sse_header() -> bytes:
     return (
         "HTTP/1.1 200 OK\r\n"
@@ -155,11 +174,150 @@ _OAUTH2_CLIENT = ("test-client-id", "test-client-secret")
 # that buffering is visible over a busy CI runner's scheduling jitter.
 SSE_EVENT_GAP_SECS = 0.2
 
+# How long /sse/hold keeps a stream open without an event: past every bound a
+# test waits for, short enough that a leaked stream does not outlive the run.
+SSE_HOLD_SECS = 60
+
 
 def _bump_count(key: str) -> int:
     """Increment and return the call count for *key* (1-indexed)."""
     _endpoint_call_counts[key] = _endpoint_call_counts.get(key, 0) + 1
     return _endpoint_call_counts[key]
+
+
+# ---------------------------------------------------------------------------
+# AWS Signature Version 4 verification (/aws/*)
+# ---------------------------------------------------------------------------
+
+# Access keys and session tokens /aws/* accepts; they match the secrets
+# conftest provisions. The verifier is written from the AWS SigV4 spec with
+# stdlib hmac/hashlib, independently of the gateway's signer.
+AWS_ACCESS_KEYS = {"AKIDEXAMPLE": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}
+AWS_SESSION_TOKENS = {"FwoGZXIvYXdzEXAMPLEsessionTOKEN+/="}
+# How far `X-Amz-Date` may be from the mock's clock, as AWS allows.
+AWS_MAX_SKEW_SECS = 15 * 60
+
+
+class SigV4Error(Exception):
+    """The request's signature does not verify; the message says why."""
+
+
+def _aws_encode(raw: bytes, keep_slash: bool) -> str:
+    return quote(raw, safe="-_.~/" if keep_slash else "-_.~")
+
+
+def _aws_normalize_path(path: str) -> str:
+    """Dot segments and repeated slashes removed, as AWS services do."""
+    out: list[str] = []
+    for segment in path.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if out:
+                out.pop()
+        else:
+            out.append(segment)
+    normalized = "/" + "/".join(out)
+    if path.endswith("/") and out:
+        normalized += "/"
+    return normalized
+
+
+def _hmac(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+def verify_sigv4(method: str, target: str, headers, body: bytes) -> dict:
+    """Verify a SigV4-signed request; return what was verified or raise SigV4Error.
+
+    The canonical request is rebuilt from the request line as received, the
+    header lines the `Authorization` header names and the body. Every
+    `x-amz-*` header received must be signed, the payload hash must be the
+    body's (or `UNSIGNED-PAYLOAD`) and `X-Amz-Date` within the skew.
+    """
+    lines = getattr(headers, "lines", list(headers.items()))
+    auth = [v for k, v in lines if k == "authorization"]
+    if len(auth) != 1 or not auth[0].startswith("AWS4-HMAC-SHA256 "):
+        raise SigV4Error(f"expected one AWS4-HMAC-SHA256 authorization header, got {len(auth)}")
+    fields = dict(
+        part.split("=", 1) for part in auth[0][len("AWS4-HMAC-SHA256 "):].split(", ") if "=" in part
+    )
+    try:
+        akid, date, region, service, terminator = fields["Credential"].split("/")
+        signed = fields["SignedHeaders"].split(";")
+        signature = fields["Signature"]
+    except (KeyError, ValueError) as exc:
+        raise SigV4Error(f"malformed authorization header: {exc}") from None
+    if terminator != "aws4_request":
+        raise SigV4Error("credential scope does not end in aws4_request")
+    secret = AWS_ACCESS_KEYS.get(akid)
+    if secret is None:
+        raise SigV4Error("unknown access key id")
+    if signed != sorted(signed) or "host" not in signed or "x-amz-date" not in signed:
+        raise SigV4Error(f"bad SignedHeaders {signed}")
+    unsigned_amz = sorted({k for k, _ in lines if k.startswith("x-amz-") and k not in signed})
+    if unsigned_amz:
+        raise SigV4Error(f"x-amz-* headers not signed: {unsigned_amz}")
+    tokens = [v for k, v in lines if k == "x-amz-security-token"]
+    if tokens and (len(tokens) != 1 or tokens[0] not in AWS_SESSION_TOKENS):
+        raise SigV4Error("unknown session token")
+
+    amz_dates = [v for k, v in lines if k == "x-amz-date"]
+    if len(amz_dates) != 1 or not re.fullmatch(r"\d{8}T\d{6}Z", amz_dates[0]):
+        raise SigV4Error(f"bad x-amz-date {amz_dates}")
+    amz_date = amz_dates[0]
+    if amz_date[:8] != date:
+        raise SigV4Error("credential scope date is not the x-amz-date date")
+    signed_at = calendar.timegm(time.strptime(amz_date, "%Y%m%dT%H%M%SZ"))
+    if abs(time.time() - signed_at) > AWS_MAX_SKEW_SECS:
+        raise SigV4Error("x-amz-date is outside the allowed skew")
+
+    body_hash = hashlib.sha256(body).hexdigest()
+    payload_hashes = [v for k, v in lines if k == "x-amz-content-sha256"]
+    if len(payload_hashes) > 1:
+        raise SigV4Error("repeated x-amz-content-sha256")
+    payload_hash = payload_hashes[0] if payload_hashes else body_hash
+    if payload_hash not in (body_hash, "UNSIGNED-PAYLOAD"):
+        raise SigV4Error("x-amz-content-sha256 is not the body's hash")
+
+    path, _, query = target.partition("?")
+    if service == "s3":
+        # S3 decodes the path and encodes it again before it checks.
+        canonical_uri = _aws_encode(unquote_to_bytes(path), keep_slash=True) or "/"
+    else:
+        canonical_uri = _aws_encode(_aws_normalize_path(path).encode(), keep_slash=True)
+    pairs = []
+    for pair in filter(None, query.split("&")):
+        name, _, value = pair.partition("=")
+        pairs.append((
+            _aws_encode(unquote_to_bytes(name), False),
+            _aws_encode(unquote_to_bytes(value), False),
+        ))
+    canonical_query = "&".join(f"{n}={v}" for n, v in sorted(pairs))
+    canonical_headers = ""
+    for name in signed:
+        values = [" ".join(v.split()) for k, v in lines if k == name]
+        if not values:
+            raise SigV4Error(f"signed header {name} not received")
+        canonical_headers += f"{name}:{','.join(values)}\n"
+    canonical = "\n".join([
+        method, canonical_uri, canonical_query, canonical_headers, ";".join(signed), payload_hash,
+    ])
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256", amz_date, f"{date}/{region}/{service}/aws4_request",
+        hashlib.sha256(canonical.encode()).hexdigest(),
+    ])
+    key = _hmac(_hmac(_hmac(_hmac(("AWS4" + secret).encode(), date), region), service), "aws4_request")
+    expected = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise SigV4Error("signature does not match")
+    return {
+        "region": region,
+        "service": service,
+        "signed_headers": ";".join(signed),
+        "payload_hash": payload_hash,
+        "session_token": bool(tokens),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +488,31 @@ async def _handle(method: str, target: str, headers: dict, body: bytes, writer: 
                 "token_type": "Bearer",
             }))
 
+    # POST /oauth2/token-unavailable — a token endpoint whose identity
+    # provider is down.
+    elif method == "POST" and path == "/oauth2/token-unavailable":
+        writer.write(_json_response({"error": "temporarily_unavailable"}, status=503))
+
+    # GET|POST /aws/... — verifies the AWS SigV4 signature; 403 like AWS
+    # when it does not, else echoes the request and what was verified.
+    elif method in ("GET", "POST") and path.startswith("/aws/"):
+        try:
+            verified = verify_sigv4(method, target, headers, body)
+        except SigV4Error as exc:
+            writer.write(_json_response(
+                {"error": "SignatureDoesNotMatch", "message": str(exc)}, status=403,
+            ))
+        else:
+            writer.write(_json_response({
+                "verified": verified,
+                "method": method,
+                "path": path,
+                "query": query,
+                "headers": headers,
+                "header_lines": [[k, v] for k, v in getattr(headers, "lines", headers.items())],
+                "body": body.decode("utf-8", errors="replace"),
+            }))
+
     # POST /echo
     elif method == "POST" and path == "/echo":
         writer.write(_json_response({
@@ -338,6 +521,12 @@ async def _handle(method: str, target: str, headers: dict, body: bytes, writer: 
             "query": query,
             "headers": headers,
             "body": body.decode("utf-8", errors="replace"),
+        }))
+
+    # POST /echo-lines — every request header line, repeated ones included
+    elif method == "POST" and path == "/echo-lines":
+        writer.write(_json_response({
+            "header_lines": [[k, v] for k, v in getattr(headers, "lines", headers.items())],
         }))
 
     # POST /sse/events — spaced events carrying every SSE field
@@ -350,6 +539,30 @@ async def _handle(method: str, target: str, headers: dict, body: bytes, writer: 
             await asyncio.sleep(SSE_EVENT_GAP_SECS)
         writer.write(_sse_raw("event: done\nid: 4\ndata: bye\n\n"))
         writer.write(_sse_end())
+
+    # POST /sse/hold — one event, then the stream stays open with nothing to
+    # send until the caller closes it (or SSE_HOLD_SECS pass).
+    elif method == "POST" and path == "/sse/hold":
+        writer.write(_sse_header())
+        writer.write(_sse_chunk("held"))
+        await writer.drain()
+        if reader is not None:
+            try:
+                # b"" once the caller closes: nothing more is read from it.
+                await asyncio.wait_for(reader.read(), timeout=SSE_HOLD_SECS)
+            except asyncio.TimeoutError:
+                pass
+        writer.write(_sse_end())
+
+    # POST /sse/fail — one event, then the connection closes without the
+    # body's terminating chunk (an upstream failing mid-stream). A FIN, not a
+    # reset: a reset may discard the event before the gateway reads it.
+    elif method == "POST" and path == "/sse/fail":
+        writer.write(_sse_header())
+        writer.write(_sse_chunk("one"))
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
 
     # POST /v1/chat/completions/stream
     elif method == "POST" and path == "/v1/chat/completions/stream":
@@ -424,21 +637,30 @@ async def _handle(method: str, target: str, headers: dict, body: bytes, writer: 
         code = int(m.group(1))
         writer.write(_json_response({"status": code, "description": f"Status {code}"}, status=code))
 
-    # POST /echo-401-once — returns 401 on first call, 200 thereafter.
-    # Used to exercise the OAGW 401-retry logic.
-    elif method == "POST" and path == "/echo-401-once":
-        call = _bump_count("echo-401-once")
-        if call == 1:
-            writer.write(_json_response(
-                {"error": "invalid_token", "error_description": "token expired"},
-                status=401,
-            ))
-        else:
-            writer.write(_json_response({
-                "headers": headers,
-                "body": body.decode("utf-8", errors="replace"),
-                "call_number": call,
-            }))
+    # GET /flaky/{key}/{n} — 503 for the first n calls with this key, 200
+    # after: an upstream that recovers. Keys are per test, the mock is shared.
+    elif method == "GET" and (m := re.fullmatch(r"/flaky/([\w-]+)/(\d+)", path)):
+        call = _bump_count(f"flaky:{m.group(1)}")
+        status = 503 if call <= int(m.group(2)) else 200
+        writer.write(_json_response({"call": call, "status": status}, status=status))
+
+    # GET /drop — reads the request and closes the connection without an
+    # answer: the request reached the upstream, which then went away.
+    elif method == "GET" and path == "/drop":
+        return
+
+    # GET /busy — 503 with the upstream's own Retry-After.
+    elif method == "GET" and path == "/busy":
+        writer.write(_with_header(
+            _json_response({"error": "busy"}, status=503), "Retry-After", "120",
+        ))
+
+    # GET /challenge — 401 with the upstream's own WWW-Authenticate.
+    elif method == "GET" and path == "/challenge":
+        writer.write(_with_header(
+            _json_response({"error": "invalid_token"}, status=401),
+            "WWW-Authenticate", 'Bearer realm="mock", error="invalid_token"',
+        ))
 
     # GET /ws/echo — WebSocket echo endpoint
     # GET /ws/handshake — same, but first sends the handshake request headers
@@ -464,9 +686,10 @@ async def _handle(method: str, target: str, headers: dict, body: bytes, writer: 
         await _ws_echo_loop(reader, writer)
         return  # Connection fully handled — don't close in _client.
 
-    # 404 fallback
+    # 404 fallback; names the path as received, so a test can check the
+    # outbound path of a route the mock has no handler for.
     else:
-        writer.write(_json_response({"error": "not found"}, status=404))
+        writer.write(_json_response({"error": "not found", "method": method, "path": path}, status=404))
 
 
 # ---------------------------------------------------------------------------

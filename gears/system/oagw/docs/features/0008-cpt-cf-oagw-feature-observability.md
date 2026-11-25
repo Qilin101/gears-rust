@@ -69,7 +69,7 @@ Operators need full visibility into outbound API traffic patterns, errors, and p
 - mTLS support for client certificate authentication with upstreams (future work)
 - Centralized logging system deployment and configuration (infrastructure concern)
 - Distributed tracing backend deployment (infrastructure concern; feature provides trace context propagation)
-- Custom metric definitions beyond the 16 OAGW standard metrics and the 8 proxy configuration cache metrics
+- Custom metric definitions beyond the OAGW standard metrics and the 8 proxy configuration cache metrics
 
 ### 1.6 Configuration Parameters
 
@@ -163,26 +163,28 @@ Operators need full visibility into outbound API traffic patterns, errors, and p
 1. [ ] - `p2` - Extract or generate trace_id from inbound request context (propagate W3C Trace Context `traceparent` header if present; generate new trace_id otherwise) - `inst-mc-0`
 2. [ ] - `p2` - Normalize path from route configuration (use route match pattern, not raw path) to control cardinality - `inst-mc-1`
 3. [ ] - `p2` - Capture the numeric HTTP response status code for the `http.response.status_code` label (OTel HTTP semconv; aligned with the inbound API Gateway) - `inst-mc-2`
-4. [ ] - `p2` - Increment `oagw_requests_in_flight{host}` gauge at request start - `inst-mc-3`
+4. [ ] - `p2` - Increment `oagw_requests_in_flight{host}` gauge at request start, under `host` `unknown` until the upstream is resolved, then under the upstream alias - `inst-mc-3`
 5. [ ] - `p2` - **TRY** - `inst-mc-4`
    1. [ ] - `p2` - Execute proxy pipeline (auth → guards → transform → upstream call → response transform) - `inst-mc-4a`
 6. [ ] - `p2` - **CATCH** any error - `inst-mc-5`
-   1. [ ] - `p2` - Increment `oagw_errors_total{host, path, error_type}` counter - `inst-mc-5a`
-7. [ ] - `p2` - Decrement `oagw_requests_in_flight{host}` gauge at request end - `inst-mc-6`
-8. [ ] - `p2` - Increment `oagw_requests_total{host, http.request.method, http.route, http.response.status_code}` counter (label keys per OTel HTTP semconv; method normalized) - `inst-mc-7`
-9. [ ] - `p2` - Observe request duration in `oagw_request_duration_seconds{host, path, phase}` histogram using configured buckets (`phase`: `total`, `resolve` for the upstream and route lookup with the proxy configuration cache on or off, `auth`) - `inst-mc-8`
-10. [ ] - `p2` - **IF** rate limit was evaluated - `inst-mc-9`
-    1. [ ] - `p2` - Update `oagw_rate_limit_usage_ratio{host, path}` gauge with current token ratio (0.0–1.0) - `inst-mc-9a`
-    2. [ ] - `p2` - **IF** rate limit exceeded, increment `oagw_rate_limit_exceeded_total{host, path}` counter - `inst-mc-9b`
-11. [ ] - `p2` - **IF** circuit breaker state changed - `inst-mc-10`
-    1. [ ] - `p2` - Update `oagw_circuit_breaker_state{host}` gauge (0=CLOSED, 1=HALF_OPEN, 2=OPEN) - `inst-mc-10a`
-    2. [ ] - `p2` - Increment `oagw_circuit_breaker_transitions_total{host, from_state, to_state}` counter - `inst-mc-10b`
-12. [ ] - `p2` - **IF** multi-endpoint upstream - `inst-mc-11`
+   1. [ ] - `p2` - Increment `oagw_errors_total{host, path, error_type, credential_mode}` counter (gateway errors only; an upstream error response is not an error here; `credential_mode`: `config`, `request_ref`, or `unknown` before the upstream resolves) - `inst-mc-5a`
+7. [ ] - `p2` - Decrement `oagw_requests_in_flight{host}` gauge when the response body ends, fails or is dropped; for a gateway error, or a response without a body (101, HEAD, 204, 304), at the response head - `inst-mc-6`
+8. [ ] - `p2` - Increment `oagw_requests_total{host, http.request.method, http.route, http.response.status_code, credential_mode}` counter for every request with a response: the upstream's status (4xx/5xx included), or for a gateway error the status the client gets; a denied `proxy:invoke` check, and a granted request the REST handler rejects before the Data Plane runs (proxy path, WebSocket upgrade, body size and body read checks), count under `host` and `http.route` `unknown`. A request the client dropped before its response head counts only in `oagw_errors_total{error_type="Cancelled"}`. A response the REST handler fails to send after the Data Plane returned it (a 101 without its tunnel, a client connection that cannot upgrade) stays counted with the Data Plane's status (label keys per OTel HTTP semconv; method normalized; `credential_mode` per ADR-0022) - `inst-mc-7`
+9. [ ] - `p2` - Observe request duration in `oagw_request_duration_seconds{host, path, phase}` histogram using configured buckets (`phase`: `total` from request start to the response head or the gateway error, not to the end of the body; `resolve` for the upstream and route lookup with the proxy configuration cache on or off; `auth`; `sign` for the auth plugin's signing phase, only for a plugin that signs) - `inst-mc-8`
+10. [ ] - `p2` - When the response body ends, fails or is dropped, observe `oagw_stream_duration_seconds{host, http.route, outcome}` from request start (`outcome`: `completed` at the end of the body, or once its `Content-Length` went through; `error` for an upstream failure or an idle timeout; `shutdown` for a gateway stop; `cancelled` when the client went away). Every upstream body is relayed as a stream, SSE or not; a response without a body (101, HEAD, 204, 304, `Content-Length: 0`) records none. A WebSocket session records `oagw_websocket_session_duration_seconds{host, outcome}` at teardown instead (`completed` when the tunnel closed, from either side; `error` on an idle timeout or an IO error; `shutdown` for a gateway stop; `cancelled` when the bridge task was dropped or panicked) - `inst-mc-8b`
+11. [ ] - `p2` - **IF** rate limit was evaluated - `inst-mc-9`
+    1. [ ] - `p2` - Update `oagw_rate_limit_usage_ratio{host, http.route, bucket}` gauge with the token ratio (0.0–1.0) of each bucket checked (`bucket`: `route`, `shadowed_route`, `upstream`, `pool`; the shadowed ancestor routes of one route share the `shadowed_route` series, written once per request with the highest ratio among them) - `inst-mc-9a`
+    2. [ ] - `p2` - **IF** rate limit exceeded, increment `oagw_rate_limit_exceeded_total{host, http.route, bucket}` counter for the rejecting bucket - `inst-mc-9b`
+12. [x] - `p2` - **IF** circuit breaker state changed - `inst-mc-10`
+    1. [x] - `p2` - Move one unit of `resilience.circuit_breaker.state{resilience.name, resilience.state}` (up-down counter, `closed` / `open` / `half_open`) from the old state to the new one; `resilience.name` is `{alias}/{upstream_id}`, with `/{owner_id}` when the effective config is another upstream's (aliases alone repeat across tenants) - `inst-mc-10a`
+    2. [x] - `p2` - Increment `resilience.circuit_breaker.transitions{resilience.name, resilience.previous_state, resilience.state}` - `inst-mc-10b`
+    3. [x] - `p2` - Every call and refusal increments `resilience.circuit_breaker.calls{resilience.name, resilience.outcome}` (`success`, `failure`, `ignored`, `rejected`) - `inst-mc-10c`
+13. [ ] - `p2` - **IF** multi-endpoint upstream - `inst-mc-11`
     1. [ ] - `p2` - Increment `oagw_routing_endpoint_selected{upstream_id, endpoint_host, selection_method}` counter - `inst-mc-11a`
     2. [ ] - `p2` - **IF** X-OAGW-Target-Host header was used, increment `oagw_routing_target_host_used{upstream_id, endpoint_host}` counter - `inst-mc-11b`
-13. [ ] - `p2` - Update `oagw_upstream_available{host, endpoint}` gauge based on response outcome (0=down, 1=up) - `inst-mc-12`
-14. [ ] - `p2` - Update `oagw_upstream_connections{host, state}` gauge with current connection pool state - `inst-mc-13`
-15. [ ] - `p2` - **RETURN** void (metrics updated in-place via Prometheus registry) - `inst-mc-14`
+14. [ ] - `p2` - Update `oagw_upstream_available{host, endpoint}` gauge based on response outcome (0=down, 1=up) - `inst-mc-12`
+15. [ ] - `p2` - Update `oagw_upstream_connections{host, state}` gauge with current connection pool state - `inst-mc-13`
+16. [ ] - `p2` - **RETURN** void (metrics updated in-place via Prometheus registry) - `inst-mc-14`
 
 ### Audit Log Emission
 
@@ -245,25 +247,27 @@ Preflight returns a permissive 204 at the handler level (no upstream resolution)
 
 ### SSRF Protection Validation
 
-- [ ] `p1` - **ID**: `cpt-cf-oagw-algo-obs-ssrf-protection`
+- [x] `p1` - **ID**: `cpt-cf-oagw-algo-obs-ssrf-protection`
 
-**Input**: Resolved upstream endpoint (scheme, host, port), inbound request headers
+**Input**: Upstream endpoints (scheme, host, port) on write and on proxy; the addresses an endpoint host resolves to on connect; inbound request headers, path and query
 
 **Output**: Validation result (pass or reject with error)
 
+The SSRF policy is the gear option `ssrf_policy` (on by default; `enabled: false` skips steps 3 and 4). DESIGN lists the denied ranges and how IPv4 and IPv6 CIDRs match each address family ([Security Considerations](../DESIGN.md#security-considerations)).
+
 **Steps**:
-1. [ ] - `p1` - Validate scheme against allowlist - `inst-ssrf-1`
-2. [ ] - `p1` - **IF** scheme is not HTTPS (MVP constraint: HTTPS-only) - `inst-ssrf-2`
-   1. [ ] - `p1` - **RETURN** reject with 400 ValidationError: "Only HTTPS upstreams are allowed" - `inst-ssrf-2a`
-3. [ ] - `p1` - Resolve DNS for upstream host - `inst-ssrf-3`
-4. [ ] - `p1` - **IF** resolved IP is in private/reserved ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1, fc00::/7) - `inst-ssrf-4`
-   1. [ ] - `p1` - **IF** IP is not in explicitly configured allowed_internal_segments - `inst-ssrf-4a`
-      1. [ ] - `p1` - **RETURN** reject with 400 ValidationError: "Upstream resolves to disallowed IP range" - `inst-ssrf-4a1`
-5. [ ] - `p1` - Strip well-known internal headers from outbound request - `inst-ssrf-5`
-   1. [ ] - `p1` - Remove: `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` (unless explicitly allowed) - `inst-ssrf-5a`
-6. [ ] - `p1` - Validate request path against route configuration: reject path traversal sequences (`../`, `..\\`, encoded variants) - `inst-ssrf-6`
-7. [ ] - `p1` - Validate query parameters against route `query_allowlist` if configured - `inst-ssrf-7`
-8. [ ] - `p1` - **RETURN** pass (request is safe to forward) - `inst-ssrf-8`
+1. [x] - `p1` - Validate the endpoint scheme on upstream create, update and registry reconcile, and again in the proxy before the auth plugin runs, for upstreams stored earlier - `inst-ssrf-1`
+2. [x] - `p1` - **IF** the scheme is `http` and the gear option `allow_http_upstream` is off (the default: HTTPS-only) - `inst-ssrf-2`
+   1. [x] - `p1` - **RETURN** reject with 400 `invalid_argument`, field `server.endpoints.scheme`, reason `HTTP_UPSTREAM_FORBIDDEN` - `inst-ssrf-2a`
+3. [x] - `p1` - On write, check every endpoint host: a denied hostname (`localhost`, `localhost.localdomain`, `extra_deny_hostnames`; not in `allow_hostnames`) or an IP address in a denied range (built-in list, `extra_deny_cidrs`; not in `allow_cidrs`) is rejected with 400: "endpoint[i] IP address '…' is blocked by SSRF protection: <reason>" or "endpoint[i] hostname '…' is blocked by SSRF protection (matches '…')". The hostname check runs again on every alias resolution - `inst-ssrf-3`
+4. [x] - `p1` - On connect, check every address the endpoint host resolves to, on every resolution (DNS rebinding); IP literals are checked the same way - `inst-ssrf-4`
+   1. [x] - `p1` - **IF** the address is in a denied range and not in `allow_cidrs`; an `allow_hostnames` entry lifts the deny for its hostname's addresses, except loopback, unspecified, link-local, multicast, broadcast and cloud metadata addresses - `inst-ssrf-4a`
+      1. [x] - `p1` - Skip the address and log the reason; **IF** every address is refused, **RETURN** an upstream connection error without connecting (503 for a single endpoint, 502 for a pool) - `inst-ssrf-4a1`
+5. [x] - `p1` - Strip well-known internal headers from outbound request - `inst-ssrf-5`
+   1. [x] - `p1` - Remove: `Forwarded`, `Via`, `X-Forwarded*`, `X-Envoy-*`, `X-ProxyUser-Ip`, `*Client-IP`, `X-Real-IP`, `X-Originating-IP`, `X-Remote-IP`, `X-Remote-Addr`, `CF-Connecting-IP`, `X-Original-Forwarded-For`, URL/host override (`X-Original-URL`, `X-Original-URI`, `X-Rewrite-URL`, `X-Original-Host`, `X-Host`) and method override (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`) headers (unless explicitly allowed: the upstream's `passthrough_allowlist` names the header; `passthrough: all` does not count) - `inst-ssrf-5a`
+6. [x] - `p1` - Validate request path against route configuration: resolve literal `.` and `..` segments before route matching, and reject with 400 a segment that is a dot-segment once percent-decoded (`%2e%2e`, `..%2f`, `..\\`, `..;`, double encoding, non-UTF-8 escapes) - `inst-ssrf-6`
+7. [x] - `p1` - Validate query parameters against the route's `query_allowlist`: a parameter it does not name is rejected with 400, reason `QUERY_NOT_ALLOWED` - `inst-ssrf-7`
+8. [x] - `p1` - **RETURN** pass (request is safe to forward) - `inst-ssrf-8`
 
 ### HTTP Smuggling Prevention
 
@@ -349,18 +353,24 @@ Not applicable — this feature implements pipeline-integrated cross-cutting con
 
 - [ ] `p2` - **ID**: `cpt-cf-oagw-dod-obs-prometheus-metrics`
 
-The system **MUST** expose all 16 OAGW Prometheus metrics at the admin `/metrics` endpoint:
-- Counters: `oagw_requests_total`, `oagw_errors_total`, `oagw_rate_limit_exceeded_total`, `oagw_rate_limit_buckets_evicted_total`, `oagw_circuit_breaker_transitions_total`, `oagw_routing_target_host_used`, `oagw_routing_endpoint_selected`, `oagw_registry_provisioning_failures_total{kind, reason}`, `oagw_registry_provisioning_runs_total{outcome}`, `oagw_credentials_withheld_total{host, outcome}`
-- Histograms: `oagw_request_duration_seconds` with buckets `[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]`
-- Gauges: `oagw_requests_in_flight`, `oagw_circuit_breaker_state`, `oagw_rate_limit_usage_ratio`, `oagw_rate_limit_buckets`, `oagw_upstream_available`, `oagw_upstream_connections`
+The system **MUST** expose these OAGW Prometheus metrics at the admin `/metrics` endpoint:
+- Counters: `oagw_requests_total`, `oagw_errors_total`, `oagw_rate_limit_exceeded_total`, `oagw_rate_limit_buckets_evicted_total`, `resilience.circuit_breaker.transitions`, `resilience.circuit_breaker.calls`, `oagw_routing_target_host_used`, `oagw_routing_endpoint_selected`, `oagw_registry_provisioning_failures_total{kind, reason}`, `oagw_registry_provisioning_runs_total{outcome}`, `oagw_credentials_withheld_total{host, outcome}`
+- Histograms: `oagw_request_duration_seconds` with buckets `[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]`, `oagw_stream_duration_seconds{host, http.route, outcome}`, `oagw_websocket_session_duration_seconds{host, outcome}`
+- Gauges: `oagw_requests_in_flight`, `resilience.circuit_breaker.state` (up-down counter), `oagw_rate_limit_usage_ratio`, `oagw_rate_limit_buckets`, `oagw_upstream_available`, `oagw_upstream_connections`, `oagw_active_websocket_sessions{host}`
 
-`oagw_request_duration_seconds` records the phases `total`, `resolve` (the upstream and route lookup, with the proxy configuration cache on or off, so the two can be compared) and `auth`.
+`oagw_requests_total` counts every proxy request with a response under its status: the upstream's status, or for a gateway error (401, 403, 429, 502, ...) the status the client gets, so a 5xx-rate query covers gateway 5xx too. `oagw_errors_total` counts the gateway errors again by `error_type`, plus `Cancelled` for a request the client dropped before its response head; such a request has no status and is not in `oagw_requests_total`. Rejections the REST handler makes after `proxy:invoke` is granted and before the Data Plane runs (proxy path, WebSocket upgrade, body size and body read checks) are counted the same way, under `host` and `http.route` `unknown`; a granted request dropped before the Data Plane runs (the client gone mid-upload, the handler dropped by the request timeout) counts as `Cancelled`. Their `phase="total"` is the `proxy:invoke` check, as for a proxied request: the client's upload is not included. A response the REST handler fails to send after the Data Plane returned it (a 101 without its tunnel, a client connection that cannot upgrade) stays counted with the Data Plane's status.
+
+`oagw_request_duration_seconds` records the phases `total` (request start to the response head, or to the gateway error; the body is not included), `resolve` (the upstream and route lookup, with the proxy configuration cache on or off, so the two can be compared), `auth` and `sign` (the auth plugin's signing phase, [ADR-0023](../ADR/0023-request-signing.md); only for a plugin that signs). `oagw_stream_duration_seconds` records request start to the end of the response body, by `outcome`: `completed` (the body ended, or its `Content-Length` went through: hyper's HTTP/1.1 server drops such a body there without reading its end), `error` (upstream failure, idle timeout), `shutdown` (gateway stop, so a rolling deploy is not an error spike) or `cancelled` (the client went away); a response without a body (101, HEAD, 204, 304, `Content-Length: 0`) records none. `oagw_websocket_session_duration_seconds` records a session's lifetime by the same outcomes: `completed` when the tunnel closed, from either side (the relay does not parse frames, and after a client-initiated Close the server closes TCP first), `error` on an idle timeout or an IO error, `shutdown` on a gateway stop, `cancelled` when the bridge task was dropped or panicked.
+
+`oagw_requests_in_flight` counts a request from the start of the Data Plane pipeline until its response body ends, fails or is dropped, SSE and other streamed bodies included; under `host` `unknown` until the upstream is resolved.
+
+`oagw_rate_limit_usage_ratio` and `oagw_rate_limit_exceeded_total` carry a `bucket` label: `route`, `shadowed_route`, `upstream` or `pool`, one series per bucket checked; the shadowed ancestor routes of one route share the `shadowed_route` series, which gets the highest ratio among them once per request (1.0 when one rejects), so an ancestor near its limit is not hidden by the root.
 
 With a database, the system **MUST** also expose the 8 proxy configuration cache metrics ([ADR: Proxy Configuration Cache](../ADR/0020-proxy-config-cache.md#health-and-metrics)):
 - Counters: `oagw_proxy_cache_lookups_total{map, result}`, `oagw_proxy_cache_evictions_total{map, reason}`, `oagw_proxy_cache_changes_total{source}`, `oagw_proxy_cache_flushes_total{cause}`, `oagw_proxy_cache_loads_discarded_total{map}`, `oagw_proxy_cache_stale_served_total{map, cause}`, `oagw_proxy_cache_publish_failures_total{reason}`
 - Gauges: `oagw_proxy_cache_entries{map}`
 
-Cardinality **MUST** be controlled: no tenant labels; `http.route` is the normalized route match pattern from route config; `http.request.method` is normalized to a standard verb or `_OTHER`; `http.response.status_code` is the numeric upstream status (OTel HTTP semconv) — status-class queries (e.g. `5xx` rate) are expressed at query time over the numeric code. Label-key vocabulary matches the inbound API Gateway so both gateways share dashboards.
+Cardinality **MUST** be controlled: no tenant labels; the circuit breaker's `resilience.name` is the one per-upstream label (one set of series per upstream with an enabled breaker, kept until restart), which a deployment with many tenant upstreams drops or aggregates in the collector; `http.route` is the normalized route match pattern from route config; `http.request.method` is normalized to a standard verb or `_OTHER`; `http.response.status_code` is the numeric upstream status (OTel HTTP semconv) — status-class queries (e.g. `5xx` rate) are expressed at query time over the numeric code. Label-key vocabulary matches the inbound API Gateway so both gateways share dashboards.
 
 **Implements**:
 - `cpt-cf-oagw-algo-obs-metrics-collection`
@@ -411,14 +421,15 @@ Configuration **MUST** support: `allowed_origins`, `allowed_methods`. Origin mat
 
 ### Implement SSRF Protection
 
-- [ ] `p1` - **ID**: `cpt-cf-oagw-dod-obs-ssrf-protection`
+- [x] `p1` - **ID**: `cpt-cf-oagw-dod-obs-ssrf-protection`
 
 The system **MUST** enforce SSRF protection on all outbound requests:
-- Scheme allowlist: HTTPS-only for MVP (`cpt-cf-oagw-constraint-https-only`)
-- IP pinning: reject DNS results resolving to private/reserved IP ranges unless explicitly allowed
-- Header stripping: remove internal forwarding headers (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`) from outbound requests unless explicitly allowed
+- Scheme allowlist: HTTPS-only unless `allow_http_upstream` is on (`cpt-cf-oagw-constraint-https-only`), checked on write and in the proxy
+- Write-time check: an endpoint whose hostname is denied or whose IP address is in a denied range is rejected with 400 unless `allow_hostnames` / `allow_cidrs` exempts it
+- Connect-time check: every resolved address is checked on every resolution, and a refused one is never connected to; `allow_hostnames` never exempts loopback, link-local or metadata addresses
+- Header stripping: remove forwarding and override headers (`Forwarded`, `X-Forwarded-*`, `X-Real-IP` and the rest of `inst-ssrf-5a`) received from the client unless the upstream's `passthrough_allowlist` names them
 - Path validation: reject path traversal sequences (`../`, `..\\`, encoded variants)
-- Query validation: validate against route `query_allowlist` if configured
+- Query validation: reject query parameters the route's `query_allowlist` does not name
 
 **Implements**:
 - `cpt-cf-oagw-algo-obs-ssrf-protection`
@@ -464,7 +475,11 @@ A failed or slow change log append **MUST NOT** fail the write: it is logged at 
 
 ## 6. Acceptance Criteria
 
-- [ ] All 16 Prometheus metrics are exposed at `/metrics` in Prometheus exposition format, plus the 8 `oagw_proxy_cache_*` metrics with a database
+- [ ] The OAGW Prometheus metrics of `cpt-cf-oagw-dod-obs-prometheus-metrics` are exposed at `/metrics` in Prometheus exposition format, plus the 8 `oagw_proxy_cache_*` metrics with a database
+- [ ] Every proxy request with a response is counted in `oagw_requests_total` with its status, gateway errors and the REST handler's own rejections included
+- [ ] `oagw_requests_in_flight` holds a request from its start until its response body ends, fails or is dropped
+- [ ] `oagw_request_duration_seconds{phase="total"}` ends at the response head; `oagw_stream_duration_seconds` ends with the body and carries its `outcome`
+- [ ] Each rate-limit bucket has its own `oagw_rate_limit_usage_ratio` and `oagw_rate_limit_exceeded_total` series (`bucket` label)
 - [ ] `oagw_request_duration_seconds` histogram uses the specified 12-bucket configuration, and records `phase="resolve"` for the upstream and route lookup
 - [ ] No metric label includes tenant_id (cardinality control)
 - [ ] Metric paths are normalized from route config, not raw request paths
@@ -475,10 +490,11 @@ A failed or slow change log append **MUST NOT** fail the write: it is logged at 
 - [ ] CORS preflight OPTIONS requests return permissive 204 at handler level without upstream resolution (see [ADR: CORS](../ADR/0006-cors.md))
 - [ ] CORS is disabled by default; only explicitly configured origins are allowed
 - [ ] Unrecognized origins on actual requests are rejected with 403 before reaching the upstream
-- [ ] HTTPS-only scheme enforcement blocks non-HTTPS upstream connections
-- [ ] DNS results resolving to private/reserved IP ranges are rejected (unless explicitly allowed)
-- [ ] Internal forwarding headers are stripped from outbound requests
-- [ ] Path traversal sequences are rejected
+- [x] HTTPS-only scheme enforcement rejects `http` endpoints on write and in the proxy unless `allow_http_upstream` is on
+- [x] An endpoint IP address in a denied range is rejected on write with 400 naming the range (unless `allow_cidrs` exempts it)
+- [x] Resolved addresses in a denied range are refused on connect (unless explicitly allowed)
+- [x] Forwarding and override headers from the client are stripped from outbound requests
+- [x] Path traversal sequences are rejected
 - [ ] Requests with ambiguous CL/TE combinations are rejected
 - [ ] Bare CR/LF characters in headers are rejected
 - [ ] With a database, a repeated proxy lookup is served from the proxy configuration cache with no database query, and returns what an uncached lookup returns

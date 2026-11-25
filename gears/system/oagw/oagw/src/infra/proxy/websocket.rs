@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use super::streaming::StreamSignal;
 use bytes::{Buf, Bytes};
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use crate::domain::ports::OagwMetricsPort;
+use crate::domain::ports::metric_labels::StreamOutcome;
 
 // ---------------------------------------------------------------------------
 // Close frames
@@ -262,21 +263,6 @@ async fn idle_elapsed(since: tokio::time::Instant, last_ms: &AtomicU64, idle: Du
     }
 }
 
-/// Resolves when the server signals shutdown.
-///
-/// Pends forever once the sender is gone: no signal can arrive after that, and
-/// returning would spin the relay's `select!` at full CPU.
-async fn shutdown_signalled(rx: &mut watch::Receiver<bool>) {
-    loop {
-        if *rx.borrow() {
-            return;
-        }
-        if rx.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Opaque relay
 // ---------------------------------------------------------------------------
@@ -306,7 +292,7 @@ pub(crate) enum RelayOutcome {
     },
     /// No bytes moved in either direction within the idle timeout.
     IdleTimeout,
-    /// Server is shutting down gracefully.
+    /// The gateway is stopping (gear stop or runtime shutdown).
     Shutdown,
     /// IO error on either half.
     Error(std::io::Error),
@@ -319,7 +305,7 @@ struct RelayConfig {
     leftover: Bytes,
     idle_timeout: Duration,
     close_timeout: Duration,
-    shutdown_rx: watch::Receiver<bool>,
+    stopped: StreamSignal,
 }
 
 /// Opaque bidirectional relay between the caller and the upstream tunnel.
@@ -356,7 +342,7 @@ where
         leftover,
         idle_timeout,
         close_timeout,
-        mut shutdown_rx,
+        stopped,
     } = cfg;
 
     let upstream = PrefixedReader::new(leftover, upstream);
@@ -393,7 +379,7 @@ where
             Err(e) => RelayOutcome::Error(e),
         },
         () = idle_elapsed(since, &last_ms, idle_timeout) => RelayOutcome::IdleTimeout,
-        () = shutdown_signalled(&mut shutdown_rx) => RelayOutcome::Shutdown,
+        () = stopped.stopped() => RelayOutcome::Shutdown,
     };
 
     if matches!(outcome, RelayOutcome::IdleTimeout | RelayOutcome::Shutdown) {
@@ -481,8 +467,9 @@ pub(crate) struct WebSocketBridgeIo {
     pub idle_timeout: Duration,
     /// Time allowed for the close handshake before forcing shutdown.
     pub close_timeout: Duration,
-    /// Signals graceful server shutdown to the relay.
-    pub shutdown_rx: watch::Receiver<bool>,
+    /// Ends the relay with Close 1001 when the gateway stops: gear stop or
+    /// runtime shutdown.
+    pub stopped: StreamSignal,
     /// Metrics port used to track session lifetime. May be `None` in tests
     /// that don't exercise metrics — the bridge still runs, just without
     /// recording.
@@ -495,13 +482,15 @@ pub(crate) struct WebSocketBridgeIo {
 /// RAII guard for an active WebSocket session.
 ///
 /// Increments `active_websocket_sessions` on construction and, on drop,
-/// decrements the gauge and records `websocket_session_duration_seconds`.
-/// Drop semantics ensure the gauge cannot leak even if the bridge future
-/// is cancelled or panics — `Drop` runs in both cases.
+/// decrements the gauge and records `websocket_session_duration_seconds`
+/// with the outcome set by [`Self::ended`]. Drop semantics ensure the gauge
+/// cannot leak even if the bridge future is cancelled or panics — `Drop`
+/// runs in both cases, and records `cancelled` when no outcome was set.
 struct WsSessionGuard {
     metrics: Arc<dyn OagwMetricsPort>,
     host: String,
     start: Instant,
+    outcome: StreamOutcome,
 }
 
 impl WsSessionGuard {
@@ -511,7 +500,12 @@ impl WsSessionGuard {
             metrics,
             host,
             start: Instant::now(),
+            outcome: StreamOutcome::Cancelled,
         }
+    }
+
+    fn ended(&mut self, relay: &RelayOutcome) {
+        self.outcome = session_outcome(relay);
     }
 }
 
@@ -520,7 +514,20 @@ impl Drop for WsSessionGuard {
         let duration = self.start.elapsed().as_secs_f64();
         self.metrics.decrement_active_websocket_sessions(&self.host);
         self.metrics
-            .record_websocket_session_duration_seconds(&self.host, duration);
+            .record_websocket_session_duration_seconds(&self.host, self.outcome, duration);
+    }
+}
+
+/// A tunnel that closed completes the session, whichever side closed TCP
+/// first: the relay does not parse frames, and after a client-initiated
+/// Close handshake RFC 6455 has the server close TCP first, so `Upstream`
+/// is also the normal end. An idle timeout and an IO error are errors; a
+/// gateway stop is its own outcome.
+fn session_outcome(relay: &RelayOutcome) -> StreamOutcome {
+    match relay {
+        RelayOutcome::Closed { .. } => StreamOutcome::Completed,
+        RelayOutcome::IdleTimeout | RelayOutcome::Error(_) => StreamOutcome::Error,
+        RelayOutcome::Shutdown => StreamOutcome::Shutdown,
     }
 }
 
@@ -565,30 +572,33 @@ pub(crate) async fn websocket_bridge(
         leftover,
         idle_timeout,
         close_timeout,
-        shutdown_rx,
+        stopped,
         metrics,
         host,
     } = bridge;
     // RAII guard: increments the active-sessions gauge now, records duration
     // and decrements on drop — even on panic / future cancellation.
-    let _session_guard = metrics.map(|m| WsSessionGuard::new(m, host));
+    let mut session_guard = metrics.map(|m| WsSessionGuard::new(m, host));
 
     // Wrap hyper's Upgraded in TokioIo so it implements tokio::io::AsyncRead/Write.
     let mut client = TokioIo::new(upgraded);
     let mut upstream = io;
 
-    match relay(
+    let outcome = relay(
         &mut client,
         &mut upstream,
         RelayConfig {
             leftover,
             idle_timeout,
             close_timeout,
-            shutdown_rx,
+            stopped,
         },
     )
-    .await
-    {
+    .await;
+    if let Some(guard) = session_guard.as_mut() {
+        guard.ended(&outcome);
+    }
+    match outcome {
         RelayOutcome::Closed {
             to_upstream,
             to_client,
@@ -603,7 +613,7 @@ pub(crate) async fn websocket_bridge(
             ended_by,
         } => debug!(to_upstream, to_client, ?ended_by, "WebSocket tunnel closed"),
         RelayOutcome::IdleTimeout => debug!("WebSocket idle timeout, closing"),
-        RelayOutcome::Shutdown => debug!("WebSocket closed due to server shutdown"),
+        RelayOutcome::Shutdown => debug!("WebSocket closed: the gateway is stopping"),
         RelayOutcome::Error(e) => warn!(error = %e, "WebSocket bridge error"),
     }
 }

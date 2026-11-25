@@ -758,3 +758,192 @@ async fn a_node_keyed_count_is_read_and_deleted_by_its_path() {
     let (status, gone) = stand.get("/nodes/count").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
 }
+
+/// Purge over REST: `only_tombstoned` answers `409` for a live node and
+/// purges it once soft-deleted; a purge answers `204` with no body.
+#[tokio::test]
+async fn a_purge_of_tombstones_only_is_refused_for_a_live_node_over_rest() {
+    let stand = Stand::new(Harness::allowed());
+    seed(&stand).await;
+    let (status, body) = stand
+        .post(
+            "/ingest",
+            &serde_json::json!({
+                "nodes": [{"node_key": "rest-purged", "type_id": conformance::OWNED}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, problem) = stand
+        .delete("/nodes/rest-purged?mode=purge&only_tombstoned=true")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a live node: {problem}");
+    let (status, _) = stand.get("/nodes/rest-purged").await;
+    assert_eq!(status, StatusCode::OK, "and it is still there");
+
+    let (status, body) = stand.delete("/nodes/rest-purged").await;
+    assert_eq!(status, StatusCode::OK, "soft delete: {body}");
+    let (status, body) = stand
+        .delete("/nodes/rest-purged?mode=purge&only_tombstoned=true")
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = stand
+        .post(
+            "/ingest",
+            &serde_json::json!({
+                "nodes": [{"node_key": "rest-purged", "type_id": conformance::OWNED}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the key is free again: {body}");
+
+    // Bound to a creation instant: another instant is refused, this one
+    // purges.
+    let (status, node) = stand.get("/nodes/rest-purged").await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let created_at = node["envelope"]["created_at"]
+        .as_str()
+        .expect("the envelope names its creation")
+        .to_owned();
+    let (status, problem) = stand
+        .delete("/nodes/rest-purged?mode=purge&expected_created_at=2000-01-01T00:00:00Z")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "another instant: {problem}");
+    let (status, body) = stand
+        .delete(&format!(
+            "/nodes/rest-purged?mode=purge&expected_created_at={}",
+            created_at.replace('+', "%2B")
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "its own instant: {body}");
+}
+
+/// A purge precondition on a soft delete is refused, not ignored: the caller
+/// that sent it meant to bind the delete to one node, and a soft delete would
+/// have taken whichever node holds the key.
+#[tokio::test]
+async fn a_purge_precondition_without_mode_purge_is_refused() {
+    let stand = Stand::new(Harness::allowed());
+    seed(&stand).await;
+    let (status, body) = stand
+        .post(
+            "/ingest",
+            &serde_json::json!({
+                "nodes": [{"node_key": "rest-soft", "type_id": conformance::OWNED}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for query in [
+        "only_tombstoned=true",
+        "expected_created_at=2026-11-01T10:00:00Z",
+        "mode=soft&only_tombstoned=true",
+    ] {
+        let (status, problem) = stand.delete(&format!("/nodes/rest-soft?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {problem}");
+    }
+    let (status, node) = stand.get("/nodes/rest-soft").await;
+    assert_eq!(status, StatusCode::OK, "the node is still live: {node}");
+    let (status, problem) = stand.delete("/nodes/rest-soft?mode=sideways").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown mode: {problem}"
+    );
+}
+
+/// A node's edges over REST: repeated filter keys are honoured, the cursor
+/// continues the listing, an unknown option is refused rather than ignored,
+/// and a traversal returns edge payloads only when asked.
+#[tokio::test]
+async fn a_nodes_edges_are_listed_over_rest_and_a_walk_can_carry_their_payloads() {
+    let stand = Stand::new(Harness::allowed());
+    seed(&stand).await;
+    let (status, body) = stand
+        .post(
+            "/ingest",
+            &serde_json::json!({
+                "nodes": [
+                    {"node_key": "le-hub", "type_id": conformance::OWNED},
+                    {"node_key": "le-a", "type_id": conformance::OWNED},
+                    {"node_key": "le-b", "type_id": conformance::OWNED},
+                    {"node_key": "le-c", "type_id": conformance::OWNED}
+                ],
+                "edges": [
+                    {"type_id": conformance::LINK, "src_node_key": "le-hub",
+                     "dst_node_key": "le-a", "discriminator": "uses",
+                     "payload": {"weight": 1}},
+                    {"type_id": conformance::LINK, "src_node_key": "le-hub",
+                     "dst_node_key": "le-b", "discriminator": "advances",
+                     "payload": {"weight": 2}},
+                    {"type_id": conformance::LINK, "src_node_key": "le-hub",
+                     "dst_node_key": "le-c", "discriminator": "blocks",
+                     "payload": {"weight": 3}}
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, both) = stand
+        .get("/nodes/le-hub/edges?discriminator=uses&discriminator=blocks")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{both}");
+    let mut weights: Vec<i64> = both["items"]
+        .as_array()
+        .expect("items is a list")
+        .iter()
+        .filter_map(|edge| edge["payload"]["weight"].as_i64())
+        .collect();
+    weights.sort_unstable();
+    assert_eq!(weights, vec![1, 3], "both repeated values apply: {both}");
+    assert!(both["next_cursor"].is_null(), "{both}");
+    assert!(both["items"][0]["envelope"].is_object(), "{both}");
+
+    let (status, first) = stand.get("/nodes/le-hub/edges?limit=2").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["items"].as_array().map(Vec::len), Some(2), "{first}");
+    let cursor = first["next_cursor"].as_str().expect("a second page");
+    let (status, second) = stand
+        .get(&format!("/nodes/le-hub/edges?limit=2&cursor={cursor}"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(
+        second["items"].as_array().map(Vec::len),
+        Some(1),
+        "{second}"
+    );
+    assert!(second["next_cursor"].is_null(), "{second}");
+
+    let (status, problem) = stand.get("/nodes/le-hub/edges?sort=weight").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown option is refused: {problem}"
+    );
+    let (status, missing) = stand.get("/nodes/le-nobody/edges").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    let walk = |include: bool| {
+        serde_json::json!({
+            "seeds": ["le-hub"], "depth": 1, "include_edge_payload": include
+        })
+    };
+    let (status, bare) = stand.post("/graph/traverse", &walk(false)).await;
+    assert_eq!(status, StatusCode::OK, "{bare}");
+    assert!(
+        bare["edges"][0].get("payload").is_none(),
+        "no payload member unless asked: {bare}"
+    );
+    let (status, carried) = stand.post("/graph/traverse", &walk(true)).await;
+    assert_eq!(status, StatusCode::OK, "{carried}");
+    assert!(
+        carried["edges"]
+            .as_array()
+            .expect("edges is a list")
+            .iter()
+            .all(|edge| edge["payload"]["weight"].is_i64()),
+        "{carried}"
+    );
+}

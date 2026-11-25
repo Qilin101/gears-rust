@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-toolkit"
-version = "0.13.1"
+version = "0.15.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -78,10 +78,14 @@ bootstrap = [
     "dep:toolkit-http-middleware",
     # OoP outbound platform-plane credential (InternalAuthInterceptor + SA reader)
     "dep:toolkit-transport-grpc",
+    # Builds that credential from `internal_auth` config (host, OoP, publish-gts).
+    "toolkit-contract/platform-credential",
     "dep:secrecy",
 ]
 
 [dependencies]
+# `x-toolkit-request-timeout` vendor-extension values use humantime strings.
+humantime = { workspace = true }
 toolkit-http = { workspace = true, optional = true }
 # Project-local crates
 toolkit-macros = { workspace = true }

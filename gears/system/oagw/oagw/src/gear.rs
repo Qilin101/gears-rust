@@ -89,10 +89,15 @@ pub struct OutboundApiGatewayGear {
     /// This process: the registry lease owner, and the origin of the proxy
     /// configuration changes it publishes.
     owner: uuid::Uuid,
-    /// The registry run `start` drives on a database backend.
+    /// The registry run `start` drives in the background.
     registry_job: OnceLock<RegistryJob>,
     /// The running registry task, from `start` to `stop`.
     registry_task: parking_lot::Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
+    /// The Data Plane's stream shutdown signal: `stop` ends open SSE streams
+    /// and WebSocket relays with it, `start` gives new streams a fresh token.
+    stream_shutdown: OnceLock<crate::infra::proxy::streaming::StreamShutdown>,
+    /// Whether streams run under a `start` that no `stop` ended yet.
+    streams_started: std::sync::atomic::AtomicBool,
     /// Where provisioning stands, for the healthcheck.
     provisioning: ProvisioningState,
     /// What `start` connects to the cluster on a database with the cache
@@ -143,6 +148,8 @@ impl Default for OutboundApiGatewayGear {
             owner: uuid::Uuid::new_v4(),
             registry_job: OnceLock::new(),
             registry_task: parking_lot::Mutex::new(None),
+            stream_shutdown: OnceLock::new(),
+            streams_started: std::sync::atomic::AtomicBool::new(false),
             provisioning: ProvisioningState::default(),
             #[cfg(feature = "cluster")]
             cache_sync: OnceLock::new(),
@@ -277,11 +284,11 @@ impl Gear for OutboundApiGatewayGear {
 
         // -- Metrics --
         let metrics_prefix = cfg.metrics.effective_prefix("oagw");
-        let scope = opentelemetry::InstrumentationScope::builder("oagw").build();
-        let metrics: Arc<dyn OagwMetricsPort> = Arc::new(OagwMetricsMeter::new(
-            &opentelemetry::global::meter_with_scope(scope),
-            &metrics_prefix,
-        ));
+        let meter = opentelemetry::global::meter_with_scope(
+            opentelemetry::InstrumentationScope::builder("oagw").build(),
+        );
+        let metrics: Arc<dyn OagwMetricsPort> =
+            Arc::new(OagwMetricsMeter::new(&meter, &metrics_prefix));
 
         // -- Control Plane init --
         let Repositories {
@@ -331,6 +338,19 @@ impl Gear for OutboundApiGatewayGear {
         // the enforcer resolves it from the hub per call.
         let policy_enforcer = PolicyEnforcer::from_hub(ctx.client_hub());
 
+        // Shared by the Control Plane, which drops the buckets a write makes
+        // stale, and the Data Plane, which enforces the limits.
+        let rate_limiter = Arc::new(crate::domain::rate_limit::RateLimiter::new());
+        // Likewise for the circuit breakers: the Control Plane drops a deleted
+        // upstream's. Their metrics are the toolkit's
+        // `resilience.circuit_breaker.*`, named `{alias}/{upstream id}`. No
+        // gear prefix: every gear's breakers share these names and dashboards.
+        let breaker_metrics =
+            toolkit_resilience::metrics::otel::OtelCircuitBreakerMetrics::new(&meter);
+        let circuit_breakers = Arc::new(
+            crate::domain::circuit_breaker::CircuitBreakers::new()
+                .with_observer(Arc::new(breaker_metrics)),
+        );
         let cp_impl = Arc::new(
             ControlPlaneServiceImpl::new(
                 upstream_repo,
@@ -341,7 +361,10 @@ impl Gear for OutboundApiGatewayGear {
                 ssrf_guard.clone(),
                 proxy_reader,
             )
-            .with_metrics(metrics.clone()),
+            .with_metrics(metrics.clone())
+            .with_rate_limiter(rate_limiter.clone())
+            .with_circuit_breakers(circuit_breakers.clone())
+            .with_allow_http_upstream(cfg.allow_http_upstream),
         );
         // The registry reconcile only; handlers and the SDK get `cp`.
         self.registry_provisioner
@@ -398,14 +421,23 @@ impl Gear for OutboundApiGatewayGear {
             backend_selector.clone(),
             engine,
             metrics.clone(),
+            // Shared with the Control Plane (see above).
+            rate_limiter,
+            circuit_breakers,
         )
         .with_request_timeout(Duration::from_secs(cfg.proxy_timeout_secs))
         .with_max_body_size(cfg.max_body_size_bytes)
         .with_allow_http_upstream(cfg.allow_http_upstream)
         .with_websocket_idle_timeout(Duration::from_secs(cfg.websocket_idle_timeout_secs))
         .with_websocket_close_timeout(Duration::from_secs(cfg.websocket_close_timeout_secs))
-        .with_streaming_idle_timeout(Duration::from_secs(cfg.streaming_idle_timeout_secs));
-        dp_impl.spawn_rate_limit_sweeper(ctx.cancellation_token().clone());
+        .with_streaming_idle_timeout(Duration::from_secs(cfg.streaming_idle_timeout_secs))
+        // The REST surface serves before the start phase: a stream opened in
+        // that window must end at shutdown too.
+        .with_streams_under(ctx.cancellation_token());
+        dp_impl.spawn_idle_sweeper(ctx.cancellation_token().clone());
+        self.stream_shutdown
+            .set(dp_impl.stream_shutdown())
+            .map_err(|_| anyhow::anyhow!("stream shutdown signal already set"))?;
         let dp: Arc<dyn DataPlaneService> = Arc::new(dp_impl);
 
         // -- Facade (for external SDK consumers) --
@@ -476,8 +508,8 @@ impl Gear for OutboundApiGatewayGear {
 
 impl OutboundApiGatewayGear {
     /// `post_init`: prepare the registry provisioning once every gear of the
-    /// group initialized — reconciled now in memory, by `start`'s background
-    /// task on a database.
+    /// group initialized, for `start`'s background task; in memory, also
+    /// reconcile once now.
     async fn prepare_registry_provisioning(&self) -> anyhow::Result<()> {
         let registry = self
             .registry_client
@@ -513,24 +545,29 @@ impl OutboundApiGatewayGear {
             gate: self.registry_gate()?,
             jitter,
         };
-        if job.gate.is_some() {
-            // A database: the background task (`start`) reconciles, so a
-            // held lease or a failing dependency never delays startup; the
-            // pod serves what the database holds meanwhile.
-            self.registry_job
-                .set(job)
-                .map_err(|_| anyhow::anyhow!("registry job already set"))?;
-        } else {
-            // In memory: the store starts empty and no other process shares
-            // it, so fill it before serving; an infrastructure error fails
-            // startup.
+        // The background task (`start`) reconciles, so a held lease or a
+        // failing dependency never fails startup; the pod serves what the
+        // store holds meanwhile.
+        if job.gate.is_none() {
+            // In memory the store starts empty, so try to fill it before
+            // serving (each call bounded by the call timeout). A dependency
+            // may not answer yet (the root tenant before account-management
+            // creates it): the task retries.
             let outcome = job
                 .run_once(&CancellationToken::new())
                 .instrument(info_span!("oagw_registry_provisioning"))
                 .await;
+            if let Err(e) = &outcome {
+                warn!(
+                    error = %format!("{e:#}"),
+                    "Registry provisioning failed at startup; retrying in the background"
+                );
+            }
             self.provisioning.record(&outcome);
-            outcome?;
         }
+        self.registry_job
+            .set(job)
+            .map_err(|_| anyhow::anyhow!("registry job already set"))?;
 
         self.type_provisioning
             .set(provisioning)
@@ -563,10 +600,10 @@ impl OutboundApiGatewayGear {
     }
 }
 
-/// On a database backend: the proxy configuration change feed, with the
-/// cache enabled (ADR-0020 *Cluster Setup*), and the registry reconcile's background task (ADR-0018
-/// *Provisioning from the Types Registry*). Pattern of the cluster gear: its
-/// own child token and join handle per `start`.
+/// The registry reconcile's background task (ADR-0018 *Provisioning from
+/// the Types Registry*), and on a database backend with the cache enabled
+/// the proxy configuration change feed (ADR-0020 *Cluster Setup*). Pattern
+/// of the cluster gear: its own child token and join handle per `start`.
 #[async_trait]
 impl RunnableCapability for OutboundApiGatewayGear {
     async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
@@ -577,7 +614,7 @@ impl RunnableCapability for OutboundApiGatewayGear {
             self.stop(deadline_after(RESTART_STOP_GRACE)).await?;
         }
         // What can fail comes first, so a failing `start` leaves nothing
-        // running. In memory, `post_init` already reconciled.
+        // running.
         let registry = match self.registry_job.get() {
             Some(job) => Some((
                 job,
@@ -608,6 +645,15 @@ impl RunnableCapability for OutboundApiGatewayGear {
             })?;
             *self.change_feed.lock() = Some(feed);
         }
+        // After every step that can fail. Streams opened from now on end at
+        // the next `stop`, or as soon as the runtime starts shutting down:
+        // it drains HTTP before it calls `stop`, and an open stream would
+        // hold the drain until its deadline.
+        if let Some(streams) = self.stream_shutdown.get() {
+            streams.resume_streams(&cancel);
+            self.streams_started
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         let Some((job, config)) = registry else {
             return Ok(());
         };
@@ -616,6 +662,18 @@ impl RunnableCapability for OutboundApiGatewayGear {
         // start), and `stop` cancels only this `start`'s child, so a
         // stop→start cycle gets a live one.
         let token = cancel.child_token();
+        // In memory the last run (`post_init`'s, or the task's before a
+        // stop) already reconciled: unless it failed or was cut off
+        // (`Pending`), the first run waits for the re-check, as after any run.
+        let first_wait = if job.gate.is_none()
+            && matches!(
+                self.provisioning.get(),
+                ProvisioningStatus::Settled | ProvisioningStatus::NotClean
+            ) {
+            (job.jitter)(config.recheck_interval)
+        } else {
+            Duration::ZERO
+        };
         let span = info_span!(
             "oagw_registry_provisioning",
             owner = %self.owner,
@@ -624,6 +682,7 @@ impl RunnableCapability for OutboundApiGatewayGear {
         let handle = tokio::spawn(
             run_registry_loop(
                 job.clone(),
+                first_wait,
                 config.recheck_interval,
                 self.provisioning.clone(),
                 token.clone(),
@@ -636,6 +695,13 @@ impl RunnableCapability for OutboundApiGatewayGear {
     }
 
     async fn stop(&self, deadline: CancellationToken) -> anyhow::Result<()> {
+        // First: an open SSE stream or WebSocket relay would otherwise run
+        // until its peer or its idle timeout ends it.
+        if let Some(streams) = self.stream_shutdown.get() {
+            streams.end_streams();
+        }
+        self.streams_started
+            .store(false, std::sync::atomic::Ordering::Release);
         let task = self.registry_task.lock().take();
         if let Some((token, handle)) = task {
             stop_registry_task(token, handle, deadline.clone()).await;
@@ -657,7 +723,12 @@ impl RunnableCapability for OutboundApiGatewayGear {
 impl OutboundApiGatewayGear {
     /// Whether a task of an earlier `start` still runs.
     fn running(&self) -> bool {
-        let running = self.registry_task.lock().is_some();
+        // Started streams count too, so a start after a start without a stop
+        // ends the open streams in every storage mode.
+        let running = self.registry_task.lock().is_some()
+            || self
+                .streams_started
+                .load(std::sync::atomic::Ordering::Acquire);
         #[cfg(feature = "cluster")]
         let running = running || self.change_feed.lock().is_some();
         running
@@ -684,7 +755,7 @@ async fn stop_registry_task(
     mut handle: tokio::task::JoinHandle<()>,
     deadline: CancellationToken,
 ) {
-    // The run stops between writes and releases its lease.
+    // The run stops between writes and, on a database, releases its lease.
     token.cancel();
     tokio::select! {
         joined = &mut handle => log_registry_task_end(joined),

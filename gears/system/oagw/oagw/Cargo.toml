@@ -1,7 +1,7 @@
 [package]
 name = "cf-gears-oagw"
 description = "OAGW module - discovers and routes to plugins"
-version = "0.8.1"
+version = "0.10.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -50,12 +50,14 @@ cluster = ["dep:cluster-sdk"]
 grpc-client = ["cluster", "cluster-sdk/grpc-client"]
 
 [dependencies]
-oagw-sdk = { path = "../oagw-sdk", package="cf-gears-oagw-sdk", version = "0.5.18", features = ["axum"] }
+oagw-sdk = { path = "../oagw-sdk", package="cf-gears-oagw-sdk", version = "0.7.0", features = ["axum"] }
 toolkit = { workspace = true }
 toolkit-auth = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum"] }
 toolkit-gts = { workspace = true }
 toolkit-http = { workspace = true }
+# Upstream circuit breakers, with their OpenTelemetry observer.
+toolkit-resilience = { workspace = true, features = ["otel"] }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }
 toolkit-utils = { workspace = true, features = ["humantime-serde"] }
@@ -88,6 +90,7 @@ opentelemetry = { workspace = true }
 heck = { workspace = true }
 # CP deps
 dashmap = { workspace = true }
+zeroize = { workspace = true }
 parking_lot = { workspace = true }
 psl = { workspace = true }
 thiserror = { workspace = true }
@@ -99,12 +102,15 @@ sea-orm-migration = { workspace = true }
 time = { workspace = true }
 # DP deps
 form_urlencoded = "1"
+percent-encoding = { workspace = true }
+unicode-normalization = { workspace = true }
 lru = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+h2 = { workspace = true }
 # Upstream proxy engine (ADR-0019)
 toolkit-http-proxy = { workspace = true }
 http-body-util = { workspace = true }

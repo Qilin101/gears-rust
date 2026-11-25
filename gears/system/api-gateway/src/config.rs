@@ -107,13 +107,17 @@ pub struct ApiGatewayConfig {
     ///   plane, validates the `X-ToolKit-Internal-Token` on co-hosted internal
     ///   routes (e.g. `authz-resolver`'s `/evaluate`) into a
     ///   `PlatformSecurityContext`. Permissive on a missing token, so tenant
-    ///   traffic is unaffected. Kube uses `audiences`.
+    ///   traffic is unaffected. The validator is built at `init` whenever
+    ///   `internal_auth` is set, whether or not any platform routes are served,
+    ///   so kube always needs the `verify` block (`audiences`); without it the
+    ///   gateway fails `init`.
     /// - **Outbound** — the credential attached to the edge's own
     ///   `DirectoryService` polls (when [`GatewayProxyConfig::enabled`]). Kube
-    ///   uses `token_path`; omit it to attach no outbound credential.
+    ///   needs the `present` block (`token_path`); without it the gateway fails
+    ///   `init`, rather than polling the directory unauthenticated.
     ///
-    /// Each direction reads only the fields it needs, so one block (e.g.
-    /// `Kube { audiences, token_path }`) configures the whole platform plane
+    /// Each direction reads only its own part, so one block (e.g.
+    /// `Kube { verify, present }`) configures the whole platform plane
     /// (`cpt-cf-adr-two-plane-auth`). Default: `None` (Profile 1 monolith).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_auth: Option<toolkit_security::InternalAuthConfig>,
@@ -128,15 +132,19 @@ pub struct ApiGatewayConfig {
 
     /// Number of trusted reverse-proxy hops in front of the gateway.
     ///
-    /// Controls how the client IP is derived for IP-keyed throttling. When `0`
+    /// Controls how the client IP is derived for IP-keyed throttling and for
+    /// the `toolkit::http::ClientIp` extension handed to handlers. When `0`
     /// (the default) the immediate peer address from `ConnectInfo` is used and
     /// the client-supplied `X-Forwarded-For` / `X-Real-IP` headers are ignored,
     /// preventing a caller from spoofing or rotating the throttling bucket key
     /// to bypass pre-auth IP limits. When set to `n >= 1`, the client IP is
     /// taken from the `X-Forwarded-For` entry `n` positions from the right (the
     /// value written by the outermost trusted proxy), which an untrusted client
-    /// cannot forge. When `X-Forwarded-For` is absent or too short, the
-    /// immediate peer's `X-Real-IP` is used under the same trust assumption.
+    /// cannot forge. Entries are counted across all `X-Forwarded-For` field
+    /// lines in order, so a proxy may append to the client's line or add its
+    /// own. When `X-Forwarded-For` is absent or too short, the immediate
+    /// peer's `X-Real-IP` is used under the same trust assumption, unless it
+    /// appears more than once (then the peer address is used).
     ///
     /// Deployment requirement for `n >= 1`: the gateway must not be reachable
     /// except through the trusted proxies, and those proxies must overwrite or
@@ -287,6 +295,16 @@ pub struct Defaults {
     /// has been returned.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
+
+    /// Optional maximum deadline any route may declare. When set, longer
+    /// route deadlines and explicit no-timeout declarations are limited to
+    /// this duration. The cap applies only until response headers are sent.
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_request_timeout: Option<Duration>,
 }
 
 impl Default for Defaults {
@@ -294,6 +312,7 @@ impl Default for Defaults {
         Self {
             body_limit_bytes: default_body_limit_bytes(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_request_timeout: None,
         }
     }
 }
@@ -303,16 +322,27 @@ impl Defaults {
     ///
     /// A zero `request_timeout` would fail every request with 504 before its
     /// handler could run, so it is refused at startup. There is deliberately no
-    /// upper bound: how long a request may legitimately take is a property of
-    /// the deployment's slowest route, which the gateway cannot know, and a cap
-    /// would only reintroduce a hard-coded limit one level up.
+    /// upper bound unless `max_request_timeout` is configured. When set, the
+    /// cap must be at least as large as the default deadline.
     ///
     /// # Errors
-    /// Returns a human-readable description when `request_timeout` is zero.
+    /// Returns a human-readable description when the default is zero or the
+    /// maximum is below the default.
     pub fn validate(&self) -> Result<(), String> {
         if self.request_timeout.is_zero() {
             return Err(
-                "invalid api_gateway configuration: `defaults.request_timeout` must be greater                  than zero (e.g. \"30s\")"
+                "invalid api_gateway configuration: `defaults.request_timeout` must be greater \
+                 than zero (e.g. \"30s\")"
+                    .to_owned(),
+            );
+        }
+        if self
+            .max_request_timeout
+            .is_some_and(|max| max < self.request_timeout)
+        {
+            return Err(
+                "invalid api_gateway configuration: `defaults.max_request_timeout` must be greater \
+                 than or equal to `defaults.request_timeout`"
                     .to_owned(),
             );
         }
@@ -447,7 +477,8 @@ pub struct RoutePolicyRule {
     /// Required scopes for this route. Request passes if token has ANY of these scopes.
     /// Must not be empty.
     pub required_scopes: Vec<String>,
-    // Future fields: rate_limit, timeout, operation_id, etc.
+    // Future fields: rate_limit, operation_id, etc. (per-route timeouts are
+    // declared on the operation via `OperationSpec::request_timeout`, not here).
 }
 
 // =================================================================================================
@@ -641,6 +672,37 @@ pub struct InFlightLimitZone {
 }
 
 impl ApiGatewayConfig {
+    /// Validate that an enabled reverse proxy can present an outbound
+    /// platform-plane credential on its `DirectoryService` polls.
+    ///
+    /// An `internal_auth` that cannot supply an outbound credential (kube
+    /// without a `present` block, an empty token path, an unusable shared
+    /// secret) is known from config alone, so it fails `init` — like a missing
+    /// `directory_endpoint` — rather than surfacing after startup as a proxy
+    /// that serves 404 for every out-of-process route. The check is
+    /// [`InternalAuthConfig::outbound`](toolkit_security::InternalAuthConfig::outbound),
+    /// shared with the credential builder.
+    ///
+    /// # Errors
+    /// Returns a human-readable description when `gateway_proxy.enabled` is
+    /// `true` and `internal_auth` is set but refused by `outbound()`.
+    pub fn validate_proxy_credential(&self) -> Result<(), String> {
+        if !self.gateway_proxy.enabled {
+            return Ok(());
+        }
+        // Profile 1 (no `internal_auth`) polls without a credential.
+        let Some(internal_auth) = &self.internal_auth else {
+            return Ok(());
+        };
+        internal_auth.outbound().map(drop).map_err(|err| {
+            format!(
+                "invalid configuration: `gateway_proxy.enabled` is true but `internal_auth` \
+                 cannot authenticate the reverse proxy's DirectoryService polls ({err}); fix \
+                 `internal_auth` or disable the reverse proxy"
+            )
+        })
+    }
+
     /// Validate the throttling configuration at load time.
     ///
     /// Checks that:
@@ -692,7 +754,80 @@ fn validate_status(zone: &str, status: u16) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::GatewayProxyConfig;
+    use super::{ApiGatewayConfig, GatewayProxyConfig};
+    use toolkit_security::{InternalAuthConfig, KubePresent, KubeVerify};
+
+    fn kube(present: Option<&str>) -> InternalAuthConfig {
+        InternalAuthConfig::Kube {
+            verify: Some(KubeVerify {
+                audiences: vec!["toolkit-internal".to_owned()],
+            }),
+            present: present.map(|p| KubePresent {
+                token_path: p.into(),
+            }),
+        }
+    }
+
+    fn gateway(enabled: bool, internal_auth: Option<InternalAuthConfig>) -> ApiGatewayConfig {
+        ApiGatewayConfig {
+            gateway_proxy: GatewayProxyConfig {
+                enabled,
+                directory_endpoint: Some("http://directory:50051".to_owned()),
+                ..Default::default()
+            },
+            internal_auth,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enabled_proxy_with_kube_but_no_present_block_is_rejected() {
+        let err = gateway(true, Some(kube(None)))
+            .validate_proxy_credential()
+            .expect_err("the proxy could never authenticate its directory polls");
+        assert!(err.contains("present"), "got: {err}");
+    }
+
+    /// The init check is `InternalAuthConfig::outbound`, so it refuses every
+    /// config the credential builder would, not only kube without `present`.
+    #[test]
+    fn enabled_proxy_with_unusable_shared_secret_is_rejected() {
+        let err = gateway(
+            true,
+            Some(InternalAuthConfig::SharedSecret {
+                secret: String::new().into(),
+                peer_name: "toolkit-internal".to_owned(),
+            }),
+        )
+        .validate_proxy_credential()
+        .expect_err("an empty secret can never authenticate the directory polls");
+        assert!(err.contains("shared_secret"), "got: {err}");
+    }
+
+    #[test]
+    fn proxy_credential_is_only_required_when_it_is_used() {
+        // Proxy disabled: kube without `present` is a valid inbound-only edge.
+        gateway(false, Some(kube(None)))
+            .validate_proxy_credential()
+            .expect("no outbound calls, no outbound credential needed");
+        // Proxy enabled with a `present` block, or with no internal_auth at all
+        // (Profile 1), or with a shared secret: nothing to refuse here.
+        gateway(true, Some(kube(Some("/var/run/secrets/tokens/t"))))
+            .validate_proxy_credential()
+            .expect("present block configured");
+        gateway(true, None)
+            .validate_proxy_credential()
+            .expect("no internal_auth configured");
+        gateway(
+            true,
+            Some(InternalAuthConfig::SharedSecret {
+                secret: "s".to_owned().into(),
+                peer_name: "toolkit-internal".to_owned(),
+            }),
+        )
+        .validate_proxy_credential()
+        .expect("a shared secret is symmetric");
+    }
 
     #[test]
     fn disabled_proxy_needs_no_endpoint() {
@@ -747,6 +882,7 @@ mod defaults_tests {
 ",
         );
         assert_eq!(cfg.defaults.request_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.defaults.max_request_timeout, None);
 
         let cfg = parse(
             "bind_addr: \"0.0.0.0:8086\"
@@ -755,6 +891,7 @@ defaults:
 ",
         );
         assert_eq!(cfg.defaults.request_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.defaults.max_request_timeout, None);
         assert_eq!(cfg.defaults.body_limit_bytes, 1024);
 
         assert_eq!(
@@ -785,6 +922,42 @@ defaults:
     }
 
     #[test]
+    fn max_request_timeout_parses_humantime_and_round_trips() {
+        let cfg = parse(
+            r#"
+bind_addr: "0.0.0.0:8086"
+defaults:
+  max_request_timeout: 2m
+"#,
+        );
+        assert_eq!(
+            cfg.defaults.max_request_timeout,
+            Some(Duration::from_secs(120))
+        );
+        assert!(cfg.defaults.validate().is_ok());
+
+        let json = serde_json::to_value(&cfg.defaults).expect("serialize");
+        assert_eq!(json["max_request_timeout"], "2m");
+    }
+
+    #[test]
+    fn max_request_timeout_must_not_be_below_default() {
+        let cfg = parse(
+            r#"
+bind_addr: "0.0.0.0:8086"
+defaults:
+  request_timeout: 30s
+  max_request_timeout: 20s
+"#,
+        );
+        let err = cfg.defaults.validate().unwrap_err();
+        assert!(
+            err.contains("max_request_timeout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn request_timeout_rejects_a_bare_number() {
         let res = serde_saphyr::from_str::<ApiGatewayConfig>(
             "bind_addr: \"0.0.0.0:8086\"
@@ -812,6 +985,7 @@ defaults:
         let defaults = Defaults::default();
         let json = serde_json::to_value(&defaults).expect("serialize");
         assert_eq!(json["request_timeout"], "30s");
+        assert!(json.get("max_request_timeout").is_none());
     }
 }
 

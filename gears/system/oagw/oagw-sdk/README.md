@@ -8,7 +8,8 @@ This crate defines the transport-agnostic interface for the OAGW gear:
 
 - **`ServiceGatewayClientV1`** — Async trait for upstream/route management and request proxying
 - **`Upstream` / `Route`** — Core domain models with builder-based construction
-- **`ServiceGatewayError`** — Error types for all gateway operations
+- **`ServiceGatewayError`** — Error types for all gateway operations; `request_not_sent()` tells whether a retry is safe for any method
+- **`reason`** — Wire `reason` codes with typed enums: `auth`, `permission`, `unavailable` (why a 502/503: `REQUEST_NOT_SENT`, `REQUEST_MAY_HAVE_BEEN_SENT`, `UPSTREAM_DISABLED`, `CREDENTIAL_STORE_UNAVAILABLE`, `IDENTITY_PROVIDER_UNAVAILABLE`) and `timeout` (504)
 - **`Body`** — Request/response body abstraction (`Bytes` / `Stream` / `Empty`)
 - **`ServerEventsStream`** — SSE response parser with typed event support
 - **`WebSocketStream`** — WebSocket abstraction with sender/receiver halves
@@ -51,6 +52,15 @@ match ServerEventsStream::from_response::<ServerEvent>(resp) {
     ServerEventsResponse::Response(resp) => { /* non-SSE fallback */ }
 }
 ```
+
+One event may take up to 16 MiB (`sse::DEFAULT_MAX_EVENT_BYTES`, its lines with
+their line endings). A larger event, or a body that never ends an event with a
+blank line, ends the stream with `StreamingError::EventTooLarge`; set another
+limit with `ServerEventsStream::from_response_with_max_event_bytes`.
+
+An event the body ends before its blank line is dropped, at a clean end too
+(W3C EventSource). A body error ends the stream with that error; invalid UTF-8
+ends it with `StreamingError::ServerEventsParse`.
 
 ## Features
 

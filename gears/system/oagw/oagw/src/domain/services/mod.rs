@@ -2,6 +2,7 @@
 pub(crate) mod client;
 /// Control-plane (configuration management) service implementation.
 pub(crate) mod management;
+mod proxy_grant;
 pub(crate) mod registry_job;
 pub(crate) mod registry_reconcile;
 pub(crate) mod registry_state;
@@ -9,6 +10,7 @@ pub(crate) mod system_identity;
 
 pub(crate) use client::ServiceGatewayClientV1Facade;
 pub(crate) use management::{ControlPlaneServiceImpl, RegistryProvisionerImpl};
+pub(crate) use proxy_grant::ProxyGrant;
 
 use async_trait::async_trait;
 use oagw_sdk::Body;
@@ -20,12 +22,15 @@ use std::net::SocketAddr;
 
 use crate::domain::error::DomainError;
 use crate::domain::model::{
-    CreateRouteRequest, CreateUpstreamRequest, Endpoint, ListQuery, Route, UpdateRouteRequest,
-    UpdateUpstreamRequest, Upstream,
+    CreateRouteRequest, CreateUpstreamRequest, Endpoint, ListQuery, ProxyTarget, Route,
+    UpdateRouteRequest, UpdateUpstreamRequest, Upstream,
 };
 use crate::domain::repo::{DeleteOutcome, Tags};
 
 /// Internal Control Plane service trait — configuration management and resolution.
+///
+/// The CRUD methods check the caller's management permissions
+/// (`create`, `override`, `read`, `delete` on the upstream or route type).
 #[async_trait]
 pub(crate) trait ControlPlaneService: Send + Sync {
     // -- Upstream CRUD --
@@ -87,13 +92,30 @@ pub(crate) trait ControlPlaneService: Send + Sync {
     /// Single `get_ancestors` call, correct multi-ID route matching across
     /// ancestor upstreams, and full effective config merge including route
     /// overrides. The proxy passes [`Tags::Skip`]: it never reads tags.
+    ///
+    /// Takes the caller's `proxy:invoke` grant: only the proxy pipeline
+    /// resolves without the `read` checks of
+    /// [`Self::resolve_proxy_target_for_client`].
     async fn resolve_proxy_target(
+        &self,
+        grant: &ProxyGrant,
+        alias: &str,
+        method: &str,
+        path: &str,
+        tags: Tags,
+    ) -> Result<ProxyTarget, DomainError>;
+
+    /// [`Self::resolve_proxy_target`] for an SDK client, which gets the
+    /// configuration back: checks `read` on upstreams and routes first.
+    /// Returns [`ProxyTarget::upstream`] and [`ProxyTarget::route`] only:
+    /// the enforced rate limits of the ancestor routes the route shadows,
+    /// which the proxy also checks, are not part of the answer.
+    async fn resolve_proxy_target_for_client(
         &self,
         ctx: &SecurityContext,
         alias: &str,
         method: &str,
         path: &str,
-        tags: Tags,
     ) -> Result<(Upstream, Route), DomainError>;
 }
 
@@ -192,17 +214,40 @@ pub(crate) trait RegistryProvisioner: Send + Sync {
 /// Internal Data Plane service trait — proxy orchestration and plugin execution.
 #[async_trait]
 pub(crate) trait DataPlaneService: Send + Sync {
+    /// Authorize and proxy a request (the SDK path). The `proxy:invoke`
+    /// check runs before the request is validated.
     async fn proxy_request(
         &self,
         ctx: SecurityContext,
         req: http::Request<Body>,
     ) -> Result<http::Response<Body>, DomainError>;
 
-    /// Remove all rate-limit buckets associated with an upstream (all scope variants).
-    fn remove_rate_limit_keys_for_upstream(&self, upstream_id: Uuid);
+    /// Check `proxy:invoke` for `ctx` before the caller reads the request
+    /// body (#4981). A denial is counted in the request metrics under the
+    /// request's `method`; a grant dropped before it is proxied or rejected
+    /// is counted as `Cancelled`.
+    async fn authorize_proxy(
+        &self,
+        ctx: SecurityContext,
+        method: &http::Method,
+    ) -> Result<ProxyGrant, DomainError>;
 
-    /// Remove all rate-limit buckets associated with a route.
-    fn remove_rate_limit_keys_for_route(&self, route_id: Uuid);
+    /// Count a request the caller rejects itself after
+    /// [`Self::authorize_proxy`] granted it (a bad path, a body over the
+    /// limit, a failed body read other than the client going away), with
+    /// the status the client gets, as
+    /// [`Self::proxy_request_granted`] counts a gateway error. The upstream
+    /// is not resolved yet, so the request counts under `host` and route
+    /// `"unknown"`. A grant dropped instead counts as `Cancelled`.
+    fn reject_granted(&self, grant: ProxyGrant, err: &DomainError);
+
+    /// Proxy a request [`Self::authorize_proxy`] already authorized, as the
+    /// caller the grant was issued for.
+    async fn proxy_request_granted(
+        &self,
+        grant: ProxyGrant,
+        req: http::Request<Body>,
+    ) -> Result<http::Response<Body>, DomainError>;
 }
 
 /// Why endpoint selection failed (multi-endpoint LB path).

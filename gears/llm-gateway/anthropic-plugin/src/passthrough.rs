@@ -6,8 +6,9 @@
 use futures::StreamExt;
 use http::response::Parts;
 use llm_gateway_sdk::{
-    LlmGatewayError, PassthroughApi, PassthroughEvent, PassthroughJsonResponse, PassthroughRequest,
-    PassthroughResponse, ProviderCallCtx, ProviderErrorCategory, ProviderFailure,
+    LlmGatewayError, PassthroughApi, PassthroughEvent, PassthroughJsonResponse, PassthroughMethod,
+    PassthroughRequest, PassthroughResponse, ProviderCallCtx, ProviderErrorCategory,
+    ProviderFailure,
 };
 use oagw_sdk::ServiceGatewayClientV1;
 use oagw_sdk::sse::{ServerEvent, ServerEventsResponse, ServerEventsStream};
@@ -22,7 +23,7 @@ use crate::settings::AnthropicProviderSettingsV1;
 use crate::wire::{COUNT_TOKENS_PATH, MESSAGES_PATH};
 use crate::{error, guard, response, stream};
 
-/// The endpoints forwarded on the pass-through route.
+/// The endpoints forwarded on the pass-through route, all `POST`.
 const ENDPOINTS: [&str; 2] = [MESSAGES_PATH, COUNT_TOKENS_PATH];
 
 const CAPABILITY: &str = "anthropic_passthrough";
@@ -36,10 +37,19 @@ pub async fn forward(
     call: &ProviderCallCtx,
     req: PassthroughRequest,
 ) -> Result<PassthroughResponse, LlmGatewayError> {
-    if req.api != PassthroughApi::Anthropic || !ENDPOINTS.contains(&req.path.as_str()) {
+    if req.api != PassthroughApi::Anthropic
+        || req.method != PassthroughMethod::Post
+        || !ENDPOINTS.contains(&req.path.as_str())
+    {
         return Err(LlmGatewayError::capability_not_supported(CAPABILITY));
     }
-    guard::check_request(&req.body)?;
+    let Some(mut body) = req.body else {
+        return Err(LlmGatewayError::validation_param(
+            "model is required",
+            MODEL,
+        ));
+    };
+    guard::check_request(&body)?;
 
     let settings: AnthropicProviderSettingsV1 = call
         .provider_settings()
@@ -52,9 +62,9 @@ pub async fn forward(
 
     let PassthroughRequest {
         path,
+        query,
         stream,
         headers,
-        mut body,
         ..
     } = req;
     let model = match body.get_mut(MODEL) {
@@ -75,6 +85,10 @@ pub async fn forward(
         .next()
         .unwrap_or_else(|| version(&settings));
     let beta = guard::beta_header(header_values(&headers, ANTHROPIC_BETA_HEADER));
+    let path = match query {
+        Some(query) => format!("{path}?{query}"),
+        None => path,
+    };
     let request = http_request(
         &path,
         version,
@@ -203,7 +217,6 @@ impl Relay {
             mut data,
             ..
         } = event;
-        let mut output_text = String::new();
         let mut usage = None;
 
         if let Ok(mut payload) = serde_json::from_str::<Value>(&data) {
@@ -217,15 +230,6 @@ impl Relay {
                         }
                     }
                 }
-                Some("content_block_delta") => {
-                    let delta = &mut payload["delta"];
-                    let text = ["text", "thinking", "partial_json"]
-                        .iter()
-                        .find_map(|key| delta.get_mut(key).map(Value::take));
-                    if let Some(Value::String(text)) = text {
-                        output_text = text;
-                    }
-                }
                 Some("message_delta") => {
                     stream::merge_usage(&mut self.usage, payload["usage"].take());
                     usage = Some(response::usage(&self.usage, true));
@@ -234,7 +238,7 @@ impl Relay {
             }
         }
 
-        let mut relayed = PassthroughEvent::new(data).with_output_text(output_text);
+        let mut relayed = PassthroughEvent::new(data);
         if let Some(name) = name {
             relayed = relayed.with_event(name);
         }

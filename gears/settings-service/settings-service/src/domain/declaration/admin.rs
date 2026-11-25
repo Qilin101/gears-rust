@@ -29,6 +29,7 @@ use crate::domain::declaration::{
     DeclarationStatus,
 };
 use crate::domain::error::DomainError;
+use crate::domain::metric_labels::StepUpResult;
 use crate::domain::ports::{SecretManager, StepUpOperation, WriteMetrics};
 use crate::domain::precondition::{self, ETag};
 use crate::domain::resolution::EffectiveCache;
@@ -323,6 +324,37 @@ pub fn normalise_display_name(raw: &str) -> Result<String, DomainError> {
     Ok(trimmed.to_owned())
 }
 
+/// The longest description, in Unicode characters: the width of the
+/// `varchar(4096)` column, which Postgres counts in characters too.
+const DESCRIPTION_MAX_CHARS: usize = 4096;
+
+/// Check a description against its bound. An empty one is fine: the bound is
+/// an upper one only, and the value is stored as supplied.
+///
+/// Without this check the two backends disagree: Postgres refuses the row at
+/// the column, which reaches the caller as a storage failure for a mistake
+/// that is theirs to fix, and `SQLite`, whose column is unbounded, stores it.
+/// The same rule a category's description follows
+/// (`crate::domain::category::bounds`).
+///
+/// # Errors
+/// [`DomainError::Validation`] naming `description`, with the code
+/// [`field::DECLARATION_DESCRIPTION_LENGTH`], when it is longer than the bound.
+pub fn check_description(description: &str) -> Result<(), DomainError> {
+    let length = description.chars().count();
+    if length > DESCRIPTION_MAX_CHARS {
+        return Err(validation(
+            "description",
+            field::DECLARATION_DESCRIPTION_LENGTH,
+            format!(
+                "a declaration description is at most {DESCRIPTION_MAX_CHARS} characters; \
+                 this one is {length}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validation(field: &str, code: &'static str, message: impl Into<String>) -> DomainError {
     DomainError::Validation {
         field: field.to_owned(),
@@ -504,7 +536,16 @@ pub fn classify_field(
     };
     let class = match name {
         // @cpt-begin:cpt-cf-settings-service-algo-setting-declarations-mutation-class:p1:inst-decl-mutcls-2
-        "description" | "domain_affinity" | "licence_feature" => {
+        "description" => {
+            if !value.is_null() {
+                let Some(raw) = value.as_str() else {
+                    return Err(wrong_shape("a string or null"));
+                };
+                check_description(raw)?;
+            }
+            FieldClass::Immediate
+        }
+        "domain_affinity" | "licence_feature" => {
             if !(value.is_string() || value.is_null()) {
                 return Err(wrong_shape("a string or null"));
             }
@@ -972,6 +1013,11 @@ where
             .as_deref()
             .map(normalise_display_name)
             .transpose()?;
+        // Before the path is looked up, so a create, a revive and an evolution
+        // all refuse an over-long description the same way.
+        if let Some(description) = request.description.as_deref() {
+            check_description(description)?;
+        }
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-7
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-6
         if !matches!(
@@ -1028,7 +1074,8 @@ where
 
     /// The create's second phase, which the revival report shares: everything
     /// the create judges before it would ask for step-up — a retired
-    /// `module_contributed` declaration, the value type's traits and the
+    /// `module_contributed` declaration, whether the named value type is one,
+    /// the value type's traits and the
     /// derived classification, a revive's own refusals, the Schema Default and
     /// the remaining body fields.
     ///
@@ -1050,6 +1097,14 @@ where
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-8
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-9
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-10
+        // What the request names as its value type has to be one, before its
+        // traits or the default are asked about: a setting key and the
+        // abstract setting base are registered types too, and neither says
+        // what shape a value has. A create, a revive, an evolution and the
+        // revival report all pass here.
+        self.validator
+            .ensure_value_type(&request.value_type_id)
+            .await??;
         let traits = self
             .validator
             .resolve_traits(&request.value_type_id)
@@ -1227,8 +1282,10 @@ where
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-8
         // Reactivation changes whether a live setting resolves: gated like a
         // value change, before anything else is inspected.
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-17
         self.verify_step_up(actor, StepUpOperation::Reactivate)
             .await?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-17
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-8
         // The row for update, then read again by id: a purge of this retired
         // declaration holds the row until it commits, so this waits for it and
@@ -1355,7 +1412,9 @@ where
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-3
         // Evolution retires a live setting's current major: gated like a value
         // change, before anything else is inspected.
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-9
         self.verify_step_up(actor, StepUpOperation::Evolve).await?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-9
         // The active row for update, then read again by id: a retire and a
         // purge of it, or another evolution, hold it until they commit, so
         // this waits for them and sees what they left — a row gone is `404`,
@@ -1598,7 +1657,9 @@ where
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-8
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-11
         if needs_step_up {
+            // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-16
             self.verify_step_up(actor, StepUpOperation::Update).await?;
+            // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-16
         }
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-11
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-10
@@ -1718,7 +1779,9 @@ where
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-5
         // Retire drops a live setting out of resolution at once: gated like a
         // value change, before the declaration is even looked up.
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-15
         self.verify_step_up(actor, StepUpOperation::Retire).await?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-15
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-5
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-4
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-6
@@ -2130,15 +2193,20 @@ where
 
     /// The step-up gate, as the value write path applies it: an interactive
     /// caller must present a fresh assertion; a service principal cannot and
-    /// is refused outright. The outcome is counted in `settings_step_up_total`
-    /// under `operation`.
+    /// is refused outright. Each outcome is counted on
+    /// `settings_step_up_total` under the `operation` the caller names.
     async fn verify_step_up(
         &self,
         actor: &WriteActor,
         operation: StepUpOperation,
     ) -> Result<(), DomainError> {
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-16
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-15
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-17
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-9
         if !actor.is_interactive() {
-            self.metrics.step_up(operation, "service_principal");
+            self.metrics
+                .step_up(operation, StepUpResult::ServicePrincipal);
             return Err(DomainError::Unauthorized {
                 resource: settings_service_sdk::gts::DECLARATION_SCHEMA,
             });
@@ -2156,11 +2224,12 @@ where
             .await
         {
             Ok(()) => {
-                self.metrics.step_up(operation, "verified");
+                self.metrics.step_up(operation, StepUpResult::Verified);
                 Ok(())
             }
             Err(refusal) => {
-                self.metrics.step_up(operation, refusal.code());
+                self.metrics
+                    .step_up(operation, StepUpResult::from(&refusal));
                 match refusal {
                     // An outage of the platform's AuthN is not a verdict on the
                     // token: the client retries rather than re-authenticates.
@@ -2178,6 +2247,10 @@ where
                 }
             }
         }
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-9
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-17
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-retire:p1:inst-decl-retire-15
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-update:p1:inst-decl-update-16
     }
 
     async fn record<C: DBRunner>(

@@ -67,7 +67,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
 - DESIGN §4.8 *Bootstrap* has the gear seed "a minimal category set" at startup, but no section names the set. The init step is specified without its contents until it does.
 - DESIGN §4.9 has every consumed client declared with `#[toolkit::consumes]`, which requires the provider SDK's REST projection to exist. `tenant-resolver-sdk` has none, so the tenant resolver is fetched from the hub at first use instead — the same thing in the Embedded profile R1 is limited to, but the declaration has to land in that SDK before the out-of-process profiles of R2.
 - The default for an omitted `tenant` is stated twice in §4.3 and differently: "platform scope" on the read and write path notes, "the caller's own tenant" in the set rules. The FEATUREs assume the caller's own tenant, which for a platform administrator is the root tenant and therefore platform scope — the one reading that satisfies both sentences.
-- DESIGN names no authorization action for the PII entitlement it gates unmasked reads on (§1.3 `DataClassification`, §4.2 *Secret Manager* `mask`). The read surface asks the `PolicyEnforcer` for `read_unmasked` on the value resource and unmasks `pii` only when it is granted; the action name is this decomposition's, to be confirmed by the authorization owners. An omitted `tenant` resolves to the caller's own tenant, which for the root is platform scope, so both §4.3 wordings hold.
+- DESIGN §4.8 names `read_unmasked` as the authorization action for the PII entitlement it gates unmasked reads on (§1.3 `DataClassification`, §4.2 *Secret Manager* `mask`). The read surface asks the `PolicyEnforcer` for `read_unmasked` on the value resource and unmasks `pii` only when it is granted; DESIGN §4.8 and the published permission catalogue carry the name. An omitted `tenant` resolves to the caller's own tenant, which for the root is platform scope, so both §4.3 wordings hold.
 - DESIGN leaves how the step-up assertion travels to the implementation (§4.2 *Value Writer*: the parameter MAY be folded into the bearer token). The write surface reads an `X-Step-Up-Token` header and, absent, checks the bearer token itself, which a session re-authenticated just now satisfies through its own `auth_time`; the header name is this decomposition's, to be confirmed against `authn-resolver`'s step-up contract when it lands. With no `step_up` configuration section nothing is bound and every write to a declaration that requires step-up refuses; the demo catalogue opts its settings out of step-up except `api_token`, so the example server can exercise writes without an identity provider.
 - §4.3 says the read's `last_change_at` is the ETag a write submits, but that field is the leak-safe maximum over the declaration and the resolved row, which may be an ancestor's. The FEATUREs guard a write on the target scope's **own** row — its `last_change_at`, or an absent-state tag when no row exists — and return that tag in `ETag`, distinct from the recency in the body.
 - DESIGN §4.2 *Secret Manager* names no principal for the gear's own calls to the Credential Store. The Secret Manager presents a fixed settings-service principal, a name-based UUID, in the target tenant with `private` sharing, so that only this gear reads an entry back; a real deployment has to grant that principal `read`, `write` and `delete` on the generic secret type in the authorization policy, which the static authorizer of the e2e profile grants implicitly. And §4.8 defines no action for the machine path's per-setting check, so `resolve_secret` asks the `PolicyEnforcer` for `read` on the value resource with the declaration id as the resource id.
@@ -103,13 +103,14 @@ One requirement is counted as covered while being split across releases: `cpt-cf
 
 - **Scope**:
   - SDK crate (`settings-service-sdk`): domain models, the `SettingKey` value object — a GTS type id under the Settings gear's abstract base `gts.cf.core.settings.setting_type.v1~` ([ADR-002](./ADR/ADR-002-setting-key-gts-type-id.md)), parsed once and never re-normalized — the `SettingsReaderClient` trait (DESIGN §4.5), the Contribution client trait,  the change-notification and outcome types the Settings Activation consumes, and the error taxonomy
-  - Gear scaffold: `#[toolkit::gear]` annotated gear with `deps = [types_registry]` — the one client it calls during its own init — and every consumed client (authorization resolver, tenant resolver, later the credential store and event broker) fetched at first use and declared with `#[toolkit::consumes]` where its SDK carries a REST projection (DESIGN §4.9; the tenant resolver's does not yet, see §1); ClientHub registration for the SDK client traits; registration of the gear's GTS control-plane schemas and the abstract `setting_type` base, and the idempotent seed of the minimal category set, at init (DESIGN §4.8 *Bootstrap*). The root tenant's id — platform scope (DESIGN §4.1, §4.7) — is learned from the tenant resolver on first use and kept
+  - Gear scaffold: `#[toolkit::gear]` annotated gear with `deps = [types_registry, credstore]` — the gears whose clients it resolves during its own init — and every consumed client (authorization resolver and tenant resolver) fetched at first use and declared with `#[toolkit::consumes]` where its SDK carries a REST projection (DESIGN §4.9; the tenant resolver's does not yet, see §1); ClientHub registration for the SDK client traits; the gear's GTS control-plane schemas and the abstract `setting_type` base published with the gear's manifest (`gts_publication(...)`), which the types registry admits before any application `init`; and the idempotent seed of the minimal category set at init (DESIGN §4.8 *Bootstrap*). The root tenant's id — platform scope (DESIGN §4.1, §4.7) — is learned from the tenant resolver on first use and kept
   - Persistence: SeaORM entity scaffolding, `SecureConn` and `DBRunner` wiring, migration harness
   - Error mapping: `DomainError` to Problem (RFC-9457) across the canonical error categories of DESIGN §4.3 — a validation rejection is invalid-argument and renders as `400`; `428`/`412` are explicit transport overrides on the `If-Match` preconditions
   - REST infrastructure: `OperationBuilder` wiring, OData `$filter`, `$select`, and `$orderby` parsing, pagination helpers, and `If-Match`/ETag plumbing
   - AuthN and AuthZ: the `PolicyEnforcer` PEP pattern, `AccessScope` derived from PDP constraints, and the `StepUpVerifier` port — declared in the domain, adapted in infra — whose default binding has the platform's AuthN resolver authenticate a presented step-up token and checks its claims; it is bound in 2.8, the first path that refuses without it, and picked up there by the behavior-affecting declaration actions of 2.3
   - Audit Emitter: the `AuditSink` port taking the mutation's own transaction and `AccessScope`, and event publication; the gear-local binding is entry 2.6, and the tracing stand-in until then exercises the emitter's callers without satisfying the audit DoD
   - Deployment-owned bootstrap configuration delivered through ToolKit config at gear init (DESIGN §4.9), never as a managed setting
+  - Metrics: the telemetry ports, `settings_authz_denial_total`, `settings_service_ready` and the two inventory gauges
 
 - **Out of scope**:
   - Every domain service and its REST handlers, which are features 2.2 through 2.10
@@ -225,6 +226,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - Purge of a retired admin-authored declaration: step-up and `If-Match` gated, one transaction that takes the row for update and hard-deletes it with its values, tenant permissions and staged secrets by `ON DELETE CASCADE`, then releases their Credential Store entries after commit through the Secret Manager port, best-effort (`cpt-cf-settings-service-seq-declaration-purge`)
   - Dependency Group and cross-setting constraint **declaration**
   - Declaration REST surface, visibility- and domain-gated with the predicate applied inside the query, returning the `key`, its `value_type_id`, and resolved traits for client rendering, and leaving the seam through which the licence predicate joins in R2
+  - Metrics: the step-up count on declaration actions
 
 - **Out of scope**:
   - Module-contributed declarations and the Contribution Reconciler, which own the contributed write path (2.10)
@@ -342,6 +344,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - `cache_ttl_seconds` backstop, default 30 s, owned by this cache
   - `cache_max_entries` bound, default 500,000 — the sizing anchor — with the entries nearest to expiry evicted first and expired entries dropped on any store
   - Hierarchy-change eviction for cascading declarations, noting that the Tenant Resolver does not publish that signal today so the TTL is currently the only backstop after a re-parent
+  - Metrics: the read-path metrics of the reader boundary
 
 - **Out of scope**:
   - The cross-replica `cache_invalidate` broadcast and its bounded-staleness guarantee, which ship in R2 when several replicas become the normal case (`cpt-cf-settings-service-fr-replica-coherence`)
@@ -399,9 +402,10 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - The canonical resource id `cf.settings:{key}@{tenant_id}` — the root tenant's id for platform scope — produced by one formatter shared by the write and the history read, so the two cannot drift
   - Writing the record as the last step before commit of the mutation's transaction, through the same `AccessScope`-scoped path as every other write; a failed write rolls the mutation back and rejects it `503`
   - Masking before the record is built: a `secret`-classified value is never written in plaintext, and the actor identity carries its `public`/`pii` classification for the read side to honour
-  - `GET /settings-service/v1/settings/{key}/history` querying `(declaration_key, tenant_id)` on `idx_audit_scoped`, paginated, newest first, with no second masking implementation and no reveal path
+  - `GET /settings-service/v1/settings/{key}/history` querying `(declaration_key, tenant_id)` on `idx_audit_scoped`, paginated, newest first, with no second masking implementation and no reveal path; with `descendants=true` the same read over the target's subtree, walked within the node budget, through `idx_audit_key_recent`, keyset-paginated and not counted
   - `idx_audit_retention` on `retain_until` for pruning; `retain_until` carried on every record from the start, the store's configured default applying when absent
   - Retiring the `TracingAuditEmitter` and closing the audit DoDs 2.1 and 2.2 left open
+  - Metrics: `settings_audit_events_total`
 
 - **Out of scope**:
   - Shipping records to the platform Audit Subsystem through the transactional outbox, which is R2 and an addition behind the same port
@@ -429,7 +433,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - GET /settings-service/v1/settings/{key}/history?tenant={tenant_id}
 
 - **Data**:
-  - `audit_records` table with `idx_audit_scoped` and the partial `idx_audit_retention`
+  - `audit_records` table with `idx_audit_scoped`, `idx_audit_key_recent`, and the partial `idx_audit_retention` and `idx_audit_default_horizon`
 
 ### 2.7 Tenant Access Restrictions &mdash; HIGH
 
@@ -502,6 +506,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - A `change_set_id` minted per `set` request and carried on the audit records it produces
   - Publication of `event_value_changed` and `event_value_change_failed` through the Change Publisher port; in R1 no consumer notification and no cross-replica broadcast are bound, so the local eviction is the write's only cache effect and a second host would be stale for at most `cache_ttl_seconds`
   - The `settings_step_up_total` counter by operation and result, and the set-path metrics `cpt-cf-settings-service-nfr-ops-set-monitoring` requires
+  - Metrics: `settings_changes_total`
 
 - **Out of scope**:
   - Writes by an authorized service principal through the SDK `set_value`, which is R2 (`cpt-cf-settings-service-fr-service-writes`); the gate table's machine column — refusal on a `requires_step_up` declaration — is enforced here
@@ -567,6 +572,7 @@ One requirement is counted as covered while being split across releases: `cpt-cf
   - `delete_secret` when an override is removed or superseded
   - Staging a secret ahead of the step-up redirect: `POST /settings/{key}/secret-stage` validates and stores the plaintext as a set would and answers with a single-use `pending_id`; the batch names it in place of the value and adopts the entry without a second store leg; expired stages are swept with their entries (DESIGN §5 *A secret staged across the step-up redirect*, §4.7 `pending_secrets`)
   - The placeholder-default rule, already enforced by 2.3 on the declaration side: a secret setting resolves to its empty placeholder, never to a credential
+  - Metrics: `settings_secret_use_total`
 
 - **Out of scope**:
   - Verified machine caller identity, without which the machine path enforces only the deployment trust boundary and attributes secret use to the caller's declared module (DESIGN §6); R2
@@ -720,6 +726,6 @@ cpt-cf-settings-service-feature-typed-value-validation ─→ cpt-cf-settings-se
 
 **Parallelism**: wave 1 is strictly sequential. In wave 2, `audit-store` can start as soon as 2.3 lands and run alongside 2.4 and 2.5; `module-contributions` needs only 2.4 and can run alongside 2.5 through 2.9; `tenant-access`, `value-writes`, and `secret-values` form a chain. Work also parallelizes inside 2.1, where the SDK crate, persistence harness, REST and OData infrastructure, error mapping, and the Audit Emitter are largely independent of one another.
 
-**Order of delivery within the waves.** Declarations reach the platform through two doors, and only one of them is on the critical path: gears contribute theirs through the SDK (2.10), administrators author theirs through `POST /settings-service/v1/declarations` (the write flows of 2.3). Set and read of values need declarations to exist, not an administrative way to author them, so the sequence that reaches a working value path soonest is: the `setting_type` base registered at init (2.1, step 9 of gear init), the Type Validator and the `setting_values` table (2.4), the reconciler (2.10), the read surface and the in-process reader (2.5), the audit store (2.6), the write path (2.8) — with tenant access (2.7) entering as its absent-row semantics first, which is `overridable` for everyone, and its endpoints after. The administrative declaration writes of 2.3 follow; their read surface is already in place.
+**Order of delivery within the waves.** Declarations reach the platform through two doors, and only one of them is on the critical path: gears contribute theirs through the SDK (2.10), administrators author theirs through `POST /settings-service/v1/declarations` (the write flows of 2.3). Set and read of values need declarations to exist, not an administrative way to author them, so the sequence that reaches a working value path soonest is: the `setting_type` base published with the gear's manifest before any `init` (2.1, step 9 of gear init), the Type Validator and the `setting_values` table (2.4), the reconciler (2.10), the read surface and the in-process reader (2.5), the audit store (2.6), the write path (2.8) — with tenant access (2.7) entering as its absent-row semantics first, which is `overridable` for everyone, and its endpoints after. The administrative declaration writes of 2.3 follow; their read surface is already in place.
 
 **What unblocks next**: 2.10 and 2.11 complete R1 — 2.11 carries cross-field search, and the `mode` tag, with `display_name` when set, rides every browse item and search hit. R2 then waits on the platform — verified machine caller identity for the out-of-process profiles and the service-write SDK path, the platform-wide elevated session behind the existing `StepUpVerifier` port, the platform Audit Subsystem behind the existing `AuditSink` port, the tenant-deleted signal, and per-feature licence entitlement — while file-valued settings, the anonymous read route, and the replica broadcast need nothing outside this gear and the broker it already publishes to.

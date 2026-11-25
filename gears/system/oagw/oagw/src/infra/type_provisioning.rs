@@ -30,10 +30,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_port() -> u16 {
-    443
-}
-
 fn default_cost() -> u32 {
     1
 }
@@ -54,8 +50,9 @@ struct Endpoint {
     #[serde(default)]
     scheme: Scheme,
     host: String,
-    #[serde(default = "default_port")]
-    port: u16,
+    /// Defaults to the scheme's port (80 for `http`, 443 otherwise).
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +206,35 @@ struct RateLimitConfig {
     response_headers: bool,
 }
 
+/// Defaults as in the REST DTO (ADR-0005); unknown fields are rejected, so
+/// a misspelled one does not fall back to its default.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CircuitBreakerConfig {
+    #[serde(default)]
+    sharing: SharingMode,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_failure_threshold")]
+    failure_threshold: u32,
+    #[serde(default = "default_timeout_seconds")]
+    timeout_seconds: u32,
+    #[serde(default = "default_success_threshold")]
+    success_threshold: u32,
+}
+
+fn default_failure_threshold() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_FAILURE_THRESHOLD
+}
+
+fn default_timeout_seconds() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_TIMEOUT_SECONDS
+}
+
+fn default_success_threshold() -> u32 {
+    oagw_sdk::CircuitBreakerConfig::DEFAULT_SUCCESS_THRESHOLD
+}
+
 #[derive(Deserialize)]
 struct BudgetConfig {
     #[serde(default)]
@@ -316,6 +342,8 @@ struct UpstreamPayload {
     #[serde(default)]
     rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
+    circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default)]
     cors: Option<CorsConfig>,
     #[serde(default)]
     tags: Vec<String>,
@@ -363,10 +391,11 @@ impl From<Scheme> for domain::Scheme {
 
 impl From<Endpoint> for domain::Endpoint {
     fn from(v: Endpoint) -> Self {
+        let scheme = domain::Scheme::from(v.scheme);
         Self {
-            scheme: v.scheme.into(),
+            scheme,
             host: v.host,
-            port: v.port,
+            port: v.port.unwrap_or_else(|| scheme.default_port()),
         }
     }
 }
@@ -511,7 +540,21 @@ impl From<RateLimitConfig> for domain::RateLimitConfig {
             strategy: v.strategy.into(),
             cost: v.cost,
             response_headers: v.response_headers,
-            pool_owner_id: None,
+            shared_pool: None,
+            limit_owner_id: None,
+        }
+    }
+}
+
+impl From<CircuitBreakerConfig> for domain::CircuitBreakerConfig {
+    fn from(v: CircuitBreakerConfig) -> Self {
+        Self {
+            sharing: v.sharing.into(),
+            enabled: v.enabled,
+            failure_threshold: v.failure_threshold,
+            timeout_seconds: v.timeout_seconds,
+            success_threshold: v.success_threshold,
+            owner_id: None,
         }
     }
 }
@@ -644,6 +687,7 @@ impl UpstreamPayload {
                 headers: self.headers.map(Into::into),
                 plugins: self.plugins.map(Into::into),
                 rate_limit: self.rate_limit.map(Into::into),
+                circuit_breaker: self.circuit_breaker.map(Into::into),
                 cors: self.cors.map(Into::into),
                 tags: self.tags,
                 enabled: self.enabled,
@@ -1006,6 +1050,33 @@ mod tests {
     // Payload deserialization tests
     // -----------------------------------------------------------------------
 
+    /// An omitted port is the scheme's default: 80 for `http`, 443 for the
+    /// others (#4979).
+    #[test]
+    fn omitted_port_defaults_per_scheme() {
+        let json = serde_json::json!({
+            "server": {
+                "endpoints": [
+                    {"scheme": "http", "host": "a.example.com"},
+                    {"scheme": "https", "host": "b.example.com"},
+                    {"scheme": "wss", "host": "c.example.com"},
+                    {"host": "d.example.com"}
+                ]
+            },
+            "protocol": HTTP_PROTOCOL_ID,
+        });
+        let payload: UpstreamPayload = serde_json::from_value(json).unwrap();
+        let ports: Vec<u16> = payload
+            .into_provisioned(None)
+            .request
+            .server
+            .endpoints
+            .iter()
+            .map(|e| e.port)
+            .collect();
+        assert_eq!(ports, [80, 443, 443, 443]);
+    }
+
     #[test]
     fn deserialize_valid_upstream_payload() {
         let tenant = Uuid::new_v4();
@@ -1060,6 +1131,47 @@ mod tests {
         let rr = headers.request.as_ref().unwrap();
         assert_eq!(rr.set.get("x-custom").unwrap(), "value");
         assert_eq!(rr.passthrough, domain::PassthroughMode::All);
+        assert_eq!(req.circuit_breaker, None);
+    }
+
+    #[test]
+    fn deserialize_upstream_circuit_breaker_with_defaults() {
+        let json = serde_json::json!({
+            "server": {"endpoints": [{"host": "api.example.com"}]},
+            "protocol": HTTP_PROTOCOL_ID,
+            "circuit_breaker": {"sharing": "enforce", "failure_threshold": 2}
+        });
+        let payload: UpstreamPayload = serde_json::from_value(json).unwrap();
+        let provisioned = payload.into_provisioned(None);
+        assert_eq!(
+            provisioned.request.circuit_breaker,
+            Some(domain::CircuitBreakerConfig {
+                sharing: domain::SharingMode::Enforce,
+                enabled: true,
+                failure_threshold: 2,
+                timeout_seconds: 30,
+                success_threshold: 3,
+                owner_id: None,
+            })
+        );
+    }
+
+    /// A misspelled field is an error, not a silent default.
+    #[test]
+    fn upstream_circuit_breaker_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "server": {"endpoints": [{"host": "api.example.com"}]},
+            "protocol": HTTP_PROTOCOL_ID,
+            "circuit_breaker": {"failure_treshold": 1}
+        });
+        let err = serde_json::from_value::<UpstreamPayload>(json)
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            err.as_deref()
+                .is_some_and(|e| e.contains("unknown field `failure_treshold`")),
+            "{err:?}"
+        );
     }
 
     #[test]

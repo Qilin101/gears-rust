@@ -3,24 +3,34 @@ use super::bind::parse_secret_ref;
 use super::budget::validate_budget_config;
 use super::canonical::canonicalize_match_rules;
 use crate::domain::error::DomainError;
+use crate::domain::gts_helpers::{
+    AUTH_PLUGIN_SCHEMA, GUARD_PLUGIN_SCHEMA, IMPLEMENTED_AUTH_PLUGIN_IDS,
+    IMPLEMENTED_GUARD_PLUGIN_IDS, IMPLEMENTED_TRANSFORM_PLUGIN_IDS, TRANSFORM_PLUGIN_SCHEMA,
+};
 use crate::domain::model::{
-    AuthConfig, CorsConfig, CreateRouteRequest, CreateUpstreamRequest, Endpoint, HeadersConfig,
-    HttpMatch, HttpMethod, MatchRules, PluginsConfig, RateLimitConfig, Route, UpdateRouteRequest,
-    UpdateUpstreamRequest,
+    AuthConfig, CircuitBreakerConfig, CorsConfig, CreateRouteRequest, CreateUpstreamRequest,
+    Endpoint, HeadersConfig, HttpMatch, HttpMethod, MatchRules, PluginsConfig, RateLimitAlgorithm,
+    RateLimitConfig, Route, Scheme, UpdateRouteRequest, UpdateUpstreamRequest,
+};
+use crate::domain::plugin::aws_sigv4::AwsSigV4AuthConfig;
+use crate::domain::plugin::credentials::{
+    ApiKeyAuthConfig, AuthConfigError, parse_credential_mode, parse_request_secret_types,
 };
 use crate::domain::repo::RowKey;
 use crate::domain::ssrf::SsrfGuard;
 
 /// The checks of an upstream create that read nothing: the request's fields,
-/// its endpoints against the SSRF policy, and its `secret_ref` syntax.
-/// Returns the alias the create stores. The Management API and the registry
-/// reconcile both run it before any read.
+/// its endpoints against the SSRF policy, and the syntax of its credential
+/// references. Returns the alias the create stores. The Management API and
+/// the registry reconcile both run it before any read.
 pub(in crate::domain::services) fn validate_upstream_request(
     ssrf: &SsrfGuard,
+    allow_http: bool,
     req: &CreateUpstreamRequest,
 ) -> Result<String, DomainError> {
     validate_upstream_content(
         ssrf,
+        allow_http,
         &req.tags,
         &req.protocol,
         req.auth.as_ref(),
@@ -28,6 +38,7 @@ pub(in crate::domain::services) fn validate_upstream_request(
         req.plugins.as_ref(),
         req.cors.as_ref(),
         req.rate_limit.as_ref(),
+        req.circuit_breaker.as_ref(),
         &req.server.endpoints,
     )?;
     match req.alias.as_deref() {
@@ -40,10 +51,12 @@ pub(in crate::domain::services) fn validate_upstream_request(
 /// alias: which alias rules apply depends on the stored row and the writer.
 pub(in crate::domain::services) fn validate_upstream_update_request(
     ssrf: &SsrfGuard,
+    allow_http: bool,
     req: &UpdateUpstreamRequest,
 ) -> Result<(), DomainError> {
     validate_upstream_content(
         ssrf,
+        allow_http,
         &req.tags,
         &req.protocol,
         req.auth.as_ref(),
@@ -51,6 +64,7 @@ pub(in crate::domain::services) fn validate_upstream_update_request(
         req.plugins.as_ref(),
         req.cors.as_ref(),
         req.rate_limit.as_ref(),
+        req.circuit_breaker.as_ref(),
         &req.server.endpoints,
     )
 }
@@ -61,6 +75,7 @@ pub(in crate::domain::services) fn validate_upstream_update_request(
 )]
 fn validate_upstream_content(
     ssrf: &SsrfGuard,
+    allow_http: bool,
     tags: &[String],
     protocol: &str,
     auth: Option<&AuthConfig>,
@@ -68,27 +83,65 @@ fn validate_upstream_content(
     plugins: Option<&PluginsConfig>,
     cors: Option<&CorsConfig>,
     rate_limit: Option<&RateLimitConfig>,
+    circuit_breaker: Option<&CircuitBreakerConfig>,
     endpoints: &[Endpoint],
 ) -> Result<(), DomainError> {
     validate_tags(tags)?;
     validate_upstream_refs(protocol, auth)?;
     validate_plugin_refs(plugins)?;
+    validate_plugin_ids(auth, plugins)?;
     validate_json_text(auth, headers, cors, plugins)?;
     validate_endpoints(endpoints)?;
+    forbid_http_endpoints(endpoints, allow_http, "")?;
     validate_endpoints_ssrf(ssrf, endpoints)?;
+    forbid_ipv6_endpoints(endpoints)?;
     if let Some(cors) = cors {
         crate::domain::cors::validate_cors_config(cors)?;
+    }
+    if let Some(rate_limit) = rate_limit {
+        validate_rate_limit_values(rate_limit)?;
     }
     if let Some(budget) = rate_limit.and_then(|rl| rl.budget.as_ref()) {
         validate_budget_config(budget)?;
     }
-    if let Some(raw_ref) = auth
-        .and_then(|a| a.config.as_ref())
-        .and_then(|c| c.get("secret_ref"))
-    {
-        parse_secret_ref(raw_ref)?;
+    if let Some(circuit_breaker) = circuit_breaker {
+        validate_circuit_breaker_values(circuit_breaker)?;
+    }
+    if let Some(auth) = auth {
+        for credential in auth.credential_refs() {
+            parse_secret_ref(credential)?;
+        }
+        validate_credential_mode(auth)?;
     }
     Ok(())
+}
+
+/// `credential_mode` and `request_secret_types` (ADR-0022), and the API-key
+/// and AWS SigV4 plugins' own keys. The API-key plugin's config goes through
+/// [`ApiKeyAuthConfig::parse`], the parser the plugin and the proxy use,
+/// plus the write-only [`ApiKeyAuthConfig::check_write_policy`]; the AWS
+/// SigV4 plugin's through [`AwsSigV4AuthConfig::parse`], the parser the
+/// plugin uses, so a required key is checked even when absent (the
+/// credential reference loop sees only the keys present). Another
+/// plugin may carry `credential_mode` and `request_secret_types` (they mean
+/// nothing there), but they must still be well-formed. A `request_ref`
+/// default `secret_ref` is a credential reference like any other and gets
+/// the same checks.
+fn validate_credential_mode(auth: &AuthConfig) -> Result<(), DomainError> {
+    let to_domain = |e: AuthConfigError| DomainError::validation_for(e.field, e.reason, e.detail);
+    let config = auth.config.as_ref();
+    if auth.plugin_type == crate::domain::gts_helpers::APIKEY_AUTH_PLUGIN_ID {
+        return ApiKeyAuthConfig::parse(config)
+            .and_then(|parsed| parsed.check_write_policy())
+            .map_err(to_domain);
+    }
+    if auth.plugin_type == crate::domain::gts_helpers::AWS_SIGV4_AUTH_PLUGIN_ID {
+        AwsSigV4AuthConfig::parse(config).map_err(to_domain)?;
+    }
+    let mode = parse_credential_mode(config).map_err(to_domain)?;
+    parse_request_secret_types(config, mode)
+        .map(drop)
+        .map_err(to_domain)
 }
 
 /// The checks of a route create that read nothing. Returns the canonical
@@ -102,6 +155,7 @@ pub(in crate::domain::services) fn validate_route_request(
         &req.match_rules,
         req.plugins.as_ref(),
         req.cors.as_ref(),
+        req.rate_limit.as_ref(),
     )
 }
 
@@ -114,6 +168,7 @@ pub(in crate::domain::services) fn validate_route_update_request(
         &req.match_rules,
         req.plugins.as_ref(),
         req.cors.as_ref(),
+        req.rate_limit.as_ref(),
     )
 }
 
@@ -122,10 +177,15 @@ fn validate_route_content(
     match_rules: &MatchRules,
     plugins: Option<&PluginsConfig>,
     cors: Option<&CorsConfig>,
+    rate_limit: Option<&RateLimitConfig>,
 ) -> Result<MatchRules, DomainError> {
     validate_tags(tags)?;
+    if let Some(rate_limit) = rate_limit {
+        validate_rate_limit_values(rate_limit)?;
+    }
     validate_match_fields(match_rules)?;
     validate_plugin_refs(plugins)?;
+    validate_plugin_ids(None, plugins)?;
     validate_json_text(None, None, cors, plugins)?;
     if let Some(cors) = cors {
         crate::domain::cors::validate_cors_config(cors)?;
@@ -184,6 +244,88 @@ pub(in crate::domain::services) fn validate_tags(tags: &[String]) -> Result<(), 
     }
     for (i, tag) in tags.iter().enumerate() {
         validate_stored_text(&format!("tags[{i}]"), tag, MAX_TAG_BYTES)?;
+        if tag.is_empty()
+            || !tag
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+        {
+            return Err(DomainError::validation(format!(
+                "tags[{i}] must match ^[a-z0-9_-]+$"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A rate limit that can admit a request: `rate`, `capacity` and `cost` are
+/// at least 1, and `cost` fits the bucket. Zero would admit everything
+/// (`cost`) or nothing with a fixed retry hint (`rate`, `capacity`).
+fn validate_rate_limit_values(rate_limit: &RateLimitConfig) -> Result<(), DomainError> {
+    if rate_limit.sustained.rate == 0 {
+        return Err(DomainError::validation(
+            "rate_limit.sustained.rate must be at least 1",
+        ));
+    }
+    if rate_limit.burst.as_ref().is_some_and(|b| b.capacity == 0) {
+        return Err(DomainError::validation(
+            "rate_limit.burst.capacity must be at least 1",
+        ));
+    }
+    if rate_limit.cost == 0 {
+        return Err(DomainError::validation(
+            "rate_limit.cost must be at least 1",
+        ));
+    }
+    // A request costing more than a full bucket is never admitted. A sliding
+    // window ignores `burst`.
+    let (capacity, field) = match (rate_limit.algorithm, &rate_limit.burst) {
+        (RateLimitAlgorithm::TokenBucket, Some(burst)) => (burst.capacity, "burst.capacity"),
+        _ => (rate_limit.sustained.rate, "sustained.rate"),
+    };
+    if rate_limit.cost > capacity {
+        return Err(DomainError::validation(format!(
+            "rate_limit.cost ({}) must not exceed rate_limit.{field} ({capacity})",
+            rate_limit.cost
+        )));
+    }
+    Ok(())
+}
+
+/// A circuit breaker that can open and close again (`inst-cfg-5`): with a
+/// zero threshold or timeout it would never let a request through or never
+/// recover. The upper bounds keep a typo (milliseconds as seconds) from
+/// failing an upstream fast for months, an enforced one for every
+/// descendant; `timeout_seconds` is capped at a day, as the proxy timeout.
+/// Checked whether or not it is `enabled`, so enabling it later cannot store
+/// a broken config.
+fn validate_circuit_breaker_values(cb: &CircuitBreakerConfig) -> Result<(), DomainError> {
+    for (field, value, max) in [
+        (
+            "failure_threshold",
+            cb.failure_threshold,
+            u64::from(CircuitBreakerConfig::MAX_FAILURE_THRESHOLD),
+        ),
+        (
+            "timeout_seconds",
+            cb.timeout_seconds,
+            crate::config::MAX_PROXY_TIMEOUT_SECS,
+        ),
+        (
+            "success_threshold",
+            cb.success_threshold,
+            u64::from(CircuitBreakerConfig::MAX_SUCCESS_THRESHOLD),
+        ),
+    ] {
+        if value == 0 {
+            return Err(DomainError::validation(format!(
+                "circuit_breaker.{field} must be at least 1"
+            )));
+        }
+        if u64::from(value) > max {
+            return Err(DomainError::validation(format!(
+                "circuit_breaker.{field} must be at most {max}"
+            )));
+        }
     }
     Ok(())
 }
@@ -195,6 +337,15 @@ pub(in crate::domain::services) fn validate_match_fields(
 ) -> Result<(), DomainError> {
     if let Some(http) = &rules.http {
         validate_stored_text("match.http.path", &http.path, MAX_PATH_BYTES)?;
+        if http.methods.is_empty() {
+            return Err(DomainError::validation(
+                "match.http.methods must list at least one method",
+            ));
+        }
+        // A prefix that is not absolute (empty included), or one the proxy
+        // would reject in a request path (stray `%`, `;`, encoded
+        // dot-segment, non-UTF-8 escape), could never match.
+        crate::domain::proxy_path::validate_route_prefix(&http.path)?;
         if http.query_allowlist.len() > MAX_QUERY_PARAMS {
             return Err(DomainError::validation(format!(
                 "match.http.query_allowlist allows at most {MAX_QUERY_PARAMS} parameters, got {}",
@@ -217,7 +368,8 @@ pub(in crate::domain::services) fn validate_match_fields(
 }
 
 /// Bound the upstream's protocol and auth plugin type, which are stored in
-/// `varchar` columns that `PostgreSQL` rejects NUL in.
+/// `varchar` columns that `PostgreSQL` rejects NUL in. Which plugin
+/// `auth.type` names is [`validate_plugin_ids`]'s concern.
 pub(in crate::domain::services) fn validate_upstream_refs(
     protocol: &str,
     auth: Option<&AuthConfig>,
@@ -229,8 +381,96 @@ pub(in crate::domain::services) fn validate_upstream_refs(
     Ok(())
 }
 
+/// Refuse plaintext endpoints unless the gear allows them (HTTPS-only
+/// constraint). Writes and the proxy both call it, so a violation reads the
+/// same wherever it is caught.
+pub(crate) fn forbid_http_endpoints(
+    endpoints: &[Endpoint],
+    allow_http: bool,
+    instance: &str,
+) -> Result<(), DomainError> {
+    if !allow_http && endpoints.iter().any(|ep| ep.scheme == Scheme::Http) {
+        return Err(DomainError::Validation {
+            field: "server.endpoints.scheme",
+            reason: oagw_sdk::field::HTTP_UPSTREAM_FORBIDDEN,
+            detail: "upstream endpoint uses HTTP; only HTTPS endpoints are permitted".to_owned(),
+            instance: instance.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The plugins an upstream or route names must be implemented, and of the
+/// kind their place takes: an auth plugin in `auth.type`, guards and
+/// transforms in `plugins.items`. Catalog-only, custom and unknown ids are
+/// `NOT_IMPLEMENTED`; a plugin of the wrong kind is a `VALIDATION` error.
+pub(in crate::domain::services) fn validate_plugin_ids(
+    auth: Option<&AuthConfig>,
+    plugins: Option<&PluginsConfig>,
+) -> Result<(), DomainError> {
+    if let Some(auth) = auth {
+        // A guard or transform here is the wrong kind, not a missing
+        // plugin: reported like an auth plugin in `plugins.items`.
+        if auth.plugin_type.starts_with(GUARD_PLUGIN_SCHEMA)
+            || auth.plugin_type.starts_with(TRANSFORM_PLUGIN_SCHEMA)
+        {
+            return Err(DomainError::validation_for(
+                "auth.type",
+                oagw_sdk::field::VALIDATION,
+                format!(
+                    "auth.type: '{}' is not an auth plugin; bind it in plugins.items",
+                    auth.plugin_type
+                ),
+            ));
+        }
+        if !IMPLEMENTED_AUTH_PLUGIN_IDS.contains(&auth.plugin_type.as_str()) {
+            return Err(not_implemented(
+                "auth.type",
+                format!(
+                    "auth plugin '{}' is not implemented; use one of {IMPLEMENTED_AUTH_PLUGIN_IDS:?}",
+                    auth.plugin_type
+                ),
+            ));
+        }
+    }
+    for (i, item) in plugins.iter().flat_map(|p| &p.items).enumerate() {
+        let plugin_ref = item.plugin_ref.as_str();
+        if plugin_ref.starts_with(AUTH_PLUGIN_SCHEMA) {
+            return Err(DomainError::validation_for(
+                "plugins.items.plugin_ref",
+                oagw_sdk::field::VALIDATION,
+                format!(
+                    "plugins.items[{i}]: '{plugin_ref}' is an auth plugin; set it in auth.type"
+                ),
+            ));
+        }
+        if !IMPLEMENTED_GUARD_PLUGIN_IDS.contains(&plugin_ref)
+            && !IMPLEMENTED_TRANSFORM_PLUGIN_IDS.contains(&plugin_ref)
+        {
+            return Err(not_implemented(
+                "plugins.items.plugin_ref",
+                format!(
+                    "plugins.items[{i}]: plugin '{plugin_ref}' is not implemented; use one of {:?}",
+                    [
+                        IMPLEMENTED_GUARD_PLUGIN_IDS,
+                        IMPLEMENTED_TRANSFORM_PLUGIN_IDS
+                    ]
+                    .concat()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A 400 for configuration OAGW does not implement.
+fn not_implemented(field: &'static str, detail: String) -> DomainError {
+    DomainError::validation_for(field, oagw_sdk::field::NOT_IMPLEMENTED, detail)
+}
+
 /// At most [`MAX_PLUGINS`] plugin bindings, with references bounded like
-/// [`validate_upstream_refs`].
+/// [`validate_upstream_refs`]. Which plugins they name is
+/// [`validate_plugin_ids`]'s concern.
 pub(in crate::domain::services) fn validate_plugin_refs(
     plugins: Option<&PluginsConfig>,
 ) -> Result<(), DomainError> {
@@ -337,15 +577,10 @@ pub(in crate::domain::services) fn validate_endpoints(
         ));
     }
 
-    // IPv6 endpoints are not yet supported — reject early with a clear message.
-    // SSRF protections for IPv6 (link-local, ULA, IPv4-mapped, etc.) are in
-    // place (`ssrf.rs`), but the proxy and endpoint infrastructure has not been
-    // tested with IPv6 upstream addresses yet.
     for (i, ep) in endpoints.iter().enumerate() {
-        if ep.normalized_host().parse::<std::net::Ipv6Addr>().is_ok() {
+        if ep.port == 0 {
             return Err(DomainError::validation(format!(
-                "endpoint[{i}] uses IPv6 address '{}'; IPv6 endpoints are not yet supported",
-                ep.host
+                "endpoint[{i}] port must be between 1 and 65535"
             )));
         }
     }
@@ -385,6 +620,23 @@ pub(in crate::domain::services) fn validate_endpoints(
         }
     }
 
+    Ok(())
+}
+
+/// Refuse IPv6 address endpoints: the proxy has not been tested with IPv6
+/// upstreams yet. Runs after the SSRF check, so an address in a denied range
+/// is refused with its SSRF reason.
+pub(in crate::domain::services) fn forbid_ipv6_endpoints(
+    endpoints: &[Endpoint],
+) -> Result<(), DomainError> {
+    for (i, ep) in endpoints.iter().enumerate() {
+        if ep.normalized_host().parse::<std::net::Ipv6Addr>().is_ok() {
+            return Err(DomainError::validation(format!(
+                "endpoint[{i}] uses IPv6 address '{}'; IPv6 endpoints are not yet supported",
+                ep.host
+            )));
+        }
+    }
     Ok(())
 }
 

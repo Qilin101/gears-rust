@@ -63,8 +63,8 @@ the implementation substrate.
 
 **Why now, before there is a consumer.** Nothing in the repository uses SQL/PGQ today; a
 repo-wide search for `GRAPH_TABLE` / `pgq` / property-graph vocabulary returns only
-considered-and-rejected mentions of graph *databases*
-([authorization/DESIGN.md:156](../../authorization/DESIGN.md#L156),
+mentions of graph *databases* as a vendor policy storage option or a design alternative
+([authorization plugin roles](../../authorization/DESIGN.md#plugin-roles),
 `gears/chat-engine/docs/ADR/0001-message-tree-structure.md:27`). But there is one tracked,
 first-class requirement: IRM's `cpt-cf-infrastructure-resource-manager-fr-graph-query`
 (`p2`, Planned —
@@ -248,6 +248,10 @@ resolvable scope dimension:
 | `resource_group_membership` | [resource_group_membership.rs:10](../../../../gears/system/resource-group/resource-group/src/infra/storage/entity/resource_group_membership.rs#L10) | `no_tenant, no_resource, no_owner, no_type` |
 | `gts_type_allowed_parent` | `.../entity/gts_type_allowed_parent.rs` | `no_tenant, no_resource, no_owner, no_type` |
 | `gts_type_allowed_membership` | `.../entity/gts_type_allowed_membership.rs` | `no_tenant, no_resource, no_owner, no_type` |
+
+> **Historical inventory.** The [Types Registry migration](https://github.com/constructorfabric/gears-rust/pull/5939)
+> dropped both `gts_type_allowed_*` tables. The `gts_type` dictionary still
+> uses the same scope flags and stores `id`, `schema_id` and `created_at`.
 
 This is deliberate and correct for those tables — a closure row references *two* tenants, so
 there is no single row-owning tenant to filter on. But it means that used as a graph element

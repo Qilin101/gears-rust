@@ -18,13 +18,14 @@ use tokio_util::sync::CancellationToken;
 use toolkit_security::AccessScope;
 
 use crate::models::{
-    ComponentReadiness, DeleteOutcome, DeleteRequest, Direction, EdgeKey, EdgeRef, EdgeView,
-    EmbeddingSpaceId, EngineCapabilities, GraphRevision, GtsTypeId, HopBudget, IngestOutcome,
-    IngestRequest, ItemError, LabelAssignment, LabelFilter, LabelId, LabelRecord, LabelSpec,
-    NodeCount, NodeId, NodeKey, NodeRow, NodeView, Page, ProjectionRequest, ReadSnapshot,
-    RegisteredType, RemainingBudget, RevisionOutcome, SearchRequest, SearchResponse,
-    SourceNamespaceOwner, StoreCapabilities, Subject, TenantId, TopologyPage, TopologyRequest,
-    TruncationReason, TypeIdSet, TypeQuery, TypeRecord, TypeRegistration, TypeRegistrationOptions,
+    ComponentReadiness, DeleteOutcome, DeleteRequest, DeletionGeneration, Direction, EdgeKey,
+    EdgeRef, EdgeView, EmbeddingSpaceId, EngineCapabilities, GraphRevision, GtsTypeId, HopBudget,
+    IngestOutcome, IngestRequest, ItemError, LabelAssignment, LabelFilter, LabelId, LabelRecord,
+    LabelSpec, NodeCount, NodeId, NodeKey, NodeRow, NodeView, Page, ProjectionRequest,
+    PurgeOptions, PurgeOutcome, ReadSnapshot, RegisteredType, RemainingBudget, RevisionOutcome,
+    SearchRequest, SearchResponse, SourceNamespaceOwner, StoreCapabilities, Subject, TenantId,
+    TenantOffboarding, TopologyPage, TopologyRequest, TruncationReason, TypeIdSet, TypeQuery,
+    TypeRecord, TypeRegistration, TypeRegistrationOptions,
 };
 
 /// Per-call context. The compiled scope is mandatory, not optional:
@@ -115,9 +116,42 @@ pub enum GraphStoreError {
     Deadline,
     #[error("cancelled")]
     Cancelled,
+    /// The tenant is being offboarded: nothing may be written for it any
+    /// more. Never retry.
+    #[error("tenant {tenant} is fenced for offboarding")]
+    TenantFenced { tenant: TenantId },
     /// Unexpected failure; details stay in access-controlled logs.
     #[error("internal store error: {0}")]
     Internal(String),
+}
+
+impl GraphStoreError {
+    /// A stable name for the kind of failure, with none of its detail: what
+    /// may be recorded where the detail may not, such as the offboarding
+    /// record a caller reads.
+    #[must_use]
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::ScopeUnservable { .. } => "scope_unservable",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Validation { .. } => "validation",
+            Self::Conflict { .. } => "conflict",
+            Self::Serialization => "serialization",
+            Self::StaleGeneration { .. } => "stale_generation",
+            Self::IdempotencyMismatch => "idempotency_mismatch",
+            Self::IdempotencyExpired => "idempotency_expired",
+            Self::NotFound => "not_found",
+            Self::LimitExceeded { .. } => "limit_exceeded",
+            Self::SourceNamespaceForbidden { .. } => "source_namespace_forbidden",
+            Self::InvalidQuery { .. } => "invalid_query",
+            Self::Corrupt { .. } => "corrupt",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::TenantFenced { .. } => "tenant_fenced",
+            Self::Internal(_) => "internal",
+        }
+    }
 }
 
 /// The store plugin contract (`cpt-cf-graph-storage-contract-graph-store-plugin`).
@@ -232,12 +266,71 @@ pub trait GraphStoreV1: Send + Sync + 'static {
         req: IngestRequest,
         embedding: EmbeddingPlan,
     ) -> Result<IngestOutcome, GraphStoreError>;
+    /// The payloads of the live edges named, keyed by edge key; an edge the
+    /// scope does not admit, or that is not stored, is absent from the map.
+    ///
+    /// Provided as one edge read per key, so a store that predates it keeps
+    /// working; the built-in store reads them in one statement per thousand.
+    async fn edge_payloads(
+        &self,
+        ctx: &StoreCtx<'_>,
+        keys: &[EdgeKey],
+    ) -> Result<std::collections::BTreeMap<EdgeKey, serde_json::Value>, GraphStoreError> {
+        let mut found = std::collections::BTreeMap::new();
+        for key in keys {
+            match self.get_edge(ctx, key).await {
+                Ok(view) => {
+                    found.insert(
+                        key.clone(),
+                        view.payload.unwrap_or_else(|| serde_json::json!({})),
+                    );
+                }
+                Err(GraphStoreError::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(found)
+    }
+
+    /// One page of the live edges incident to the live node `query.node_key`,
+    /// in edge-id order after `query.after`, both endpoints visible under the
+    /// scope. `NotFound` when the node is not visible.
+    ///
+    /// Provided as unsupported, so a store that predates it keeps compiling.
+    async fn list_node_edges(
+        &self,
+        ctx: &StoreCtx<'_>,
+        query: &NodeEdgesQuery,
+    ) -> Result<NodeEdgesPage, GraphStoreError> {
+        let _ = (ctx, query);
+        Err(GraphStoreError::Unsupported {
+            what: "edge listing",
+        })
+    }
+
     /// Tombstone a node with its incident edges, or a single edge.
     async fn soft_delete(
         &self,
         ctx: &StoreCtx<'_>,
         req: DeleteRequest,
     ) -> Result<DeleteOutcome, GraphStoreError>;
+
+    /// Remove a node -- live or tombstoned -- and every edge incident to it,
+    /// in one transaction, so its key is free again (gears-rust #5194). A
+    /// key with no stored node is no change, not an error; a live node under
+    /// `options.only_tombstoned` is a `Conflict`.
+    ///
+    /// Provided as unsupported, so a store that predates purge keeps
+    /// compiling and says so rather than tombstoning instead.
+    async fn purge_node(
+        &self,
+        ctx: &StoreCtx<'_>,
+        key: NodeKey,
+        options: PurgeOptions,
+    ) -> Result<PurgeOutcome, GraphStoreError> {
+        let _ = (ctx, key, options);
+        Err(GraphStoreError::Unsupported { what: "purge" })
+    }
 
     // --- labels -----------------------------------------------------------
     // Labels are deferred: no store in this release provides them and the
@@ -377,6 +470,102 @@ pub trait GraphStoreV1: Send + Sync + 'static {
         ctx: &StoreCtx<'_>,
         keys: &[NodeKey],
     ) -> Result<Vec<Option<EmbeddingState>>, GraphStoreError>;
+
+    // --- tenant offboarding -----------------------------------------------
+    // A store that declares `capabilities().offboarding` implements all of
+    // these, and the gear calls none of them on a store that does not. The
+    // provided defaults refuse with `Unsupported`: a store that declares the
+    // capability and misses one fails loudly rather than answer "nobody is
+    // fenced" and serve a tenant under deletion.
+
+    /// Fence `ctx.tenant`, once: from this call on, every write for it fails
+    /// with `TenantFenced`, including one already in flight that has not
+    /// committed. Idempotent: a tenant already fenced answers its record
+    /// unchanged, and the first `deletion_generation` stands. Every statement
+    /// runs under `ctx.scope`, the scope the policy granted for the call.
+    async fn fence_tenant(
+        &self,
+        ctx: &StoreCtx<'_>,
+        deletion_generation: Option<DeletionGeneration>,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        let _ = (ctx, deletion_generation);
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    /// `ctx.tenant`'s offboarding record, if it was ever fenced, read under
+    /// `ctx.scope`.
+    async fn tenant_offboarding(
+        &self,
+        ctx: &StoreCtx<'_>,
+    ) -> Result<Option<TenantOffboarding>, GraphStoreError> {
+        let _ = ctx;
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    /// The tenants under `ctx.scope` whose deletion is running: their ids
+    /// only, for a read whose scope the gear cannot narrow in memory.
+    async fn fenced_tenants(&self, ctx: &StoreCtx<'_>) -> Result<Vec<TenantId>, GraphStoreError> {
+        let _ = ctx;
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    /// Every tenant ever fenced, finished or not: their ids only, for the
+    /// gear's in-memory set, which the request path checks instead of the
+    /// store. Acts for no caller, as the worker's methods below.
+    async fn all_fenced_tenant_ids(&self) -> Result<Vec<TenantId>, GraphStoreError> {
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    // The ones below serve the gear's worker, which acts for no caller:
+    // they take the tenant rather than a `StoreCtx`.
+
+    /// Remove up to `batch` more of a fenced tenant's rows, in an order the
+    /// foreign keys admit, and answer the record with the counts so far. A
+    /// step that runs clears the failure count. When nothing is left it
+    /// stamps `completed_at`. Safe to run again, and from two places at once:
+    /// the steps take turns on the record. A tenant that was never fenced is
+    /// `NotFound`.
+    async fn offboard_step(
+        &self,
+        tenant: TenantId,
+        batch: std::num::NonZeroU64,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        let _ = (tenant, batch);
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    /// Note on the record that a step for `tenant` failed with `error`, and
+    /// answer the record as it now stands, so a caller reading it can tell a
+    /// stuck deletion from a running one and the worker can back off.
+    async fn record_offboarding_failure(
+        &self,
+        tenant: TenantId,
+        error: &GraphStoreError,
+    ) -> Result<TenantOffboarding, GraphStoreError> {
+        let _ = (tenant, error);
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
+
+    /// The records of fenced tenants whose deletion has not finished, oldest
+    /// fence first. A record the store cannot read is left out (and the
+    /// store says so), rather than failing the list for every tenant.
+    async fn pending_offboardings(&self) -> Result<Vec<TenantOffboarding>, GraphStoreError> {
+        Err(GraphStoreError::Unsupported {
+            what: "tenant offboarding",
+        })
+    }
 }
 
 /// What a store holds of one node's vector, for the coordinator's skip
@@ -584,6 +773,31 @@ pub struct VectorArm {
     /// and vectors whose input has since changed, are not comparable with the
     /// query and must not appear.
     pub epoch: i64,
+}
+
+/// What a store lists for one page of a node's edges (`list_node_edges`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeEdgesQuery {
+    pub node_key: NodeKey,
+    pub direction: Direction,
+    /// Registered edge types to keep; `None` keeps every type.
+    pub edge_types: Option<TypeIdSet>,
+    pub discriminators: Vec<String>,
+    /// List edges whose storage id is greater than this one.
+    pub after: Option<i64>,
+    pub limit: u32,
+}
+
+/// One page of a node's edges, and the storage id the next page starts after
+/// when there may be more. The page can hold fewer than `limit` edges while
+/// more exist: an edge whose other endpoint is hidden is skipped, and the
+/// position moves past it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeEdgesPage {
+    pub items: Vec<EdgeView>,
+    pub next_after: Option<i64>,
+    /// The revision the page observed.
+    pub revision: GraphRevision,
 }
 
 /// The embedding decisions of one ingest batch.

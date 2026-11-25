@@ -1,9 +1,10 @@
 //! OpenTelemetry-backed implementation of [`OagwMetricsPort`].
 //!
 //! Holds the active P0 instruments listed on the domain port. Deferred
-//! instruments from feature 0008 (circuit breaker, multi-endpoint routing,
-//! upstream availability) are NOT declared here yet — they are introduced
-//! when their owning feature lands. The proxy configuration cache's
+//! instruments from feature 0008 (multi-endpoint routing, upstream
+//! availability) are NOT declared here yet — they are introduced when their
+//! owning feature lands. Circuit breakers report through `toolkit-resilience`'s
+//! own observer (`resilience.circuit_breaker.*`, wired in `gear.rs`). The proxy configuration cache's
 //! `oagw_proxy_cache_*` instruments follow ADR-0020 (feature 0008, *Proxy
 //! Configuration Cache*).
 use opentelemetry::KeyValue;
@@ -11,7 +12,8 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, UpDownCounter};
 
 use crate::domain::ports::OagwMetricsPort;
 use crate::domain::ports::metric_labels::{
-    CacheEviction, CacheLookup, CacheMap, CacheStale, METHOD_OTHER, key,
+    CacheEviction, CacheLookup, CacheMap, CacheStale, METHOD_OTHER, RateLimitBucket, StreamOutcome,
+    key,
 };
 
 /// Map an HTTP method to a low-cardinality `http.request.method` label value.
@@ -46,6 +48,12 @@ const DURATION_BUCKETS_SECONDS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+/// Histogram bucket boundaries (seconds) for `oagw_stream_duration_seconds`:
+/// short JSON bodies and SSE streams that run for hours alike.
+const STREAM_BUCKETS_SECONDS: [f64; 14] = [
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 1_800.0, 3_600.0,
+];
+
 /// Histogram bucket boundaries (seconds) for
 /// `oagw_websocket_session_duration_seconds`. Sessions live on a different
 /// scale than per-request latency — typical sessions span seconds to hours.
@@ -57,6 +65,7 @@ pub struct OagwMetricsMeter {
     requests: Counter<u64>,
     errors: Counter<u64>,
     request_duration_seconds: Histogram<f64>,
+    stream_duration_seconds: Histogram<f64>,
     requests_in_flight: UpDownCounter<i64>,
     rate_limit_exceeded: Counter<u64>,
     rate_limit_usage_ratio: Gauge<f64>,
@@ -104,13 +113,21 @@ impl OagwMetricsMeter {
                 .build(),
             request_duration_seconds: meter
                 .f64_histogram(format!("{prefix}_request_duration_seconds"))
-                .with_description("End-to-end proxy request latency (seconds)")
+                .with_description("Proxy request latency to the response head (seconds)")
                 .with_unit("s")
                 .with_boundaries(DURATION_BUCKETS_SECONDS.to_vec())
                 .build(),
+            stream_duration_seconds: meter
+                .f64_histogram(format!("{prefix}_stream_duration_seconds"))
+                .with_description(
+                    "Proxy request latency to the end of the response body (seconds), by outcome",
+                )
+                .with_unit("s")
+                .with_boundaries(STREAM_BUCKETS_SECONDS.to_vec())
+                .build(),
             requests_in_flight: meter
                 .i64_up_down_counter(format!("{prefix}_requests_in_flight"))
-                .with_description("Currently in-flight proxy requests")
+                .with_description("Proxy requests started whose response body has not ended")
                 .build(),
             rate_limit_exceeded: meter
                 .u64_counter(format!("{prefix}_rate_limit_exceeded"))
@@ -194,8 +211,23 @@ impl OagwMetricsMeter {
     }
 }
 
+/// The `credential_mode` label value: the mode's stored name, or `unknown`
+/// before the upstream resolves.
+fn credential_mode_label(
+    mode: Option<crate::domain::plugin::credentials::CredentialMode>,
+) -> &'static str {
+    mode.map_or(crate::domain::ports::metric_labels::UNKNOWN, |m| m.as_str())
+}
+
 impl OagwMetricsPort for OagwMetricsMeter {
-    fn record_request(&self, host: &str, path: &str, method: &str, status_code: u16) {
+    fn record_request(
+        &self,
+        host: &str,
+        path: &str,
+        method: &str,
+        status_code: u16,
+        credential_mode: Option<crate::domain::plugin::credentials::CredentialMode>,
+    ) {
         self.requests.add(
             1,
             &[
@@ -203,17 +235,25 @@ impl OagwMetricsPort for OagwMetricsMeter {
                 KeyValue::new(key::PATH, path.to_owned()),
                 KeyValue::new(key::METHOD, method.to_owned()),
                 KeyValue::new(key::STATUS_CODE, i64::from(status_code)),
+                KeyValue::new(key::CREDENTIAL_MODE, credential_mode_label(credential_mode)),
             ],
         );
     }
 
-    fn record_error(&self, host: &str, path: &str, error_type: &str) {
+    fn record_error(
+        &self,
+        host: &str,
+        path: &str,
+        error_type: &str,
+        credential_mode: Option<crate::domain::plugin::credentials::CredentialMode>,
+    ) {
         self.errors.add(
             1,
             &[
                 KeyValue::new(key::HOST, host.to_owned()),
                 KeyValue::new(key::PATH, path.to_owned()),
                 KeyValue::new(key::ERROR_TYPE, error_type.to_owned()),
+                KeyValue::new(key::CREDENTIAL_MODE, credential_mode_label(credential_mode)),
             ],
         );
     }
@@ -229,6 +269,23 @@ impl OagwMetricsPort for OagwMetricsMeter {
         );
     }
 
+    fn record_stream_duration_seconds(
+        &self,
+        host: &str,
+        path: &str,
+        outcome: StreamOutcome,
+        seconds: f64,
+    ) {
+        self.stream_duration_seconds.record(
+            seconds,
+            &[
+                KeyValue::new(key::HOST, host.to_owned()),
+                KeyValue::new(key::PATH, path.to_owned()),
+                KeyValue::new(key::OUTCOME, outcome.as_str()),
+            ],
+        );
+    }
+
     fn increment_in_flight(&self, host: &str) {
         self.requests_in_flight
             .add(1, &[KeyValue::new(key::HOST, host.to_owned())]);
@@ -239,23 +296,31 @@ impl OagwMetricsPort for OagwMetricsMeter {
             .add(-1, &[KeyValue::new(key::HOST, host.to_owned())]);
     }
 
-    fn record_rate_limit_exceeded(&self, host: &str, path: &str) {
+    fn record_rate_limit_exceeded(&self, host: &str, path: &str, bucket: RateLimitBucket) {
         self.rate_limit_exceeded.add(
             1,
             &[
                 KeyValue::new(key::HOST, host.to_owned()),
                 KeyValue::new(key::PATH, path.to_owned()),
+                KeyValue::new(key::BUCKET, bucket.as_str()),
             ],
         );
     }
 
-    fn record_rate_limit_usage_ratio(&self, host: &str, path: &str, ratio: f64) {
+    fn record_rate_limit_usage_ratio(
+        &self,
+        host: &str,
+        path: &str,
+        bucket: RateLimitBucket,
+        ratio: f64,
+    ) {
         let clamped = ratio.clamp(0.0, 1.0);
         self.rate_limit_usage_ratio.record(
             clamped,
             &[
                 KeyValue::new(key::HOST, host.to_owned()),
                 KeyValue::new(key::PATH, path.to_owned()),
+                KeyValue::new(key::BUCKET, bucket.as_str()),
             ],
         );
     }
@@ -270,9 +335,19 @@ impl OagwMetricsPort for OagwMetricsMeter {
             .add(-1, &[KeyValue::new(key::HOST, host.to_owned())]);
     }
 
-    fn record_websocket_session_duration_seconds(&self, host: &str, seconds: f64) {
-        self.websocket_session_duration_seconds
-            .record(seconds, &[KeyValue::new(key::HOST, host.to_owned())]);
+    fn record_websocket_session_duration_seconds(
+        &self,
+        host: &str,
+        outcome: StreamOutcome,
+        seconds: f64,
+    ) {
+        self.websocket_session_duration_seconds.record(
+            seconds,
+            &[
+                KeyValue::new(key::HOST, host.to_owned()),
+                KeyValue::new(key::OUTCOME, outcome.as_str()),
+            ],
+        );
     }
 
     fn record_rate_limit_sweep(&self, evicted: u64, live: u64) {

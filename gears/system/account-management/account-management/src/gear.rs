@@ -5,7 +5,7 @@
 //! - publication (`gts_publication(...)`, run by the runtime before any application `init`):
 //!   AM's and its SDK's declarations, the configured root type and the optional
 //!   TR-plugin instance, admitted with the rest of the process's manifests.
-//! - `init`: validates config and the local root binding, registers AM's RG types,
+//! - `init`: validates config and the local root binding,
 //!   constructs every service over both registry APIs (wired before the
 //!   application group, local or remote) and binds the enabled TR plugin to its
 //!   admitted instance; idempotent.
@@ -50,6 +50,7 @@ use crate::domain::metadata::registry::MetadataSchemaRegistry;
 use crate::domain::metadata::repo::MetadataRepo;
 use crate::domain::metadata::service::MetadataService;
 use crate::domain::metrics::install_facade_bridge;
+use crate::domain::principal_lifecycle::PrincipalLifecycleNotifier;
 use crate::domain::root_type::validate_root_binding;
 use crate::domain::service_account::service::ServiceAccountService;
 use crate::domain::tenant::TenantRepo;
@@ -640,8 +641,9 @@ impl Gear for AccountManagementGear {
         // clients otherwise (`gts_publication(...)` and `#[toolkit::consumes]` wire both
         // with the infrastructure). Request reads use `request_registry` with
         // each caller's context (types-registry SPEC §8.4). Bootstrap, retention and the reaper use
-        // `platform_registry`. Process-wide IdP selection and TR hierarchy reads
-        // are named platform exceptions; see `tr_plugin::plugin_impl`.
+        // `platform_registry`. Process-wide IdP selection, principal-lifecycle
+        // hook discovery and TR hierarchy reads are named platform exceptions;
+        // see `tr_plugin::plugin_impl` and `infra::principal_lifecycle`.
         let request_registry = ctx
             .client_hub()
             .get::<dyn types_registry_sdk::TypesRegistryApi>()
@@ -802,57 +804,8 @@ impl Gear for AccountManagementGear {
             PolicyEnforcer::new(authz).with_capabilities(vec![Capability::TenantHierarchy]);
         info!("authz-resolver client resolved from client hub; PolicyEnforcer wired");
 
-        // FEATURE 2.6 — idempotent user-group RG type registration.
-        // Must complete before the gear signals ready so the type
-        // is guaranteed to exist for any consumer that resolves AM's
-        // `Running` state. Failure aborts init.
-        // @cpt-begin:cpt-cf-account-management-flow-user-groups-rg-type-registration:p1:inst-flow-rgreg-invoke-algo
-        {
-            use crate::domain::user_groups::registration::RegistrationError;
-            // Resolve the narrow, un-gated bootstrap client instead of the
-            // full `ResourceGroupClient`: at this point in `init` the
-            // platform's `AuthZ` machinery is structurally unreachable (see
-            // `resource_group_sdk::ResourceGroupTypeBootstrap`'s doc
-            // comment for the full rationale). TEMPORARY: this bootstrap
-            // split only exists because the GTS type registry lives inside
-            // the resource-group gear — revisit when it becomes its own
-            // gear (see that trait's "Temporary" doc section).
-            let rg_type_bootstrap: Arc<
-                dyn resource_group_sdk::ResourceGroupTypeBootstrap + Send + Sync,
-            > = ctx
-                .client_hub()
-                .get::<dyn resource_group_sdk::ResourceGroupTypeBootstrap>()
-                .map_err(|e| anyhow::anyhow!("failed to get ResourceGroupTypeBootstrap: {e}"))?;
-            // System-actor context: stable subject UUID across processes
-            // so a future RG-side authz tightening that rejects anonymous
-            // does not regress gear init into permanent fail-closed.
-            let sys_ctx = crate::domain::system_actor::for_gear_init();
-            match crate::domain::user_groups::register_user_group_types(
-                &rg_type_bootstrap,
-                &sys_ctx,
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    info!(
-                        target: "am.user_groups",
-                        ?outcome,
-                        "user-groups RG type registrations completed (member handle + container)"
-                    );
-                }
-                Err(RegistrationError::ServiceUnavailable(detail)) => {
-                    return Err(anyhow::anyhow!(
-                        "user-groups RG type registration failed (service_unavailable): {detail}"
-                    ));
-                }
-                Err(RegistrationError::DivergentSchema(detail)) => {
-                    return Err(anyhow::anyhow!(
-                        "user-groups RG type registration failed (divergent_schema): {detail}"
-                    ));
-                }
-            }
-        }
-        // @cpt-end:cpt-cf-account-management-flow-user-groups-rg-type-registration:p1:inst-flow-rgreg-invoke-algo
+        // FEATURE 2.6 — AM publishes its group and membership schemas
+        // (`crate::gts::rg_types`) before init. RG reads them from Types Registry.
 
         // FEATURE 2.6 — register the cascade cleanup hook so
         // tenant hard-delete removes the tenant's user-group subtree
@@ -862,6 +815,24 @@ impl Gear for AccountManagementGear {
             Arc::clone(&rg_client),
         ));
         // @cpt-end:cpt-cf-account-management-flow-user-groups-cascade-cleanup-trigger:p1:inst-flow-cascade-entry
+
+        // Principal-lifecycle hooks: other gears register a hook to hear
+        // about user and tenant deletions. One dispatcher serves both the `delete_user` path
+        // (wired into `UserService` below) and the tenant hard-delete
+        // pipeline (this hook, registered after the user-groups cascade so
+        // AM's own cleanup runs first). The dispatcher resolves hooks on
+        // every delivery, so it is safe to build before the registry has
+        // committed the hooks' instances.
+        let principal_lifecycle: Arc<dyn PrincipalLifecycleNotifier> =
+            Arc::new(crate::infra::principal_lifecycle::HookDispatcher::new(
+                ctx.client_hub(),
+                Arc::clone(&platform_registry),
+            ));
+        self.register_hard_delete_hook(
+            crate::domain::principal_lifecycle::build_tenant_hard_delete_hook(Arc::clone(
+                &principal_lifecycle,
+            )),
+        );
 
         // Validate bootstrap config (fast, fail-fast) and store
         // params for `serve`. The saga itself runs there, under the
@@ -1010,8 +981,11 @@ impl Gear for AccountManagementGear {
         // `IdpPluginClient` plugin came in via `ClientHub`
         // earlier in this `init`. Per
         // `cpt-cf-account-management-constraint-no-user-storage` the
-        // service holds NO storage handles -- every read and write
-        // is a live pass-through to the IdP.
+        // service stores no user data -- every read and write of a user
+        // is a live pass-through to the IdP. Its one storage handle is
+        // the record of unfinished deletions (two ids, kept only while a
+        // deletion is in flight), an operation marker rather than user
+        // data.
         let user_service = Arc::new(
             UserService::new(
                 Arc::clone(&repo) as Arc<dyn TenantRepo>,
@@ -1023,10 +997,19 @@ impl Gear for AccountManagementGear {
             // dangling rows from RG's `resource_group_membership` table
             // referencing the deleted AM user. Without this, hard-
             // deleted users leave orphaned `(group_id,
-            // gts.cf.core.rg.type.v1~cf.core.am.user.v1~, user_uuid)`
+            // gts.cf.core.am.user.v1~, user_uuid)`
             // rows that surface in group-member listings until the
             // RG-side cleanup pipeline catches up.
             .with_rg_membership_cleanup(Arc::clone(&rg_client))
+            // Tell other gears' principal-lifecycle hooks the user is
+            // gone, so their state keyed by the user goes with it.
+            .with_principal_lifecycle(Arc::clone(&principal_lifecycle))
+            // Record each deletion before the IdP call, so a retry can
+            // finish one the IdP has already carried out and a DELETE
+            // for a user the tenant does not have stays a no-op.
+            .with_pending_deprovisions(Arc::new(
+                crate::infra::storage::repo_impl::PendingDeprovisionRepoImpl::new(Arc::clone(&db)),
+            ))
             // Plumb the per-deployment `listing.max_top` so the user
             // listing surface honors the operator knob uniformly with
             // tenant / conversion / metadata listings.

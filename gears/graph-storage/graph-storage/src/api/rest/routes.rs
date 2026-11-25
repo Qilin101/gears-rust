@@ -43,7 +43,65 @@ pub fn register_routes(
     let router = write_routes(router, openapi);
     let router = read_routes(router, openapi);
     let router = query_routes(router, openapi);
+    let router = offboarding_routes(router, openapi);
     router.layer(Extension(services))
+}
+
+/// Tenant offboarding: starting it, and asking whether it finished.
+fn offboarding_routes(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    let router = OperationBuilder::post(format!("{BASE}/tenants/{{tenant_id}}/offboarding"))
+        .operation_id("graph_storage.offboard_tenant")
+        .summary("Remove everything this gear holds for a deleted tenant")
+        .description(
+            "Accepted only for a tenant the platform has marked deleted, and only \
+             with the `offboard` permission granted for that tenant. The first \
+             call fences the tenant -- every other operation for it answers \
+             `failed_precondition` / `TENANT_FENCED` -- and the gear removes \
+             its rows in the background. Answers the record as it stands; a \
+             repeated call is safe. It cannot be undone",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param("tenant_id", "The tenant to offboard")
+        .json_request::<dto::GraphOffboardRequest>(openapi, "The deletion generation, if any")
+        .handler(handlers::offboard_tenant)
+        .json_response_with_schema::<dto::GraphTenantOffboardingDto>(
+            openapi,
+            http::StatusCode::ACCEPTED,
+            "The tenant is fenced; its deletion runs or has finished",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_404(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .error_503(openapi)
+        .register(router, openapi);
+
+    OperationBuilder::get(format!("{BASE}/tenants/{{tenant_id}}/offboarding"))
+        .operation_id("graph_storage.tenant_offboarding")
+        .summary("A tenant's offboarding: whether its deletion has finished")
+        .description(
+            "Same permission as starting it. Not found when the tenant was never \
+             offboarded, exactly as when the caller may not ask",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param("tenant_id", "The offboarded tenant")
+        .handler(handlers::tenant_offboarding)
+        .json_response_with_schema::<dto::GraphTenantOffboardingDto>(
+            openapi,
+            http::StatusCode::OK,
+            "The offboarding record",
+        )
+        .error_401(openapi)
+        .error_404(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .error_503(openapi)
+        .register(router, openapi)
 }
 
 /// Type registration and lookup.
@@ -274,6 +332,69 @@ fn write_routes(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
         .register(router, openapi)
 }
 
+/// A node's edges, a page at a time.
+fn edge_list_route(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    OperationBuilder::get(format!("{BASE}/nodes/{{node_key}}/edges"))
+        .operation_id("graph_storage.list_node_edges")
+        .summary("A node's edges, a page at a time")
+        .description(
+            "Every live edge incident to the node, with payload and audit \
+             envelope, in storage order: the full edge set of a hub whose node \
+             read stops at `node_read_max_adjacency`. An edge is listed only \
+             when both its endpoints are visible to the caller. Keep paging \
+             while `next_cursor` is non-null, even when `items` is short or \
+             empty: a skipped edge still moves the position. The cursor is \
+             bound to the node, `direction`, `edge_type_pattern` and \
+             `discriminator`, and refused under others.",
+        )
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .path_param("node_key", "Producer-supplied node key")
+        .query_param(
+            "direction",
+            false,
+            "`outgoing`, `incoming` or `either` (the default)",
+        )
+        .query_param_array(
+            "edge_type_pattern",
+            false,
+            "GTS pattern the edge type must match; repeat for several",
+            "string",
+        )
+        .query_param_array(
+            "discriminator",
+            false,
+            "Discriminator the edge must carry; repeat for several",
+            "string",
+        )
+        .query_param_typed(
+            "limit",
+            false,
+            "Page size, at most edge_list_max_page (also the default)",
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Continuation token from a previous page's `next_cursor`",
+        )
+        .query_param_typed("tenant", false, TENANT_PARAM, "string")
+        .handler(handlers::list_node_edges)
+        .json_response_with_schema::<dto::GraphEdgeListDto>(
+            openapi,
+            http::StatusCode::OK,
+            "One page of the node's edges",
+        )
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_404(openapi)
+        .error_500(openapi)
+        .error_503(openapi)
+        .register(router, openapi)
+}
+
 /// Node read, tabular projection and the revision surface.
 fn read_routes(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     let router = OperationBuilder::get(format!("{BASE}/nodes/{{node_key}}"))
@@ -317,6 +438,8 @@ fn read_routes(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
         .error_500(openapi)
         .error_503(openapi)
         .register(router, openapi);
+
+    let router = edge_list_route(router, openapi);
 
     let router = OperationBuilder::get(format!("{BASE}/nodes:count"))
         .operation_id("graph_storage.count_nodes")
@@ -396,18 +519,42 @@ fn read_routes(router: Router, openapi: &dyn OpenApiRegistry) -> Router {
 
     let router = OperationBuilder::delete(format!("{BASE}/nodes/{{node_key}}"))
         .operation_id("graph_storage.delete_node")
-        .summary("Soft-delete a node and its incident edges")
+        .summary("Soft-delete a node and its incident edges, or purge them")
+        .description(
+            "`mode=soft` (the default) tombstones the node and its incident edges. \
+             `mode=purge` removes the node, live or tombstoned, and every edge \
+             incident to it for good, freeing the key; it needs the `purge` \
+             permission and answers 204 whether or not a node was stored under \
+             the key. A retry after an unknown outcome finds whatever node holds \
+             the key by then; where keys are reused, purge with \
+             `expected_created_at` (the node's envelope `created_at`), which \
+             answers 409 for any other node under the key",
+        )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
         .path_param("node_key", "Producer-supplied node key")
         .query_param_typed("tenant", false, TENANT_PARAM, "string")
+        .query_param("mode", false, "`soft` (default) or `purge`")
+        .query_param_typed(
+            "only_tombstoned",
+            false,
+            "With `mode=purge`: purge only a node already soft-deleted; 409 for a live one",
+            "boolean",
+        )
+        .query_param(
+            "expected_created_at",
+            false,
+            "With `mode=purge`: purge only the node whose envelope `created_at` is this RFC 3339 instant; 409 for another node under the key",
+        )
         .handler(handlers::delete_node)
         .json_response_with_schema::<dto::GraphDeleteResultDto>(
             openapi,
             http::StatusCode::OK,
             "What was tombstoned",
         )
+        .no_content_response(http::StatusCode::NO_CONTENT, "Purged, or nothing to purge")
+        .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
@@ -611,5 +758,49 @@ mod tests {
         let router = write_routes(router, &registry);
         let router = read_routes(router, &registry);
         drop(query_routes(router, &registry));
+    }
+
+    /// Keeps the operations it is shown, so a test can read the spec.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<OperationSpec>>);
+
+    impl OpenApiRegistry for Recorder {
+        fn register_operation(&self, spec: &OperationSpec) {
+            self.0.lock().expect("not poisoned").push(spec.clone());
+        }
+
+        fn ensure_schema_raw(
+            &self,
+            name: &str,
+            _schemas: Vec<(
+                String,
+                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+            )>,
+        ) -> String {
+            name.to_owned()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// The edge listing's repeatable filters are declared as arrays, the
+    /// `?key=a&key=b` encoding its handler decodes; declared as plain strings,
+    /// a client generated from the spec could send only one value.
+    #[test]
+    fn the_edge_listing_declares_its_repeatable_filters_as_arrays() {
+        let recorder = Recorder::default();
+        drop(edge_list_route(Router::new(), &recorder));
+        let specs = recorder.0.lock().expect("not poisoned");
+        let spec = specs.first().expect("the route registers");
+        for name in ["edge_type_pattern", "discriminator"] {
+            let param = spec
+                .params
+                .iter()
+                .find(|param| param.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is declared"));
+            assert!(param.array, "`{name}` repeats");
+        }
     }
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, RawQuery};
 use axum::http::HeaderMap;
 use axum::{Extension, Json};
 use graph_storage_sdk::models as m;
@@ -220,6 +220,32 @@ pub async fn transfer_source_namespace(
     Ok(Json(row.into()))
 }
 
+/// The tenant is the path's, never `?tenant=`: the route is about one named
+/// tenant, and the policy is asked about that one.
+#[tracing::instrument(skip_all, fields(user.id = %ctx.subject_id(), tenant = %tenant))]
+pub async fn offboard_tenant(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(services): Extension<Arc<GraphServices>>,
+    Path(tenant): Path<uuid::Uuid>,
+    Json(request): Json<dto::GraphOffboardRequest>,
+) -> ApiResult<(http::StatusCode, Json<dto::GraphTenantOffboardingDto>)> {
+    let request = request
+        .try_into()
+        .map_err(|message: &str| crate::domain::error::DomainError::invalid(message))?;
+    let record = services.offboard_tenant(&ctx, tenant, request).await?;
+    Ok((http::StatusCode::ACCEPTED, Json(record.into())))
+}
+
+#[tracing::instrument(skip_all, fields(user.id = %ctx.subject_id(), tenant = %tenant))]
+pub async fn tenant_offboarding(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(services): Extension<Arc<GraphServices>>,
+    Path(tenant): Path<uuid::Uuid>,
+) -> ApiResult<Json<dto::GraphTenantOffboardingDto>> {
+    let record = services.tenant_offboarding(&ctx, tenant).await?;
+    Ok(Json(record.into()))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListTypesParams {
     /// `node`, `edge` or `attribute`.
@@ -359,6 +385,67 @@ pub async fn get_edge(
     Ok(Json(view.into()))
 }
 
+/// The query of `GET /nodes/{node_key}/edges`. Decoded with
+/// `serde_html_form` rather than the axum extractor, because
+/// `edge_type_pattern` and `discriminator` repeat and `serde_urlencoded`
+/// cannot collect a repeated key; unknown keys are refused rather than
+/// ignored, as on the type catalog.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListNodeEdgesParams {
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub edge_type_pattern: Vec<String>,
+    #[serde(default)]
+    pub discriminator: Vec<String>,
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+    pub tenant: Option<uuid::Uuid>,
+}
+
+/// One page of a node's edges, payloads and envelopes included: the full
+/// edge set of a hub whose node read stops at `node_read_max_adjacency`.
+#[tracing::instrument(
+    skip_all,
+    fields(user.id = %ctx.subject_id(), target_tenant = tracing::field::Empty)
+)]
+pub async fn list_node_edges(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(services): Extension<Arc<GraphServices>>,
+    Path(node_key): Path<String>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<dto::GraphEdgeListDto>> {
+    let params: ListNodeEdgesParams =
+        serde_html_form::from_str(query.as_deref().unwrap_or_default()).map_err(|error| {
+            DomainError::invalid(format!(
+                "{error}; the edge listing takes `direction`, `edge_type_pattern`, \
+                 `discriminator`, `limit`, `cursor` and `tenant`"
+            ))
+        })?;
+    tracing::Span::current().record("target_tenant", tracing::field::debug(&params.tenant));
+    let target = dto::TargetTenantParam {
+        tenant: params.tenant,
+    };
+    let page = services
+        .list_node_edges(
+            target.call(&ctx),
+            m::NodeEdgesRequest {
+                node_key,
+                direction: parse_direction(params.direction.as_deref())?,
+                edge_type_patterns: params.edge_type_pattern,
+                discriminators: params.discriminator,
+                limit: params.limit,
+                cursor: params.cursor,
+            },
+        )
+        .await?;
+    Ok(Json(dto::GraphEdgeListDto {
+        items: page.items.into_iter().map(Into::into).collect(),
+        next_cursor: page.next_cursor,
+        revision: page.revision.into(),
+    }))
+}
+
 /// Tabular projection.
 ///
 /// The `OData` extractor is the platform binding: it parses and validates the
@@ -427,10 +514,95 @@ pub async fn delete_node(
     Extension(ctx): Extension<SecurityContext>,
     Extension(services): Extension<Arc<GraphServices>>,
     Query(target): Query<dto::TargetTenantParam>,
+    Query(params): Query<DeleteNodeParams>,
     Path(node_key): Path<String>,
-) -> ApiResult<Json<dto::GraphDeleteResultDto>> {
-    let outcome = services.delete_node(target.call(&ctx), &node_key).await?;
-    Ok(Json(outcome.into()))
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    match params.mode()? {
+        DeleteMode::Soft => {
+            // A purge precondition on a soft delete would be ignored, and a
+            // caller that sent `expected_created_at` to make sure it removes
+            // one node would be told it succeeded against whichever node
+            // holds the key. Refused rather than dropped.
+            if params.only_tombstoned || params.expected_created_at.is_some() {
+                return Err(DomainError::invalid(
+                    "`only_tombstoned` and `expected_created_at` need `mode=purge`; a soft \
+                     delete takes neither",
+                )
+                .into());
+            }
+            let outcome = services.delete_node(target.call(&ctx), &node_key).await?;
+            Ok(Json(dto::GraphDeleteResultDto::from(outcome)).into_response())
+        }
+        // `204` whether or not a node was stored under the key: a purge is
+        // idempotent, so a caller retrying after an unknown outcome gets the
+        // answer it got the first time (gears-rust #5194).
+        DeleteMode::Purge => {
+            let expected_created_at = params
+                .expected_created_at
+                .as_deref()
+                .map(|text| {
+                    time::OffsetDateTime::parse(
+                        text,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .map_err(|error| {
+                        DomainError::invalid(format!(
+                            "expected_created_at `{text}` is not an RFC 3339 timestamp: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let options = graph_storage_sdk::models::PurgeOptions {
+                only_tombstoned: params.only_tombstoned,
+                expected_created_at,
+            };
+            services
+                .purge_node(target.call(&ctx), &node_key, options)
+                .await?;
+            Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+        }
+    }
+}
+
+/// What `DELETE /nodes/{node_key}` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteMode {
+    /// Tombstone the node and its incident edges (the default).
+    Soft,
+    /// Remove the node and every incident edge for good.
+    Purge,
+}
+
+impl DeleteNodeParams {
+    /// The mode named, parsed here rather than by serde so an unknown one is
+    /// refused with the problem document every other refusal of this surface
+    /// uses, not the extractor's plain-text rejection.
+    fn mode(&self) -> Result<DeleteMode, DomainError> {
+        match self.mode.as_deref() {
+            None | Some("soft") => Ok(DeleteMode::Soft),
+            Some("purge") => Ok(DeleteMode::Purge),
+            Some(other) => Err(DomainError::invalid(format!(
+                "mode `{other}`; expected soft or purge"
+            ))),
+        }
+    }
+}
+
+/// `?mode=` on `DELETE /nodes/{node_key}`: `soft` (the default) tombstones,
+/// `purge` removes for good.
+#[derive(Debug, Deserialize)]
+pub struct DeleteNodeParams {
+    pub mode: Option<String>,
+    /// With `mode=purge`: purge only a node already soft-deleted, and answer
+    /// `409` for a live one -- the retry-safe form where a key can be written
+    /// again (`PurgeOptions::only_tombstoned`).
+    #[serde(default)]
+    pub only_tombstoned: bool,
+    /// With `mode=purge`: purge only the node created at this RFC 3339
+    /// instant -- its envelope's `created_at` -- and answer `409` for any
+    /// other (`PurgeOptions::expected_created_at`).
+    pub expected_created_at: Option<String>,
 }
 
 #[tracing::instrument(skip_all, fields(user.id = %ctx.subject_id(), target_tenant = ?target.tenant))]
@@ -500,6 +672,7 @@ pub async fn traverse(
                 max_nodes: request.max_nodes,
                 direction: parse_direction(request.direction.as_deref())?,
                 edge_discriminators: request.edge_discriminators,
+                include_edge_payload: request.include_edge_payload,
             },
         )
         .await?;
@@ -522,6 +695,7 @@ pub async fn neighborhood(
                 node_budget: request.node_budget,
                 include_phantoms: request.include_phantoms,
                 direction: parse_direction(request.direction.as_deref())?,
+                include_edge_payload: request.include_edge_payload,
             },
         )
         .await?;

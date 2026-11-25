@@ -9,7 +9,9 @@
 pub mod evolution;
 pub mod ingest;
 pub mod namespaces;
+pub(crate) mod offboarding;
 pub mod projection;
+pub mod purge;
 pub mod reads;
 pub mod scope;
 pub mod search;
@@ -243,6 +245,7 @@ impl GraphStoreV1 for PgGraphStore {
             labels: false,
             chunks: false,
             topology: false,
+            offboarding: true,
         }
     }
 
@@ -380,6 +383,66 @@ impl GraphStoreV1 for PgGraphStore {
         ingest::soft_delete(self, ctx, req).await
     }
 
+    async fn purge_node(
+        &self,
+        ctx: &StoreCtx<'_>,
+        key: graph_storage_sdk::models::NodeKey,
+        options: graph_storage_sdk::models::PurgeOptions,
+    ) -> Result<graph_storage_sdk::models::PurgeOutcome, GraphStoreError> {
+        purge::purge_node(self, ctx, key, options).await
+    }
+
+    async fn fence_tenant(
+        &self,
+        ctx: &StoreCtx<'_>,
+        deletion_generation: Option<graph_storage_sdk::models::DeletionGeneration>,
+    ) -> Result<graph_storage_sdk::models::TenantOffboarding, GraphStoreError> {
+        offboarding::fence(self, ctx, deletion_generation).await
+    }
+
+    async fn tenant_offboarding(
+        &self,
+        ctx: &StoreCtx<'_>,
+    ) -> Result<Option<graph_storage_sdk::models::TenantOffboarding>, GraphStoreError> {
+        offboarding::record(self, ctx).await
+    }
+
+    async fn fenced_tenants(
+        &self,
+        ctx: &StoreCtx<'_>,
+    ) -> Result<Vec<graph_storage_sdk::models::TenantId>, GraphStoreError> {
+        offboarding::fenced_ids(self, ctx).await
+    }
+
+    async fn all_fenced_tenant_ids(
+        &self,
+    ) -> Result<Vec<graph_storage_sdk::models::TenantId>, GraphStoreError> {
+        let conn = self.db().conn().map_err(|error| map_db_error(&error))?;
+        offboarding::all_fenced_ids(&conn).await
+    }
+
+    async fn offboard_step(
+        &self,
+        tenant: graph_storage_sdk::models::TenantId,
+        batch: std::num::NonZeroU64,
+    ) -> Result<graph_storage_sdk::models::TenantOffboarding, GraphStoreError> {
+        offboarding::step(self, tenant, batch).await
+    }
+
+    async fn record_offboarding_failure(
+        &self,
+        tenant: graph_storage_sdk::models::TenantId,
+        error: &GraphStoreError,
+    ) -> Result<graph_storage_sdk::models::TenantOffboarding, GraphStoreError> {
+        offboarding::note_failure(self, tenant, error).await
+    }
+
+    async fn pending_offboardings(
+        &self,
+    ) -> Result<Vec<graph_storage_sdk::models::TenantOffboarding>, GraphStoreError> {
+        offboarding::pending(self).await
+    }
+
     async fn begin_read(&self, ctx: &StoreCtx<'_>) -> Result<ReadSnapshot, GraphStoreError> {
         reads::begin_read(self, ctx).await
     }
@@ -415,6 +478,22 @@ impl GraphStoreV1 for PgGraphStore {
         ids: &[NodeId],
     ) -> Result<Vec<NodeView>, GraphStoreError> {
         reads::hydrate_nodes(self, ctx, ids).await
+    }
+
+    async fn edge_payloads(
+        &self,
+        ctx: &StoreCtx<'_>,
+        keys: &[EdgeKey],
+    ) -> Result<std::collections::BTreeMap<EdgeKey, serde_json::Value>, GraphStoreError> {
+        reads::edge_payloads(self, ctx, keys).await
+    }
+
+    async fn list_node_edges(
+        &self,
+        ctx: &StoreCtx<'_>,
+        query: &graph_storage_sdk::plugin_api::NodeEdgesQuery,
+    ) -> Result<graph_storage_sdk::plugin_api::NodeEdgesPage, GraphStoreError> {
+        reads::list_node_edges(self, ctx, query).await
     }
 
     async fn node_types(

@@ -83,6 +83,31 @@ fn gateway_rate_limit_maps_to_rate_limited() {
     ));
 }
 
+/// SREF-SDK-008: `InvalidSecretRef` (each code) goes through the catch-all to
+/// a sanitized `ProviderError`.
+#[test]
+fn gateway_invalid_secret_ref_maps_through_catch_all() {
+    use oagw_sdk::field::SecretRefCode;
+    for code in [
+        SecretRefCode::Invalid,
+        SecretRefCode::NotAllowed,
+        SecretRefCode::Required,
+    ] {
+        let mapped: LlmProviderError = ServiceGatewayError::InvalidSecretRef {
+            code,
+            detail: "secret reference header issue".into(),
+        }
+        .into();
+        assert!(
+            matches!(
+                mapped,
+                LlmProviderError::ProviderError { ref code, .. } if code == "gateway_error"
+            ),
+            "{mapped:?}"
+        );
+    }
+}
+
 #[test]
 fn gateway_rate_limit_forwards_retry_hint() {
     let err = ServiceGatewayError::RateLimited {
@@ -99,17 +124,34 @@ fn gateway_rate_limit_forwards_retry_hint() {
 
 #[test]
 fn gateway_timeout_maps_to_timeout() {
-    let mapped: LlmProviderError = ServiceGatewayError::Timeout.into();
-    assert!(matches!(mapped, LlmProviderError::Timeout));
+    for reason in [
+        None,
+        Some(oagw_sdk::reason::timeout::TimeoutReason::RequestNotSent),
+        Some(oagw_sdk::reason::timeout::TimeoutReason::RequestMayHaveBeenSent),
+    ] {
+        let mapped: LlmProviderError = ServiceGatewayError::Timeout { reason }.into();
+        assert!(matches!(mapped, LlmProviderError::Timeout));
+    }
 }
 
 #[test]
 fn gateway_unavailable_maps_to_provider_unavailable() {
-    let err = ServiceGatewayError::Unavailable {
-        retry_after_secs: Some(5),
-    };
-    let mapped: LlmProviderError = err.into();
-    assert!(matches!(mapped, LlmProviderError::ProviderUnavailable));
+    use oagw_sdk::reason::unavailable::UnavailableReason;
+    for reason in [
+        None,
+        Some(UnavailableReason::RequestNotSent),
+        Some(UnavailableReason::RequestMayHaveBeenSent),
+        Some(UnavailableReason::UpstreamDisabled),
+        Some(UnavailableReason::CredentialStoreUnavailable),
+        Some(UnavailableReason::IdentityProviderUnavailable),
+    ] {
+        let err = ServiceGatewayError::Unavailable {
+            retry_after_secs: Some(5),
+            reason,
+        };
+        let mapped: LlmProviderError = err.into();
+        assert!(matches!(mapped, LlmProviderError::ProviderUnavailable));
+    }
 }
 
 #[test]

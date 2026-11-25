@@ -12,11 +12,17 @@ pub(in crate::domain::services) fn canonical_tags(mut tags: Vec<String>) -> Vec<
     tags
 }
 
-/// De-duplicate HTTP methods and sort them in canonical (declaration) order.
+/// De-duplicate HTTP methods and sort them in canonical (declaration) order,
+/// and store the path prefix in the form requests are matched in (encoded
+/// unreserved characters decoded, other escapes uppercased), so the overlap
+/// check compares equal prefixes.
 pub(in crate::domain::services) fn canonicalize_match_rules(rules: &mut MatchRules) {
     if let Some(http) = rules.http.as_mut() {
         http.methods.sort();
         http.methods.dedup();
+        if http.path.contains('%') {
+            http.path = crate::domain::proxy_path::normalize_percent_encoding(&http.path);
+        }
     }
 }
 
@@ -44,6 +50,7 @@ pub(crate) fn upstream_drift(
         headers,
         plugins,
         rate_limit,
+        circuit_breaker,
         cors,
         tags,
     } = stored;
@@ -56,6 +63,7 @@ pub(crate) fn upstream_drift(
         ("headers", *headers == req.headers),
         ("plugins", *plugins == req.plugins),
         ("rate_limit", *rate_limit == req.rate_limit),
+        ("circuit_breaker", *circuit_breaker == req.circuit_breaker),
         ("cors", *cors == req.cors),
         ("tags", *tags == canonical_tags(req.tags.clone())),
     ]
@@ -154,6 +162,7 @@ mod tests {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec!["b".into(), "a".into(), "b".into()],
             enabled: true,
@@ -169,6 +178,7 @@ mod tests {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec!["a".into(), "b".into()],
             managed_by: ManagedBy::Api,
